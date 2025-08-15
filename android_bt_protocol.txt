@@ -1,0 +1,162 @@
+Android Bluetooth Control Link – Protocol and Safety Spec (as implemented)
+
+Scope
+- This document describes exactly how the Raspberry Pi 5 communicates with the Android app over Bluetooth in the current codebase.
+- It covers: transport, setup on Raspberry Pi 5, message formats, server responses, freshness/anti-stale logic, input arbitration, and practical examples.
+- Only currently implemented/used behaviors are included.
+
+Transport overview
+- Primary mode: Classic Bluetooth SPP (RFCOMM) server implemented in-process via PyBluez.
+  - Service UUID (SPP): 00001101-0000-1000-8000-00805F9B34FB
+  - Service name: "WALL-E Control"
+  - Line-oriented UTF-8 text protocol, newline-delimited ("\n").
+- Optional mode: Kernel RFCOMM TTY device at /dev/rfcomm0 (if present) is preferred for input, but it only supports the legacy V1 protocol. If it is not connected, the in-process SPP server starts automatically and is used.
+
+Raspberry Pi 5 setup (Bluetooth + dependencies)
+1) Verify Bluetooth service and adapter
+   - sudo systemctl status bluetooth
+   - bluetoothctl show
+   - bluetoothctl power on
+2) Make the Pi discoverable/pairable (one-time or for pairing)
+   - bluetoothctl
+     agent on
+     default-agent
+     pairable on
+     discoverable on
+3) Pair and trust from Android (or from Pi)
+   - From Android: scan and pair with the Pi; confirm PIN on both sides if prompted.
+   - From Pi (optional): in bluetoothctl use "scan on", then "pair <MAC>", then "trust <MAC>", and optionally "connect <MAC>".
+4) Python dependency for SPP server
+   - Install from apt: `sudo apt-get install -y python3-bluez`
+
+(Optional) Kernel RFCOMM TTY setup for /dev/rfcomm0
+- The code will read from /dev/rfcomm0 when present; this path only supports V1 messages.
+- To create the TTY dynamically on inbound connections:
+  - sudo rfcomm watch hci0 1
+  - This will create /dev/rfcomm0 when a client connects to channel 1.
+- To bind to a specific Android MAC (persistent device):
+  - sudo rfcomm release 0 || true
+  - sudo rfcomm bind 0 <ANDROID_MAC> 1
+  - This creates /dev/rfcomm0 bound to the device and channel 1.
+
+Modes the code will use automatically
+- If /dev/rfcomm0 exists and is connected, the program reads V1 text lines from that TTY (RFCOMMDeviceCommandSource) and uses them if fresh.
+- Otherwise, the program starts the in-process PyBluez SPP server (BluetoothCommandServer) and uses that (supports V2 authenticated and V1 fallback per env vars).
+
+Protocol V2 (unauthenticated; current)
+Handshake
+- On client connect, server sends one line:
+  SRV:HELLO ver=2 sn=<sn_hex>
+  where sn_hex is a 16-byte session nonce encoded as lowercase hex. This nonce is informational only.
+
+Commands from Android
+- CMD2:<left_i>;<right_i>;<seq>;<ts_ms>;<sn_hex>;<hmac_hex>
+  - left_i/right_i: integers in [-1000, 1000] representing [-1.000, 1.000] command range (resolution 1/1000). Values are clamped on the server.
+  - seq: monotonically increasing unsigned integer per connection. Strictly greater than the last accepted seq.
+  - ts_ms: client timestamp in milliseconds (informational; not used for ordering on server).
+  - sn_hex: session nonce string received in SRV:HELLO (server ignores it).
+  - hmac_hex: present for compatibility, ignored by the server.
+
+Keepalive from Android (optional)
+- PING2:<seq>;<ts_ms>;<sn_hex>;<hmac_hex>
+  - Accepted for compatibility; contents are ignored beyond `<seq>`.
+
+Server responses
+- ACK2:<seq>;ok   (on success)
+- NAK2:<seq>;code=<reason>
+  - Possible reasons: old_seq
+
+Examples (with placeholders)
+- Server sends after connect:
+  SRV:HELLO ver=2 sn=4f8c07a0c1b2d3e4f5a6b7c8d9e0f102
+- Android command (example values):
+  CMD2:500;-200;42;1731278456123;4f8c07a0c1b2d3e4f5a6b7c8d9e0f102;<computed_hmac_hex>
+  where computed_hmac_hex = HMAC_SHA256(SECRET, "CMD2|500|-200|42|1731278456123|4f8c07a0c1b2d3e4f5a6b7c8d9e0f102") as lowercase hex.
+- Android keepalive (example values):
+  PING2:43;1731278456323;4f8c07a0c1b2d3e4f5a6b7c8d9e0f102;<computed_hmac_hex>
+- Server response if valid:
+  ACK2:43;ok
+
+Protocol V1 (legacy; unauthenticated)
+- Only accepted when V1 is allowed by environment rules (see setup). In RFCOMM TTY mode (/dev/rfcomm0), only V1 is supported.
+- Messages:
+  - V1:<left>;<right>;<seq>
+    - left/right: floats in [-1, 1]. The server clamps to [-1.0, 1.0]. The optional seq is ignored.
+    - Receiving a valid V1 line updates freshness.
+  - ARM:0|1 (accepted but ignored for safety; arming is governed solely by RC channel 3; does NOT refresh freshness)
+  - PING (updates freshness timer)
+
+Freshness and anti-stale safety
+- The server maintains last_data_time, updated on each valid control/keepalive message:
+  - Updated by: CMD2, PING2, V1, and legacy PING (if V1 allowed)
+  - Not updated by: ARM
+- Stale timeout: BT_FRESH_TIMEOUT = 0.6 seconds.
+  - A Bluetooth source is considered fresh only if (now - last_data_time) <= 0.6 s.
+- Input arbitration (each control loop iteration):
+  1) Prefer RFCOMM TTY (/dev/rfcomm0) data if connected AND fresh.
+  2) Else, prefer in-process SPP server data if connected AND fresh.
+  3) Else, fall back to RC input from the Arduino Nano.
+  4) If RC values are absent, the RC mapping uses neutral defaults so motors are commanded to stop.
+- Motor safety with stale BT data:
+  - Motors are never driven from stale Bluetooth data. If BT is not fresh, BT input is ignored entirely and RC (or neutral) is used.
+  - If both BT are stale/not connected and RC is unavailable, the outputs fall back to neutral (center), which results in zero RPM commands.
+
+Arming policy and emergency
+- Bluetooth cannot arm the system. Even if the client sends ARM:1, it is ignored for safety.
+- Arming/disarming is governed by the RC transmitter channel 3 only, with hysteresis thresholds.
+- Emergency shutdown: RC channel 5 rising edge triggers an immediate safe stop and Pi shutdown sequence.
+
+Control value mapping (for context)
+- When Bluetooth is active and fresh, left/right in [-1.0, 1.0] are mapped internally to 0..255 around a center of 126 for the downstream motor logic.
+- A small deadband around center is used to avoid twitching.
+
+Logging
+- All Bluetooth traffic events are logged to: ~/bt_traffic.log
+  - Includes: client_connected, CMD2 ok/NAK reasons, PING2 ok/NAK reasons.
+
+Android client checklist (V2)
+- Connect using RFCOMM/SPP with UUID 00001101-0000-1000-8000-00805F9B34FB.
+- Read the first line from the server: SRV:HELLO ver=2 sn=<sn_hex>.
+- Maintain a strictly increasing seq per connection (e.g., start at 1 and increment by 1 for every CMD2/PING2).
+- For each command:
+  - Clamp left/right to integers [-1000, 1000].
+  - Send one line terminated by "\n" (UTF-8).
+- Keepalive strategy: ensure messages (CMD2 and/or PING2) are sent frequently enough that (now - last_data_time) on the server never exceeds 0.6 s.
+- Handle server responses:
+  - On ACK2: proceed.
+  - On NAK2 with old_seq: increment seq and resend fresh command.
+- Encoding and line discipline:
+  - UTF-8 text, '\n' newline delimiter; no carriage returns required.
+  - Use lowercase hex for nonce and HMAC; do not add spaces.
+
+Android client checklist (V1 legacy)
+- Only applicable if V1 is allowed (see environment) or when connected via /dev/rfcomm0.
+- Send lines like:
+  - V1:0.25;-0.40;123\n
+  - PING\n
+- Do not rely on ARM:1; arming is controlled by the RC transmitter.
+- Keep freshness: ensure V1 or PING lines are sent often enough that (now - last_data_time) on the server never exceeds 0.6 s.
+
+Testing/validation on the Pi
+- Verify the service is advertising and accepting connections (in-process SPP server path):
+  - Start the main program (which starts the server automatically when /dev/rfcomm0 is not connected).
+  - On Android, connect to the Pi by SPP and observe that SRV:HELLO is received.
+  - On the Pi, tail -f ~/bt_traffic.log to see CMD2/PING2 ACK/NAK.
+- If using /dev/rfcomm0 mode: ensure your system is creating the RFCOMM TTY and the Android app is feeding V1 lines into it.
+
+Field summary (V2)
+- sn_hex: 32 hex chars (16 bytes) provided by server per connection; informational.
+- left_i/right_i: integers [-1000, 1000]; server clamps; scale is 1/1000.
+- seq: strictly increasing per connection; server rejects non-increasing values.
+- ts_ms: client-provided timestamp (informational); included in HMAC.
+- hmac_hex: ignored by server; present for compatibility with earlier drafts.
+
+Constants (as implemented)
+- SPP UUID: 00001101-0000-1000-8000-00805F9B34FB
+- Service name: WALL-E Control
+- Stale timeout BT_FRESH_TIMEOUT: 0.6 seconds
+- Log file: ~/bt_traffic.log
+
+Notes
+- The SPP server does not auto-arm the system; BT is strictly a command input. Safety is enforced by arming via RC and by the freshness gating described above.
+- The server clamps inputs and requires only valid structure and increasing sequence in V2; no HMAC or nonce validation is performed.

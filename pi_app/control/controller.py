@@ -79,7 +79,12 @@ class Controller:
         self._safety_state = SafetyState(is_armed=False, last_transition_epoch_s=0.0)
         self._safety_params = safety_params or SafetyParams()
 
-    def process(self, rc: RCInputs, now_epoch_s: float | None = None) -> Tuple[DriveCommand, List[SafetyEvent]]:
+    def process(
+        self,
+        rc: RCInputs,
+        now_epoch_s: float | None = None,
+        bt_override_bytes: tuple[int, int] | None = None,
+    ) -> Tuple[DriveCommand, List[SafetyEvent]]:
         now = now_epoch_s if now_epoch_s is not None else time.time()
 
         # Update safety
@@ -97,9 +102,12 @@ class Controller:
             self._relay.set_armed(False)
             self._shutdown.schedule_shutdown(delay_seconds=5.0)
 
-        # Command computation
-        left = map_pulse_to_byte(rc.ch1_us)
-        right = map_pulse_to_byte(rc.ch2_us)
+        # Command computation (prefer Bluetooth override if provided)
+        if bt_override_bytes is not None:
+            left, right = bt_override_bytes
+        else:
+            left = map_pulse_to_byte(rc.ch1_us)
+            right = map_pulse_to_byte(rc.ch2_us)
 
         # If disarmed, force neutral outputs
         if not self._safety_state.is_armed:

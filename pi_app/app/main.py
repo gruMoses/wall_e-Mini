@@ -7,6 +7,7 @@ try:
     from pi_app.hardware.arduino_modelx import ArduinoModelXDriver
     from pi_app.hardware.arduino_rc import ArduinoRCReader
     from pi_app.control.controller import Controller, RCInputs
+    from pi_app.io.bt_input import BtCommandServer
 except ModuleNotFoundError:
     # Allow running as a script: python3 /home/pi/pi_app/app/main.py
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -14,6 +15,7 @@ except ModuleNotFoundError:
     from pi_app.hardware.arduino_modelx import ArduinoModelXDriver  # type: ignore
     from pi_app.hardware.arduino_rc import ArduinoRCReader  # type: ignore
     from pi_app.control.controller import Controller, RCInputs  # type: ignore
+    from pi_app.io.bt_input import BtCommandServer  # type: ignore
 
 
 def run() -> None:
@@ -30,6 +32,8 @@ def run() -> None:
         motor_driver = ArduinoModelXDriver(rc_reader=rc_reader)
 
     controller = Controller(motor_driver=motor_driver)
+    bt_server = BtCommandServer()
+    bt_server.start()
 
     try:
         while True:
@@ -41,7 +45,11 @@ def run() -> None:
                 ch5_us=s.ch5_us,
                 last_update_epoch_s=s.last_update_epoch_s,
             )
-            cmd, events = controller.process(rc)
+            # Prefer fresh BT over RC using timestamp freshness
+            bt = bt_server.get_latest_bytes()
+            bt_age = time.time() - bt.last_update_epoch_s
+            bt_override = (bt.left_byte, bt.right_byte) if bt_age <= 0.6 else None
+            cmd, events = controller.process(rc, bt_override_bytes=bt_override)
             # Minimal console heartbeat with incoming RC info
             print(
                 (
@@ -56,6 +64,10 @@ def run() -> None:
         pass
     finally:
         print()
+        try:
+            bt_server.stop()
+        except Exception:
+            pass
         rc_reader.stop()
 
 
