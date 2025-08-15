@@ -72,12 +72,27 @@ def parse_v1(line: str) -> Optional[Tuple[float, float, int]]:
 def floats_to_bytes(left_f: float, right_f: float) -> Tuple[int, int]:
     """
     Map normalized floats in [-1, 1] to bytes in [0, 255].
-    Center 0.0 maps to ~128. Endpoints map to 0/255.
+    Center 0.0 maps to 126 (system neutral). Endpoints map to 0/255.
+    A small deadband around 0.0 forces exact neutral to avoid drift.
     """
+    DEAD_BAND = 0.02  # approx 2% stick deadband
+
     def map_one(v: float) -> int:
-        # Normalize from [-1,1] -> [0,1]
-        normalized = (v + 1.0) * 0.5
-        return max(0, min(255, int(round(normalized * 255.0))))
+        if -DEAD_BAND <= v <= DEAD_BAND:
+            return 126
+        # Positive side maps over upper span (129 steps)
+        if v > 0.0:
+            upper_span = 255 - 126  # 129
+            mapped = 126 + int(round(min(1.0, v) * upper_span))
+        else:
+            # Negative side maps over lower span (126 steps)
+            lower_span = 126
+            mapped = 126 - int(round(min(1.0, abs(v)) * lower_span))
+        if mapped < 0:
+            return 0
+        if mapped > 255:
+            return 255
+        return mapped
 
     return map_one(left_f), map_one(right_f)
 

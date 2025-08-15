@@ -51,10 +51,12 @@ def run() -> None:
             bt_override = (bt.left_byte, bt.right_byte) if bt_age <= 0.6 else None
             cmd, events = controller.process(rc, bt_override_bytes=bt_override)
             # Minimal console heartbeat with incoming RC info
+            src = "BT" if bt_override is not None else "RC"
             print(
                 (
-                    f"ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch5={s.ch5_us:4d}  "
-                    f"L={cmd.left_byte:3d} R={cmd.right_byte:3d} ARMED={cmd.is_armed} EMERG={cmd.emergency_active}    "
+                    f"{src} ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch5={s.ch5_us:4d}  "
+                    f"L={cmd.left_byte:3d} R={cmd.right_byte:3d} (bt_age={bt_age:0.2f}s btL={bt.left_byte:3d} btR={bt.right_byte:3d}) "
+                    f"ARMED={cmd.is_armed} EMERG={cmd.emergency_active}    "
                 ),
                 end="\r",
                 flush=True,

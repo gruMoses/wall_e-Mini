@@ -11,18 +11,28 @@ from pi_app.io.bt_proto import parse_cmd2, accept_cmd2, parse_v1, floats_to_byte
 
 
 def _ints_to_bytes(left_i: int, right_i: int) -> Tuple[int, int]:
+    DEAD_BAND_INT = 20  # approx 2% of full-scale (1000)
+
     def map_one(v: int) -> int:
         if v < -1000:
             v = -1000
         if v > 1000:
             v = 1000
-        normalized = (v + 1000) / 2000.0
-        b = int(round(normalized * 255.0))
-        if b < 0:
+        if -DEAD_BAND_INT <= v <= DEAD_BAND_INT:
+            return 126
+        if v > 0:
+            # Upper span from center 126 to 255 has 129 steps
+            upper_span = 255 - 126
+            mapped = 126 + int(round((v / 1000.0) * upper_span))
+        else:
+            # Lower span from center 126 down to 0 has 126 steps
+            lower_span = 126
+            mapped = 126 - int(round((abs(v) / 1000.0) * lower_span))
+        if mapped < 0:
             return 0
-        if b > 255:
+        if mapped > 255:
             return 255
-        return b
+        return mapped
 
     return map_one(left_i), map_one(right_i)
 
