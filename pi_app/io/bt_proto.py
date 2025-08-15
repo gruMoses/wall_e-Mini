@@ -76,8 +76,18 @@ def floats_to_bytes(left_f: float, right_f: float) -> Tuple[int, int]:
     A small deadband around 0.0 forces exact neutral to avoid drift.
     """
     DEAD_BAND = 0.02  # approx 2% stick deadband
+    TOP_SNAP = 0.95   # snap to full scale when beyond this
 
     def map_one(v: float) -> int:
+        # Clamp and top/bottom snap
+        if v > 1.0:
+            v = 1.0
+        if v < -1.0:
+            v = -1.0
+        if v >= TOP_SNAP:
+            return 255
+        if v <= -TOP_SNAP:
+            return 0
         if -DEAD_BAND <= v <= DEAD_BAND:
             return 126
         # Positive side maps over upper span (129 steps)

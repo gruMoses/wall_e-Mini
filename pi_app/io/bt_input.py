@@ -12,12 +12,17 @@ from pi_app.io.bt_proto import parse_cmd2, accept_cmd2, parse_v1, floats_to_byte
 
 def _ints_to_bytes(left_i: int, right_i: int) -> Tuple[int, int]:
     DEAD_BAND_INT = 20  # approx 2% of full-scale (1000)
+    TOP_SNAP_INT = 950  # snap to full scale when beyond this
 
     def map_one(v: int) -> int:
         if v < -1000:
             v = -1000
         if v > 1000:
             v = 1000
+        if v >= TOP_SNAP_INT:
+            return 255
+        if v <= -TOP_SNAP_INT:
+            return 0
         if -DEAD_BAND_INT <= v <= DEAD_BAND_INT:
             return 126
         if v > 0:
