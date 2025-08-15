@@ -35,6 +35,10 @@ def run() -> None:
     bt_server = BtCommandServer()
     bt_server.start()
 
+    # Debug trackers for BT byte extrema
+    min_btL, max_btL = 255, 0
+    min_btR, max_btR = 255, 0
+
     try:
         while True:
             s = rc_reader.get_state()
@@ -50,6 +54,26 @@ def run() -> None:
             bt_age = time.time() - bt.last_update_epoch_s
             bt_override = (bt.left_byte, bt.right_byte) if bt_age <= 0.6 else None
             cmd, events = controller.process(rc, bt_override_bytes=bt_override)
+            # Emit debug lines on BT extrema updates
+            if bt_override is not None:
+                updated = False
+                if bt.left_byte < min_btL:
+                    min_btL = bt.left_byte
+                    updated = True
+                if bt.left_byte > max_btL:
+                    max_btL = bt.left_byte
+                    updated = True
+                if bt.right_byte < min_btR:
+                    min_btR = bt.right_byte
+                    updated = True
+                if bt.right_byte > max_btR:
+                    max_btR = bt.right_byte
+                    updated = True
+                if updated:
+                    print(
+                        f"DBG BT extrema: L=[{min_btL},{max_btL}] R=[{min_btR},{max_btR}] (age={bt_age:0.2f}s)",
+                        flush=True,
+                    )
             # Minimal console heartbeat with incoming RC info
             src = "BT" if bt_override is not None else "RC"
             print(
