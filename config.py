@@ -14,14 +14,17 @@ class ImuSteeringConfig:
     enabled: bool = True
     
     # PID gains for heading control
-    kp: float = 2.0      # Proportional gain (heading error to steering correction)
+    kp: float = 0.30     # Proportional gain (heading error to steering correction)
     ki: float = 0.1      # Integral gain (accumulated drift correction)
     kd: float = 0.5      # Derivative gain (yaw rate damping)
     
     # Control parameters
-    max_correction: int = 30      # Maximum steering correction in byte units (0-255)
+    max_correction: int = 58      # Maximum steering correction in byte units (0-255)
     deadband_deg: float = 2.0    # Minimum heading error to trigger correction (degrees)
     max_integral: float = 50.0   # Maximum integral term to prevent windup
+    
+    # Debug and logging
+    log_steering_corrections: bool = False  # Enable debug logging of steering corrections
     
     # Timing
     update_rate_hz: float = 20.0  # IMU update rate
