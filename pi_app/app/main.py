@@ -1,5 +1,8 @@
 import time
 import sys
+import os
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 try:
@@ -22,6 +25,19 @@ except ModuleNotFoundError:
     from pi_app.control.imu_steering import ImuSteeringCompensator  # type: ignore
     from pi_app.io.bt_input import BtCommandServer  # type: ignore
     from config import config  # type: ignore
+
+
+def _cleanup_old_logs(log_dir: Path, days: int = 7) -> None:
+    try:
+        cutoff = time.time() - days * 24 * 3600
+        for p in log_dir.glob("run_*.log"):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def run() -> None:
@@ -60,6 +76,14 @@ def run() -> None:
     min_btL, max_btL = 255, 0
     min_btR, max_btR = 255, 0
 
+    # Prepare structured logging directory and cleanup
+    logs_dir = Path(__file__).resolve().parents[2] / "wall_e-Mini" / "logs"
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    _cleanup_old_logs(logs_dir, days=7)
+
     try:
         while True:
             s = rc_reader.get_state()
@@ -74,7 +98,7 @@ def run() -> None:
             bt = bt_server.get_latest_bytes()
             bt_age = time.time() - bt.last_update_epoch_s
             bt_override = (bt.left_byte, bt.right_byte) if bt_age <= 0.6 else None
-            cmd, events = controller.process(rc, bt_override_bytes=bt_override)
+            cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
             # Emit debug lines on BT extrema updates
             if bt_override is not None:
                 updated = False
@@ -117,6 +141,27 @@ def run() -> None:
                 end="\r",
                 flush=True,
             )
+
+            # Structured JSON log for analysis (one line per tick)
+            try:
+                log_obj = {
+                    "ts": time.time(),
+                    "src": src,
+                    "rc": {"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch5": s.ch5_us},
+                    "bt": {"L": bt.left_byte, "R": bt.right_byte, "age_s": round(bt_age, 3)},
+                    "imu": imu_status if imu_status else None,
+                    "imu_steering": {
+                        "steering_input": telem.get("steering_input"),
+                        "correction_raw": telem.get("imu_correction_raw"),
+                        "correction_applied": telem.get("imu_correction_applied"),
+                    },
+                    "motor": {"L": cmd.left_byte, "R": cmd.right_byte},
+                    "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
+                    "events": [e.name for e in events] if events else [],
+                }
+                print(json.dumps(log_obj), flush=False)
+            except Exception:
+                pass
             time.sleep(0.02)
     except KeyboardInterrupt:
         pass

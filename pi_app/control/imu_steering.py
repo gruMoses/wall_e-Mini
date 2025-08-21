@@ -64,6 +64,8 @@ class ImuSteeringCompensator:
         self.imu_reader = imu_reader
         self.state = ImuSteeringState()
         self.lock = Lock()
+        # Tracks when we entered neutral steering to manage target updates
+        self._neutral_since_epoch: Optional[float] = None
         
         # Initialize IMU if provided
         if self.imu_reader is not None:
@@ -122,21 +124,54 @@ class ImuSteeringCompensator:
                     self.state.pitch_deg = data['pitch_deg']
                     self.state.last_update_time = time.time()
             
-            # Update target heading when steering input changes significantly
-            if abs(steering_input - self.state.last_steering_input) > 0.1:
-                with self.lock:
-                    self.state.target_heading_deg = self.state.heading_deg
-                    self.state.integral_error = 0.0  # Reset integral when steering changes
-            
-            self.state.last_steering_input = steering_input
-            
-            # Compute compensation only when near neutral steering
-            if abs(steering_input) < 0.1:
-                return self._compute_heading_hold_correction(dt)
+            # Determine neutral vs active steering with hysteresis
+            neutral_enter = getattr(self.config, 'steering_neutral_enter', 0.10)
+            neutral_exit = getattr(self.config, 'steering_neutral_exit', 0.10)
+            last = self.state.last_steering_input
+            # If we were neutral, remain neutral until we exceed the exit threshold.
+            # If we were not neutral, only enter neutral when we are below the tighter enter threshold.
+            was_neutral = abs(last) < neutral_enter
+            if was_neutral:
+                is_neutral = abs(steering_input) < neutral_exit
             else:
-                # Reset integral when actively steering
+                is_neutral = abs(steering_input) < neutral_enter
+
+            # On transition to non-neutral, reset integral and clear neutral timer
+            if not is_neutral and was_neutral:
                 with self.lock:
                     self.state.integral_error = 0.0
+                self._neutral_since_epoch = None
+
+            # On entering neutral, capture timestamp and optionally dwell before locking target
+            if is_neutral and not was_neutral:
+                self._neutral_since_epoch = time.time()
+                dwell = getattr(self.config, 'neutral_dwell_s', 0.0)
+                if dwell <= 0.0:
+                    with self.lock:
+                        self.state.target_heading_deg = self.state.heading_deg
+                        self.state.integral_error = 0.0
+
+            self.state.last_steering_input = steering_input
+
+            # Compute compensation only when near neutral steering
+            if is_neutral:
+                # If a dwell was requested, lock heading after dwell time passes
+                dwell = getattr(self.config, 'neutral_dwell_s', 0.0)
+                if dwell > 0.0 and self._neutral_since_epoch is not None:
+                    if (time.time() - self._neutral_since_epoch) >= dwell:
+                        with self.lock:
+                            self.state.target_heading_deg = self.state.heading_deg
+                            self.state.integral_error = 0.0
+                        self._neutral_since_epoch = None
+                correction = self._compute_heading_hold_correction(dt)
+                # Honor config inversion at the source
+                try:
+                    if getattr(self.config, 'invert_output', False) and correction is not None:
+                        correction = -correction
+                except Exception:
+                    pass
+                return correction
+            else:
                 return None
                 
         except Exception as e:

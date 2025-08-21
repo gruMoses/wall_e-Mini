@@ -91,13 +91,17 @@ class Controller:
         self._imu_compensator = imu_compensator
         self._last_imu_update = 0.0
         self._imu_update_interval = 1.0 / config.imu_steering.update_rate_hz if config.imu_steering.enabled else 1.0
+        # Track when we begin moving straight to (re)lock heading
+        self._was_moving_straight = False
+        self._straight_latched = False
+        self._straight_disengage_deadline = 0.0
 
     def process(
         self,
         rc: RCInputs,
         now_epoch_s: float | None = None,
         bt_override_bytes: tuple[int, int] | None = None,
-    ) -> Tuple[DriveCommand, List[SafetyEvent]]:
+    ) -> Tuple[DriveCommand, List[SafetyEvent], dict]:
         now = now_epoch_s if now_epoch_s is not None else time.time()
 
         # Update safety
@@ -116,11 +120,13 @@ class Controller:
             self._shutdown.schedule_shutdown(delay_seconds=5.0)
 
         # Command computation (prefer Bluetooth override if provided)
+        telemetry: dict = {}
         if bt_override_bytes is not None:
             left, right = bt_override_bytes
             # Convert byte values to normalized steering input for IMU
             steering_input = self._bytes_to_steering_input(left, right)
         else:
+            # Tank-drive: ch1 is left throttle, ch2 is right throttle
             left = map_pulse_to_byte(rc.ch1_us)
             right = map_pulse_to_byte(rc.ch2_us)
             # Convert RC values to normalized steering input for IMU
@@ -128,11 +134,71 @@ class Controller:
 
         # Apply IMU steering compensation if available and enabled
         imu_correction = self._apply_imu_compensation(steering_input, now)
+        telemetry["steering_input"] = steering_input
+        telemetry["imu_correction_raw"] = imu_correction
         
-        # Apply correction to motor outputs
+        # Straight-intent gating for dual-throttle skid steer
+        tol = getattr(config.imu_steering, 'straight_equal_tolerance_us', 20)
+        min_th = getattr(config.imu_steering, 'straight_min_throttle_us', 80)
+        rel_pct = getattr(config.imu_steering, 'straight_relative_tolerance_pct', 0.15)
+        hysteresis_s = getattr(config.imu_steering, 'straight_disengage_hysteresis_s', 0.0)
+        d1 = rc.ch1_us - 1500
+        d2 = rc.ch2_us - 1500
+        abs_diff = abs(rc.ch1_us - rc.ch2_us)
+        moving_ok = max(abs(d1), abs(d2)) >= min_th
+        # Absolute check
+        equal_abs_ok = abs_diff <= tol
+        # Relative check (difference relative to magnitude)
+        max_abs = max(abs(d1), abs(d2), 1)
+        equal_rel_ok = (abs_diff / max_abs) <= rel_pct
+        equal_ok = equal_abs_ok or (moving_ok and equal_rel_ok)
+        now_s = now
+        is_moving_straight = False
+        if moving_ok and equal_ok:
+            is_moving_straight = True
+            self._straight_latched = True
+            self._straight_disengage_deadline = now_s + hysteresis_s
+        else:
+            if self._straight_latched and now_s <= self._straight_disengage_deadline:
+                is_moving_straight = True
+            else:
+                self._straight_latched = False
+        if self._imu_compensator is not None and is_moving_straight and not self._was_moving_straight:
+            try:
+                self._imu_compensator.reset_target_heading()
+            except Exception:
+                pass
+        self._was_moving_straight = is_moving_straight
+
+        # Apply correction to motor outputs continuously with steering-scaled blending
+        corr_applied = None
         if imu_correction is not None:
-            left = self._apply_steering_correction(left, imu_correction)
-            right = self._apply_steering_correction(right, -imu_correction)  # Opposite correction for right track
+            # Blend factor reduces correction as steering_input magnitude increases
+            zero_at = float(getattr(config.imu_steering, 'correction_zero_at_steering', 0.5))
+            si = max(0.0, min(1.0, abs(steering_input)))
+            if zero_at <= 0.0:
+                blend = 0.0
+            else:
+                blend = max(0.0, 1.0 - (si / zero_at))
+            telemetry["correction_blend"] = blend
+            corr = imu_correction * blend
+            # Gate integral lock/target reset by straight intent, but allow small scaled corrections any time
+            if abs(corr) > 0.0:
+                left = self._apply_steering_correction(left, corr)
+                right = self._apply_steering_correction(right, -corr)
+                corr_applied = corr
+
+        # Optional per-side straight bias to cancel residual skew; only when straight intent
+        if is_moving_straight:
+            try:
+                biasL = int(getattr(config.imu_steering, 'straight_bias_left_byte', 0))
+                biasR = int(getattr(config.imu_steering, 'straight_bias_right_byte', 0))
+                if biasL or biasR:
+                    left = max(0, min(255, left + biasL))
+                    right = max(0, min(255, right + biasR))
+            except Exception:
+                pass
+        telemetry["imu_correction_applied"] = corr_applied
 
         # If disarmed, force neutral outputs
         if not self._safety_state.is_armed:
@@ -150,8 +216,13 @@ class Controller:
             is_armed=self._safety_state.is_armed,
             emergency_active=self._safety_state.emergency_active,
         )
-
-        return cmd, events
+        telemetry["motor_left_byte"] = left
+        telemetry["motor_right_byte"] = right
+        telemetry["straight_intent"] = is_moving_straight
+        telemetry["rc_equal_tol_us"] = tol
+        telemetry["rc_equal_rel_pct"] = rel_pct
+        telemetry["straight_latched"] = self._straight_latched
+        return cmd, events, telemetry
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:
         """Convert left/right byte values to normalized steering input (-1.0 to 1.0)."""
@@ -192,6 +263,7 @@ class Controller:
         """Apply steering correction to a motor byte value."""
         corrected = base_byte + int(round(correction))
         return max(0, min(255, corrected))
+
 
     def get_imu_status(self) -> Optional[dict]:
         """Get IMU status information for monitoring."""
