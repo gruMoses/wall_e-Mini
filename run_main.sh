@@ -56,6 +56,6 @@ fi
 source "$VENV_DIR/bin/activate"
 
 cd "$APP_DIR"
-exec python3 -u -m app.main
+exec python3 -u -m app.main --pid-debug
 
 
