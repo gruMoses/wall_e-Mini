@@ -49,8 +49,7 @@ class ImuSteeringConfig:
     
     # Timing
     update_rate_hz: float = 80.0  # IMU update rate
-    heading_hold_timeout_s: float = 0.5  # Time to hold heading when no steering input
-    
+
     # Fallback behavior
     fallback_on_error: bool = True  # Use RC control if IMU fails
     calibration_timeout_s: float = 5.0  # Timeout for IMU calibration

@@ -115,7 +115,6 @@ def make_compensator(
         invert_output=True,  # applied inside compensator
         log_steering_corrections=False,
         update_rate_hz=20.0,
-        heading_hold_timeout_s=0.5,
         fallback_on_error=True,
         calibration_timeout_s=1.0,
     )

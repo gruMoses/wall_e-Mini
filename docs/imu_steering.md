@@ -52,7 +52,6 @@ class ImuSteeringConfig:
     
     # Timing
     update_rate_hz: float = 20.0     # IMU update rate
-    heading_hold_timeout_s: float = 0.5  # Heading hold timeout
 ```
 
 ### Tuning Guidelines
