@@ -33,6 +33,18 @@ class FakeShutdown(ShutdownScheduler):
         self.scheduled.append(delay_seconds)
 
 
+class FakeImu:
+    def __init__(self):
+        self.dts = []
+
+    def update(self, steering_input: float, dt: float) -> float:
+        self.dts.append(dt)
+        return 0.0
+
+    def reset_target_heading(self) -> None:
+        pass
+
+
 class TestController(unittest.TestCase):
     def test_process_disarmed_neutral(self):
         motor = FakeMotor()
@@ -84,6 +96,19 @@ class TestController(unittest.TestCase):
         self.assertFalse(cmd.is_armed)
         self.assertGreaterEqual(motor.stops, 1)
         self.assertEqual(shutdown.scheduled, [5.0])
+
+    def test_initial_imu_dt_clamped(self):
+        motor = FakeMotor()
+        relay = FakeRelay()
+        shutdown = FakeShutdown()
+        imu = FakeImu()
+        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown, imu_compensator=imu)
+        # Simulate uninitialized last update to force large dt
+        c._last_imu_update = 0.0
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch5_us=1000, last_update_epoch_s=0.0)
+        c.process(rc, now_epoch_s=100.0)
+        self.assertTrue(imu.dts)
+        self.assertLessEqual(imu.dts[0], c._imu_update_interval)
 
 
 if __name__ == "__main__":

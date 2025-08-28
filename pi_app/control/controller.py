@@ -89,7 +89,8 @@ class Controller:
         
         # IMU steering compensation
         self._imu_compensator = imu_compensator
-        self._last_imu_update = 0.0
+        # Initialize to current time so the first compensation call uses a sane dt
+        self._last_imu_update = time.time()
         self._imu_update_interval = 1.0 / config.imu_steering.update_rate_hz if config.imu_steering.enabled else 1.0
         # Track when we begin moving straight to (re)lock heading
         self._was_moving_straight = False
@@ -245,13 +246,15 @@ class Controller:
 
     def _apply_imu_compensation(self, steering_input: float, now: float) -> Optional[float]:
         """Apply IMU steering compensation if available and timing allows."""
-        if (self._imu_compensator is None or 
+        if (self._imu_compensator is None or
             not config.imu_steering.enabled or
             now - self._last_imu_update < self._imu_update_interval):
             return None
-        
+
         try:
             dt = now - self._last_imu_update
+            # Clamp dt to avoid integral windup from large gaps between updates
+            dt = min(dt, self._imu_update_interval)
             correction = self._imu_compensator.update(steering_input, dt)
             self._last_imu_update = now
             
