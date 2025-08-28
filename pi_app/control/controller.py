@@ -295,14 +295,20 @@ class Controller:
         
         try:
             status = self._imu_compensator.get_status()
-            return {
-                'heading_deg': int(round(status.heading_deg)),
-                'target_heading_deg': int(round(status.target_heading_deg)),
-                'yaw_rate_dps': int(round(status.yaw_rate_dps)),
+            status_dict = {
+                'heading_deg': status.heading_deg,
+                'target_heading_deg': status.target_heading_deg,
+                'yaw_rate_dps': status.yaw_rate_dps,
+                'roll_deg': status.roll_deg,
+                'pitch_deg': status.pitch_deg,
                 'is_available': status.is_available,
                 'is_calibrated': status.is_calibrated,
-                'error_count': status.error_count
+                'error_count': status.error_count,
             }
+            for k, v in status_dict.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    status_dict[k] = int(round(v))
+            return status_dict
         except Exception:
             return None
 
