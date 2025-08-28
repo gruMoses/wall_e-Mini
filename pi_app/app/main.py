@@ -135,7 +135,12 @@ def run() -> None:
     try:
         last_log_ts = 0.0
         log_interval = 0.1  # 10 Hz logging
+        prev_loop_ts = time.monotonic()
+        prev_imu_ts = getattr(controller, "_last_imu_update", None)
         while True:
+            loop_now = time.monotonic()
+            loop_dt_ms = int(round((loop_now - prev_loop_ts) * 1000))
+            prev_loop_ts = loop_now
             s = rc_reader.get_state()
             rc = RCInputs(
                 ch1_us=s.ch1_us,
@@ -149,6 +154,15 @@ def run() -> None:
             bt_age = time.time() - bt.last_update_epoch_s
             bt_override = (bt.left_byte, bt.right_byte) if bt_age <= 0.6 else None
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
+            imu_dt_ms = None
+            imu_update_ts = getattr(controller, "_last_imu_update", None)
+            if (
+                imu_update_ts is not None
+                and prev_imu_ts is not None
+                and imu_update_ts != prev_imu_ts
+            ):
+                imu_dt_ms = int(round((imu_update_ts - prev_imu_ts) * 1000))
+            prev_imu_ts = imu_update_ts
             # Suppress BT extrema debug output to keep CLI clean
             # Get IMU status for display
             imu_status = controller.get_imu_status()
@@ -213,6 +227,8 @@ def run() -> None:
                         }),
                         "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
+                        "loop_dt_ms": loop_dt_ms,
+                        "imu_dt_ms": imu_dt_ms,
                         "events": [e.name for e in events] if events else [],
                     }
                     line = json.dumps(log_obj)
