@@ -12,12 +12,23 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from pi_app.hardware.imu_reader import ImuReader
 from pi_app.control.imu_steering import ImuSteeringCompensator
 from config import config
+
+
+@pytest.fixture
+def imu_reader():
+    """Provide a real IMU reader or skip if hardware is unavailable."""
+    try:
+        return ImuReader()
+    except Exception:
+        pytest.skip("IMU hardware not available")
 
 
 def test_imu_reader():

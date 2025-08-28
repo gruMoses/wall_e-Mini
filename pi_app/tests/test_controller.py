@@ -40,7 +40,7 @@ class TestController(unittest.TestCase):
         shutdown = FakeShutdown()
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
-        cmd, events = c.process(rc, now_epoch_s=0.0)
+        cmd, events, _ = c.process(rc, now_epoch_s=0.0)
         self.assertEqual(cmd.left_byte, 126)
         self.assertEqual(cmd.right_byte, 126)
         self.assertFalse(cmd.is_armed)
@@ -54,7 +54,7 @@ class TestController(unittest.TestCase):
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
         # Arm
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch5_us=1000, last_update_epoch_s=0.0)
-        cmd, events = c.process(rc, now_epoch_s=0.3)
+        cmd, events, _ = c.process(rc, now_epoch_s=0.3)
         self.assertTrue(cmd.is_armed)
         # Send some non-neutral values
         rc = RCInputs(
@@ -64,7 +64,7 @@ class TestController(unittest.TestCase):
             ch5_us=1000,
             last_update_epoch_s=0.0,
         )
-        cmd, events = c.process(rc, now_epoch_s=0.6)
+        cmd, events, _ = c.process(rc, now_epoch_s=0.6)
         self.assertEqual(motor.commands[-1], (255, 0))
         self.assertTrue(cmd.is_armed)
 
@@ -75,11 +75,11 @@ class TestController(unittest.TestCase):
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
         # Arm first
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch5_us=1000, last_update_epoch_s=0.0)
-        cmd, events = c.process(rc, now_epoch_s=0.5)
+        cmd, events, _ = c.process(rc, now_epoch_s=0.5)
         self.assertTrue(cmd.is_armed)
         # Trigger emergency rising edge
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1500, ch5_us=1900, last_update_epoch_s=0.0)
-        cmd, events = c.process(rc, now_epoch_s=0.6)
+        cmd, events, _ = c.process(rc, now_epoch_s=0.6)
         self.assertIn(SafetyEvent.EMERGENCY_TRIGGERED, events)
         self.assertFalse(cmd.is_armed)
         self.assertGreaterEqual(motor.stops, 1)

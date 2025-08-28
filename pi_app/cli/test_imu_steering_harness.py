@@ -112,7 +112,8 @@ def make_compensator(
         max_correction=max_correction,
         deadband_deg=deadband_deg,
         max_integral=max_integral,
-        invert_output=True,  # not used inside compensator; applied upstream
+        # Keep natural sign for unit tests; inversion is handled when integrating with hardware
+        invert_output=False,
         log_steering_corrections=False,
         update_rate_hz=20.0,
         heading_hold_timeout_s=0.5,
