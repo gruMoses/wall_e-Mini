@@ -135,16 +135,20 @@ class ImuSteeringCompensator:
     def update(self, steering_input: float, dt: float) -> Optional[float]:
         """
         Update IMU state and compute steering compensation.
-        
+
         Args:
             steering_input: Current steering input from RC/BT (-1.0 to 1.0, 0.0 = neutral)
-            dt: Time delta since last update
-            
+            dt: Time delta in seconds since the previous update.
+                Must be positive; non-positive values skip compensation.
+
         Returns:
             Steering correction in byte units (-max_correction to +max_correction),
             or None if IMU is not available or compensation is disabled
         """
         if not self.config.enabled or not self.state.is_available:
+            return None
+
+        if dt <= 0.0:
             return None
             
         try:
