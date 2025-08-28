@@ -26,6 +26,8 @@ const int TRACK_CENTER = 126;
 // Simple serial command buffer
 char cmdBuf[32];
 byte cmdLen = 0;
+unsigned long lastByteTime = 0;
+const unsigned long CMD_TIMEOUT_MS = 100;  // reset buffer if idle >100ms
 
 void isrCH1() {
   if (digitalRead(chPins[0])) 
@@ -120,8 +122,15 @@ void driveRight(int trackByte) {
 }
 
 void processSerialCommand() {
+  const unsigned long now = millis();
+  if (cmdLen > 0 && (now - lastByteTime) > CMD_TIMEOUT_MS) {
+    // Timed out waiting for newline; clear partial command
+    cmdLen = 0;
+    cmdBuf[0] = '\0';
+  }
   while (Serial.available()) {
     char c = (char)Serial.read();
+    lastByteTime = millis();
     if (c == '\n' || c == '\r') {
       if (cmdLen > 0) {
         cmdBuf[cmdLen] = '\0';
@@ -148,6 +157,7 @@ void processSerialCommand() {
     } else {
       // overflow, reset
       cmdLen = 0;
+      cmdBuf[0] = '\0';
     }
   }
 }
