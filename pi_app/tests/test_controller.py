@@ -85,6 +85,12 @@ class TestController(unittest.TestCase):
         self.assertGreaterEqual(motor.stops, 1)
         self.assertEqual(shutdown.scheduled, [5.0])
 
+    def test_reset_imu_timestamp_helper(self):
+        c = Controller()
+        # Reset the timestamp via helper and ensure the internal value changes
+        c._reset_imu_timestamp(123.0)
+        self.assertEqual(c._last_imu_update, 123.0)
+
 
 if __name__ == "__main__":
     unittest.main()
