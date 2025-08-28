@@ -163,7 +163,7 @@ class ImuSteeringCompensator:
                             self.state.integral_error = 0.0
                         self._neutral_since_epoch = None
                 correction = self._compute_heading_hold_correction(dt)
-                # Honor optional config inversion
+                # Honor optional config inversion for steering output
                 if correction is not None and getattr(self.config, 'invert_output', False):
                     correction = -correction
                 return correction
