@@ -11,7 +11,7 @@ import time
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
-from threading import Lock
+from threading import RLock
 import sys
 from pathlib import Path
 
@@ -20,6 +20,36 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from pi_app.hardware.imu_reader import ImuReader
 from config import ImuSteeringConfig
+
+
+class _LockedRLock:
+    """Wrapper around :class:`threading.RLock` providing ``locked()``."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+
+    # Context manager support
+    def __enter__(self) -> "_LockedRLock":
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[override]
+        self._lock.release()
+
+    # Lock interface
+    def acquire(self, *args, **kwargs):  # type: ignore[override]
+        return self._lock.acquire(*args, **kwargs)
+
+    def release(self) -> None:  # type: ignore[override]
+        self._lock.release()
+
+    def locked(self) -> bool:
+        """Return True if the lock is held by the current thread."""
+        # Some Python versions expose ``_is_owned`` instead of ``locked``
+        owned = getattr(self._lock, "_is_owned", None)
+        if owned is not None:
+            return owned()
+        return self._lock.locked()
 
 
 @dataclass
@@ -56,13 +86,17 @@ class ImuSteeringCompensator:
     3. Applying proportional corrections based on heading error
     4. Using integral term to correct for systematic drift
     5. Using derivative term to dampen oscillations
+
+    A `threading.RLock` protects shared state, enabling safe re-entrant
+    access when multiple methods need to hold the lock simultaneously.
     """
     
     def __init__(self, config: ImuSteeringConfig, imu_reader: Optional[ImuReader] = None):
         self.config = config
         self.imu_reader = imu_reader
         self.state = ImuSteeringState()
-        self.lock = Lock()
+        # Reentrant lock allows nested acquisition when methods call each other
+        self.lock = _LockedRLock()
         # Tracks when we entered neutral steering to manage target updates
         # (monotonic timestamp)
         self._neutral_since: Optional[float] = None
@@ -163,7 +197,8 @@ class ImuSteeringCompensator:
                             self.state.target_heading_deg = self.state.heading_deg
                             self.state.integral_error = 0.0
                         self._neutral_since = None
-                correction = self._compute_heading_hold_correction(dt)
+                with self.lock:
+                    correction = self._compute_heading_hold_correction(dt)
                 # Honor optional config inversion for steering output
                 if correction is not None and getattr(self.config, 'invert_output', False):
                     correction = -correction
@@ -180,6 +215,7 @@ class ImuSteeringCompensator:
     
     def _compute_heading_hold_correction(self, dt: float) -> float:
         """Compute PID-based heading hold correction."""
+        assert self.lock.locked()
         with self.lock:
             # Compute heading error (normalized to [-180, 180])
             error_deg = self.state.target_heading_deg - self.state.heading_deg
