@@ -109,7 +109,9 @@ class ImuSteeringCompensator:
             Steering correction in byte units (-max_correction to +max_correction),
             or None if IMU is not available or compensation is disabled
         """
-        if not self.config.enabled or not self.state.is_available:
+        with self.lock:
+            available = self.state.is_available
+        if not self.config.enabled or not available:
             return None
             
         try:
@@ -126,92 +128,91 @@ class ImuSteeringCompensator:
             # Determine neutral vs active steering with hysteresis
             neutral_enter = getattr(self.config, 'steering_neutral_enter', 0.10)
             neutral_exit = getattr(self.config, 'steering_neutral_exit', 0.10)
-            last = self.state.last_steering_input
-            # If we were neutral, remain neutral until we exceed the exit threshold.
-            # If we were not neutral, only enter neutral when we are below the tighter enter threshold.
-            was_neutral = abs(last) < neutral_enter
-            if was_neutral:
-                is_neutral = abs(steering_input) < neutral_exit
-            else:
-                is_neutral = abs(steering_input) < neutral_enter
 
-            # On transition to non-neutral, reset integral and clear neutral timer
-            if not is_neutral and was_neutral:
-                with self.lock:
+            with self.lock:
+                last = self.state.last_steering_input
+                # If we were neutral, remain neutral until we exceed the exit threshold.
+                # If we were not neutral, only enter neutral when we are below the tighter enter threshold.
+                was_neutral = abs(last) < neutral_enter
+                is_neutral = abs(steering_input) < (neutral_exit if was_neutral else neutral_enter)
+
+                # On transition to non-neutral, reset integral and clear neutral timer
+                if not is_neutral and was_neutral:
                     self.state.integral_error = 0.0
-                self._neutral_since_epoch = None
+                    self._neutral_since_epoch = None
 
-            # On entering neutral, capture timestamp and optionally dwell before locking target
-            if is_neutral and not was_neutral:
-                self._neutral_since_epoch = time.time()
-                dwell = getattr(self.config, 'neutral_dwell_s', 0.0)
-                if dwell <= 0.0:
-                    with self.lock:
+                # On entering neutral, capture timestamp and optionally dwell before locking target
+                if is_neutral and not was_neutral:
+                    self._neutral_since_epoch = time.time()
+                    dwell = getattr(self.config, 'neutral_dwell_s', 0.0)
+                    if dwell <= 0.0:
                         self.state.target_heading_deg = self.state.heading_deg
                         self.state.integral_error = 0.0
 
-            self.state.last_steering_input = steering_input
+                self.state.last_steering_input = steering_input
 
-            # Compute compensation only when near neutral steering
-            if is_neutral:
-                # If a dwell was requested, lock heading after dwell time passes
-                dwell = getattr(self.config, 'neutral_dwell_s', 0.0)
-                if dwell > 0.0 and self._neutral_since_epoch is not None:
-                    if (time.time() - self._neutral_since_epoch) >= dwell:
-                        with self.lock:
+                # Compute compensation only when near neutral steering
+                if is_neutral:
+                    # If a dwell was requested, lock heading after dwell time passes
+                    dwell = getattr(self.config, 'neutral_dwell_s', 0.0)
+                    if dwell > 0.0 and self._neutral_since_epoch is not None:
+                        if (time.time() - self._neutral_since_epoch) >= dwell:
                             self.state.target_heading_deg = self.state.heading_deg
                             self.state.integral_error = 0.0
-                        self._neutral_since_epoch = None
-                correction = self._compute_heading_hold_correction(dt)
-                # Honor optional config inversion for steering output
-                if correction is not None and getattr(self.config, 'invert_output', False):
-                    correction = -correction
-                return correction
-            else:
-                return None
-                
+                            self._neutral_since_epoch = None
+                    correction = self._compute_heading_hold_correction(dt)
+                    # Honor optional config inversion for steering output
+                    if correction is not None and getattr(self.config, 'invert_output', False):
+                        correction = -correction
+                else:
+                    correction = None
+
+            return correction
+
         except Exception as e:
-            self.state.error_count += 1
-            if self.state.error_count > 10:
-                with self.lock:
+            with self.lock:
+                self.state.error_count += 1
+                if self.state.error_count > 10:
                     self.state.is_available = False
             return None
     
     def _compute_heading_hold_correction(self, dt: float) -> float:
-        """Compute PID-based heading hold correction."""
-        with self.lock:
-            # Compute heading error (normalized to [-180, 180])
-            error_deg = self.state.target_heading_deg - self.state.heading_deg
-            while error_deg > 180:
-                error_deg -= 360
-            while error_deg < -180:
-                error_deg += 360
-            
-            # Apply deadband
-            if abs(error_deg) < self.config.deadband_deg:
-                return 0.0
-            
-            # PID control
-            # Proportional term
-            p_term = self.config.kp * error_deg
-            
-            # Integral term (with anti-windup)
-            self.state.integral_error += error_deg * dt
-            self.state.integral_error = max(-self.config.max_integral, 
-                                         min(self.config.max_integral, self.state.integral_error))
-            i_term = self.config.ki * self.state.integral_error
-            
-            # Derivative term (yaw rate damping)
-            d_term = -self.config.kd * self.state.yaw_rate_dps
-            
-            # Combine terms
-            correction = p_term + i_term + d_term
-            
-            # Clamp to maximum correction
-            max_corr = float(self.config.max_correction)
-            correction = max(-max_corr, min(max_corr, correction))
-            
-            return correction
+        """Compute PID-based heading hold correction.
+
+        Caller must hold ``self.lock`` before invoking this method.
+        """
+        # Compute heading error (normalized to [-180, 180])
+        error_deg = self.state.target_heading_deg - self.state.heading_deg
+        while error_deg > 180:
+            error_deg -= 360
+        while error_deg < -180:
+            error_deg += 360
+
+        # Apply deadband
+        if abs(error_deg) < self.config.deadband_deg:
+            return 0.0
+
+        # PID control
+        # Proportional term
+        p_term = self.config.kp * error_deg
+
+        # Integral term (with anti-windup)
+        self.state.integral_error += error_deg * dt
+        self.state.integral_error = max(-self.config.max_integral,
+                                        min(self.config.max_integral, self.state.integral_error))
+        i_term = self.config.ki * self.state.integral_error
+
+        # Derivative term (yaw rate damping)
+        d_term = -self.config.kd * self.state.yaw_rate_dps
+
+        # Combine terms
+        correction = p_term + i_term + d_term
+
+        # Clamp to maximum correction
+        max_corr = float(self.config.max_correction)
+        correction = max(-max_corr, min(max_corr, correction))
+
+        return correction
     
     def get_status(self) -> ImuSteeringState:
         """Get current IMU steering state."""
