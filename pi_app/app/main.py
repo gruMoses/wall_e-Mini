@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 import fcntl
+import argparse
 
 try:
     from pi_app.hardware.vesc import VescCanDriver
@@ -52,11 +53,18 @@ def _cleanup_old_logs(log_dir: Path, days: int = 7) -> None:
 
 
 def run() -> None:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--pid-debug",
+        action="store_true",
+        help="Print PID controller debug values",
+    )
+    args, _ = parser.parse_known_args()
+    pid_debug = args.pid_debug or config.log_steering_corrections
+
     rc_reader = ArduinoRCReader()
     port = rc_reader.start()
     print(f"Arduino RC detected on {port}")
-
-    pid_debug = "--pid-debug" in sys.argv
 
     # Initialize IMU and steering compensator
     imu_compensator = None
