@@ -96,6 +96,14 @@ class Controller:
         self._straight_latched = False
         self._straight_disengage_deadline = 0.0
 
+    def _reset_imu_timestamp(self, now: float) -> None:
+        """Reset the timestamp used to throttle IMU updates.
+
+        This helper allows tests to control when the next IMU update
+        is permitted without reaching into private attributes.
+        """
+        self._last_imu_update = now
+
     def process(
         self,
         rc: RCInputs,
