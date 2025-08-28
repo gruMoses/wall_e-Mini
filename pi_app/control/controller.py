@@ -89,7 +89,7 @@ class Controller:
         
         # IMU steering compensation
         self._imu_compensator = imu_compensator
-        self._last_imu_update = 0.0
+        self._last_imu_update = time.monotonic()
         self._imu_update_interval = 1.0 / config.imu_steering.update_rate_hz if config.imu_steering.enabled else 1.0
         # Track when we begin moving straight to (re)lock heading
         self._was_moving_straight = False
@@ -102,14 +102,15 @@ class Controller:
         now_epoch_s: float | None = None,
         bt_override_bytes: tuple[int, int] | None = None,
     ) -> Tuple[DriveCommand, List[SafetyEvent], dict]:
-        now = now_epoch_s if now_epoch_s is not None else time.time()
+        epoch_now = now_epoch_s if now_epoch_s is not None else time.time()
+        mono_now = time.monotonic()
 
         # Update safety
         self._safety_state, events = update_safety(
             self._safety_state,
             ch3_us=rc.ch3_us,
             ch5_us=rc.ch5_us,
-            now_epoch_s=now,
+            now_epoch_s=epoch_now,
             params=self._safety_params,
         )
 
@@ -133,7 +134,7 @@ class Controller:
             steering_input = self._bytes_to_steering_input(left, right)
 
         # Apply IMU steering compensation if available and enabled
-        imu_correction = self._apply_imu_compensation(steering_input, now)
+        imu_correction = self._apply_imu_compensation(steering_input, mono_now)
         telemetry["steering_input"] = steering_input
         telemetry["imu_correction_raw"] = imu_correction
         
@@ -152,7 +153,7 @@ class Controller:
         max_abs = max(abs(d1), abs(d2), 1)
         equal_rel_ok = (abs_diff / max_abs) <= rel_pct
         equal_ok = equal_abs_ok or (moving_ok and equal_rel_ok)
-        now_s = now
+        now_s = mono_now
         is_moving_straight = False
         if moving_ok and equal_ok:
             is_moving_straight = True
@@ -243,17 +244,17 @@ class Controller:
         # Clamp to [-1.0, 1.0]
         return max(-1.0, min(1.0, steering))
 
-    def _apply_imu_compensation(self, steering_input: float, now: float) -> Optional[float]:
+    def _apply_imu_compensation(self, steering_input: float, now_s: float) -> Optional[float]:
         """Apply IMU steering compensation if available and timing allows."""
-        if (self._imu_compensator is None or 
+        if (self._imu_compensator is None or
             not config.imu_steering.enabled or
-            now - self._last_imu_update < self._imu_update_interval):
+            now_s - self._last_imu_update < self._imu_update_interval):
             return None
-        
+
         try:
-            dt = now - self._last_imu_update
+            dt = now_s - self._last_imu_update
             correction = self._imu_compensator.update(steering_input, dt)
-            self._last_imu_update = now
+            self._last_imu_update = now_s
             
             if config.imu_steering.log_steering_corrections and correction is not None:
                 print(f"IMU correction: {correction:.2f} (steering: {steering_input:.2f})")
