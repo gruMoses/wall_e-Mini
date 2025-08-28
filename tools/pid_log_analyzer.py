@@ -10,8 +10,8 @@ Design goals:
 - Do not modify existing project files; can be called after main exits.
 
 Output formats (compact):
-1) json (default): single JSON object {meta, rows, summary}
-2) ndjson: header line, rows per line, final summary line
+1) json (default): single JSON object {meta, runs: [{rows, summary}], overall_summary}
+2) ndjson: header line, rows per line, final summary line (single-run only)
 
 Where row columns are:
 - dt: elapsed milliseconds since first included sample
@@ -21,6 +21,7 @@ Where row columns are:
 - u: applied correction (after clamp/invert), int bytes
 - s: steering input (normalized −1..1) × scale["s"] (int)
 - sat: 1 if PID output saturated/clamped, else 0
+ - ml,mr: motor command bytes (left/right), ints
 """
 
 from __future__ import annotations
@@ -53,9 +54,9 @@ def _import_config():
 
 @dataclass
 class Scales:
-    e: int = 10   # 0.1 deg
-    r: int = 10   # 0.1 deg/s
-    s: int = 100  # 0.01 normalized
+    e: float = 10.0   # 0.1 deg
+    r: float = 10.0   # 0.1 deg/s
+    s: float = 100.0  # 0.01 normalized
 
     def to_dict(self) -> dict:
         return {"e": self.e, "r": self.r, "s": self.s}
@@ -102,7 +103,7 @@ def _sat_flag(steer: dict, max_corr: Optional[int]) -> int:
     return 0
 
 
-def _derive_row(obj: dict, scales: Scales, max_corr: Optional[int]) -> Optional[Tuple[int, int, int, int, int, int, int, int, int]]:
+def _derive_row(obj: dict, scales: Scales, max_corr: Optional[int]) -> Optional[Tuple[int, int, int, int, int, int, int, int, int, int, int]]:
     if not _pid_active(obj):
         return None
     ts_iso = obj.get("ts_iso")
@@ -125,6 +126,9 @@ def _derive_row(obj: dict, scales: Scales, max_corr: Optional[int]) -> Optional[
     d = pid.get("d", 0.0)
     u = steer.get("correction_applied")
     s = obj.get("imu_steering", {}).get("steering_input", 0.0)
+    motor = obj.get("motor") or {}
+    ml = motor.get("L", None)
+    mr = motor.get("R", None)
     sat = _sat_flag(steer, max_corr)
 
     # Quantize
@@ -135,9 +139,11 @@ def _derive_row(obj: dict, scales: Scales, max_corr: Optional[int]) -> Optional[
     d_q = int(round(float(d)))
     u_q = int(round(float(u)))
     s_q = int(round(float(s) * scales.s))
+    ml_q = int(ml) if isinstance(ml, int) else 0
+    mr_q = int(mr) if isinstance(mr, int) else 0
 
     # Return with placeholder dt (0). Caller fills dt sequence.
-    return (0, e_q, r_q, p_q, i_q, d_q, u_q, s_q, int(sat))
+    return (0, e_q, r_q, p_q, i_q, d_q, u_q, s_q, int(sat), ml_q, mr_q)
 
 
 def _zero_crossings_per_second(times_ms: Iterable[int], errors_q: Iterable[int], scale_e: int) -> float:
@@ -170,7 +176,7 @@ def _zero_crossings_per_second(times_ms: Iterable[int], errors_q: Iterable[int],
     return 1.0 / period_s if period_s > 0 else 0.0
 
 
-def analyze(log_path: Path, out_path: Optional[Path] = None, fmt: str = "json") -> Optional[Path]:
+def analyze(log_path: Path, out_path: Optional[Path] = None, fmt: str = "json", gap_threshold_ms: int = 500, r_event_thresh_dps: float = 20.0, overshoot_window_ms: int = 500) -> Optional[Path]:
     cfg = _import_config()
     pid_debug_enabled = bool(getattr(getattr(cfg, "imu_steering", cfg), "log_steering_corrections", False) or getattr(cfg, "log_steering_corrections", False))
     if not pid_debug_enabled:
@@ -247,35 +253,134 @@ def analyze(log_path: Path, out_path: Optional[Path] = None, fmt: str = "json") 
     zc_hz = _zero_crossings_per_second(times_ms, errors_q, scales.e)
 
     meta_obj = {
-        "columns": ["dt","e","r","p","i","d","u","s","sat"],
+        "columns": ["dt","e","r","p","i","d","u","s","sat","ml","mr"],
         "units": {"dt": "ms", "e": "deg", "r": "deg/s", "p": "byte", "i": "byte", "d": "byte", "u": "byte", "s": "norm", "sat": "0/1"},
         "scale": scales.to_dict(),
         "pid": {"kp": kp, "ki": ki, "kd": kd},
         "hint": "LLM: dt(ms), e(deg), r(deg/s), p,i,d(terms), u(applied), s(steer -1..1), sat(1 if clamped)."
     }
-    summary_obj = {
-        "n": len(rows),
-        "rms_e": round(rms_e, 3),
-        "mean_abs_e": round(mean_abs_e, 3),
-        "max_abs_e": round(max_abs_e, 3),
-        "sat_ratio": round(sat_ratio, 3),
-        "zc_per_s": round(zc_hz, 3),
-    }
+    # Build runs by gap threshold
+    runs: list[dict] = []
+    if rows:
+        cur_rows: list[Tuple[int, ...]] = []
+        cur_times: list[int] = []
+        cur_errors: list[int] = []
+        prev_dt = rows[0][0]
+        for r in rows:
+            dt = r[0]
+            if cur_rows and (dt - prev_dt) > gap_threshold_ms:
+                runs.append({"rows": cur_rows, "times": cur_times, "errors": cur_errors})
+                cur_rows, cur_times, cur_errors = [], [], []
+            cur_rows.append(r)
+            cur_times.append(dt)
+            cur_errors.append(r[1])
+            prev_dt = dt
+        if cur_rows:
+            runs.append({"rows": cur_rows, "times": cur_times, "errors": cur_errors})
+
+    def summarize(_rows: list[Tuple[int, ...]], _times: list[int], _errors: list[int]) -> dict:
+        if not _rows:
+            return {"n": 0}
+        abs_errors = [abs(x / float(scales.e)) for x in _errors]
+        mean_abs_e = sum(abs_errors) / len(abs_errors)
+        rms_e = math.sqrt(sum((x * x) for x in abs_errors) / len(abs_errors))
+        max_abs_e = max(abs_errors)
+        sat_ratio = sum(r[-3] for r in _rows) / float(len(_rows))  # sat column index
+        zc_hz = _zero_crossings_per_second(_times, _errors, int(scales.e))
+        # mean absolute term contributions
+        mean_abs_p = sum(abs(r[3]) for r in _rows) / float(len(_rows))
+        mean_abs_i = sum(abs(r[4]) for r in _rows) / float(len(_rows))
+        mean_abs_d = sum(abs(r[5]) for r in _rows) / float(len(_rows))
+        # roughness via yaw-rate
+        rs = [r[2] / float(scales.r) for r in _rows]
+        mean_r = sum(rs) / len(rs)
+        r_std = math.sqrt(sum((x - mean_r) ** 2 for x in rs) / len(rs))
+        r_max_abs = max(abs(x) for x in rs)
+        # overshoot after high-rate events
+        r_thr_q = int(round(r_event_thresh_dps * scales.r))
+        overs = []
+        for idx, (t, eq, rq) in enumerate(zip(_times, _errors, [r[2] for r in _rows])):
+            if abs(rq) >= r_thr_q:
+                t_end = t + overshoot_window_ms
+                peek = 0.0
+                for j in range(idx, len(_rows)):
+                    if _times[j] > t_end:
+                        break
+                    peek = max(peek, abs(_errors[j] / float(scales.e)))
+                if peek:
+                    overs.append(peek)
+        overshoot = sum(overs) / len(overs) if overs else 0.0
+        return {
+            "n": len(_rows),
+            "rms_e": round(rms_e, 3),
+            "mean_abs_e": round(mean_abs_e, 3),
+            "max_abs_e": round(max_abs_e, 3),
+            "sat_ratio": round(sat_ratio, 3),
+            "zc_per_s": round(zc_hz, 3),
+            "mean_abs_p": round(mean_abs_p, 3),
+            "mean_abs_i": round(mean_abs_i, 3),
+            "mean_abs_d": round(mean_abs_d, 3),
+            "r_std": round(r_std, 3),
+            "r_max_abs": round(r_max_abs, 3),
+            "overshoot": round(overshoot, 3),
+        }
+
+    # Integral windup ratio
+    windup_ratio = None
+    try:
+        max_int = float(getattr(cfg.imu_steering, "max_integral", 0.0)) if cfg and getattr(cfg, "imu_steering", None) is not None else 0.0
+        if max_int > 0:
+            total = 0
+            wind = 0
+            with log_path.open("r", encoding="utf-8", errors="ignore") as fh2:
+                for line in fh2:
+                    if not line or line[0] != '{':
+                        continue
+                    try:
+                        obj2 = json.loads(line)
+                    except Exception:
+                        continue
+                    imu2 = obj2.get("imu") or {}
+                    steer2 = obj2.get("imu_steering") or {}
+                    if not (imu2.get("is_available") and _is_num(steer2.get("correction_applied"))):
+                        continue
+                    integ = (obj2.get("pid") or {}).get("integral_error")
+                    if _is_num(integ):
+                        total += 1
+                        if abs(float(integ)) >= 0.98 * max_int:
+                            wind += 1
+            if total > 0:
+                windup_ratio = round(wind / float(total), 3)
+    except Exception:
+        pass
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as out:
         if fmt == "json":
-            payload = {
-                "meta": meta_obj,
-                "rows": rows,
-                "summary": summary_obj,
-            }
+            if not runs:
+                out.write(json.dumps({"error": "No active PID data"}))
+                return out_path
+            run_objs = []
+            for r in runs:
+                summ = summarize(r["rows"], r["times"], r["errors"])
+                run_objs.append({"rows": r["rows"], "summary": summ})
+            overall = summarize(sum((r["rows"] for r in runs), []), sum((r["times"] for r in runs), []), sum((r["errors"] for r in runs), []))
+            if windup_ratio is not None:
+                overall["windup_ratio"] = windup_ratio
+            payload = {"meta": meta_obj, "runs": run_objs, "overall_summary": overall}
             out.write(json.dumps(payload, separators=(",", ":")))
         else:
+            flat_rows = sum((r["rows"] for r in runs), []) if runs else []
+            if not flat_rows:
+                out.write(json.dumps({"error": "No active PID data"}))
+                return out_path
             out.write(json.dumps({"meta": meta_obj}, separators=(",", ":")) + "\n")
-            for r in rows:
+            for r in flat_rows:
                 out.write("[" + ",".join(str(x) for x in r) + "]\n")
-            out.write(json.dumps({"summary": summary_obj}, separators=(",", ":")) + "\n")
+            overall = summarize(flat_rows, [r[0] for r in flat_rows], [r[1] for r in flat_rows])
+            if windup_ratio is not None:
+                overall["windup_ratio"] = windup_ratio
+            out.write(json.dumps({"summary": overall}, separators=(",", ":")) + "\n")
 
     return out_path
 
@@ -287,11 +392,14 @@ def main():
     parser.add_argument("--log", type=str, default=str(logs_dir / "latest.log"), help="Path to input JSONL log (default: logs/latest.log)")
     parser.add_argument("--out", type=str, default=None, help="Output path (default by format)")
     parser.add_argument("--format", choices=["json", "ndjson"], default="json", help="Output format (default: json)")
+    parser.add_argument("--gap_threshold_ms", type=int, default=500, help="Start new run if time gap exceeds this (default: 500)")
+    parser.add_argument("--r_event_thresh_dps", type=float, default=20.0, help="Yaw rate threshold (deg/s) to mark a disturbance event (default: 20)")
+    parser.add_argument("--overshoot_window_ms", type=int, default=500, help="Window after event to measure overshoot (default: 500)")
     args = parser.parse_args()
     log_path = Path(args.log)
     out_path = Path(args.out) if args.out else None
 
-    res = analyze(log_path, out_path, fmt=args.format)
+    res = analyze(log_path, out_path, fmt=args.format, gap_threshold_ms=args.gap_threshold_ms, r_event_thresh_dps=args.r_event_thresh_dps, overshoot_window_ms=args.overshoot_window_ms)
     if res is None:
         # Either pid debugging disabled or no data
         return 0
