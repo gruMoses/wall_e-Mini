@@ -1,9 +1,23 @@
 import threading
 import time
+import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
 import glob
+
+logger = logging.getLogger(__name__)
+
+try:
+    from prometheus_client import Counter
+
+    RC_READ_ERRORS = Counter(
+        "rc_read_errors_total", "Number of RC read failures"
+    )
+except Exception:  # pragma: no cover
+    RC_READ_ERRORS = None
+
+RC_READ_ERROR_COUNT = 0
 
 try:
     import serial  # type: ignore
@@ -181,6 +195,7 @@ class ArduinoRCReader:
 
     # Internal
     def _read_loop(self) -> None:
+        global RC_READ_ERROR_COUNT
         assert self._serial is not None
         ser = self._serial
         while not self._stop_event.is_set():
@@ -217,7 +232,10 @@ class ArduinoRCReader:
                     last_update_epoch_s=now,
                 )
             except Exception:
-                # On any exception, keep trying unless stopped
+                RC_READ_ERROR_COUNT += 1
+                if RC_READ_ERRORS is not None:
+                    RC_READ_ERRORS.inc()
+                logger.exception("RC read failed")
                 time.sleep(0.01)
 
     # Motor command sending for Arduino-based motor driver fallback
