@@ -28,6 +28,16 @@ except ModuleNotFoundError:
     from config import config  # type: ignore
 
 
+def to_int(val):
+    if isinstance(val, dict):
+        return {k: to_int(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [to_int(v) for v in val]
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return int(round(val))
+    return val
+
+
 def _cleanup_old_logs(log_dir: Path, days: int = 7) -> None:
     try:
         cutoff = time.time() - days * 24 * 3600
@@ -150,18 +160,18 @@ def run() -> None:
                 if now_ts - last_log_ts >= log_interval and cmd.is_armed:
                     last_log_ts = now_ts
                     log_obj = {
-                        "ts": now_ts,
+                        "ts": to_int(now_ts),
                         "ts_iso": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
                         "src": src,
-                        "rc": {"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch5": s.ch5_us},
-                        "bt": {"L": bt.left_byte, "R": bt.right_byte, "age_s": round(bt_age, 3)},
-                        "imu": imu_status if imu_status else None,
-                        "imu_steering": {
-                            "steering_input": int(telem.get("steering_input")) if telem.get("steering_input") is not None else None,
-                            "correction_raw": int(telem.get("imu_correction_raw")) if telem.get("imu_correction_raw") is not None else None,
-                            "correction_applied": int(telem.get("imu_correction_applied")) if telem.get("imu_correction_applied") is not None else None,
-                        },
-                        "motor": {"L": cmd.left_byte, "R": cmd.right_byte},
+                        "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch5": s.ch5_us}),
+                        "bt": to_int({"L": bt.left_byte, "R": bt.right_byte, "age_s": bt_age}),
+                        "imu": to_int(imu_status) if imu_status else None,
+                        "imu_steering": to_int({
+                            "steering_input": telem.get("steering_input"),
+                            "correction_raw": telem.get("imu_correction_raw"),
+                            "correction_applied": telem.get("imu_correction_applied"),
+                        }),
+                        "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
                         "events": [e.name for e in events] if events else [],
                     }
