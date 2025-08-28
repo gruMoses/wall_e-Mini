@@ -88,6 +88,7 @@ def run_tests() -> None:
     _run(test_wraparound_error)
     _run(test_neutral_transitions)
     _run(test_non_neutral_disable)
+    _run(test_integral_deadband_bias)
 
     print(f"\nSummary: {passed} passed, {failed} failed")
     if failed:
@@ -213,6 +214,33 @@ def test_non_neutral_disable() -> None:
     comp.set_target_heading(10.0)
     corr = tick(comp, imu, steering_input=0.5, dt=0.05)  # active steering
     assert_true("Non-neutral returns None", corr is None)
+
+
+def test_integral_deadband_bias() -> None:
+    """Integral should correct small biases even within the deadband."""
+    imu = FakeImuReader(heading_deg=1.0)
+    comp = make_compensator(
+        imu,
+        kp=0.0,
+        ki=0.5,
+        kd=0.0,
+        deadband_deg=2.0,
+        max_integral=5.0,
+    )
+    comp.set_target_heading(0.0)
+    dt = 0.1
+    corr: float | None = 0.0
+    for _ in range(100):
+        corr = tick(comp, imu, steering_input=0.0, dt=dt)
+        # keep heading error constant at 1 deg
+        imu.heading_deg = 1.0
+    # Integral should clamp at -5 -> correction becomes +2.5 after inversion
+    assert_almost_equal(
+        "Integral bias correction",
+        float(corr or 0.0),
+        2.5,
+        tol=1e-3,
+    )
 
 
 if __name__ == "__main__":

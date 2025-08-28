@@ -188,18 +188,22 @@ class ImuSteeringCompensator:
             while error_deg < -180:
                 error_deg += 360
             
-            # Apply deadband
-            if abs(error_deg) < self.config.deadband_deg:
-                return 0.0
-            
+            # Integral term (with anti-windup) -- update before applying deadband so
+            # small persistent errors accumulate and can be corrected over time.
+            self.state.integral_error += error_deg * dt
+            self.state.integral_error = max(-self.config.max_integral,
+                                         min(self.config.max_integral, self.state.integral_error))
+
+            # Apply deadband to the proportional term only.  This allows the
+            # integral accumulator above to remove minor biases even when the
+            # instantaneous heading error is within the deadband.
+            p_error = 0.0 if abs(error_deg) < self.config.deadband_deg else error_deg
+
             # PID control
             # Proportional term
-            p_term = self.config.kp * error_deg
-            
-            # Integral term (with anti-windup)
-            self.state.integral_error += error_deg * dt
-            self.state.integral_error = max(-self.config.max_integral, 
-                                         min(self.config.max_integral, self.state.integral_error))
+            p_term = self.config.kp * p_error
+
+            # Integral term
             i_term = self.config.ki * self.state.integral_error
             
             # Derivative term (yaw rate damping)
