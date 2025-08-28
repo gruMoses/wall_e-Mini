@@ -149,7 +149,7 @@ def test_proportional_only() -> None:
     comp = make_compensator(imu, kp=1.0, ki=0.0, kd=0.0, deadband_deg=0.0)
     comp.set_target_heading(0.0)
     corr = tick(comp, imu, steering_input=0.0, dt=0.05)
-    # error = target - heading = -10 -> correction = +10 after inversion
+    # error = target - heading = -10 -> correction becomes +10 after inversion
     assert_almost_equal("P-only correction", float(corr or 0.0), 10.0, tol=1e-6)
 
 
@@ -163,7 +163,7 @@ def test_integral_clamp() -> None:
         corr = tick(comp, imu, steering_input=0.0, dt=dt)
         # keep IMU heading constant to isolate integral
         imu.heading_deg = 0.0
-    # At clamp: integral_error = max_integral = 2.5; correction = -2.5 after inversion
+    # At clamp: integral_error = max_integral = 2.5; correction becomes -2.5 after inversion
     assert_almost_equal("Integral clamp", float(corr or 0.0), -2.5, tol=1e-3)
 
 
