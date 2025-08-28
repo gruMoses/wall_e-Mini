@@ -1,9 +1,11 @@
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from pi_app.control.controller import Controller, RCInputs, MotorDriver, ArmRelay, ShutdownScheduler
 from pi_app.control.mapping import MIN_PULSE_WIDTH_US, MAX_PULSE_WIDTH_US
 from pi_app.control.safety import SafetyEvent
+from config import config as default_config
 
 
 class FakeMotor(MotorDriver):
@@ -85,6 +87,13 @@ class TestController(unittest.TestCase):
         self.assertFalse(cmd.is_armed)
         self.assertGreaterEqual(motor.stops, 1)
         self.assertEqual(shutdown.scheduled, [5.0])
+
+    def test_init_requires_positive_update_rate(self):
+        bad_imu = replace(default_config.imu_steering, update_rate_hz=0.0)
+        bad_config = replace(default_config, imu_steering=bad_imu)
+        with patch('pi_app.control.controller.config', bad_config):
+            with self.assertRaises(ValueError):
+                Controller()
 
     def test_reset_imu_timestamp_helper(self):
         with patch("pi_app.control.controller.time.monotonic", return_value=50.0):
