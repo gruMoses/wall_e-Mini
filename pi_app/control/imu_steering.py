@@ -157,6 +157,8 @@ class ImuSteeringCompensator:
                     self.state.roll_deg = data['roll_deg']
                     self.state.pitch_deg = data['pitch_deg']
                     self.state.last_update_time = time.monotonic()
+                    # Reset error counter after a successful read
+                    self.state.error_count = 0
             
             # Determine neutral vs active steering with hysteresis
             neutral_enter = getattr(self.config, 'steering_neutral_enter', 0.10)
