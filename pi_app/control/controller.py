@@ -92,7 +92,13 @@ class Controller:
         # Use a monotonic clock so IMU update intervals are not affected
         # by system clock adjustments.
         self._last_imu_update = time.monotonic()
-        self._imu_update_interval = 1.0 / config.imu_steering.update_rate_hz if config.imu_steering.enabled else 1.0
+        if config.imu_steering.enabled:
+            rate_hz = getattr(config.imu_steering, "update_rate_hz", 0)
+            if rate_hz <= 0:
+                raise ValueError("config.imu_steering.update_rate_hz must be positive")
+            self._imu_update_interval = 1.0 / rate_hz
+        else:
+            self._imu_update_interval = 1.0
         # Track when we begin moving straight to (re)lock heading
         self._was_moving_straight = False
         self._straight_latched = False
