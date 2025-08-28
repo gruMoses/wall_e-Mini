@@ -39,6 +39,16 @@ def to_int(val):
     return val
 
 
+def round1(val):
+    if isinstance(val, dict):
+        return {k: round1(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [round1(v) for v in val]
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return round(float(val), 1)
+    return val
+
+
 def _cleanup_old_logs(log_dir: Path, days: int = 7) -> None:
     try:
         cutoff = time.time() - days * 24 * 3600
@@ -192,6 +202,14 @@ def run() -> None:
                             "steering_input": telem.get("steering_input"),
                             "correction_raw": telem.get("imu_correction_raw"),
                             "correction_applied": telem.get("imu_correction_applied"),
+                        }),
+                        "pid": round1({
+                            "error_deg": telem.get("pid_error_deg"),
+                            "p": telem.get("pid_p"),
+                            "i": telem.get("pid_i"),
+                            "d": telem.get("pid_d"),
+                            "correction": telem.get("pid_correction"),
+                            "integral_error": (imu_status or {}).get("integral_error"),
                         }),
                         "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
