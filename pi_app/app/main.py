@@ -157,9 +157,9 @@ def run() -> None:
                         "bt": {"L": bt.left_byte, "R": bt.right_byte, "age_s": round(bt_age, 3)},
                         "imu": imu_status if imu_status else None,
                         "imu_steering": {
-                            "steering_input": telem.get("steering_input"),
-                            "correction_raw": telem.get("imu_correction_raw"),
-                            "correction_applied": telem.get("imu_correction_applied"),
+                            "steering_input": int(telem.get("steering_input")) if telem.get("steering_input") is not None else None,
+                            "correction_raw": int(telem.get("imu_correction_raw")) if telem.get("imu_correction_raw") is not None else None,
+                            "correction_applied": int(telem.get("imu_correction_applied")) if telem.get("imu_correction_applied") is not None else None,
                         },
                         "motor": {"L": cmd.left_byte, "R": cmd.right_byte},
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
