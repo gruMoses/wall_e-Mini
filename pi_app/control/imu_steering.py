@@ -163,12 +163,9 @@ class ImuSteeringCompensator:
                             self.state.integral_error = 0.0
                         self._neutral_since_epoch = None
                 correction = self._compute_heading_hold_correction(dt)
-                # Honor config inversion at the source
-                try:
-                    if getattr(self.config, 'invert_output', False) and correction is not None:
-                        correction = -correction
-                except Exception:
-                    pass
+                # Honor optional config inversion
+                if correction is not None and getattr(self.config, 'invert_output', False):
+                    correction = -correction
                 return correction
             else:
                 return None
@@ -204,8 +201,8 @@ class ImuSteeringCompensator:
                                          min(self.config.max_integral, self.state.integral_error))
             i_term = self.config.ki * self.state.integral_error
             
-            # Derivative term (yaw rate feed-forward)
-            d_term = self.config.kd * self.state.yaw_rate_dps
+            # Derivative term (yaw rate damping)
+            d_term = -self.config.kd * self.state.yaw_rate_dps
             
             # Combine terms
             correction = p_term + i_term + d_term
