@@ -36,11 +36,10 @@ class ImuSteeringState:
     target_heading_deg: float = 0.0
     last_steering_input: float = 0.0  # -1.0 to 1.0, where 0.0 is neutral
     last_update_time: float = 0.0
-    
+
     # PID state
     integral_error: float = 0.0
-    last_error: float = 0.0
-    
+
     # Status
     is_calibrated: bool = False
     is_available: bool = False
@@ -229,7 +228,6 @@ class ImuSteeringCompensator:
                 last_steering_input=self.state.last_steering_input,
                 last_update_time=self.state.last_update_time,
                 integral_error=self.state.integral_error,
-                last_error=self.state.last_error,
                 is_calibrated=self.state.is_calibrated,
                 is_available=self.state.is_available,
                 error_count=self.state.error_count
