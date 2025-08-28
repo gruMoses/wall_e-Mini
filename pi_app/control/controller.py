@@ -182,8 +182,9 @@ class Controller:
                 blend = max(0.0, 1.0 - (si / zero_at))
             telemetry["correction_blend"] = blend
             corr = imu_correction * blend
-            # Gate integral lock/target reset by straight intent, but allow small scaled corrections any time
-            if abs(corr) > 0.0:
+            # Apply corrections only when moving to avoid idle spin corrections
+            if moving_ok and abs(corr) > 0.0:
+                # Apply so that positive correction increases left and decreases right
                 left = self._apply_steering_correction(left, corr)
                 right = self._apply_steering_correction(right, -corr)
                 corr_applied = corr
@@ -194,8 +195,8 @@ class Controller:
                 biasL = int(getattr(config.imu_steering, 'straight_bias_left_byte', 0))
                 biasR = int(getattr(config.imu_steering, 'straight_bias_right_byte', 0))
                 if biasL or biasR:
-                    left = max(0, min(255, left + biasL))
-                    right = max(0, min(255, right + biasR))
+                    left = max(0, min(254, left + biasL))
+                    right = max(0, min(254, right + biasR))
             except Exception:
                 pass
         telemetry["imu_correction_applied"] = corr_applied
@@ -205,6 +206,11 @@ class Controller:
             left = right = 126
             self._motor.stop()
         else:
+            # Hardware guard: enforce max 254 before sending
+            if left > 254:
+                left = 254
+            if right > 254:
+                right = 254
             self._motor.set_tracks(left, right)
 
         # Reflect arm relay state
@@ -262,7 +268,7 @@ class Controller:
     def _apply_steering_correction(self, base_byte: int, correction: float) -> int:
         """Apply steering correction to a motor byte value."""
         corrected = base_byte + int(round(correction))
-        return max(0, min(255, corrected))
+        return max(0, min(254, corrected))
 
 
     def get_imu_status(self) -> Optional[dict]:

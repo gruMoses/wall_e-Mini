@@ -21,7 +21,11 @@ class ImuSteeringConfig:
     # Control parameters
     max_correction: int = 100     # Maximum steering correction in byte units (0-255)
     deadband_deg: float = 0.5    # Minimum heading error to trigger correction (degrees)
+<<<<<<< Updated upstream
+    max_integral: float = 25.0   # Maximum integral term to prevent windup
+=======
     max_integral: float = 40.0   # Maximum integral term to prevent windup
+>>>>>>> Stashed changes
     invert_output: bool = True   # Invert the sign of IMU steering correction (hardware-specific)
     # Steering neutral detection (hysteresis) to lock heading until commanded turn
     steering_neutral_enter: float = 0.08  # |steering_input| below this enters neutral

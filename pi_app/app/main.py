@@ -4,6 +4,7 @@ import os
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+import fcntl
 
 try:
     from pi_app.hardware.vesc import VescCanDriver
@@ -72,19 +73,38 @@ def run() -> None:
     bt_server = BtCommandServer()
     bt_server.start()
 
-    # Debug trackers for BT byte extrema
-    min_btL, max_btL = 255, 0
-    min_btR, max_btR = 255, 0
+    # Debug trackers removed to simplify CLI view
 
     # Prepare structured logging directory and cleanup
-    logs_dir = Path(__file__).resolve().parents[2] / "wall_e-Mini" / "logs"
+    logs_dir = Path(__file__).resolve().parents[2] / "logs"
     try:
         logs_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
     _cleanup_old_logs(logs_dir, days=7)
 
+    # Open a per-run structured log file (e.g., run_20250821_132230.log)
+    run_dt = datetime.now()
+    log_filename = f"run_{run_dt.strftime('%Y%m%d_%H%M%S')}.log"
+    log_path = logs_dir / log_filename
+    log_fh = None
     try:
+        log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
+        # Update handy latest.log symlink
+        try:
+            latest_link = logs_dir / "latest.log"
+            if latest_link.exists() or latest_link.is_symlink():
+                latest_link.unlink(missing_ok=True)
+            os.symlink(log_path.name, latest_link)
+        except Exception:
+            pass
+    except Exception:
+        # If file cannot be opened, continue without file logging
+        log_fh = None
+
+    try:
+        last_log_ts = 0.0
+        log_interval = 0.1  # 10 Hz logging
         while True:
             s = rc_reader.get_state()
             rc = RCInputs(
@@ -99,67 +119,59 @@ def run() -> None:
             bt_age = time.time() - bt.last_update_epoch_s
             bt_override = (bt.left_byte, bt.right_byte) if bt_age <= 0.6 else None
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
-            # Emit debug lines on BT extrema updates
-            if bt_override is not None:
-                updated = False
-                if bt.left_byte < min_btL:
-                    min_btL = bt.left_byte
-                    updated = True
-                if bt.left_byte > max_btL:
-                    max_btL = bt.left_byte
-                    updated = True
-                if bt.right_byte < min_btR:
-                    min_btR = bt.right_byte
-                    updated = True
-                if bt.right_byte > max_btR:
-                    max_btR = bt.right_byte
-                    updated = True
-                if updated:
-                    print(
-                        f"DBG BT extrema: L=[{min_btL},{max_btL}] R=[{min_btR},{max_btR}] (age={bt_age:0.2f}s)",
-                        flush=True,
-                    )
+            # Suppress BT extrema debug output to keep CLI clean
             # Get IMU status for display
             imu_status = controller.get_imu_status()
-            imu_info = ""
-            if imu_status:
-                if imu_status['is_available']:
-                    imu_info = f" IMU: {imu_status['heading_deg']:.0f}°→{imu_status['target_heading_deg']:.0f}°"
-                else:
-                    imu_info = " IMU: OFFLINE"
+            # Prepare concise IMU info (heading → target)
+            if imu_status and imu_status.get('is_available'):
+                imu_info = f"IMU {imu_status['heading_deg']:.0f}°→{imu_status['target_heading_deg']:.0f}°"
+            elif imu_status:
+                imu_info = "IMU OFFLINE"
             else:
-                imu_info = " IMU: DISABLED"
+                imu_info = "IMU DISABLED"
 
             # Minimal console heartbeat with incoming RC info
             src = "BT" if bt_override is not None else "RC"
-            print(
-                (
-                    f"{src} ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch5={s.ch5_us:4d}  "
-                    f"L={cmd.left_byte:3d} R={cmd.right_byte:3d} (bt_age={bt_age:0.2f}s btL={bt.left_byte:3d} btR={bt.right_byte:3d}) "
-                    f"ARMED={cmd.is_armed} EMERG={cmd.emergency_active}{imu_info}    "
-                ),
-                end="\r",
-                flush=True,
+            # Show only RC/BT values, concise IMU, and IMU corrections
+            corr_raw = telem.get("imu_correction_raw")
+            corr_applied = telem.get("imu_correction_applied")
+            corr_raw_str = f"{corr_raw:.0f}" if isinstance(corr_raw, (int, float)) else "-"
+            corr_app_str = f"{corr_applied:.0f}" if isinstance(corr_applied, (int, float)) else "-"
+            line_cli = (
+                f"{src} RC(ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch5={s.ch5_us:4d}) "
+                f"BT(L={bt.left_byte:3d} R={bt.right_byte:3d})  "
+                f"{imu_info}  corr_raw={corr_raw_str} corr_applied={corr_app_str}   "
             )
+            print(line_cli, end="\r", flush=True)
 
-            # Structured JSON log for analysis (one line per tick)
+            # Structured JSON log for analysis (one line per tick) - only when armed
             try:
-                log_obj = {
-                    "ts": time.time(),
-                    "src": src,
-                    "rc": {"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch5": s.ch5_us},
-                    "bt": {"L": bt.left_byte, "R": bt.right_byte, "age_s": round(bt_age, 3)},
-                    "imu": imu_status if imu_status else None,
-                    "imu_steering": {
-                        "steering_input": telem.get("steering_input"),
-                        "correction_raw": telem.get("imu_correction_raw"),
-                        "correction_applied": telem.get("imu_correction_applied"),
-                    },
-                    "motor": {"L": cmd.left_byte, "R": cmd.right_byte},
-                    "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
-                    "events": [e.name for e in events] if events else [],
-                }
-                print(json.dumps(log_obj), flush=False)
+                now_ts = time.time()
+                if now_ts - last_log_ts >= log_interval and cmd.is_armed:
+                    last_log_ts = now_ts
+                    log_obj = {
+                        "ts": now_ts,
+                        "ts_iso": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                        "src": src,
+                        "rc": {"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch5": s.ch5_us},
+                        "bt": {"L": bt.left_byte, "R": bt.right_byte, "age_s": round(bt_age, 3)},
+                        "imu": imu_status if imu_status else None,
+                        "imu_steering": {
+                            "steering_input": telem.get("steering_input"),
+                            "correction_raw": telem.get("imu_correction_raw"),
+                            "correction_applied": telem.get("imu_correction_applied"),
+                        },
+                        "motor": {"L": cmd.left_byte, "R": cmd.right_byte},
+                        "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
+                        "events": [e.name for e in events] if events else [],
+                    }
+                    line = json.dumps(log_obj)
+                    # Do not print structured JSON to console; keep file logging only
+                    if log_fh is not None:
+                        try:
+                            log_fh.write(line + "\n")
+                        except Exception:
+                            pass
             except Exception:
                 pass
             time.sleep(0.02)
@@ -172,9 +184,42 @@ def run() -> None:
         except Exception:
             pass
         rc_reader.stop()
+        try:
+            if log_fh is not None:
+                log_fh.flush()
+                log_fh.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
-    run()
+    # Singleton lock to prevent multiple instances
+    lock_file = Path("/tmp/wall_e_mini_main.lock")
+    _lock_fh = None
+    try:
+        _lock_fh = open(lock_file, "w")
+        fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            _lock_fh.truncate(0)
+            _lock_fh.write(str(os.getpid()))
+            _lock_fh.flush()
+        except Exception:
+            pass
+    except BlockingIOError:
+        print("Another WALL-E Mini control app instance is already running. Exiting.")
+        sys.exit(1)
+    except Exception:
+        # If locking fails for unexpected reasons, proceed without blocking to avoid false negatives
+        _lock_fh = None
+
+    try:
+        run()
+    finally:
+        try:
+            if _lock_fh is not None:
+                fcntl.flock(_lock_fh, fcntl.LOCK_UN)
+                _lock_fh.close()
+        except Exception:
+            pass
 
 

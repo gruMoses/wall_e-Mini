@@ -243,8 +243,8 @@ class ArduinoRCReader:
         ser = self._serial
         if ser is None:
             return
-        left = max(0, min(255, int(left_byte)))
-        right = max(0, min(255, int(right_byte)))
+        left = max(0, min(254, int(left_byte)))
+        right = max(0, min(254, int(right_byte)))
         line = f"M,{left},{right}\n".encode("utf-8")
         with self._write_lock:
             try:

@@ -17,7 +17,7 @@ from qwiic_mmc5983ma import QwiicMMC5983MA
 class ImuReader:
     def __init__(self, address_imu: int = 0x6B, address_mag: int = 0x30,
                  complementary_alpha_rp: float = 0.98,
-                 complementary_alpha_yaw: float = 0.98,
+                 complementary_alpha_yaw: float = 0.95,
                  calibration_path: Optional[str] = None) -> None:
         self.imu = QwiicISM330DHCX(address=address_imu)
         self.mag = QwiicMMC5983MA(address=address_mag)
@@ -68,7 +68,7 @@ class ImuReader:
         delta = (yaw_mag - yaw_pred + math.pi) % (2.0*math.pi) - math.pi
         self.yaw_rad = self.alpha_yaw * yaw_pred + (1.0-self.alpha_yaw)*(yaw_pred + delta)
         yaw_deg_ccw = math.degrees(self.yaw_rad)
-        yaw_deg_cw = -yaw_deg_ccw
+        yaw_deg_cw = yaw_deg_ccw  # Fix: sensor readings are already in correct orientation
         heading_deg = (yaw_deg_cw + 360.0) % 360.0
         temp_c = self._read_temp_c()
         return {

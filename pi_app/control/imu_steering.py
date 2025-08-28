@@ -204,8 +204,8 @@ class ImuSteeringCompensator:
                                          min(self.config.max_integral, self.state.integral_error))
             i_term = self.config.ki * self.state.integral_error
             
-            # Derivative term (yaw rate damping)
-            d_term = -self.config.kd * self.state.yaw_rate_dps
+            # Derivative term (yaw rate feed-forward)
+            d_term = self.config.kd * self.state.yaw_rate_dps
             
             # Combine terms
             correction = p_term + i_term + d_term

@@ -28,7 +28,7 @@ class ArduinoModelXDriver:
     # MotorDriver API
     def set_tracks(self, left_byte: int, right_byte: int) -> None:
         # TODO: send to Arduino when protocol is defined
-        self._last_tracks = (max(0, min(255, left_byte)), max(0, min(255, right_byte)))
+        self._last_tracks = (max(0, min(254, left_byte)), max(0, min(254, right_byte)))
         if self._rc_reader is not None:
             self._rc_reader.send_motor_command(self._last_tracks[0], self._last_tracks[1])
 

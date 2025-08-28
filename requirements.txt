@@ -2,4 +2,5 @@ pyserial>=3.5,<4
 sparkfun-qwiic>=1.0.0
 sparkfun-qwiic-ism330dhcx>=1.0.0
 sparkfun-qwiic-mmc5983ma>=1.0.0
+numpy>=1.21
 
