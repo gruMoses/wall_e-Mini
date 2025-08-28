@@ -2,6 +2,7 @@ import time
 import sys
 import os
 import json
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 import fcntl
@@ -256,6 +257,24 @@ def run() -> None:
                 log_fh.close()
         except Exception:
             pass
+        # On exit, run compact PID analyzer if debugging was enabled
+        try:
+            if 'pid_debug' in locals() and pid_debug:
+                tools_analyzer = Path(__file__).resolve().parents[2] / "tools" / "pid_log_analyzer.py"
+                if tools_analyzer.exists():
+                    # Prefer the exact run log we just wrote
+                    target_log = log_path if 'log_path' in locals() else (Path(__file__).resolve().parents[2] / "logs" / "latest.log")
+                    if target_log and target_log.exists():
+                        subprocess.run(
+                            [sys.executable, str(tools_analyzer), "--log", str(target_log)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                            timeout=15,
+                        )
+        except Exception:
+            # Never let analysis interfere with shutdown
+            pass
 
 
 if __name__ == "__main__":
@@ -287,5 +306,4 @@ if __name__ == "__main__":
                 _lock_fh.close()
         except Exception:
             pass
-
 
