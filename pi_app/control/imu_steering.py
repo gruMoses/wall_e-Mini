@@ -64,7 +64,8 @@ class ImuSteeringCompensator:
         self.state = ImuSteeringState()
         self.lock = Lock()
         # Tracks when we entered neutral steering to manage target updates
-        self._neutral_since_epoch: Optional[float] = None
+        # (monotonic timestamp)
+        self._neutral_since: Optional[float] = None
         
         # Initialize IMU if provided
         if self.imu_reader is not None:
@@ -89,7 +90,7 @@ class ImuSteeringCompensator:
                 self.state.target_heading_deg = data['heading_deg']
                 self.state.is_calibrated = True
                 self.state.is_available = True
-                self.state.last_update_time = time.time()
+                self.state.last_update_time = time.monotonic()
                 
         except Exception as e:
             print(f"IMU initialization failed: {e}")
@@ -121,7 +122,7 @@ class ImuSteeringCompensator:
                     self.state.yaw_rate_dps = data['gz_dps']  # Use gyroscope z-axis for yaw rate
                     self.state.roll_deg = data['roll_deg']
                     self.state.pitch_deg = data['pitch_deg']
-                    self.state.last_update_time = time.time()
+                    self.state.last_update_time = time.monotonic()
             
             # Determine neutral vs active steering with hysteresis
             neutral_enter = getattr(self.config, 'steering_neutral_enter', 0.10)
@@ -139,11 +140,11 @@ class ImuSteeringCompensator:
             if not is_neutral and was_neutral:
                 with self.lock:
                     self.state.integral_error = 0.0
-                self._neutral_since_epoch = None
+                self._neutral_since = None
 
             # On entering neutral, capture timestamp and optionally dwell before locking target
             if is_neutral and not was_neutral:
-                self._neutral_since_epoch = time.time()
+                self._neutral_since = time.monotonic()
                 dwell = getattr(self.config, 'neutral_dwell_s', 0.0)
                 if dwell <= 0.0:
                     with self.lock:
@@ -156,12 +157,12 @@ class ImuSteeringCompensator:
             if is_neutral:
                 # If a dwell was requested, lock heading after dwell time passes
                 dwell = getattr(self.config, 'neutral_dwell_s', 0.0)
-                if dwell > 0.0 and self._neutral_since_epoch is not None:
-                    if (time.time() - self._neutral_since_epoch) >= dwell:
+                if dwell > 0.0 and self._neutral_since is not None:
+                    if (time.monotonic() - self._neutral_since) >= dwell:
                         with self.lock:
                             self.state.target_heading_deg = self.state.heading_deg
                             self.state.integral_error = 0.0
-                        self._neutral_since_epoch = None
+                        self._neutral_since = None
                 correction = self._compute_heading_hold_correction(dt)
                 # Honor optional config inversion for steering output
                 if correction is not None and getattr(self.config, 'invert_output', False):
