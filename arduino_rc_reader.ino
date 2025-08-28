@@ -94,6 +94,7 @@ void driveLeft(int trackByte) {
   }
   bool forward = delta > 0;
   int pwm = abs(delta) * 255 / (TRACK_MAX - TRACK_CENTER); // scale 0..129 -> 0..255
+  if (pwm > 254) pwm = 254;
   digitalWrite(IN3_L, forward ? HIGH : LOW);
   digitalWrite(IN4_L, forward ? LOW : HIGH);
   analogWrite(ENB_L, pwm);
@@ -111,6 +112,7 @@ void driveRight(int trackByte) {
   }
   bool forward = delta > 0;
   int pwm = abs(delta) * 255 / (TRACK_MAX - TRACK_CENTER);
+  if (pwm > 254) pwm = 254;
   // Note: IN1/IN2 polarity may need swap depending on wiring
   digitalWrite(IN1_R, forward ? HIGH : LOW);
   digitalWrite(IN2_R, forward ? LOW : HIGH);
