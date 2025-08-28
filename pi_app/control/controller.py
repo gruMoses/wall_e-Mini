@@ -296,9 +296,9 @@ class Controller:
         try:
             status = self._imu_compensator.get_status()
             return {
-                'heading_deg': status.heading_deg,
-                'target_heading_deg': status.target_heading_deg,
-                'yaw_rate_dps': status.yaw_rate_dps,
+                'heading_deg': int(round(status.heading_deg)),
+                'target_heading_deg': int(round(status.target_heading_deg)),
+                'yaw_rate_dps': int(round(status.yaw_rate_dps)),
                 'is_available': status.is_available,
                 'is_calibrated': status.is_calibrated,
                 'error_count': status.error_count
