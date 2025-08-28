@@ -70,6 +70,13 @@ class ImuSteeringState:
     # PID state
     integral_error: float = 0.0
 
+    # Last computed PID terms for debugging/telemetry
+    pid_error_deg: float = 0.0
+    pid_p: float = 0.0
+    pid_i: float = 0.0
+    pid_d: float = 0.0
+    pid_correction: float = 0.0
+
     # Status
     is_calibrated: bool = False
     is_available: bool = False
@@ -100,6 +107,15 @@ class ImuSteeringCompensator:
         # Tracks when we entered neutral steering to manage target updates
         # (monotonic timestamp)
         self._neutral_since: Optional[float] = None
+
+        # Track last PID computation for external inspection
+        self._last_pid = {
+            "error_deg": 0.0,
+            "p_term": 0.0,
+            "i_term": 0.0,
+            "d_term": 0.0,
+            "correction": 0.0,
+        }
         
         # Initialize IMU if provided
         if self.imu_reader is not None:
@@ -253,11 +269,20 @@ class ImuSteeringCompensator:
             
             # Combine terms
             correction = p_term + i_term + d_term
-            
+
             # Clamp to maximum correction
             max_corr = float(self.config.max_correction)
             correction = max(-max_corr, min(max_corr, correction))
-            
+
+            # Store last PID components for debugging/telemetry
+            self._last_pid = {
+                "error_deg": error_deg,
+                "p_term": p_term,
+                "i_term": i_term,
+                "d_term": d_term,
+                "correction": correction,
+            }
+
             return correction
     
     def get_status(self) -> ImuSteeringState:
@@ -272,6 +297,11 @@ class ImuSteeringCompensator:
                 last_steering_input=self.state.last_steering_input,
                 last_update_time=self.state.last_update_time,
                 integral_error=self.state.integral_error,
+                pid_error_deg=self._last_pid.get("error_deg", 0.0),
+                pid_p=self._last_pid.get("p_term", 0.0),
+                pid_i=self._last_pid.get("i_term", 0.0),
+                pid_d=self._last_pid.get("d_term", 0.0),
+                pid_correction=self._last_pid.get("correction", 0.0),
                 is_calibrated=self.state.is_calibrated,
                 is_available=self.state.is_available,
                 error_count=self.state.error_count

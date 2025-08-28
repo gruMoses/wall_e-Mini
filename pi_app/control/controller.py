@@ -153,6 +153,18 @@ class Controller:
         imu_correction = self._apply_imu_compensation(steering_input, mono_now)
         telemetry["steering_input"] = steering_input
         telemetry["imu_correction_raw"] = imu_correction
+
+        # Expose PID debug fields from IMU compensator
+        if self._imu_compensator is not None:
+            try:
+                status = self._imu_compensator.get_status()
+                telemetry["pid_error_deg"] = status.pid_error_deg
+                telemetry["pid_p"] = status.pid_p
+                telemetry["pid_i"] = status.pid_i
+                telemetry["pid_d"] = status.pid_d
+                telemetry["pid_correction"] = status.pid_correction
+            except Exception:
+                pass
         
         # Straight-intent gating for dual-throttle skid steer
         tol = getattr(config.imu_steering, 'straight_equal_tolerance_us', 20)
@@ -301,6 +313,12 @@ class Controller:
                 'yaw_rate_dps': status.yaw_rate_dps,
                 'roll_deg': status.roll_deg,
                 'pitch_deg': status.pitch_deg,
+                'integral_error': status.integral_error,
+                'pid_error_deg': status.pid_error_deg,
+                'pid_p': status.pid_p,
+                'pid_i': status.pid_i,
+                'pid_d': status.pid_d,
+                'pid_correction': status.pid_correction,
                 'is_available': status.is_available,
                 'is_calibrated': status.is_calibrated,
                 'error_count': status.error_count,

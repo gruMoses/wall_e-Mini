@@ -56,6 +56,8 @@ def run() -> None:
     port = rc_reader.start()
     print(f"Arduino RC detected on {port}")
 
+    pid_debug = "--pid-debug" in sys.argv
+
     # Initialize IMU and steering compensator
     imu_compensator = None
     if config.imu_steering.enabled:
@@ -152,7 +154,19 @@ def run() -> None:
                 f"BT(L={bt.left_byte:3d} R={bt.right_byte:3d})  "
                 f"{imu_info}  corr_raw={corr_raw_str} corr_applied={corr_app_str}   "
             )
-            print(line_cli, end="\r", flush=True)
+            if pid_debug:
+                print(line_cli)
+                pid_line = (
+                    f"PID err={telem.get('pid_error_deg', 0.0):.1f} "
+                    f"P={telem.get('pid_p', 0.0):.1f} "
+                    f"I={telem.get('pid_i', 0.0):.1f} "
+                    f"D={telem.get('pid_d', 0.0):.1f} "
+                    f"yaw={(imu_status or {}).get('yaw_rate_dps', 0.0):.1f} "
+                    f"int={(imu_status or {}).get('integral_error', 0.0):.1f}"
+                )
+                print(pid_line)
+            else:
+                print(line_cli, end="\r", flush=True)
 
             # Structured JSON log for analysis (one line per tick) - only when armed
             try:
