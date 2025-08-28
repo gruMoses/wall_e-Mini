@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from pi_app.control.controller import Controller, RCInputs, MotorDriver, ArmRelay, ShutdownScheduler
 from pi_app.control.mapping import MIN_PULSE_WIDTH_US, MAX_PULSE_WIDTH_US
@@ -86,7 +87,10 @@ class TestController(unittest.TestCase):
         self.assertEqual(shutdown.scheduled, [5.0])
 
     def test_reset_imu_timestamp_helper(self):
-        c = Controller()
+        with patch("pi_app.control.controller.time.monotonic", return_value=50.0):
+            c = Controller()
+        # On init, the monotonic clock value should be captured
+        self.assertEqual(c._last_imu_update, 50.0)
         # Reset the timestamp via helper and ensure the internal value changes
         c._reset_imu_timestamp(123.0)
         self.assertEqual(c._last_imu_update, 123.0)
