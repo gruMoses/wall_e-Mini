@@ -195,8 +195,8 @@ class Controller:
                 biasL = int(getattr(config.imu_steering, 'straight_bias_left_byte', 0))
                 biasR = int(getattr(config.imu_steering, 'straight_bias_right_byte', 0))
                 if biasL or biasR:
-                    left = max(0, min(254, left + biasL))
-                    right = max(0, min(254, right + biasR))
+                    left = max(0, min(255, left + biasL))
+                    right = max(0, min(255, right + biasR))
             except Exception:
                 pass
         telemetry["imu_correction_applied"] = corr_applied
@@ -206,11 +206,11 @@ class Controller:
             left = right = 126
             self._motor.stop()
         else:
-            # Hardware guard: enforce max 254 before sending
-            if left > 254:
-                left = 254
-            if right > 254:
-                right = 254
+            # Hardware guard: enforce max 255 before sending
+            if left > 255:
+                left = 255
+            if right > 255:
+                right = 255
             self._motor.set_tracks(left, right)
 
         # Reflect arm relay state
@@ -268,7 +268,7 @@ class Controller:
     def _apply_steering_correction(self, base_byte: int, correction: float) -> int:
         """Apply steering correction to a motor byte value."""
         corrected = base_byte + int(round(correction))
-        return max(0, min(254, corrected))
+        return max(0, min(255, corrected))
 
 
     def get_imu_status(self) -> Optional[dict]:
