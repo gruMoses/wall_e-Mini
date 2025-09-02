@@ -14,15 +14,15 @@ class ImuSteeringConfig:
     enabled: bool = True
     
     # PID gains for heading control (updated from auto-tune)
-    kp: float = 2.5    # Proportional gain (heading error to steering correction)
-    ki: float = 0.25 # Integral gain (accumulated drift correction)
-    kd: float = 0.04   # Derivative gain (yaw rate damping)
+    kp: float = 2.0    # Proportional gain (heading error to steering correction)
+    ki: float = 0.35 # Integral gain (accumulated drift correction)
+    kd: float = 0.06   # Derivative gain (yaw rate damping)
     
     # Control parameters
-    max_correction: int = 200     # Maximum steering correction in byte units (0-255)
+    max_correction: int = 220     # Maximum steering correction in byte units (0-255)
     deadband_deg: float = 0.5    # Minimum heading error to trigger correction (degrees)
     max_integral: float = 40.0   # Maximum integral term to prevent windup
-    invert_output: bool = True   # Invert the sign of IMU steering correction (hardware-specific)
+    invert_output: bool = False   # Invert the sign of IMU steering correction (hardware-specific)
     # Steering neutral detection (hysteresis) to lock heading until commanded turn
     steering_neutral_enter: float = 0.08  # |steering_input| below this enters neutral
     steering_neutral_exit: float = 0.15   # |steering_input| above this exits neutral
@@ -33,10 +33,10 @@ class ImuSteeringConfig:
     # Relative tolerance to allow proportional mismatch at higher throttle
     straight_relative_tolerance_pct: float = 0.35
     # Optional per-side bias applied only during straight intent (bytes)
-    straight_bias_left_byte: int = -12
-    straight_bias_right_byte: int = 12
+    straight_bias_left_byte: int = -16
+    straight_bias_right_byte: int = 16
     # Hysteresis time to keep straight intent latched despite brief mismatch (seconds)
-    straight_disengage_hysteresis_s: float = 0.50
+    straight_disengage_hysteresis_s: float = 0.80
     # Steering-blend: corrections scale down as absolute steering_input grows; zero at this magnitude
     correction_zero_at_steering: float = 0.50
     
@@ -60,6 +60,11 @@ class Config:
     
     # File paths
     imu_calibration_path: str = "imu_calibration.json"
+    # Optional magnetometer axis map to align mag with accel/gyro frame.
+    # Each element: 'x','-x','y','-y','z','-z'. None selects sensible defaults per sensor.
+    imu_mag_axis_map: tuple[str, str, str] | None = ('x', 'y', '-z')
+    # Heading convention: True = heading increases clockwise (compass style)
+    imu_heading_cw_positive: bool = True
     
     # Debug settings
     log_imu_data: bool = False
