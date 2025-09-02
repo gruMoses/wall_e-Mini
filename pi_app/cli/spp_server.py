@@ -2,6 +2,8 @@
 import os
 import signal
 import sys
+import json
+import time
 from pathlib import Path
 
 try:
@@ -18,6 +20,28 @@ except ModuleNotFoundError:
     from pi_app.io.bt_proto import parse_cmd2, accept_cmd2, parse_v1, floats_to_bytes  # type: ignore
 
 SPP_UUID = "00001101-0000-1000-8000-00805F9B34FB"
+
+
+def ints_to_bytes(left_i: int, right_i: int):
+    """Convert integer values (-1000 to 1000) to byte values (0-255)"""
+    DEAD_BAND_INT = 20
+    TOP_SNAP_INT = 950
+    
+    def map_one(v: int) -> int:
+        if v < -1000: v = -1000
+        if v > 1000: v = 1000
+        if v >= TOP_SNAP_INT: return 255
+        if v <= -TOP_SNAP_INT: return 0
+        if -DEAD_BAND_INT <= v <= DEAD_BAND_INT: return 126
+        if v > 0:
+            upper_span = 255 - 126
+            mapped = 126 + int(round((v / 1000.0) * upper_span))
+        else:
+            lower_span = 126
+            mapped = 126 - int(round((abs(v) / 1000.0) * lower_span))
+        return max(0, min(255, mapped))
+    
+    return map_one(left_i), map_one(right_i)
 
 
 def run_server() -> int:
@@ -100,7 +124,25 @@ def run_server() -> int:
                         if ok:
                             last_seq = cmd.seq
                             client_sock.send(f"ACK2:{cmd.seq};ok\n".encode("utf-8"))
-                            print(f"OK  seq={cmd.seq} left_i={cmd.left_i} right_i={cmd.right_i}")
+                            print(f"OK  seq={cmd.seq} left_i={cmd.left_i} right_i={cmd.right_i}", flush=True)
+                            
+                            # Convert to bytes for Wall-E app compatibility
+                            left_byte, right_byte = ints_to_bytes(cmd.left_i, cmd.right_i)
+                            print(f"DEBUG: Converted {cmd.left_i},{cmd.right_i} -> {left_byte},{right_byte}", flush=True)
+                            
+                            # Write latest command to shared file for Wall-E app
+                            try:
+                                shared_data = {
+                                    "left_byte": left_byte,
+                                    "right_byte": right_byte,
+                                    "last_update_epoch_s": time.time()
+                                }
+                                with open("/tmp/wall_e_bt_latest.json", "w") as sf:
+                                    json.dump(shared_data, sf)
+                                print(f"Wrote to shared file: L={left_byte} R={right_byte}", flush=True)
+                            except Exception as e:
+                                print(f"Error writing shared file: {e}", flush=True)
+                            
                             try:
                                 with open(log_path, "a", buffering=1) as lf:
                                     lf.write(f"CMD2 ok seq={cmd.seq} left={cmd.left_i} right={cmd.right_i}\n")
@@ -122,6 +164,20 @@ def run_server() -> int:
                         last_seq = seq
                         client_sock.send(f"ACK2:{seq};ok\n".encode("utf-8"))
                         print(f"V1  seq={seq} left_f={lf:.3f} right_f={rf:.3f} -> bytes {lb},{rb}")
+                        
+                        # Write latest command to shared file for Wall-E app
+                        try:
+                            shared_data = {
+                                "left_byte": lb,
+                                "right_byte": rb,
+                                "last_update_epoch_s": time.time()
+                            }
+                            with open("/tmp/wall_e_bt_latest.json", "w") as sf:
+                                json.dump(shared_data, sf)
+                            print(f"Wrote V1 to shared file: L={lb} R={rb}")
+                        except Exception as e:
+                            print(f"Error writing V1 shared file: {e}")
+                        
                         try:
                             with open(log_path, "a", buffering=1) as lfout:
                                 lfout.write(f"V1 ok seq={seq} left_f={lf:.3f} right_f={rf:.3f} bytes={lb},{rb}\n")

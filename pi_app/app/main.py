@@ -103,8 +103,9 @@ def run() -> None:
         motor_driver = ArduinoModelXDriver(rc_reader=rc_reader)
 
     controller = Controller(motor_driver=motor_driver, imu_compensator=imu_compensator)
-    bt_server = BtCommandServer()
-    bt_server.start()
+    # bt_server = BtCommandServer()  # Disabled - using standalone wall-e-spp.service instead
+    # bt_server.start()  # Disabled - using standalone wall-e-spp.service instead
+    bt_server = None  # Set to None to indicate external SPP service is used
 
     # Debug trackers removed to simplify CLI view
 
@@ -153,9 +154,17 @@ def run() -> None:
                 last_update_epoch_s=s.last_update_epoch_s,
             )
             # Prefer fresh BT over RC using timestamp freshness
-            bt = bt_server.get_latest_bytes()
-            bt_age = time.time() - bt.last_update_epoch_s
-            bt_override = (bt.left_byte, bt.right_byte) if bt_age <= 0.6 else None
+            # Read from shared file written by standalone SPP server
+            bt_override = None
+            try:
+                import json
+                with open("/tmp/wall_e_bt_latest.json", "r") as sf:
+                    bt_data = json.load(sf)
+                    bt_age = time.time() - bt_data["last_update_epoch_s"]
+                    if bt_age <= 0.6:  # Fresh BT command within 600ms
+                        bt_override = (bt_data["left_byte"], bt_data["right_byte"])
+            except Exception:
+                pass  # No BT data available, use RC instead
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
             imu_dt_ms = None
             imu_update_ts = getattr(controller, "_last_imu_update", None)
@@ -184,9 +193,14 @@ def run() -> None:
             corr_applied = telem.get("imu_correction_applied")
             corr_raw_str = f"{corr_raw:.0f}" if isinstance(corr_raw, (int, float)) else "-"
             corr_app_str = f"{corr_applied:.0f}" if isinstance(corr_applied, (int, float)) else "-"
+            # Show BT values if available
+            bt_display = "BT(external SPP)"
+            if bt_override is not None:
+                bt_display = f"BT(L={bt_override[0]:3d} R={bt_override[1]:3d})"
+            
             line_cli = (
                 f"{src} RC(ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch5={s.ch5_us:4d}) "
-                f"BT(L={bt.left_byte:3d} R={bt.right_byte:3d})  "
+                f"{bt_display}  "
                 f"{imu_info}  corr_raw={corr_raw_str} corr_applied={corr_app_str}   "
             )
             if pid_debug:
@@ -249,7 +263,8 @@ def run() -> None:
     finally:
         print()
         try:
-            bt_server.stop()
+            if bt_server is not None:  # Only stop if bt_server was created
+                bt_server.stop()
         except Exception:
             pass
         rc_reader.stop()
