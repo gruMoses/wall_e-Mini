@@ -15,7 +15,6 @@ try:
     from pi_app.hardware.imu_reader import ImuReader
     from pi_app.control.controller import Controller, RCInputs
     from pi_app.control.imu_steering import ImuSteeringCompensator
-    from pi_app.io.bt_input import BtCommandServer
     from config import config
 except ModuleNotFoundError:
     # Allow running as a script: python3 /home/pi/pi_app/app/main.py
@@ -26,7 +25,6 @@ except ModuleNotFoundError:
     from pi_app.hardware.imu_reader import ImuReader  # type: ignore
     from pi_app.control.controller import Controller, RCInputs  # type: ignore
     from pi_app.control.imu_steering import ImuSteeringCompensator  # type: ignore
-    from pi_app.io.bt_input import BtCommandServer  # type: ignore
     from config import config  # type: ignore
 
 
@@ -103,8 +101,6 @@ def run() -> None:
         motor_driver = ArduinoModelXDriver(rc_reader=rc_reader)
 
     controller = Controller(motor_driver=motor_driver, imu_compensator=imu_compensator)
-    # bt_server = BtCommandServer()  # Disabled - using standalone wall-e-spp.service instead
-    # bt_server.start()  # Disabled - using standalone wall-e-spp.service instead
     bt_server = None  # Set to None to indicate external SPP service is used
 
     # Debug trackers removed to simplify CLI view
