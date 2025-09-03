@@ -109,7 +109,7 @@ class BtCommandServer:
                     continue
                 try:
                     # Informational hello (nonce not used)
-                    client_sock.send(f"SRV:HELLO ver=2 sn=demo_nonce\n".encode("utf-8"))
+                    client_sock.send("SRV:HELLO ver=2 sn=demo_nonce\n".encode("utf-8"))
                     buf = ""
                     pending_cmd2 = ""
                     last_seq: Optional[int] = None
