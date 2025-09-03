@@ -23,9 +23,8 @@ import json
 import math
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import List, Tuple
 from dataclasses import dataclass
-from collections import defaultdict
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).resolve().parents[2]))
