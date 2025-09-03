@@ -113,7 +113,7 @@ def main():
     print("Test Summary:")
     print(f"  IMU Reader: {'✓' if imu_reader else '✗'}")
     print(f"  Steering Compensator: {'✓' if compensator else '✗'}")
-    print(f"  Fallback Behavior: ✓")
+    print("  Fallback Behavior: ✓")
     
     if imu_reader and compensator:
         print("\n🎉 All tests passed! IMU steering compensation is ready.")
