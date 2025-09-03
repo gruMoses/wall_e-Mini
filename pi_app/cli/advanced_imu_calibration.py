@@ -17,8 +17,8 @@ import math
 import argparse
 import statistics
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, NamedTuple
-from dataclasses import dataclass, field
+from typing import Dict, List
+from dataclasses import dataclass
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -323,7 +323,7 @@ class AdvancedImuCalibrator:
 
         # Step 6: Generate recommendations
         print("\\n" + "="*60)
-        recommendations = self.generate_recommendations(interference, mounting, quality)
+        self.generate_recommendations(interference, mounting, quality)
 
         # Save enhanced calibration
         self.save_enhanced_calibration(optimal_params, quality)
