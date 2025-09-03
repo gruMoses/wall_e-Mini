@@ -8,9 +8,8 @@ This module implements a PID controller that uses IMU data to:
 """
 
 import time
-import math
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 from threading import RLock
 import sys
 from pathlib import Path
@@ -149,8 +148,8 @@ class ImuSteeringCompensator:
                 self.state.is_available = True
                 self.state.last_update_time = time.monotonic()
                 
-        except Exception as e:
-            print(f"IMU initialization failed: {e}")
+        except Exception:
+            print("IMU initialization failed")
             with self.lock:
                 self.state.is_available = False
                 self.state.is_calibrated = False
@@ -235,7 +234,7 @@ class ImuSteeringCompensator:
             else:
                 return None
                 
-        except Exception as e:
+        except Exception:
             self.state.error_count += 1
             if self.state.error_count > 10:
                 with self.lock:
