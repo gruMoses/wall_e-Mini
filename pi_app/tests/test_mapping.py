@@ -1,5 +1,3 @@
-import math
-
 import unittest
 
 from pi_app.control.mapping import (
