@@ -106,7 +106,6 @@ def _sat_flag(steer: dict, max_corr: Optional[int]) -> int:
 def _derive_row(obj: dict, scales: Scales, max_corr: Optional[int]) -> Optional[Tuple[int, int, int, int, int, int, int, int, int, int, int]]:
     if not _pid_active(obj):
         return None
-    ts_iso = obj.get("ts_iso")
     imu = obj.get("imu") or {}
     steer = obj.get("imu_steering") or {}
     pid = obj.get("pid") or {}
@@ -154,14 +153,12 @@ def _zero_crossings_per_second(times_ms: Iterable[int], errors_q: Iterable[int],
         return 0.0
     crossings = []
     prev_sign = 1 if errs[0] > 0 else (-1 if errs[0] < 0 else 0)
-    prev_t = times[0]
     for t, e in zip(times[1:], errs[1:]):
         sgn = 1 if e > 0 else (-1 if e < 0 else 0)
         if sgn != 0 and prev_sign != 0 and sgn != prev_sign:
             crossings.append(t)
         if sgn != 0:
             prev_sign = sgn
-        prev_t = t
     if len(crossings) < 2:
         return 0.0
     # Period estimated by differences between crossings (half-cycles)
@@ -243,14 +240,6 @@ def analyze(log_path: Path, out_path: Optional[Path] = None, fmt: str = "json", 
 
     if not rows:
         return None
-
-    # Compute compact summary metrics
-    abs_errors = [abs(x / float(scales.e)) for x in errors_q]
-    mean_abs_e = sum(abs_errors) / len(abs_errors)
-    rms_e = math.sqrt(sum((x * x) for x in abs_errors) / len(abs_errors))
-    max_abs_e = max(abs_errors)
-    sat_ratio = sum(r[-1] for r in rows) / float(len(rows))
-    zc_hz = _zero_crossings_per_second(times_ms, errors_q, scales.e)
 
     meta_obj = {
         "columns": ["dt","e","r","p","i","d","u","s","sat","ml","mr"],
