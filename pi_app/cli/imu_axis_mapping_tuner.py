@@ -68,6 +68,7 @@ def main() -> int:
         imu = ImuReader(
             calibration_path=config.imu_calibration_path,
             mag_axis_map=m,
+            use_magnetometer=config.imu_use_magnetometer,
         )
         # Short settle
         time.sleep(0.2)

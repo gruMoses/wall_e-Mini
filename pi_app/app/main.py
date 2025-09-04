@@ -82,7 +82,8 @@ def run() -> None:
             print("Initializing IMU...")
             imu = ImuReader(calibration_path=config.imu_calibration_path,
                             mag_axis_map=getattr(config, 'imu_mag_axis_map', None),
-                            heading_cw_positive=getattr(config, 'imu_heading_cw_positive', True))
+                            heading_cw_positive=getattr(config, 'imu_heading_cw_positive', True),
+                            use_magnetometer=config.imu_use_magnetometer)
             imu_compensator = ImuSteeringCompensator(config.imu_steering, imu)
             print("✓ IMU steering compensation enabled")
         except Exception as e:

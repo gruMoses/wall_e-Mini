@@ -24,6 +24,7 @@ from dataclasses import dataclass
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from pi_app.hardware.imu_reader import ImuReader
+from config import config
 
 
 @dataclass
@@ -89,7 +90,8 @@ class AdvancedImuCalibrator:
             self.imu = ImuReader(
                 complementary_alpha_rp=0.02,  # Trust accelerometer more
                 complementary_alpha_yaw=0.01,  # Trust magnetometer more
-                calibration_path=str(self.calibration_path)
+                calibration_path=str(self.calibration_path),
+                use_magnetometer=config.imu_use_magnetometer
             )
             print("✅ IMU initialized with optimized parameters")
             return True

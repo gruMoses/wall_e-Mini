@@ -45,7 +45,8 @@ def main() -> int:
 
     imu = ImuReader(calibration_path=config.imu_calibration_path,
                     mag_axis_map=getattr(config, 'imu_mag_axis_map', None),
-                    heading_cw_positive=getattr(config, 'imu_heading_cw_positive', True))
+                    heading_cw_positive=getattr(config, 'imu_heading_cw_positive', True),
+                    use_magnetometer=config.imu_use_magnetometer)
     eff_map = imu._get_effective_mag_axis_map()
     print(f"\nMag axis mapping in use: {eff_map}")
 

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from pi_app.hardware.imu_reader import ImuReader
+from config import config
 
 
 @dataclass
@@ -54,7 +55,8 @@ class ImuCalibrator:
 
     def __init__(self, calibration_path: str = "imu_calibration.json"):
         self.calibration_path = Path(calibration_path)
-        self.imu = ImuReader(calibration_path=str(self.calibration_path))
+        self.imu = ImuReader(calibration_path=str(self.calibration_path),
+                             use_magnetometer=config.imu_use_magnetometer)
         self.calibration = CalibrationData()
 
     def load_existing_calibration(self) -> bool:

@@ -25,7 +25,7 @@ def test_imu_reader():
     print("Testing IMU Reader...")
     
     try:
-        imu = ImuReader()
+        imu = ImuReader(use_magnetometer=config.imu_use_magnetometer)
         print("✓ IMU Reader initialized successfully")
         
         # Test reading
