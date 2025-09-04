@@ -171,15 +171,36 @@ class Controller:
         min_th = getattr(config.imu_steering, 'straight_min_throttle_us', 80)
         rel_pct = getattr(config.imu_steering, 'straight_relative_tolerance_pct', 0.15)
         hysteresis_s = getattr(config.imu_steering, 'straight_disengage_hysteresis_s', 0.0)
-        d1 = rc.ch1_us - 1500
-        d2 = rc.ch2_us - 1500
-        abs_diff = abs(rc.ch1_us - rc.ch2_us)
-        moving_ok = max(abs(d1), abs(d2)) >= min_th
-        # Absolute check
-        equal_abs_ok = abs_diff <= tol
-        # Relative check (difference relative to magnitude)
-        max_abs = max(abs(d1), abs(d2), 1)
-        equal_rel_ok = (abs_diff / max_abs) <= rel_pct
+
+        # Use actual motor commands for moving_ok when Bluetooth is active
+        if bt_override_bytes is not None:
+            # For Bluetooth, use the motor byte values to determine if moving
+            bt_left, bt_right = bt_override_bytes
+            bt_left_diff = abs(bt_left - 126)  # Distance from neutral (126)
+            bt_right_diff = abs(bt_right - 126)
+            moving_ok = max(bt_left_diff, bt_right_diff) >= 20  # Minimum movement threshold
+        else:
+            # For RC, use the original logic
+            d1 = rc.ch1_us - 1500
+            d2 = rc.ch2_us - 1500
+            moving_ok = max(abs(d1), abs(d2)) >= min_th
+
+        # Determine equal_ok based on input source
+        if bt_override_bytes is not None:
+            # For Bluetooth, check if both motors are similar (straight intent)
+            bt_left, bt_right = bt_override_bytes
+            abs_diff = abs(bt_left - bt_right)
+            equal_abs_ok = abs_diff <= 10  # Small tolerance for byte values
+            # Relative check (difference relative to magnitude)
+            max_abs = max(abs(bt_left - 126), abs(bt_right - 126), 1)
+            equal_rel_ok = (abs_diff / max_abs) <= rel_pct
+        else:
+            # For RC, use the original logic
+            abs_diff = abs(rc.ch1_us - rc.ch2_us)
+            equal_abs_ok = abs_diff <= tol
+            # Relative check (difference relative to magnitude)
+            max_abs = max(abs(d1), abs(d2), 1)
+            equal_rel_ok = (abs_diff / max_abs) <= rel_pct
         equal_ok = equal_abs_ok or (moving_ok and equal_rel_ok)
         now_s = mono_now
         is_moving_straight = False
