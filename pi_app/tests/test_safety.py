@@ -1,4 +1,3 @@
-import time
 import unittest
 
 from pi_app.control.safety import (
