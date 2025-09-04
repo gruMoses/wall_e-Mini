@@ -14,13 +14,13 @@ class ImuSteeringConfig:
     enabled: bool = True
     
     # PID gains for heading control (updated from auto-tune)
-    kp: float = 2.0    # Proportional gain (heading error to steering correction)
-    ki: float = 0.35 # Integral gain (accumulated drift correction)
-    kd: float = 0.06   # Derivative gain (yaw rate damping)
+    kp: float = 1.7    # Proportional gain (heading error to steering correction)
+    ki: float = 0.4 # Integral gain (accumulated drift correction)
+    kd: float = 0.08   # Derivative gain (yaw rate damping)
     
     # Control parameters
     max_correction: int = 220     # Maximum steering correction in byte units (0-255)
-    deadband_deg: float = 0.5    # Minimum heading error to trigger correction (degrees)
+    deadband_deg: float = 0.9    # Minimum heading error to trigger correction (degrees)
     max_integral: float = 40.0   # Maximum integral term to prevent windup
     invert_output: bool = False   # Invert the sign of IMU steering correction (hardware-specific)
     # Steering neutral detection (hysteresis) to lock heading until commanded turn
@@ -33,8 +33,8 @@ class ImuSteeringConfig:
     # Relative tolerance to allow proportional mismatch at higher throttle
     straight_relative_tolerance_pct: float = 0.35
     # Optional per-side bias applied only during straight intent (bytes)
-    straight_bias_left_byte: int = -16
-    straight_bias_right_byte: int = 16
+    straight_bias_left_byte: int = -20
+    straight_bias_right_byte: int = 20
     # Hysteresis time to keep straight intent latched despite brief mismatch (seconds)
     straight_disengage_hysteresis_s: float = 0.80
     # Steering-blend: corrections scale down as absolute steering_input grows; zero at this magnitude

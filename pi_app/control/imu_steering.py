@@ -116,6 +116,8 @@ class ImuSteeringCompensator:
             "d_term": 0.0,
             "correction": 0.0,
         }
+        # Track saturation from previous iteration to apply simple anti-windup
+        self._last_saturated: bool = False
         
         # Initialize IMU if provided
         if self.imu_reader is not None:
@@ -253,9 +255,10 @@ class ImuSteeringCompensator:
             while error_deg < -180:
                 error_deg += 360
             
-            # Integral term (with anti-windup) -- update before applying deadband so
-            # small persistent errors accumulate and can be corrected over time.
-            self.state.integral_error += error_deg * dt
+            # Integral term (with anti-windup) -- update only when not saturated
+            # to prevent integral windup during output clamping.
+            if not self._last_saturated:
+                self.state.integral_error += error_deg * dt
             self.state.integral_error = max(-self.config.max_integral,
                                          min(self.config.max_integral, self.state.integral_error))
 
@@ -274,12 +277,15 @@ class ImuSteeringCompensator:
             # Derivative term (yaw rate damping)
             d_term = -self.config.kd * self.state.yaw_rate_dps
             
-            # Combine terms
-            correction = p_term + i_term + d_term
+            # Combine terms (raw before clamp)
+            raw = p_term + i_term + d_term
 
             # Clamp to maximum correction
             max_corr = float(self.config.max_correction)
-            correction = max(-max_corr, min(max_corr, correction))
+            correction = max(-max_corr, min(max_corr, raw))
+
+            # Update saturation flag for next iteration's anti-windup
+            self._last_saturated = (correction != raw) or (abs(raw) >= max_corr)
 
             # Store last PID components for debugging/telemetry
             self._last_pid = {
