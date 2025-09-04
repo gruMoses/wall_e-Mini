@@ -33,6 +33,7 @@ class FakeImuReader:
         self._yaw_rate_dps = yaw_rate_dps
         self.roll_deg = 0.0
         self.pitch_deg = 0.0
+        self.use_mag = True
 
     def calibrate_gyro(self, duration_s: float) -> None:  # noqa: D401
         pass

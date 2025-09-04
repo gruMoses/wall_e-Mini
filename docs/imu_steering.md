@@ -54,6 +54,11 @@ class ImuSteeringConfig:
     update_rate_hz: float = 20.0     # IMU update rate
 ```
 
+To disable the magnetometer and rely solely on the accelerometer and gyro,
+set `imu_use_magnetometer = False` in `Config`. When disabled, the IMU reader
+skips magnetometer initialization and returns zero magnetic field values while
+yaw is estimated by integrating the gyroscope.
+
 ### Tuning Guidelines
 
 1. **Start with low gains**: Begin with the default values

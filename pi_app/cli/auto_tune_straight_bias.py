@@ -151,7 +151,8 @@ def main() -> None:
     except Exception:
         pass
 
-    imu = ImuReader(calibration_path=config.imu_calibration_path)
+    imu = ImuReader(calibration_path=config.imu_calibration_path,
+                    use_magnetometer=config.imu_use_magnetometer)
     rc = ArduinoRCReader()
     try:
         port = rc.start()

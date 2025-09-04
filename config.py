@@ -64,6 +64,8 @@ class Config:
     imu_mag_axis_map: tuple[str, str, str] | None = ('x', 'y', '-z')
     # Heading convention: True = heading increases clockwise (compass style)
     imu_heading_cw_positive: bool = True
+    # Whether to use the magnetometer for yaw/heading fusion
+    imu_use_magnetometer: bool = True
     
     # Debug settings
     log_imu_data: bool = False

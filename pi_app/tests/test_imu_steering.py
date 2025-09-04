@@ -12,6 +12,7 @@ class FakeImuReader:
         self.headings = iter(headings) if headings is not None else itertools.repeat(0.0)
         self.fail = False
         self.delay = delay
+        self.use_mag = True
 
     def calibrate_gyro(self, duration_s):
         pass

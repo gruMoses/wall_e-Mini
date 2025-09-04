@@ -132,14 +132,15 @@ class ImuSteeringCompensator:
             self.imu_reader.calibrate_gyro(duration_s=min(3.0, self.config.calibration_timeout_s))
             
             # Try to calibrate magnetometer unless a calibration file already exists
-            try:
-                cal_path = getattr(self.imu_reader, 'calibration_path', None)
-                from pathlib import Path as _P
-                if not cal_path or not _P(cal_path).exists():
+            if getattr(self.imu_reader, 'use_mag', True):
+                try:
+                    cal_path = getattr(self.imu_reader, 'calibration_path', None)
+                    from pathlib import Path as _P
+                    if not cal_path or not _P(cal_path).exists():
+                        self.imu_reader.calibrate_mag_hard_iron(duration_s=min(5.0, self.config.calibration_timeout_s))
+                except Exception:
+                    # On any unexpected issue checking the path, fall back to a short calibration
                     self.imu_reader.calibrate_mag_hard_iron(duration_s=min(5.0, self.config.calibration_timeout_s))
-            except Exception:
-                # On any unexpected issue checking the path, fall back to a short calibration
-                self.imu_reader.calibrate_mag_hard_iron(duration_s=min(5.0, self.config.calibration_timeout_s))
             
             # Read initial heading
             data = self.imu_reader.read()

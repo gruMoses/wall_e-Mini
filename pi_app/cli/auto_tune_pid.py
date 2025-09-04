@@ -221,7 +221,8 @@ def main() -> None:
     csv_path = logs_dir / f"auto_tune_{int(time.time())}.csv"
 
     # Initialize IMU
-    imu = ImuReader(calibration_path=config.imu_calibration_path)
+    imu = ImuReader(calibration_path=config.imu_calibration_path,
+                    use_magnetometer=config.imu_use_magnetometer)
 
     # Always start Arduino RC reader to monitor arming (ch3) [[memory:3361651]]
     rc_reader: Optional[ArduinoRCReader] = ArduinoRCReader()

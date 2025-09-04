@@ -18,7 +18,8 @@ class ImuReader:
                  complementary_alpha_yaw: float = 0.95,
                  calibration_path: Optional[str] = None,
                  mag_axis_map: Optional[Tuple[str, str, str]] = None,
-                 heading_cw_positive: bool = True) -> None:
+                 heading_cw_positive: bool = True,
+                 use_magnetometer: bool = True) -> None:
         # Hardware can be either single-chip ICM-20948 or ISM330DHCX+MMC5983MA combo.
         # We'll auto-detect and initialize accordingly.
         self.mode: Optional[str] = None  # 'ICM20948' or 'ISM_MMC'
@@ -48,6 +49,7 @@ class ImuReader:
             self.calibration_path = project_root / 'imu_calibration.json'
         self.mag_axis_map: Optional[Tuple[str, str, str]] = mag_axis_map
         self._heading_cw_positive = bool(heading_cw_positive)
+        self.use_mag = bool(use_magnetometer)
         if self.calibration_path and self.calibration_path.exists():
             try:
                 self.load_calibration(self.calibration_path)
@@ -80,20 +82,29 @@ class ImuReader:
             gy_dps = (float(getattr(imu, 'gyRaw', 0.0)) / 131.0) - self.gyro_bias_dps[1]
             gz_dps = (float(getattr(imu, 'gzRaw', 0.0)) / 131.0) - self.gyro_bias_dps[2]
 
-            mx = float(getattr(imu, 'mxRaw', 0.0)) * 0.0015
-            my = float(getattr(imu, 'myRaw', 0.0)) * 0.0015
-            mz = float(getattr(imu, 'mzRaw', 0.0)) * 0.0015
-            mx, my, mz = self._map_mag_axes(mx, my, mz)
-            mx_g = (mx - self.mag_offsets_g[0]) * self.mag_scales[0]
-            my_g = (my - self.mag_offsets_g[1]) * self.mag_scales[1]
-            mz_g = (mz - self.mag_offsets_g[2]) * self.mag_scales[2]
+            if self.use_mag:
+                mx = float(getattr(imu, 'mxRaw', 0.0)) * 0.0015
+                my = float(getattr(imu, 'myRaw', 0.0)) * 0.0015
+                mz = float(getattr(imu, 'mzRaw', 0.0)) * 0.0015
+                mx, my, mz = self._map_mag_axes(mx, my, mz)
+                mx_g = (mx - self.mag_offsets_g[0]) * self.mag_scales[0]
+                my_g = (my - self.mag_offsets_g[1]) * self.mag_scales[1]
+                mz_g = (mz - self.mag_offsets_g[2]) * self.mag_scales[2]
+            else:
+                mx_g = my_g = mz_g = 0.0
         elif self.mode == 'ISM_MMC':
-            # ISM330DHCX accel/gyro and MMC5983MA magnetometer
+            # ISM330DHCX accel/gyro and optional MMC5983MA magnetometer
             a = self.ism.get_accel()
             g = self.ism.get_gyro()
-            mx, my, mz = self.mmc.get_measurement_xyz_gauss()
-            # Map axes (defaults to invert Z for ISM+MMC)
-            mx, my, mz = self._map_mag_axes(mx, my, mz)
+            if self.use_mag and self.mmc is not None:
+                mx, my, mz = self.mmc.get_measurement_xyz_gauss()
+                # Map axes (defaults to invert Z for ISM+MMC)
+                mx, my, mz = self._map_mag_axes(mx, my, mz)
+                mx_g = (mx - self.mag_offsets_g[0]) * self.mag_scales[0]
+                my_g = (my - self.mag_offsets_g[1]) * self.mag_scales[1]
+                mz_g = (mz - self.mag_offsets_g[2]) * self.mag_scales[2]
+            else:
+                mx_g = my_g = mz_g = 0.0
             # ISM library returns milli-units; convert to g and dps
             ax_g = (getattr(a, 'xData', 0.0) or 0.0) / 1000.0
             ay_g = (getattr(a, 'yData', 0.0) or 0.0) / 1000.0
@@ -101,23 +112,26 @@ class ImuReader:
             gx_dps = ((getattr(g, 'xData', 0.0) or 0.0) / 1000.0) - self.gyro_bias_dps[0]
             gy_dps = ((getattr(g, 'yData', 0.0) or 0.0) / 1000.0) - self.gyro_bias_dps[1]
             gz_dps = ((getattr(g, 'zData', 0.0) or 0.0) / 1000.0) - self.gyro_bias_dps[2]
-            # Apply mag hard-iron offsets and soft-iron scaling
-            mx_g = (mx - self.mag_offsets_g[0]) * self.mag_scales[0]
-            my_g = (my - self.mag_offsets_g[1]) * self.mag_scales[1]
-            mz_g = (mz - self.mag_offsets_g[2]) * self.mag_scales[2]
         else:
             raise RuntimeError('IMU not initialized')
 
         # Compute orientation via complementary filter
-        roll_acc, pitch_acc, yaw_mag = self._tilt_compensated_heading(ax_g, ay_g, az_g, mx_g, my_g, mz_g)
+        if self.use_mag:
+            roll_acc, pitch_acc, yaw_mag = self._tilt_compensated_heading(ax_g, ay_g, az_g, mx_g, my_g, mz_g)
+        else:
+            roll_acc, pitch_acc, _ = self._tilt_compensated_heading(ax_g, ay_g, az_g, 0.0, 0.0, 0.0)
+            yaw_mag = 0.0
         gx = math.radians(gx_dps)
         gy = math.radians(gy_dps)
         gz = math.radians(gz_dps)
         self.roll_rad = self.alpha_rp * (self.roll_rad + gx*dt) + (1.0-self.alpha_rp)*roll_acc
         self.pitch_rad = self.alpha_rp * (self.pitch_rad + gy*dt) + (1.0-self.alpha_rp)*pitch_acc
-        yaw_pred = self.yaw_rad + gz*dt
-        delta = (yaw_mag - yaw_pred + math.pi) % (2.0*math.pi) - math.pi
-        self.yaw_rad = self.alpha_yaw * yaw_pred + (1.0-self.alpha_yaw)*(yaw_pred + delta)
+        if self.use_mag:
+            yaw_pred = self.yaw_rad + gz*dt
+            delta = (yaw_mag - yaw_pred + math.pi) % (2.0*math.pi) - math.pi
+            self.yaw_rad = self.alpha_yaw * yaw_pred + (1.0-self.alpha_yaw)*(yaw_pred + delta)
+        else:
+            self.yaw_rad += gz*dt
 
         yaw_deg_ccw = math.degrees(self.yaw_rad)
         yaw_display = (-yaw_deg_ccw) if self._heading_cw_positive else yaw_deg_ccw
@@ -158,6 +172,8 @@ class ImuReader:
 
 
     def calibrate_mag_hard_iron(self, duration_s: float = 5.0):
+        if not self.use_mag:
+            return self.mag_offsets_g
         end_t = time.monotonic() + float(duration_s)
         minx = miny = minz = 1e9
         maxx = maxy = maxz = -1e9
@@ -187,6 +203,8 @@ class ImuReader:
         """Compute both hard‑iron offsets and soft‑iron scale factors.
         Move through full 3D orientations during collection.
         """
+        if not self.use_mag:
+            return self.mag_offsets_g, self.mag_scales
         end_t = time.monotonic() + float(duration_s)
         minx = miny = minz = 1e9
         maxx = maxy = maxz = -1e9
@@ -273,7 +291,7 @@ class ImuReader:
                 try_init_icm(alt)
 
         if self.mode != 'ICM20948':
-            # Fall back to ISM330DHCX + MMC5983MA
+            # Fall back to ISM330DHCX (+ optional MMC5983MA)
             try:
                 QwiicISM330DHCX = import_module('qwiic_ism330dhcx').QwiicISM330DHCX
                 QwiicMMC5983MA = import_module('qwiic_mmc5983ma').QwiicMMC5983MA
@@ -281,7 +299,7 @@ class ImuReader:
                 # If we already tried ICM and failed, surface helpful message
                 if tried_icm:
                     raise RuntimeError(
-                        "IMU drivers not available: tried ICM-20948 (addresses: " + 
+                        "IMU drivers not available: tried ICM-20948 (addresses: " +
                         ', '.join(tried_icm) + ") and ISM330DHCX/MMC5983MA, but drivers missing."
                     ) from e
                 raise
@@ -294,10 +312,11 @@ class ImuReader:
             self.ism.set_accel_data_rate(self.ism.kXlOdr104Hz)
             self.ism.set_gyro_data_rate(self.ism.kGyroOdr104Hz)
 
-            # Initialize MMC5983MA magnetometer
-            self.mmc = QwiicMMC5983MA(address=0x30)
-            if not self.mmc.begin():
-                raise RuntimeError('Failed to initialize MMC5983MA magnetometer (addr 0x30)')
+            # Initialize MMC5983MA magnetometer only if requested
+            if self.use_mag:
+                self.mmc = QwiicMMC5983MA(address=0x30)
+                if not self.mmc.begin():
+                    raise RuntimeError('Failed to initialize MMC5983MA magnetometer (addr 0x30)')
             self.mode = 'ISM_MMC'
 
 
@@ -309,27 +328,34 @@ class ImuReader:
             ax_g = float(getattr(imu, 'axRaw', 0.0)) / 16384.0
             ay_g = float(getattr(imu, 'ayRaw', 0.0)) / 16384.0
             az_g = float(getattr(imu, 'azRaw', 0.0)) / 16384.0
-            mx = float(getattr(imu, 'mxRaw', 0.0)) * 0.0015
-            my = float(getattr(imu, 'myRaw', 0.0)) * 0.0015
-            mz = float(getattr(imu, 'mzRaw', 0.0)) * 0.0015
-            mx, my, mz = self._map_mag_axes(mx, my, mz)
-            mx_g = (mx - self.mag_offsets_g[0]) * self.mag_scales[0]
-            my_g = (my - self.mag_offsets_g[1]) * self.mag_scales[1]
-            mz_g = (mz - self.mag_offsets_g[2]) * self.mag_scales[2]
+            if self.use_mag:
+                mx = float(getattr(imu, 'mxRaw', 0.0)) * 0.0015
+                my = float(getattr(imu, 'myRaw', 0.0)) * 0.0015
+                mz = float(getattr(imu, 'mzRaw', 0.0)) * 0.0015
+                mx, my, mz = self._map_mag_axes(mx, my, mz)
+                mx_g = (mx - self.mag_offsets_g[0]) * self.mag_scales[0]
+                my_g = (my - self.mag_offsets_g[1]) * self.mag_scales[1]
+                mz_g = (mz - self.mag_offsets_g[2]) * self.mag_scales[2]
+            else:
+                mx_g = my_g = mz_g = 0.0
         elif self.mode == 'ISM_MMC':
             a = self.ism.get_accel()
             ax_g = (getattr(a, 'xData', 0.0) or 0.0) / 1000.0
             ay_g = (getattr(a, 'yData', 0.0) or 0.0) / 1000.0
             az_g = (getattr(a, 'zData', 0.0) or 0.0) / 1000.0
-            mx, my, mz = self.mmc.get_measurement_xyz_gauss()
-            mx, my, mz = self._map_mag_axes(mx, my, mz)
-            mx_g = (mx - self.mag_offsets_g[0]) * self.mag_scales[0]
-            my_g = (my - self.mag_offsets_g[1]) * self.mag_scales[1]
-            mz_g = (mz - self.mag_offsets_g[2]) * self.mag_scales[2]
+            if self.use_mag and self.mmc is not None:
+                mx, my, mz = self.mmc.get_measurement_xyz_gauss()
+                mx, my, mz = self._map_mag_axes(mx, my, mz)
+                mx_g = (mx - self.mag_offsets_g[0]) * self.mag_scales[0]
+                my_g = (my - self.mag_offsets_g[1]) * self.mag_scales[1]
+                mz_g = (mz - self.mag_offsets_g[2]) * self.mag_scales[2]
+            else:
+                mx_g = my_g = mz_g = 0.0
         else:
             raise RuntimeError('IMU not initialized')
         r, p, y = self._tilt_compensated_heading(ax_g, ay_g, az_g, mx_g, my_g, mz_g)
-        self.roll_rad, self.pitch_rad, self.yaw_rad = r, p, y
+        self.roll_rad, self.pitch_rad = r, p
+        self.yaw_rad = y if self.use_mag else 0.0
         self._last_monotonic = time.monotonic()
 
 
