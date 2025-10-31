@@ -8,7 +8,7 @@ from pathlib import Path
 # Add parent directory to path for config import
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from pi_app.control.mapping import map_pulse_to_byte
+from pi_app.control.mapping import map_pulse_to_byte, map_pulse_to_byte_saturated
 from pi_app.control.safety import update_safety, SafetyState, SafetyParams, SafetyEvent
 from pi_app.control.state import DriveCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
@@ -144,8 +144,14 @@ class Controller:
             steering_input = self._bytes_to_steering_input(left, right)
         else:
             # Tank-drive: ch1 is left throttle, ch2 is right throttle
-            left = map_pulse_to_byte(rc.ch1_us)
-            right = map_pulse_to_byte(rc.ch2_us)
+            try:
+                f_full = int(getattr(config.rc_map, 'forward_full_us', 1950))
+                r_full = int(getattr(config.rc_map, 'reverse_full_us', 1050))
+            except Exception:
+                f_full, r_full = 1950, 1050
+
+            left = map_pulse_to_byte_saturated(rc.ch1_us, f_full, r_full)
+            right = map_pulse_to_byte_saturated(rc.ch2_us, f_full, r_full)
             # Convert RC values to normalized steering input for IMU
             steering_input = self._bytes_to_steering_input(left, right)
 

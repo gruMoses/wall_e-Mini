@@ -52,3 +52,48 @@ def map_pulse_to_byte(pulse_us: int) -> int:
     return clamp(mapped, MIN_OUTPUT, MAX_OUTPUT)
 
 
+# CH1/CH2 saturated mapping: early full-scale beyond configurable thresholds
+def map_pulse_to_byte_saturated(
+    pulse_us: int,
+    forward_full_us: int,
+    reverse_full_us: int,
+) -> int:
+    """
+    Piecewise-linear mapping with early saturation for throttle channels.
+
+    Rules:
+    - Deadband: |pulse-1500| <= 25 -> 128
+    - If pulse >= forward_full_us -> 255
+    - If pulse <= reverse_full_us -> 0
+    - Otherwise, map linearly:
+      * [1500..forward_full_us] -> [128..255]
+      * [reverse_full_us..1500] -> [0..128]
+    - Inputs are clamped to [850, 2150] for safety.
+    """
+    # Deadband around center
+    if abs(pulse_us - CENTER_PULSE_WIDTH_US) <= DEADBAND_US:
+        return CENTER_OUTPUT_VALUE
+
+    # Safety clamp raw pulse to plausible range
+    clamped_us = clamp(pulse_us, MIN_PULSE_WIDTH_US, MAX_PULSE_WIDTH_US)
+
+    # Early saturation
+    if clamped_us >= forward_full_us:
+        return MAX_OUTPUT
+    if clamped_us <= reverse_full_us:
+        return MIN_OUTPUT
+
+    # Linear within segments toward center
+    if clamped_us > CENTER_PULSE_WIDTH_US:
+        # Upper segment: center -> forward_full_us maps 128 -> 255
+        span_up = max(1, forward_full_us - CENTER_PULSE_WIDTH_US)
+        frac = (clamped_us - CENTER_PULSE_WIDTH_US) / span_up
+        val = CENTER_OUTPUT_VALUE + int(round(frac * (MAX_OUTPUT - CENTER_OUTPUT_VALUE)))
+        return clamp(val, MIN_OUTPUT, MAX_OUTPUT)
+    else:
+        # Lower segment: reverse_full_us -> center maps 0 -> 128
+        span_dn = max(1, CENTER_PULSE_WIDTH_US - reverse_full_us)
+        frac = (clamped_us - reverse_full_us) / span_dn
+        val = int(round(frac * CENTER_OUTPUT_VALUE))
+        return clamp(val, MIN_OUTPUT, MAX_OUTPUT)
+

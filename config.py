@@ -51,11 +51,23 @@ class ImuSteeringConfig:
 
 
 @dataclass(frozen=True)
+class RcMapConfig:
+    """RC mapping configuration for throttle channels (CH1/CH2).
+
+    When RC pulse exceeds these thresholds, output saturates to full-scale.
+    """
+    forward_full_us: int = 1950  # >= maps to 255
+    reverse_full_us: int = 1050  # <= maps to 0
+
+
+@dataclass(frozen=True)
 class Config:
     """Main configuration class."""
     
     # IMU steering configuration
     imu_steering: ImuSteeringConfig = ImuSteeringConfig()
+    # RC mapping config
+    rc_map: RcMapConfig = RcMapConfig()
     
     # File paths
     imu_calibration_path: str = "imu_calibration.json"
