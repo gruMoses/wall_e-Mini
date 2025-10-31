@@ -90,15 +90,7 @@ if [[ -f "$LOCK_FILE" ]]; then
   rm -f "$LOCK_FILE" || true
 fi
 
-echo "[run_main] Activating venv and starting main..."
-
-if [[ ! -x "$VENV_PY" ]]; then
-  echo "[run_main] ERROR: venv Python not found at $VENV_PY" >&2
-  exit 1
-fi
-
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
+echo "[run_main] Starting main application (using system Python)..."
 
 cd "$APP_DIR"
 exec python3 -u -m app.main --pid-debug

@@ -32,8 +32,8 @@ class ImuSteeringConfig:
     # Relative tolerance to allow proportional mismatch at higher throttle
     straight_relative_tolerance_pct: float = 0.35
     # Optional per-side bias applied only during straight intent (bytes)
-    straight_bias_left_byte: int = -20
-    straight_bias_right_byte: int = 20
+    #straight_bias_left_byte: int = -20
+    #straight_bias_right_byte: int = 20
     # Hysteresis time to keep straight intent latched despite brief mismatch (seconds)
     straight_disengage_hysteresis_s: float = 0.80
     # Steering-blend: corrections scale down as absolute steering_input grows; zero at this magnitude

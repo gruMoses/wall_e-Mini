@@ -69,19 +69,13 @@ class VescCanDriver:
         except Exception:
             return
 
-        # Payload for COMM_SET_RPM (command=8) with 32-bit RPM
-        cmd = 8
-        rpm32 = int(rpm)
-        data = bytes([
-            cmd,
-            (rpm32 >> 24) & 0xFF,
-            (rpm32 >> 16) & 0xFF,
-            (rpm32 >> 8) & 0xFF,
-            rpm32 & 0xFF,
-        ])
-        # VESC CAN id base for commands to a specific id is typically 0x090 | can_id
-        arbitration_id = 0x090 | (can_id & 0x7F)
-        msg = can.Message(arbitration_id=arbitration_id, data=data, is_extended_id=False)
+        # Use the correct VESC CAN protocol (matching working old code)
+        # Arbitration ID: 0x300 + can_id (extended CAN ID)
+        # Payload: 32-bit signed RPM, big-endian (struct.pack('>i', rpm))
+        import struct
+        arbitration_id = 0x300 + can_id
+        data = struct.pack('>i', int(rpm))
+        msg = can.Message(arbitration_id=arbitration_id, data=data, is_extended_id=True)
         try:
             assert self._bus is not None
             self._bus.send(msg)

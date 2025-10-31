@@ -83,6 +83,7 @@ def run_server() -> int:
         last_seq = None
         pending_cmd2: str = ""
         try:
+            # Try V2 protocol first (with nonce)
             client_sock.send(f"SRV:HELLO ver=2 sn={expected_nonce}\n".encode("utf-8"))
             buf = ""
             while should_run:
@@ -117,18 +118,19 @@ def run_server() -> int:
                         else:
                             line_to_parse = line
 
+                    # Try V2 protocol first
                     cmd = parse_cmd2(line_to_parse)
                     if cmd is not None:
                         ok, reason = accept_cmd2(cmd, last_seq)
                         if ok:
                             last_seq = cmd.seq
                             client_sock.send(f"ACK2:{cmd.seq};ok\n".encode("utf-8"))
-                            print(f"OK  seq={cmd.seq} left_i={cmd.left_i} right_i={cmd.right_i}", flush=True)
-                            
+                            print(f"V2 OK  seq={cmd.seq} left_i={cmd.left_i} right_i={cmd.right_i}", flush=True)
+
                             # Convert to bytes for Wall-E app compatibility
                             left_byte, right_byte = ints_to_bytes(cmd.left_i, cmd.right_i)
-                            print(f"DEBUG: Converted {cmd.left_i},{cmd.right_i} -> {left_byte},{right_byte}", flush=True)
-                            
+                            print(f"V2 DEBUG: Converted {cmd.left_i},{cmd.right_i} -> {left_byte},{right_byte}", flush=True)
+
                             # Write latest command to shared file for Wall-E app
                             try:
                                 shared_data = {
@@ -141,49 +143,51 @@ def run_server() -> int:
                                 print(f"Wrote to shared file: L={left_byte} R={right_byte}", flush=True)
                             except Exception as e:
                                 print(f"Error writing shared file: {e}", flush=True)
-                            
-                            try:
-                                with open(log_path, "a", buffering=1) as lf:
-                                    lf.write(f"CMD2 ok seq={cmd.seq} left={cmd.left_i} right={cmd.right_i}\n")
-                            except Exception:
-                                pass
                         else:
                             client_sock.send(f"NAK2:{cmd.seq};code={reason}\n".encode("utf-8"))
-                            print(f"NAK seq={cmd.seq} code={reason} line={line_to_parse}")
+                            print(f"V2 NAK seq={cmd.seq} reason={reason}", flush=True)
+                    else:
+                        # Try V1 protocol
+                        v1_cmd = parse_v1(line_to_parse)
+                        if v1_cmd is not None:
+                            left_f, right_f, seq = v1_cmd
+                            print(f"V1 OK  seq={seq} left_f={left_f} right_f={right_f}", flush=True)
+
+                            # Convert floats to bytes for Wall-E app compatibility
+                            left_byte, right_byte = floats_to_bytes(left_f, right_f)
+                            print(f"V1 DEBUG: Converted {left_f},{right_f} -> {left_byte},{right_byte}", flush=True)
+
+                            # Write latest command to shared file for Wall-E app
                             try:
-                                with open(log_path, "a", buffering=1) as lf:
-                                    lf.write(f"CMD2 nak seq={cmd.seq} code={reason}\n")
-                            except Exception:
-                                pass
-                        continue
-                    v1 = parse_v1(line_to_parse)
-                    if v1 is not None:
-                        lf, rf, seq = v1
-                        lb, rb = floats_to_bytes(lf, rf)
-                        last_seq = seq
-                        client_sock.send(f"ACK2:{seq};ok\n".encode("utf-8"))
-                        print(f"V1  seq={seq} left_f={lf:.3f} right_f={rf:.3f} -> bytes {lb},{rb}")
-                        
-                        # Write latest command to shared file for Wall-E app
-                        try:
-                            shared_data = {
-                                "left_byte": lb,
-                                "right_byte": rb,
-                                "last_update_epoch_s": time.time()
-                            }
-                            with open("/tmp/wall_e_bt_latest.json", "w") as sf:
-                                json.dump(shared_data, sf)
-                            print(f"Wrote V1 to shared file: L={lb} R={rb}")
-                        except Exception as e:
-                            print(f"Error writing V1 shared file: {e}")
-                        
-                        try:
-                            with open(log_path, "a", buffering=1) as lfout:
-                                lfout.write(f"V1 ok seq={seq} left_f={lf:.3f} right_f={rf:.3f} bytes={lb},{rb}\n")
-                        except Exception:
-                            pass
-                        continue
-                    print(f"RX  {line}")
+                                shared_data = {
+                                    "left_byte": left_byte,
+                                    "right_byte": right_byte,
+                                    "last_update_epoch_s": time.time()
+                                }
+                                with open("/tmp/wall_e_bt_latest.json", "w") as sf:
+                                    json.dump(shared_data, sf)
+                                print(f"V1 Wrote to shared file: L={left_byte} R={right_byte}", flush=True)
+                            except Exception as e:
+                                print(f"V1 Error writing shared file: {e}", flush=True)
+                        elif line_to_parse == "PING":
+                            print("V1 PING received", flush=True)
+                        elif line_to_parse.startswith("ARM:"):
+                            print(f"V1 ARM command: {line_to_parse} (ignored for safety)", flush=True)
+                        else:
+                            print(f"Unknown command: {line_to_parse}", flush=True)
+
+                    # Log successful commands
+                    try:
+                        with open(log_path, "a", buffering=1) as lf:
+                            if cmd is not None and 'ok' in locals() and ok:
+                                lf.write(f"CMD2 ok seq={cmd.seq} left={cmd.left_i} right={cmd.right_i}\n")
+                            elif v1_cmd is not None:
+                                left_f, right_f, seq = v1_cmd
+                                lf.write(f"V1 ok seq={seq} left={left_f} right={right_f}\n")
+                            elif line_to_parse == "PING":
+                                lf.write("PING received\n")
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"Client error: {e}")
         finally:

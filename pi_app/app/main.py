@@ -96,7 +96,7 @@ def run() -> None:
     motor_driver = None
     if VescCanDriver.detect():
         print("VESC over CAN detected; using VESC driver")
-        motor_driver = VescCanDriver()
+        motor_driver = VescCanDriver(left_id=2, right_id=1)
     else:
         print("VESC not detected; using Arduino Model X motor driver (stub)")
         motor_driver = ArduinoModelXDriver(rc_reader=rc_reader)
@@ -224,7 +224,7 @@ def run() -> None:
                         "ts_iso": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
                         "src": src,
                         "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch5": s.ch5_us}),
-                        "bt": to_int({"L": bt.left_byte, "R": bt.right_byte, "age_s": bt_age}),
+                        "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
                         "imu": to_int(imu_status) if imu_status else None,
                         "imu_steering": to_int({
                             "steering_input": telem.get("steering_input"),
