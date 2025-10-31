@@ -153,6 +153,7 @@ def run() -> None:
             # Prefer fresh BT over RC using timestamp freshness
             # Read from shared file written by standalone SPP server
             bt_override = None
+            bt_age = None
             try:
                 import json
                 with open("/tmp/wall_e_bt_latest.json", "r") as sf:
@@ -198,7 +199,8 @@ def run() -> None:
             line_cli = (
                 f"{src} RC(ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch5={s.ch5_us:4d}) "
                 f"{bt_display}  "
-                f"{imu_info}  corr_raw={corr_raw_str} corr_applied={corr_app_str}   "
+                f"{imu_info}  corr_raw={corr_raw_str} corr_applied={corr_app_str}  "
+                f"armed={'Y' if cmd.is_armed else 'N'} ev={len(events)}   "
             )
             if pid_debug:
                 print(line_cli)
@@ -214,10 +216,10 @@ def run() -> None:
             else:
                 print(line_cli, end="\r", flush=True)
 
-            # Structured JSON log for analysis (one line per tick) - only when armed
+            # Structured JSON log for analysis (one line per tick)
             try:
                 now_ts = time.time()
-                if now_ts - last_log_ts >= log_interval and cmd.is_armed:
+                if now_ts - last_log_ts >= log_interval:
                     last_log_ts = now_ts
                     log_obj = {
                         "ts": to_int(now_ts),
@@ -250,8 +252,14 @@ def run() -> None:
                     if log_fh is not None:
                         try:
                             log_fh.write(line + "\n")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            # Print the error once to avoid flooding
+                            try:
+                                if '_log_write_error_reported' not in locals() or not _log_write_error_reported:
+                                    print(f"Log write error: {e}")
+                                    _log_write_error_reported = True
+                            except Exception:
+                                pass
             except Exception:
                 pass
             time.sleep(0.02)
