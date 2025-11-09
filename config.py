@@ -61,6 +61,12 @@ class RcMapConfig:
 
 
 @dataclass(frozen=True)
+class VescConfig:
+    # VESC expects electrical RPM (eRPM)
+    max_erpm: int = 15000
+
+
+@dataclass(frozen=True)
 class Config:
     """Main configuration class."""
     
@@ -68,6 +74,8 @@ class Config:
     imu_steering: ImuSteeringConfig = ImuSteeringConfig()
     # RC mapping config
     rc_map: RcMapConfig = RcMapConfig()
+    # VESC config
+    vesc: VescConfig = VescConfig()
     
     # File paths
     imu_calibration_path: str = "imu_calibration.json"

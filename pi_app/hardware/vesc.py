@@ -34,8 +34,8 @@ class VescCanDriver:
 
     # MotorDriver API
     def set_tracks(self, left_byte: int, right_byte: int) -> None:
-        left_rpm = self._byte_to_rpm(left_byte)
-        right_rpm = self._byte_to_rpm(right_byte)
+        left_rpm = self._byte_to_rpm(left_byte, self._max_rpm)
+        right_rpm = self._byte_to_rpm(right_byte, self._max_rpm)
         self._send_rpm(self._left_id, left_rpm)
         self._send_rpm(self._right_id, right_rpm)
 
