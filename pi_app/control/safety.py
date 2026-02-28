@@ -9,6 +9,7 @@ class SafetyEvent(Enum):
     EMERGENCY_TRIGGERED = auto()
     FOLLOW_ME_ENTERED = auto()
     FOLLOW_ME_EXITED = auto()
+    RC_STALE = auto()
 
 
 @dataclass(frozen=True)

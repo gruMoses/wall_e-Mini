@@ -21,6 +21,8 @@ from pi_app.control.waypoint_nav import WaypointNavController
 from pi_app.hardware.rtk_gps import GpsReading
 from config import config
 
+RC_STALE_TIMEOUT_S = 1.0
+
 
 @dataclass(frozen=True)
 class RCInputs:
@@ -187,6 +189,25 @@ class Controller:
     ) -> Tuple[DriveCommand, List[SafetyEvent], dict]:
         epoch_now = now_epoch_s if now_epoch_s is not None else time.time()
         mono_now = time.monotonic()
+
+        # RC staleness watchdog: if no RC update for >1s, force disarm
+        rc_age = epoch_now - rc.last_update_epoch_s if rc.last_update_epoch_s > 0.0 else 0.0
+        if rc_age > RC_STALE_TIMEOUT_S:
+            self._motor.stop()
+            self._relay.set_armed(False)
+            self._safety_state = SafetyState(
+                is_armed=False,
+                last_transition_epoch_s=epoch_now,
+                emergency_active=self._safety_state.emergency_active,
+            )
+            self._mode = "MANUAL"
+            cmd = DriveCommand(
+                left_byte=CENTER_OUTPUT_VALUE,
+                right_byte=CENTER_OUTPUT_VALUE,
+                is_armed=False,
+                emergency_active=self._safety_state.emergency_active,
+            )
+            return cmd, [SafetyEvent.RC_STALE], {"mode": "MANUAL", "rc_stale": True, "rc_age_s": rc_age}
 
         # Update safety
         self._safety_state, events = update_safety(

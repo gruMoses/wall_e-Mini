@@ -86,7 +86,7 @@ def run() -> None:
         help="Print PID controller debug values",
     )
     args, _ = parser.parse_known_args()
-    pid_debug = args.pid_debug or config.log_steering_corrections
+    pid_debug = args.pid_debug or config.imu_steering.log_steering_corrections
 
     rc_reader = ArduinoRCReader()
     port = rc_reader.start()

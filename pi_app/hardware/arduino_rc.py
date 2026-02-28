@@ -211,12 +211,51 @@ class ArduinoRCReader:
     def get_state(self) -> RCState:
         return self._state
 
-    # Internal
+    def _reconnect(self) -> bool:
+        """Close current serial, rediscover the Arduino, and reopen.
+
+        Returns True on successful reconnection, False otherwise.
+        """
+        try:
+            if self._serial is not None:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+                self._serial = None
+        except Exception:
+            pass
+
+        port = discover_arduino_port(preferred=self._requested_port or self._port_in_use)
+        if port is None:
+            return False
+
+        try:
+            ser = serial.Serial(port, self._baud_rate, timeout=self._steady_timeout_s)
+            ser.reset_input_buffer()
+            self._serial = ser
+            self._port_in_use = port
+            logger.info("Reconnected to Arduino RC on %s", port)
+            return True
+        except Exception:
+            return False
+
     def _read_loop(self) -> None:
         global RC_READ_ERROR_COUNT
         assert self._serial is not None
-        ser = self._serial
+        consecutive_errors = 0
         while not self._stop_event.is_set():
+            ser = self._serial
+            if ser is None:
+                if not self._reconnect():
+                    for _ in range(20):
+                        if self._stop_event.is_set():
+                            return
+                        time.sleep(0.1)
+                    continue
+                consecutive_errors = 0
+                continue
+
             try:
                 raw = ser.readline()
                 if not raw:
@@ -224,11 +263,9 @@ class ArduinoRCReader:
                 try:
                     line = raw.decode("utf-8", errors="strict").strip()
                 except UnicodeDecodeError:
-                    # Skip undecodable lines
                     continue
                 values = _parse_csv_line(line)
                 if values is None:
-                    # Ignore non-CSV debug lines like "DBG raw: ..."
                     continue
 
                 sanitized = list(values)
@@ -238,7 +275,6 @@ class ArduinoRCReader:
                     else:
                         sanitized[idx] = value
                         self._last_valid[idx] = value
-                    # Apply deadband around 1500 us
                     sanitized[idx] = _apply_deadband(sanitized[idx])
 
                 now = time.time()
@@ -250,11 +286,25 @@ class ArduinoRCReader:
                     ch5_us=sanitized[4],
                     last_update_epoch_s=now,
                 )
+                consecutive_errors = 0
+            except (serial.SerialException, OSError):
+                consecutive_errors += 1
+                RC_READ_ERROR_COUNT += 1
+                if RC_READ_ERRORS is not None:
+                    RC_READ_ERRORS.inc()
+                logger.warning("Serial connection lost (error #%d), attempting reconnect...",
+                               consecutive_errors)
+                self._serial = None
             except Exception:
+                consecutive_errors += 1
                 RC_READ_ERROR_COUNT += 1
                 if RC_READ_ERRORS is not None:
                     RC_READ_ERRORS.inc()
                 logger.exception("RC read failed")
+                if consecutive_errors >= 10:
+                    logger.warning("Too many consecutive errors, attempting reconnect...")
+                    self._serial = None
+                    consecutive_errors = 0
                 time.sleep(0.01)
 
     # Motor command sending for Arduino-based motor driver fallback
