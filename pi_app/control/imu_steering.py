@@ -9,7 +9,7 @@ This module implements a PID controller that uses IMU data to:
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 from threading import RLock
 import sys
 from pathlib import Path
@@ -17,8 +17,15 @@ from pathlib import Path
 # Add parent directory to path for config import
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from pi_app.hardware.imu_reader import ImuReader
 from config import ImuSteeringConfig
+
+
+@runtime_checkable
+class ImuReaderLike(Protocol):
+    """Any object that provides read(), calibrate_gyro(), and use_mag."""
+    use_mag: bool
+    def read(self) -> dict: ...
+    def calibrate_gyro(self, duration_s: float = ...) -> tuple: ...
 
 
 class _LockedRLock:
@@ -97,7 +104,7 @@ class ImuSteeringCompensator:
     access when multiple methods need to hold the lock simultaneously.
     """
     
-    def __init__(self, config: ImuSteeringConfig, imu_reader: Optional[ImuReader] = None):
+    def __init__(self, config: ImuSteeringConfig, imu_reader: Optional[ImuReaderLike] = None):
         self.config = config
         self.imu_reader = imu_reader
         self.state = ImuSteeringState()

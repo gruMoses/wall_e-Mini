@@ -92,23 +92,8 @@ def run() -> None:
     port = rc_reader.start()
     print(f"Arduino RC detected on {port}")
 
-    # Initialize IMU and steering compensator
+    # IMU compensator will be initialized after OAK-D (oak_d source needs it running)
     imu_compensator = None
-    if config.imu_steering.enabled:
-        try:
-            print("Initializing IMU...")
-            imu = ImuReader(calibration_path=config.imu_calibration_path,
-                            mag_axis_map=getattr(config, 'imu_mag_axis_map', None),
-                            heading_cw_positive=getattr(config, 'imu_heading_cw_positive', True),
-                            use_magnetometer=config.imu_use_magnetometer)
-            imu_compensator = ImuSteeringCompensator(config.imu_steering, imu)
-            print("✓ IMU steering compensation enabled")
-        except Exception as e:
-            print(f"⚠️  IMU initialization failed: {e}")
-            if config.imu_steering.fallback_on_error:
-                print("   Falling back to RC-only control")
-            else:
-                raise
 
     # Initialize OAK-D Lite depth camera, derived controllers, and recorder
     oak_reader = None
@@ -144,6 +129,54 @@ def run() -> None:
         except Exception as e:
             print(f"OAK-D Lite initialization failed: {e}")
             print("  Continuing without depth camera")
+
+    # Initialize IMU and steering compensator (after OAK-D so oak_d fallback is available).
+    # Priority: external I2C IMU (best quality) > OAK-D onboard IMU > none.
+    imu_source_cfg = getattr(config, "imu_source", "auto")
+    if config.imu_steering.enabled and imu_source_cfg != "none":
+        imu = None
+        imu_source_used = None
+
+        # Try external I2C IMU first (unless config explicitly says oak_d only)
+        if imu_source_cfg in ("auto", "external"):
+            try:
+                print("Probing external I2C IMU...")
+                imu = ImuReader(
+                    calibration_path=config.imu_calibration_path,
+                    mag_axis_map=getattr(config, "imu_mag_axis_map", None),
+                    heading_cw_positive=getattr(config, "imu_heading_cw_positive", True),
+                    use_magnetometer=config.imu_use_magnetometer,
+                )
+                imu_source_used = "external"
+                print("  External I2C IMU detected")
+            except Exception:
+                if imu_source_cfg == "external":
+                    print("  External IMU not found")
+                else:
+                    print("  External IMU not found, will try OAK-D IMU")
+
+        # Fall back to OAK-D onboard IMU if external is not available
+        if imu is None and imu_source_cfg in ("auto", "oak_d") and oak_reader is not None:
+            try:
+                from pi_app.hardware.oak_imu import OakImuReader
+                print("Initializing OAK-D onboard IMU...")
+                time.sleep(0.5)  # let the pipeline push a few IMU frames
+                imu = OakImuReader(oak_reader)
+                imu_source_used = "oak_d"
+            except Exception as e:
+                print(f"  OAK-D IMU initialization failed: {e}")
+
+        if imu is not None:
+            try:
+                imu_compensator = ImuSteeringCompensator(config.imu_steering, imu)
+                print(f"  IMU steering compensation enabled (source: {imu_source_used})")
+            except Exception as e:
+                print(f"  IMU steering init failed: {e}")
+                if not config.imu_steering.fallback_on_error:
+                    raise
+                print("   Falling back to RC-only control")
+        else:
+            print("  No IMU available — steering compensation disabled")
 
     # Initialize RTK GPS and waypoint navigation
     gps_reader = None

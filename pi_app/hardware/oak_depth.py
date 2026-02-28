@@ -60,6 +60,17 @@ class _RgbState:
     timestamp: float = 0.0
 
 
+@dataclass
+class _ImuState:
+    ax_mss: float = 0.0  # m/s²
+    ay_mss: float = 0.0
+    az_mss: float = 0.0
+    gx_rads: float = 0.0  # rad/s
+    gy_rads: float = 0.0
+    gz_rads: float = 0.0
+    timestamp: float = 0.0
+
+
 class OakDepthReader:
     """Background OAK-D Lite reader following the ArduinoRCReader thread pattern."""
 
@@ -76,6 +87,7 @@ class OakDepthReader:
         self._depth_state = _DepthState()
         self._det_state = _DetectionState(persons=[])
         self._rgb_state = _RgbState()
+        self._imu_state = _ImuState()
         self._lock = threading.Lock()
 
         self._thread: threading.Thread | None = None
@@ -140,6 +152,20 @@ class OakDepthReader:
         with self._lock:
             return self._rgb_state.frame
 
+    def get_imu_data(self) -> tuple[_ImuState, float]:
+        """Return (imu_state_copy, age_s). Thread-safe."""
+        with self._lock:
+            age = time.monotonic() - self._imu_state.timestamp if self._imu_state.timestamp else float("inf")
+            return _ImuState(
+                ax_mss=self._imu_state.ax_mss,
+                ay_mss=self._imu_state.ay_mss,
+                az_mss=self._imu_state.az_mss,
+                gx_rads=self._imu_state.gx_rads,
+                gy_rads=self._imu_state.gy_rads,
+                gz_rads=self._imu_state.gz_rads,
+                timestamp=self._imu_state.timestamp,
+            ), age
+
     @property
     def recording_enabled(self) -> bool:
         return self._rec_cfg is not None and self._rec_cfg.enabled
@@ -196,6 +222,14 @@ class OakDepthReader:
             depth_q = spatial_nn.passthroughDepth.createOutputQueue()
             rgb_preview_q = cam_rgb.requestOutput((640, 480)).createOutputQueue()
 
+            # IMU node (BMI270: accel + gyro at 100 Hz)
+            imu_node = pipeline.create(dai.node.IMU)
+            imu_node.enableIMUSensor(dai.IMUSensor.ACCELEROMETER_RAW, 100)
+            imu_node.enableIMUSensor(dai.IMUSensor.GYROSCOPE_RAW, 100)
+            imu_node.setBatchReportThreshold(1)
+            imu_node.setMaxBatchReports(10)
+            imu_q = imu_node.out.createOutputQueue()
+
             # Optional recording queues (v3: create from node outputs, no XLinkOut)
             h265_q = None
             if self._rec_cfg is not None and self._rec_cfg.enabled:
@@ -221,6 +255,7 @@ class OakDepthReader:
                 self._poll_depth(depth_q, np)
                 self._poll_detections(det_q)
                 self._poll_rgb(rgb_preview_q)
+                self._poll_imu(imu_q)
                 time.sleep(1.0 / self._obs_cfg.update_rate_hz)
         except Exception:
             logger.exception("OAK-D pipeline error")
@@ -310,3 +345,27 @@ class OakDepthReader:
                 self._rgb_state.timestamp = time.monotonic()
         except Exception:
             logger.debug("RGB poll error", exc_info=True)
+
+    def _poll_imu(self, imu_q) -> None:
+        """Extract latest accelerometer and gyroscope data from the OAK-D IMU."""
+        try:
+            imu_data = imu_q.tryGet()
+            if imu_data is None:
+                return
+            packets = imu_data.packets
+            if not packets:
+                return
+            pkt = packets[-1]
+            accel = pkt.acceleroMeter
+            gyro = pkt.gyroscope
+            now = time.monotonic()
+            with self._lock:
+                self._imu_state.ax_mss = accel.x
+                self._imu_state.ay_mss = accel.y
+                self._imu_state.az_mss = accel.z
+                self._imu_state.gx_rads = gyro.x
+                self._imu_state.gy_rads = gyro.y
+                self._imu_state.gz_rads = gyro.z
+                self._imu_state.timestamp = now
+        except Exception:
+            logger.debug("IMU poll error", exc_info=True)

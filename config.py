@@ -176,6 +176,10 @@ class Config:
     # Live web viewer (MJPEG stream + recordings browser)
     oak_web_viewer: OakWebViewerConfig = OakWebViewerConfig()
     
+    # IMU source: "auto" (try external I2C first, fall back to OAK-D),
+    # "external" (I2C breakout only), "oak_d" (OAK-D onboard BMI270 only), "none"
+    imu_source: str = "auto"
+
     # File paths
     imu_calibration_path: str = "imu_calibration.json"
     # Optional magnetometer axis map to align mag with accel/gyro frame.
