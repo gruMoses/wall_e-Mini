@@ -32,11 +32,11 @@ class FakeShutdown:
         self.scheduled.append(delay_seconds)
 
 
-NEUTRAL_RC = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch5_us=1000,
+NEUTRAL_RC = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000,
                        last_update_epoch_s=0.0)
-ARMED_RC = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch5_us=1000,
+ARMED_RC = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                      last_update_epoch_s=0.0)
-FWD_RC = RCInputs(ch1_us=2000, ch2_us=2000, ch3_us=1900, ch5_us=1000,
+FWD_RC = RCInputs(ch1_us=2000, ch2_us=2000, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                    last_update_epoch_s=0.0)
 
 
@@ -129,9 +129,7 @@ class TestControllerFollowMe(unittest.TestCase):
         shutdown = FakeShutdown()
         fm_cfg = FollowMeConfig()
         fm = FollowMeController(fm_cfg)
-        params = SafetyParams(debounce_seconds=0.0,
-                              follow_me_tap_count=4,
-                              follow_me_tap_window_s=2.0)
+        params = SafetyParams(debounce_seconds=0.0)
         ctrl = Controller(
             motor_driver=motor,
             arm_relay=relay,
@@ -141,81 +139,69 @@ class TestControllerFollowMe(unittest.TestCase):
         )
         return ctrl, motor
 
-    def _tap_cycle(self, ctrl, t):
-        """One arm-disarm cycle at time t. Returns time after."""
-        arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch5_us=1000,
+    def _enter_follow_me(self, ctrl, t):
+        """Arm and flip ch4 high. Returns time after."""
+        arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                           last_update_epoch_s=0.0)
-        disarm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch5_us=1000,
-                             last_update_epoch_s=0.0)
         ctrl.process(arm_rc, now_epoch_s=t)
-        ctrl.process(disarm_rc, now_epoch_s=t + 0.1)
+        fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1900, ch5_us=1000,
+                         last_update_epoch_s=0.0)
+        ctrl.process(fm_rc, now_epoch_s=t + 0.1)
         return t + 0.2
 
-    def test_follow_me_mode_activates_on_4_taps(self):
+    def test_follow_me_mode_activates_on_ch4_high(self):
         ctrl, motor = self._make_controller()
-        t = 10.0
-        for _ in range(4):
-            t = self._tap_cycle(ctrl, t)
+        self._enter_follow_me(ctrl, 10.0)
         self.assertEqual(ctrl._mode, "FOLLOW_ME")
+
+    def test_follow_me_mode_deactivates_on_ch4_low(self):
+        ctrl, motor = self._make_controller()
+        t = self._enter_follow_me(ctrl, 10.0)
+        self.assertEqual(ctrl._mode, "FOLLOW_ME")
+
+        # Ch4 low -> exit Follow Me
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
+                      last_update_epoch_s=0.0)
+        cmd, events, _ = ctrl.process(rc, now_epoch_s=t)
+        self.assertEqual(ctrl._mode, "MANUAL")
+        self.assertIn(SafetyEvent.FOLLOW_ME_EXITED, events)
 
     def test_follow_me_mode_deactivates_on_disarm(self):
         ctrl, motor = self._make_controller()
-        t = 10.0
-        for _ in range(4):
-            t = self._tap_cycle(ctrl, t)
+        t = self._enter_follow_me(ctrl, 10.0)
         self.assertEqual(ctrl._mode, "FOLLOW_ME")
 
-        # Arm then disarm -> exit Follow Me
-        arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch5_us=1000,
-                          last_update_epoch_s=0.0)
-        disarm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch5_us=1000,
+        # Disarm (ch3 low) while ch4 high -> exit Follow Me
+        disarm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1900, ch5_us=1000,
                              last_update_epoch_s=0.0)
-        ctrl.process(arm_rc, now_epoch_s=t)
-        cmd, events, _ = ctrl.process(disarm_rc, now_epoch_s=t + 0.1)
+        cmd, events, _ = ctrl.process(disarm_rc, now_epoch_s=t)
         self.assertEqual(ctrl._mode, "MANUAL")
         self.assertIn(SafetyEvent.FOLLOW_ME_EXITED, events)
 
     def test_follow_me_uses_detections_not_rc(self):
         ctrl, motor = self._make_controller()
-        t = 10.0
-        for _ in range(4):
-            t = self._tap_cycle(ctrl, t)
+        t = self._enter_follow_me(ctrl, 10.0)
 
-        # Arm back up so motor output is not forced neutral
-        arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch5_us=1000,
-                          last_update_epoch_s=0.0)
-        ctrl.process(arm_rc, now_epoch_s=t)
-        t += 0.1
-
-        # Feed person detections far ahead
         ctrl.set_person_detections([
             PersonDetection(x_m=0.0, z_m=3.0, confidence=0.9,
                             bbox=(0.45, 0.3, 0.55, 0.8))
         ])
 
-        # Process with neutral RC -> should still drive forward toward person
-        neutral_armed_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900,
-                                    ch5_us=1000, last_update_epoch_s=0.0)
-        cmd, _, telem = ctrl.process(neutral_armed_rc, now_epoch_s=t)
+        armed_fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900,
+                                ch4_us=1900, ch5_us=1000, last_update_epoch_s=0.0)
+        cmd, _, telem = ctrl.process(armed_fm_rc, now_epoch_s=t)
         self.assertEqual(telem["mode"], "FOLLOW_ME")
-        # Person ahead -> both motors should be above neutral
         self.assertGreater(cmd.left_byte, 126)
         self.assertGreater(cmd.right_byte, 126)
 
     def test_follow_me_no_person_returns_neutral(self):
         ctrl, motor = self._make_controller()
-        t = 10.0
-        for _ in range(4):
-            t = self._tap_cycle(ctrl, t)
-
-        # Arm
-        arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch5_us=1000,
-                          last_update_epoch_s=0.0)
-        ctrl.process(arm_rc, now_epoch_s=t)
-        t += 0.1
+        t = self._enter_follow_me(ctrl, 10.0)
 
         ctrl.set_person_detections([])
-        cmd, _, _ = ctrl.process(arm_rc, now_epoch_s=t)
+        armed_fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900,
+                                ch4_us=1900, ch5_us=1000, last_update_epoch_s=0.0)
+        cmd, _, _ = ctrl.process(armed_fm_rc, now_epoch_s=t)
         self.assertEqual(cmd.left_byte, 126)
         self.assertEqual(cmd.right_byte, 126)
 

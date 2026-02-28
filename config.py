@@ -90,8 +90,6 @@ class FollowMeConfig:
     steering_gain: float = 0.8
     detection_confidence: float = 0.5
     lost_target_timeout_s: float = 1.0
-    tap_window_s: float = 2.0
-    tap_count: int = 4
 
 
 @dataclass(frozen=True)

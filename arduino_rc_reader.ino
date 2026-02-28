@@ -3,10 +3,10 @@
 #include <PinChangeInterrupt.h>
 #define DEBUG 0
 
-const byte NUM_CHANNELS = 4;
-const byte chPins[NUM_CHANNELS] = {2, 3, 4, 6}; // Ch1, Ch2, Ch3, Ch5
-volatile unsigned long pulseWidths[NUM_CHANNELS] = {1500, 1500, 1500, 1500};
-volatile unsigned long pulseStart[NUM_CHANNELS] = {0, 0, 0, 0};
+const byte NUM_CHANNELS = 5;
+const byte chPins[NUM_CHANNELS] = {2, 3, 4, 10, 6}; // Ch1, Ch2, Ch3, Ch4, Ch5
+volatile unsigned long pulseWidths[NUM_CHANNELS] = {1500, 1500, 1500, 1500, 1500};
+volatile unsigned long pulseStart[NUM_CHANNELS] = {0, 0, 0, 0, 0};
 
 // Model X motor driver pin mapping (per attached photo)
 // Left motor: ENB(PWM)=D5, IN3=D7, IN4=D8
@@ -53,6 +53,12 @@ void isrCH4() {
   else 
     pulseWidths[3] = micros() - pulseStart[3];
 }
+void isrCH5() {
+  if (digitalRead(chPins[4]))
+    pulseStart[4] = micros();
+  else
+    pulseWidths[4] = micros() - pulseStart[4];
+}
 
 void setup() {
   Serial.begin(115200);
@@ -64,6 +70,7 @@ void setup() {
   attachPCINT(digitalPinToPCINT(chPins[1]), isrCH2, CHANGE);
   attachPCINT(digitalPinToPCINT(chPins[2]), isrCH3, CHANGE);
   attachPCINT(digitalPinToPCINT(chPins[3]), isrCH4, CHANGE);
+  attachPCINT(digitalPinToPCINT(chPins[4]), isrCH5, CHANGE);
 
   // Motor driver outputs
   pinMode(ENB_L, OUTPUT);
@@ -168,12 +175,13 @@ void loop() {
   const unsigned long nowMs = millis();
 
   // 1) Read current raw widths atomically once
-  unsigned long r0, r1, r2, r3;
+  unsigned long r0, r1, r2, r3, r4;
   noInterrupts();
   r0 = pulseWidths[0];
   r1 = pulseWidths[1];
   r2 = pulseWidths[2];
   r3 = pulseWidths[3];
+  r4 = pulseWidths[4];
   interrupts();
 
   // 2) Sanitize locally (bounds widened per receiver behavior)
@@ -182,13 +190,15 @@ void loop() {
   unsigned long f1 = clamp(r1);
   unsigned long f2 = clamp(r2);
   unsigned long f3 = clamp(r3);
+  unsigned long f4 = clamp(r4);
 
   // 3) Output CSV at ~50 Hz (20 ms)
   if (nowMs >= nextCsvAt) {
     Serial.print(f0); Serial.print(',');
     Serial.print(f1); Serial.print(',');
     Serial.print(f2); Serial.print(',');
-    Serial.println(f3);
+    Serial.print(f3); Serial.print(',');
+    Serial.println(f4);
     nextCsvAt = nowMs + 20;
   }
 
@@ -199,12 +209,14 @@ void loop() {
     Serial.print(r0); Serial.print(',');
     Serial.print(r1); Serial.print(',');
     Serial.print(r2); Serial.print(',');
-    Serial.print(r3);
+    Serial.print(r3); Serial.print(',');
+    Serial.print(r4);
     Serial.print(" filtered:");
     Serial.print(f0); Serial.print(',');
     Serial.print(f1); Serial.print(',');
     Serial.print(f2); Serial.print(',');
-    Serial.println(f3);
+    Serial.print(f3); Serial.print(',');
+    Serial.println(f4);
     nextDbgAt = nowMs + 500;
   }
 #endif

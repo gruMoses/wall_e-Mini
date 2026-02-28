@@ -24,6 +24,7 @@ class RCInputs:
     ch1_us: int
     ch2_us: int
     ch3_us: int
+    ch4_us: int
     ch5_us: int
     last_update_epoch_s: float
 
@@ -188,6 +189,7 @@ class Controller:
         self._safety_state, events = update_safety(
             self._safety_state,
             ch3_us=rc.ch3_us,
+            ch4_us=rc.ch4_us,
             ch5_us=rc.ch5_us,
             now_epoch_s=epoch_now,
             params=self._safety_params,

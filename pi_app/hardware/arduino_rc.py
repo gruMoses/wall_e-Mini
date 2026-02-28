@@ -27,7 +27,8 @@ except Exception as exc:  # pragma: no cover
     ) from exc
 
 
-CSV_FIELDS = 4
+CSV_FIELDS_OLD = 4
+CSV_FIELDS_NEW = 5
 BAUD_RATE = 115200
 DETECTION_READ_TIMEOUT_S = 0.5
 DETECTION_WINDOW_S = 5.0
@@ -45,11 +46,12 @@ class RCState:
     ch1_us: int = CENTER_PULSE_WIDTH_US
     ch2_us: int = CENTER_PULSE_WIDTH_US
     ch3_us: int = CENTER_PULSE_WIDTH_US
+    ch4_us: int = CENTER_PULSE_WIDTH_US
     ch5_us: int = CENTER_PULSE_WIDTH_US
     last_update_epoch_s: float = 0.0
 
-    def as_tuple(self) -> Tuple[int, int, int, int]:
-        return (self.ch1_us, self.ch2_us, self.ch3_us, self.ch5_us)
+    def as_tuple(self) -> Tuple[int, int, int, int, int]:
+        return (self.ch1_us, self.ch2_us, self.ch3_us, self.ch4_us, self.ch5_us)
 
 
 def _list_candidate_ports(preferred: Optional[str] = None) -> List[str]:
@@ -71,7 +73,7 @@ def _list_candidate_ports(preferred: Optional[str] = None) -> List[str]:
 
 
 def _try_detect_on_port(device: str) -> bool:
-    """Open a device and confirm it emits lines with exactly 4 integer CSV fields."""
+    """Open a device and confirm it emits parseable RC CSV lines."""
     try:
         with serial.Serial(device, BAUD_RATE, timeout=DETECTION_READ_TIMEOUT_S) as ser:
             ser.reset_input_buffer()
@@ -103,15 +105,30 @@ def discover_arduino_port(preferred: Optional[str] = "/dev/ttyUSB0") -> Optional
     return None
 
 
-def _parse_csv_line(line: str) -> Optional[Tuple[int, int, int, int]]:
+def _parse_csv_line(line: str) -> Optional[Tuple[int, int, int, int, int]]:
     parts = line.split(",")
-    if len(parts) != CSV_FIELDS:
+    if len(parts) not in (CSV_FIELDS_OLD, CSV_FIELDS_NEW):
         return None
     try:
-        values = tuple(int(p.strip()) for p in parts)  # type: ignore[assignment]
+        raw_values = [int(p.strip()) for p in parts]
     except ValueError:
         return None
-    return values  # type: ignore[return-value]
+    if len(raw_values) == CSV_FIELDS_NEW:
+        return (
+            raw_values[0],
+            raw_values[1],
+            raw_values[2],
+            raw_values[3],
+            raw_values[4],
+        )
+    # Backward compatibility for legacy firmware output: ch1,ch2,ch3,ch5
+    return (
+        raw_values[0],
+        raw_values[1],
+        raw_values[2],
+        CENTER_PULSE_WIDTH_US,
+        raw_values[3],
+    )
 
 
 def _apply_deadband(value_us: int) -> int:
@@ -125,7 +142,7 @@ class ArduinoRCReader:
     Background reader that exposes the latest sanitized RC values from the Arduino.
 
     - Autodetects the serial port unless one is provided
-    - Parses lines with exactly 4 integer CSV fields
+    - Parses lines with 5 CSV fields (ch1,ch2,ch3,ch4,ch5), while accepting legacy 4-field lines
     - Sanitizes each field: if outside [800, 2200] µs, substitute last valid (initial 1500)
     - Applies ±25 µs deadband around 1500 µs
     - Uses a 1.0 s read timeout during steady-state
@@ -148,6 +165,7 @@ class ArduinoRCReader:
         self._write_lock = threading.Lock()
 
         self._last_valid: List[int] = [
+            CENTER_PULSE_WIDTH_US,
             CENTER_PULSE_WIDTH_US,
             CENTER_PULSE_WIDTH_US,
             CENTER_PULSE_WIDTH_US,
@@ -228,7 +246,8 @@ class ArduinoRCReader:
                     ch1_us=sanitized[0],
                     ch2_us=sanitized[1],
                     ch3_us=sanitized[2],
-                    ch5_us=sanitized[3],
+                    ch4_us=sanitized[3],
+                    ch5_us=sanitized[4],
                     last_update_epoch_s=now,
                 )
             except Exception:

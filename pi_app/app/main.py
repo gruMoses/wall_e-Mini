@@ -130,7 +130,7 @@ def run() -> None:
                     print("  Obstacle avoidance enabled")
                 if config.follow_me.enabled:
                     follow_me_ctrl = FollowMeController(config.follow_me)
-                    print("  Follow Me mode available (4-tap Ch3 to activate)")
+                    print("  Follow Me mode available (Ch4 switch to activate)")
                 if rec_cfg is not None:
                     try:
                         oak_recorder = OakRecorder(config.oak_recording)
@@ -251,6 +251,7 @@ def run() -> None:
                 ch1_us=s.ch1_us,
                 ch2_us=s.ch2_us,
                 ch3_us=s.ch3_us,
+                ch4_us=s.ch4_us,
                 ch5_us=s.ch5_us,
                 last_update_epoch_s=s.last_update_epoch_s,
             )
@@ -357,7 +358,7 @@ def run() -> None:
                     gps_info = "  GPS(no fix)"
 
             line_cli = (
-                f"{src} RC(ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch5={s.ch5_us:4d}) "
+                f"{src} RC(ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch4={s.ch4_us:4d} ch5={s.ch5_us:4d}) "
                 f"{bt_display}  "
                 f"{imu_info}  corr_raw={corr_raw_str} corr_applied={corr_app_str}  "
                 f"armed={'Y' if cmd.is_armed else 'N'} ev={len(events)}"
@@ -387,7 +388,7 @@ def run() -> None:
                         "ts_iso": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
                         "src": src,
                         "mode": telem.get("mode", "MANUAL"),
-                        "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch5": s.ch5_us}),
+                        "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
                         "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
                         "imu": to_int(imu_status) if imu_status else None,
                         "imu_steering": to_int({
