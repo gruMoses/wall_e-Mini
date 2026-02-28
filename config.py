@@ -67,6 +67,89 @@ class VescConfig:
 
 
 @dataclass(frozen=True)
+class ObstacleAvoidanceConfig:
+    """Configuration for OAK-D Lite depth-based obstacle avoidance."""
+    enabled: bool = True
+    slow_distance_m: float = 1.5
+    stop_distance_m: float = 0.4
+    roi_width_pct: float = 0.5
+    roi_height_pct: float = 0.5
+    update_rate_hz: float = 15.0
+    stale_timeout_s: float = 0.5
+    stale_policy: str = "clear"  # "stop" or "clear" when depth data is stale
+
+
+@dataclass(frozen=True)
+class FollowMeConfig:
+    """Configuration for autonomous person-following mode."""
+    enabled: bool = True
+    follow_distance_m: float = 1.5
+    min_distance_m: float = 0.5
+    max_distance_m: float = 5.0
+    max_follow_speed_byte: int = 60
+    steering_gain: float = 0.8
+    detection_confidence: float = 0.5
+    lost_target_timeout_s: float = 1.0
+    tap_window_s: float = 2.0
+    tap_count: int = 4
+
+
+@dataclass(frozen=True)
+class OakRecordingConfig:
+    """Configuration for activity-triggered OAK-D recording (video + MCAP)."""
+    enabled: bool = True
+    recording_dir: str = "logs/oak"
+
+    # Trigger: record whenever obstacle avoidance is active or Follow Me is on
+    pre_buffer_s: float = 2.0         # ring-buffer seconds kept before trigger fires
+    post_event_linger_s: float = 3.0  # keep recording N seconds after last trigger
+
+    # H.265 video (on-device encoding, near-zero CPU cost)
+    video_enabled: bool = True
+    video_bitrate_kbps: int = 3000
+
+    # MCAP annotated snapshots + telemetry
+    mcap_enabled: bool = True
+    mcap_image_fps: float = 5.0       # annotated RGB snapshot rate
+    mcap_depth_fps: float = 2.0       # colorized depth snapshot rate
+
+    # Storage management
+    max_total_mb: int = 4000
+    max_age_days: int = 3
+
+
+@dataclass(frozen=True)
+class OakWebViewerConfig:
+    """Configuration for the live web viewer served from the Pi."""
+    enabled: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8080
+
+
+@dataclass(frozen=True)
+class GpsConfig:
+    """Configuration for DFRobot GNSS-RTK rover module (I2C)."""
+    enabled: bool = True
+    i2c_bus: int = 1
+    i2c_addr: int = 0x20
+    update_rate_hz: float = 1.0
+    min_quality: int = 1         # 0=invalid, 1=GPS, 2=DGPS, 4=RTK fixed, 5=RTK float
+    stale_timeout_s: float = 3.0
+
+
+@dataclass(frozen=True)
+class WaypointNavConfig:
+    """Configuration for autonomous GPS waypoint navigation."""
+    enabled: bool = True
+    waypoint_file: str = "waypoints.json"
+    arrival_radius_m: float = 0.5
+    cruise_speed_byte: int = 40
+    approach_speed_byte: int = 20
+    slow_radius_m: float = 2.0
+    min_rtk_quality: int = 4     # require RTK fixed for autonomous nav
+
+
+@dataclass(frozen=True)
 class Config:
     """Main configuration class."""
     
@@ -76,6 +159,24 @@ class Config:
     rc_map: RcMapConfig = RcMapConfig()
     # VESC config
     vesc: VescConfig = VescConfig()
+
+    # OAK-D Lite obstacle avoidance
+    obstacle_avoidance: ObstacleAvoidanceConfig = ObstacleAvoidanceConfig()
+
+    # RTK GPS
+    gps: GpsConfig = GpsConfig()
+
+    # Waypoint navigation
+    waypoint_nav: WaypointNavConfig = WaypointNavConfig()
+
+    # Follow Me person-tracking mode
+    follow_me: FollowMeConfig = FollowMeConfig()
+
+    # OAK-D recording (video + MCAP)
+    oak_recording: OakRecordingConfig = OakRecordingConfig()
+
+    # Live web viewer (MJPEG stream + recordings browser)
+    oak_web_viewer: OakWebViewerConfig = OakWebViewerConfig()
     
     # File paths
     imu_calibration_path: str = "imu_calibration.json"
@@ -85,7 +186,7 @@ class Config:
     # Heading convention: True = heading increases clockwise (compass style)
     imu_heading_cw_positive: bool = True
     # Whether to use the magnetometer for yaw/heading fusion
-    imu_use_magnetometer: bool = True
+    imu_use_magnetometer: bool = False
     
     # Debug settings
     log_imu_data: bool = False

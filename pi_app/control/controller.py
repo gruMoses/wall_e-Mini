@@ -12,6 +12,10 @@ from pi_app.control.mapping import map_pulse_to_byte, map_pulse_to_byte_saturate
 from pi_app.control.safety import update_safety, SafetyState, SafetyParams, SafetyEvent
 from pi_app.control.state import DriveCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
+from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
+from pi_app.control.follow_me import FollowMeController, PersonDetection
+from pi_app.control.waypoint_nav import WaypointNavController
+from pi_app.hardware.rtk_gps import GpsReading
 from config import config
 
 
@@ -73,6 +77,8 @@ class ThreadedShutdownScheduler:
 
 
 class Controller:
+    NEUTRAL = 126
+
     def __init__(
         self,
         motor_driver: MotorDriver | None = None,
@@ -80,6 +86,9 @@ class Controller:
         shutdown_scheduler: ShutdownScheduler | None = None,
         safety_params: SafetyParams | None = None,
         imu_compensator: Optional[ImuSteeringCompensator] = None,
+        obstacle_avoidance: Optional[ObstacleAvoidanceController] = None,
+        follow_me: Optional[FollowMeController] = None,
+        waypoint_nav: Optional[WaypointNavController] = None,
     ) -> None:
         self._motor = motor_driver or NoopMotorDriver()
         self._relay = arm_relay or NoopArmRelay()
@@ -104,6 +113,15 @@ class Controller:
         self._straight_latched = False
         self._straight_disengage_deadline = 0.0
 
+        # Obstacle avoidance, Follow Me, and Waypoint Nav
+        self._obstacle_avoidance = obstacle_avoidance
+        self._follow_me = follow_me
+        self._waypoint_nav = waypoint_nav
+        self._mode = "MANUAL"  # "MANUAL", "FOLLOW_ME", or "WAYPOINT_NAV"
+        self._obstacle_distance_m: float | None = None
+        self._obstacle_age_s: float | None = None
+        self._gps_reading: GpsReading | None = None
+
     def _reset_imu_timestamp(self, now: float) -> None:
         """Reset the monotonic timestamp used to throttle IMU updates.
 
@@ -111,6 +129,51 @@ class Controller:
         permitted without reaching into private attributes.
         """
         self._last_imu_update = now
+
+    def set_obstacle_data(self, distance_m: float, age_s: float) -> None:
+        """Feed latest depth reading from OakDepthReader."""
+        self._obstacle_distance_m = distance_m
+        self._obstacle_age_s = age_s
+
+    def set_person_detections(self, detections: list[PersonDetection]) -> None:
+        """Feed latest person detections from OakDepthReader."""
+        self._person_detections = detections
+
+    def set_gps_reading(self, reading: GpsReading | None) -> None:
+        """Feed latest reading from RtkGpsReader."""
+        self._gps_reading = reading
+
+    def activate_follow_me(self) -> bool:
+        """Enter FOLLOW_ME mode from web UI. Returns True if activated."""
+        if self._follow_me is not None and self._safety_state.is_armed:
+            self._mode = "FOLLOW_ME"
+            return True
+        return False
+
+    def deactivate_follow_me(self) -> None:
+        """Return to MANUAL mode from Follow Me."""
+        if self._mode == "FOLLOW_ME":
+            self._mode = "MANUAL"
+
+    def activate_waypoint_nav(self) -> None:
+        """Enter WAYPOINT_NAV mode (call from UI / CLI)."""
+        if self._waypoint_nav is not None and not self._waypoint_nav.completed:
+            self._mode = "WAYPOINT_NAV"
+
+    def deactivate_waypoint_nav(self) -> None:
+        """Return to MANUAL mode from waypoint nav."""
+        if self._mode == "WAYPOINT_NAV":
+            self._mode = "MANUAL"
+
+    @staticmethod
+    def _scale_toward_neutral(byte_val: int, scale: float) -> int:
+        """Interpolate a motor byte toward neutral (126) by the given scale.
+
+        scale=1.0 -> unchanged, scale=0.0 -> neutral.
+        """
+        neutral = 126
+        result = neutral + (byte_val - neutral) * scale
+        return max(0, min(255, int(round(result))))
 
     def process(
         self,
@@ -130,17 +193,57 @@ class Controller:
             params=self._safety_params,
         )
 
+        # React to mode transitions from safety events
+        for ev in events:
+            if ev is SafetyEvent.FOLLOW_ME_ENTERED:
+                self._mode = "FOLLOW_ME"
+            elif ev in (SafetyEvent.FOLLOW_ME_EXITED, SafetyEvent.EMERGENCY_TRIGGERED):
+                self._mode = "MANUAL"
+        # Disarm exits waypoint nav
+        if not self._safety_state.is_armed and self._mode == "WAYPOINT_NAV":
+            self._mode = "MANUAL"
+
         # Emergency triggered: stop motors, disarm, schedule shutdown
         if any(e is SafetyEvent.EMERGENCY_TRIGGERED for e in events):
             self._motor.stop()
             self._relay.set_armed(False)
             self._shutdown.schedule_shutdown(delay_seconds=5.0)
 
-        # Command computation (prefer Bluetooth override if provided)
-        telemetry: dict = {}
-        if bt_override_bytes is not None:
+        # Command computation
+        telemetry: dict = {"mode": self._mode}
+
+        if self._mode == "WAYPOINT_NAV" and self._waypoint_nav is not None:
+            gps = self._gps_reading
+            if gps is not None:
+                gps_age = time.monotonic() - gps.timestamp
+                target_brg, speed = self._waypoint_nav.compute(
+                    gps.latitude, gps.longitude, gps.fix_quality, gps_age,
+                )
+                if speed > 0 and self._imu_compensator is not None:
+                    self._imu_compensator.set_target_heading(target_brg)
+                fwd = min(126 + speed, 255)
+                left = right = fwd
+            else:
+                left = right = self.NEUTRAL
+            steering_input = 0.0
+            nav_st = self._waypoint_nav.get_status()
+            telemetry["wp_index"] = nav_st.waypoint_index
+            telemetry["wp_total"] = nav_st.waypoint_total
+            telemetry["wp_name"] = nav_st.waypoint_name
+            telemetry["wp_bearing_deg"] = nav_st.bearing_deg
+            telemetry["wp_distance_m"] = nav_st.distance_m
+            telemetry["wp_completed"] = nav_st.completed
+            if nav_st.completed:
+                self._mode = "MANUAL"
+        elif self._mode == "FOLLOW_ME" and self._follow_me is not None:
+            detections = getattr(self, "_person_detections", []) or []
+            left, right = self._follow_me.compute(detections)
+            steering_input = self._bytes_to_steering_input(left, right)
+            fm_status = self._follow_me.get_status()
+            fm_status["follow_me_num_persons"] = len(detections)
+            telemetry.update(fm_status)
+        elif bt_override_bytes is not None:
             left, right = bt_override_bytes
-            # Convert byte values to normalized steering input for IMU
             steering_input = self._bytes_to_steering_input(left, right)
         else:
             # Tank-drive: ch1 is left throttle, ch2 is right throttle
@@ -152,7 +255,6 @@ class Controller:
 
             left = map_pulse_to_byte_saturated(rc.ch1_us, f_full, r_full)
             right = map_pulse_to_byte_saturated(rc.ch2_us, f_full, r_full)
-            # Convert RC values to normalized steering input for IMU
             steering_input = self._bytes_to_steering_input(left, right)
 
         # Apply IMU steering compensation if available and enabled
@@ -256,6 +358,20 @@ class Controller:
             except Exception:
                 pass
         telemetry["imu_correction_applied"] = corr_applied
+
+        # Obstacle avoidance throttle scaling
+        obstacle_scale = 1.0
+        if self._obstacle_avoidance is not None and self._obstacle_distance_m is not None:
+            obstacle_scale = self._obstacle_avoidance.compute_throttle_scale(
+                self._obstacle_distance_m,
+                self._obstacle_age_s if self._obstacle_age_s is not None else 999.0,
+            )
+            left = self._scale_toward_neutral(left, obstacle_scale)
+            right = self._scale_toward_neutral(right, obstacle_scale)
+            oa_status = self._obstacle_avoidance.get_status()
+            telemetry.update(oa_status)
+        telemetry["obstacle_throttle_scale"] = obstacle_scale
+        telemetry["obstacle_distance_m"] = self._obstacle_distance_m
 
         # If disarmed, force neutral outputs
         if not self._safety_state.is_armed:

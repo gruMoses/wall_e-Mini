@@ -13,18 +13,35 @@ try:
     from pi_app.hardware.arduino_modelx import ArduinoModelXDriver
     from pi_app.hardware.arduino_rc import ArduinoRCReader
     from pi_app.hardware.imu_reader import ImuReader
+    from pi_app.hardware.oak_depth import OakDepthReader
+    from pi_app.hardware.oak_recorder import OakRecorder, RecordingTelemetry
+    from pi_app.hardware.rtk_gps import RtkGpsReader
+    from pi_app.web.oak_viewer import OakWebViewer
     from pi_app.control.controller import Controller, RCInputs
     from pi_app.control.imu_steering import ImuSteeringCompensator
+    from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
+    from pi_app.control.follow_me import FollowMeController
+    from pi_app.control.waypoint_nav import (
+        WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
+    )
     from config import config
 except ModuleNotFoundError:
-    # Allow running as a script: python3 /home/pi/pi_app/app/main.py
     sys.path.append(str(Path(__file__).resolve().parents[2]))
     from pi_app.hardware.vesc import VescCanDriver  # type: ignore
     from pi_app.hardware.arduino_modelx import ArduinoModelXDriver  # type: ignore
     from pi_app.hardware.arduino_rc import ArduinoRCReader  # type: ignore
     from pi_app.hardware.imu_reader import ImuReader  # type: ignore
+    from pi_app.hardware.oak_depth import OakDepthReader  # type: ignore
+    from pi_app.hardware.oak_recorder import OakRecorder, RecordingTelemetry  # type: ignore
+    from pi_app.hardware.rtk_gps import RtkGpsReader  # type: ignore
+    from pi_app.web.oak_viewer import OakWebViewer  # type: ignore
     from pi_app.control.controller import Controller, RCInputs  # type: ignore
     from pi_app.control.imu_steering import ImuSteeringCompensator  # type: ignore
+    from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController  # type: ignore
+    from pi_app.control.follow_me import FollowMeController  # type: ignore
+    from pi_app.control.waypoint_nav import (  # type: ignore
+        WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
+    )
     from config import config  # type: ignore
 
 
@@ -93,6 +110,77 @@ def run() -> None:
             else:
                 raise
 
+    # Initialize OAK-D Lite depth camera, derived controllers, and recorder
+    oak_reader = None
+    oak_recorder = None
+    obstacle_ctrl = None
+    follow_me_ctrl = None
+    if config.obstacle_avoidance.enabled or config.follow_me.enabled:
+        try:
+            if OakDepthReader.detect():
+                rec_cfg = config.oak_recording if config.oak_recording.enabled else None
+                oak_reader = OakDepthReader(
+                    config.obstacle_avoidance, config.follow_me,
+                    recording_config=rec_cfg,
+                )
+                oak_reader.start()
+                print("OAK-D Lite detected and started")
+                if config.obstacle_avoidance.enabled:
+                    obstacle_ctrl = ObstacleAvoidanceController(config.obstacle_avoidance)
+                    print("  Obstacle avoidance enabled")
+                if config.follow_me.enabled:
+                    follow_me_ctrl = FollowMeController(config.follow_me)
+                    print("  Follow Me mode available (4-tap Ch3 to activate)")
+                if rec_cfg is not None:
+                    try:
+                        oak_recorder = OakRecorder(config.oak_recording)
+                        oak_recorder.start(oak_reader)
+                        print("  Activity-triggered recording enabled")
+                    except Exception as e:
+                        print(f"  Recording init failed: {e} — continuing without recording")
+                        oak_recorder = None
+            else:
+                print("OAK-D Lite not detected — obstacle avoidance / Follow Me disabled")
+        except Exception as e:
+            print(f"OAK-D Lite initialization failed: {e}")
+            print("  Continuing without depth camera")
+
+    # Initialize RTK GPS and waypoint navigation
+    gps_reader = None
+    waypoint_nav_ctrl = None
+    if config.gps.enabled:
+        try:
+            if RtkGpsReader.detect(config.gps.i2c_bus, config.gps.i2c_addr):
+                gps_reader = RtkGpsReader(config.gps)
+                gps_reader.start()
+                print("RTK GPS detected and started")
+                if config.waypoint_nav.enabled:
+                    wp_cfg = WpNavCfg(
+                        arrival_radius_m=config.waypoint_nav.arrival_radius_m,
+                        cruise_speed_byte=config.waypoint_nav.cruise_speed_byte,
+                        approach_speed_byte=config.waypoint_nav.approach_speed_byte,
+                        slow_radius_m=config.waypoint_nav.slow_radius_m,
+                        min_rtk_quality=config.waypoint_nav.min_rtk_quality,
+                        stale_timeout_s=config.gps.stale_timeout_s,
+                    )
+                    wp_file = Path(__file__).resolve().parents[2] / config.waypoint_nav.waypoint_file
+                    wps = []
+                    if wp_file.exists():
+                        try:
+                            wps = load_waypoints(wp_file)
+                            print(f"  Loaded {len(wps)} waypoints from {wp_file.name}")
+                        except Exception as e:
+                            print(f"  Failed to load waypoints: {e}")
+                    else:
+                        print(f"  No waypoint file ({wp_file.name}); nav available but empty")
+                    waypoint_nav_ctrl = WaypointNavController(wp_cfg, wps)
+                    print("  Waypoint navigation available")
+            else:
+                print("RTK GPS not detected — waypoint navigation disabled")
+        except Exception as e:
+            print(f"RTK GPS initialization failed: {e}")
+            print("  Continuing without GPS")
+
     motor_driver = None
     if VescCanDriver.detect():
         print("VESC over CAN detected; using VESC driver")
@@ -101,8 +189,24 @@ def run() -> None:
         print("VESC not detected; using Arduino Model X motor driver (stub)")
         motor_driver = ArduinoModelXDriver(rc_reader=rc_reader)
 
-    controller = Controller(motor_driver=motor_driver, imu_compensator=imu_compensator)
+    controller = Controller(
+        motor_driver=motor_driver,
+        imu_compensator=imu_compensator,
+        obstacle_avoidance=obstacle_ctrl,
+        follow_me=follow_me_ctrl,
+        waypoint_nav=waypoint_nav_ctrl,
+    )
     bt_server = None  # Set to None to indicate external SPP service is used
+
+    # Start web viewer (needs recorder + controller)
+    oak_web_viewer = None
+    if config.oak_web_viewer.enabled and oak_recorder is not None:
+        try:
+            oak_web_viewer = OakWebViewer(config.oak_web_viewer, oak_recorder, controller=controller)
+            oak_web_viewer.start()
+            print(f"Web viewer at http://0.0.0.0:{config.oak_web_viewer.port}/")
+        except Exception as e:
+            print(f"Web viewer failed to start: {e}")
 
     # Debug trackers removed to simplify CLI view
 
@@ -163,7 +267,46 @@ def run() -> None:
                         bt_override = (bt_data["left_byte"], bt_data["right_byte"])
             except Exception:
                 pass  # No BT data available, use RC instead
+            # Feed OAK-D Lite data to controller
+            oak_depth_stats = None
+            oak_persons = []
+            if oak_reader is not None:
+                dist_m, dist_age = oak_reader.get_min_distance()
+                controller.set_obstacle_data(dist_m, dist_age)
+                oak_depth_stats = oak_reader.get_depth_stats()
+                if follow_me_ctrl is not None:
+                    oak_persons = oak_reader.get_person_detections()
+                    controller.set_person_detections(oak_persons)
+            # Feed GPS data to controller
+            gps_reading = None
+            if gps_reader is not None:
+                gps_reading = gps_reader.get_reading()
+                controller.set_gps_reading(gps_reading)
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
+
+            # Feed recorder (activity-triggered)
+            if oak_recorder is not None:
+                try:
+                    rec_telem = RecordingTelemetry(
+                        timestamp=time.time(),
+                        mode=telem.get("mode", "MANUAL"),
+                        throttle_scale=telem.get("obstacle_throttle_scale", 1.0),
+                        obstacle_distance_m=telem.get("obstacle_distance_m"),
+                        motor_left=cmd.left_byte,
+                        motor_right=cmd.right_byte,
+                        is_armed=cmd.is_armed,
+                        depth_stats=oak_depth_stats,
+                        person_detections=oak_persons,
+                        follow_tracking=telem.get("follow_me_tracking", False),
+                        follow_target_x_m=telem.get("follow_me_target_x_m"),
+                        follow_target_z_m=telem.get("follow_me_target_z_m"),
+                    )
+                    depth_frame = oak_reader.get_latest_depth_frame() if oak_reader else None
+                    rgb_frame = oak_reader.get_latest_rgb_frame() if oak_reader else None
+                    oak_recorder.update(rec_telem, depth_frame=depth_frame, rgb_frame=rgb_frame)
+                except Exception:
+                    pass
+
             imu_dt_ms = None
             imu_update_ts = getattr(controller, "_last_imu_update", None)
             if (
@@ -195,12 +338,30 @@ def run() -> None:
             bt_display = "BT(external SPP)"
             if bt_override is not None:
                 bt_display = f"BT(L={bt_override[0]:3d} R={bt_override[1]:3d})"
-            
+
+            # Obstacle / Follow Me info
+            mode_str = telem.get("mode", "MANUAL")
+            oa_scale = telem.get("obstacle_throttle_scale", 1.0)
+            oa_dist = telem.get("obstacle_distance_m")
+            oak_info = ""
+            if oak_reader is not None:
+                dist_str = f"{oa_dist:.2f}m" if oa_dist is not None else "?"
+                oak_info = f"  OAK({dist_str} scl={oa_scale:.1f})"
+            mode_info = f"  [{mode_str}]" if mode_str != "MANUAL" else ""
+
+            gps_info = ""
+            if gps_reader is not None:
+                if gps_reading is not None:
+                    gps_info = f"  GPS(q{gps_reading.fix_quality} sat={gps_reading.satellites_used})"
+                else:
+                    gps_info = "  GPS(no fix)"
+
             line_cli = (
                 f"{src} RC(ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch5={s.ch5_us:4d}) "
                 f"{bt_display}  "
                 f"{imu_info}  corr_raw={corr_raw_str} corr_applied={corr_app_str}  "
-                f"armed={'Y' if cmd.is_armed else 'N'} ev={len(events)}   "
+                f"armed={'Y' if cmd.is_armed else 'N'} ev={len(events)}"
+                f"{oak_info}{gps_info}{mode_info}   "
             )
             if pid_debug:
                 print(line_cli)
@@ -225,6 +386,7 @@ def run() -> None:
                         "ts": to_int(now_ts),
                         "ts_iso": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
                         "src": src,
+                        "mode": telem.get("mode", "MANUAL"),
                         "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch5": s.ch5_us}),
                         "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
                         "imu": to_int(imu_status) if imu_status else None,
@@ -240,6 +402,35 @@ def run() -> None:
                             "d": telem.get("pid_d"),
                             "correction": telem.get("pid_correction"),
                             "integral_error": (imu_status or {}).get("integral_error"),
+                        }),
+                        "obstacle": round1({
+                            "distance_m": telem.get("obstacle_distance_m"),
+                            "throttle_scale": telem.get("obstacle_throttle_scale"),
+                            "depth_p5_mm": oak_depth_stats.p5_mm if oak_depth_stats else None,
+                            "depth_p50_mm": oak_depth_stats.p50_mm if oak_depth_stats else None,
+                            "depth_valid_pct": oak_depth_stats.valid_pixel_pct if oak_depth_stats else None,
+                        }),
+                        "follow_me": round1({
+                            "tracking": telem.get("follow_me_tracking"),
+                            "target_z_m": telem.get("follow_me_target_z_m"),
+                            "target_x_m": telem.get("follow_me_target_x_m"),
+                            "num_persons": telem.get("follow_me_num_persons"),
+                        }),
+                        "gps": round1({
+                            "lat": gps_reading.latitude if gps_reading else None,
+                            "lon": gps_reading.longitude if gps_reading else None,
+                            "alt_m": gps_reading.altitude_m if gps_reading else None,
+                            "fix": gps_reading.fix_quality if gps_reading else None,
+                            "sats": gps_reading.satellites_used if gps_reading else None,
+                            "hdop": gps_reading.hdop if gps_reading else None,
+                        }),
+                        "waypoint_nav": round1({
+                            "wp_index": telem.get("wp_index"),
+                            "wp_total": telem.get("wp_total"),
+                            "wp_name": telem.get("wp_name"),
+                            "wp_bearing_deg": telem.get("wp_bearing_deg"),
+                            "wp_distance_m": telem.get("wp_distance_m"),
+                            "wp_completed": telem.get("wp_completed"),
                         }),
                         "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
@@ -267,6 +458,21 @@ def run() -> None:
         pass
     finally:
         print()
+        try:
+            if oak_recorder is not None:
+                oak_recorder.stop()
+        except Exception:
+            pass
+        try:
+            if oak_reader is not None:
+                oak_reader.stop()
+        except Exception:
+            pass
+        try:
+            if gps_reader is not None:
+                gps_reader.stop()
+        except Exception:
+            pass
         try:
             if bt_server is not None:  # Only stop if bt_server was created
                 bt_server.stop()
