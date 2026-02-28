@@ -8,7 +8,10 @@ from pathlib import Path
 # Add parent directory to path for config import
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from pi_app.control.mapping import map_pulse_to_byte, map_pulse_to_byte_saturated
+from pi_app.control.mapping import (
+    map_pulse_to_byte, map_pulse_to_byte_saturated,
+    CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT,
+)
 from pi_app.control.safety import update_safety, SafetyState, SafetyParams, SafetyEvent
 from pi_app.control.state import DriveCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
@@ -78,7 +81,7 @@ class ThreadedShutdownScheduler:
 
 
 class Controller:
-    NEUTRAL = 126
+    NEUTRAL = CENTER_OUTPUT_VALUE
 
     def __init__(
         self,
@@ -122,6 +125,7 @@ class Controller:
         self._obstacle_distance_m: float | None = None
         self._obstacle_age_s: float | None = None
         self._gps_reading: GpsReading | None = None
+        self._person_detections: list[PersonDetection] = []
 
     def _reset_imu_timestamp(self, now: float) -> None:
         """Reset the monotonic timestamp used to throttle IMU updates.
@@ -172,9 +176,8 @@ class Controller:
 
         scale=1.0 -> unchanged, scale=0.0 -> neutral.
         """
-        neutral = 126
-        result = neutral + (byte_val - neutral) * scale
-        return max(0, min(255, int(round(result))))
+        result = CENTER_OUTPUT_VALUE + (byte_val - CENTER_OUTPUT_VALUE) * scale
+        return max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(result))))
 
     def process(
         self,
@@ -223,7 +226,7 @@ class Controller:
                 )
                 if speed > 0 and self._imu_compensator is not None:
                     self._imu_compensator.set_target_heading(target_brg)
-                fwd = min(126 + speed, 255)
+                fwd = min(CENTER_OUTPUT_VALUE + speed, MAX_OUTPUT)
                 left = right = fwd
             else:
                 left = right = self.NEUTRAL
@@ -238,7 +241,7 @@ class Controller:
             if nav_st.completed:
                 self._mode = "MANUAL"
         elif self._mode == "FOLLOW_ME" and self._follow_me is not None:
-            detections = getattr(self, "_person_detections", []) or []
+            detections = self._person_detections or []
             left, right = self._follow_me.compute(detections)
             steering_input = self._bytes_to_steering_input(left, right)
             fm_status = self._follow_me.get_status()
@@ -286,8 +289,8 @@ class Controller:
         if bt_override_bytes is not None:
             # For Bluetooth, use the motor byte values to determine if moving
             bt_left, bt_right = bt_override_bytes
-            bt_left_diff = abs(bt_left - 126)  # Distance from neutral (126)
-            bt_right_diff = abs(bt_right - 126)
+            bt_left_diff = abs(bt_left - CENTER_OUTPUT_VALUE)
+            bt_right_diff = abs(bt_right - CENTER_OUTPUT_VALUE)
             moving_ok = max(bt_left_diff, bt_right_diff) >= 20  # Minimum movement threshold
         else:
             # For RC, use the original logic
@@ -300,9 +303,8 @@ class Controller:
             # For Bluetooth, check if both motors are similar (straight intent)
             bt_left, bt_right = bt_override_bytes
             abs_diff = abs(bt_left - bt_right)
-            equal_abs_ok = abs_diff <= 10  # Small tolerance for byte values
-            # Relative check (difference relative to magnitude)
-            max_abs = max(abs(bt_left - 126), abs(bt_right - 126), 1)
+            equal_abs_ok = abs_diff <= 10
+            max_abs = max(abs(bt_left - CENTER_OUTPUT_VALUE), abs(bt_right - CENTER_OUTPUT_VALUE), 1)
             equal_rel_ok = (abs_diff / max_abs) <= rel_pct
         else:
             # For RC, use the original logic
@@ -355,8 +357,8 @@ class Controller:
                 biasL = int(getattr(config.imu_steering, 'straight_bias_left_byte', 0))
                 biasR = int(getattr(config.imu_steering, 'straight_bias_right_byte', 0))
                 if biasL or biasR:
-                    left = max(0, min(255, left + biasL))
-                    right = max(0, min(255, right + biasR))
+                    left = max(MIN_OUTPUT, min(MAX_OUTPUT, left + biasL))
+                    right = max(MIN_OUTPUT, min(MAX_OUTPUT, right + biasR))
             except Exception:
                 pass
         telemetry["imu_correction_applied"] = corr_applied
@@ -377,14 +379,13 @@ class Controller:
 
         # If disarmed, force neutral outputs
         if not self._safety_state.is_armed:
-            left = right = 126
+            left = right = CENTER_OUTPUT_VALUE
             self._motor.stop()
         else:
-            # Hardware guard: enforce max 255 before sending
-            if left > 255:
-                left = 255
-            if right > 255:
-                right = 255
+            if left > MAX_OUTPUT:
+                left = MAX_OUTPUT
+            if right > MAX_OUTPUT:
+                right = MAX_OUTPUT
             self._motor.set_tracks(left, right)
 
         # Reflect arm relay state
@@ -406,15 +407,9 @@ class Controller:
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:
         """Convert left/right byte values to normalized steering input (-1.0 to 1.0)."""
-        # Center is 126, so compute steering as difference from center
-        left_diff = left_byte - 126
-        right_diff = right_byte - 126
-        
-        # Average the steering input and normalize to [-1.0, 1.0]
-        # Positive means turning right, negative means turning left
-        steering = (right_diff - left_diff) / 2.0 / 126.0
-        
-        # Clamp to [-1.0, 1.0]
+        left_diff = left_byte - CENTER_OUTPUT_VALUE
+        right_diff = right_byte - CENTER_OUTPUT_VALUE
+        steering = (right_diff - left_diff) / 2.0 / CENTER_OUTPUT_VALUE
         return max(-1.0, min(1.0, steering))
 
     def _apply_imu_compensation(self, steering_input: float, now_s: float) -> Optional[float]:
@@ -442,7 +437,7 @@ class Controller:
     def _apply_steering_correction(self, base_byte: int, correction: float) -> int:
         """Apply steering correction to a motor byte value."""
         corrected = base_byte + int(round(correction))
-        return max(0, min(255, corrected))
+        return max(MIN_OUTPUT, min(MAX_OUTPUT, corrected))
 
 
     def get_imu_status(self) -> Optional[dict]:

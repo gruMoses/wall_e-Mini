@@ -15,8 +15,9 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from config import FollowMeConfig
+from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT
 
-NEUTRAL = 126
+NEUTRAL = CENTER_OUTPUT_VALUE
 
 
 @dataclass(frozen=True)
@@ -82,8 +83,8 @@ class FollowMeController:
         right = NEUTRAL + speed_offset - steer_offset
 
         return (
-            max(0, min(255, int(round(left)))),
-            max(0, min(255, int(round(right)))),
+            max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(left)))),
+            max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(right)))),
         )
 
     def _select_target(

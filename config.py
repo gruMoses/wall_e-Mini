@@ -192,7 +192,6 @@ class Config:
     
     # Debug settings
     log_imu_data: bool = False
-    log_steering_corrections: bool = True
 
 
 # Global configuration instance

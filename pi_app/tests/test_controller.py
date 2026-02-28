@@ -3,7 +3,7 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from pi_app.control.controller import Controller, RCInputs, MotorDriver, ArmRelay, ShutdownScheduler
-from pi_app.control.mapping import MIN_PULSE_WIDTH_US, MAX_PULSE_WIDTH_US
+from pi_app.control.mapping import MIN_PULSE_WIDTH_US, MAX_PULSE_WIDTH_US, MAX_OUTPUT, MIN_OUTPUT
 from pi_app.control.safety import SafetyEvent
 from config import config as default_config
 
@@ -69,7 +69,7 @@ class TestController(unittest.TestCase):
             last_update_epoch_s=0.0,
         )
         cmd, events, _ = c.process(rc, now_epoch_s=0.6)
-        self.assertEqual(motor.commands[-1], (255, 0))
+        self.assertEqual(motor.commands[-1], (MAX_OUTPUT, MIN_OUTPUT))
         self.assertTrue(cmd.is_armed)
 
     def test_emergency_triggers_shutdown_and_stop(self):
