@@ -141,7 +141,8 @@ class PIDAutoTuner:
         finally:
             # Always stop motors
             try:
-                self._write_tracks(126, 126)
+                from pi_app.control.mapping import CENTER_OUTPUT_VALUE
+                self._write_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
                 self.motor_driver.stop()
             except Exception:
                 pass
