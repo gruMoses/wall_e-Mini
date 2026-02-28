@@ -2,11 +2,18 @@ import time
 import sys
 import os
 import json
+import signal
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 import fcntl
 import argparse
+
+
+def _sigterm_handler(signum, frame):
+    raise KeyboardInterrupt
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 try:
     from pi_app.hardware.vesc import VescCanDriver
