@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT
+
 
 @dataclass
 class Cmd2:
@@ -71,37 +73,34 @@ def parse_v1(line: str) -> Optional[Tuple[float, float, int]]:
 
 def floats_to_bytes(left_f: float, right_f: float) -> Tuple[int, int]:
     """
-    Map normalized floats in [-1, 1] to bytes in [0, 255].
-    Center 0.0 maps to 126 (system neutral). Endpoints map to 0/255.
+    Map normalized floats in [-1, 1] to motor bytes in [0, 254].
+    Center 0.0 maps to 126 (system neutral). Endpoints map to 0/254.
     A small deadband around 0.0 forces exact neutral to avoid drift.
     """
-    DEAD_BAND = 0.02  # approx 2% stick deadband
-    TOP_SNAP = 0.95   # snap to full scale when beyond this
+    DEAD_BAND = 0.02
+    TOP_SNAP = 0.95
 
     def map_one(v: float) -> int:
-        # Clamp and top/bottom snap
         if v > 1.0:
             v = 1.0
         if v < -1.0:
             v = -1.0
         if v >= TOP_SNAP:
-            return 255
+            return MAX_OUTPUT
         if v <= -TOP_SNAP:
-            return 0
+            return MIN_OUTPUT
         if -DEAD_BAND <= v <= DEAD_BAND:
-            return 126
-        # Positive side maps over upper span (129 steps)
+            return CENTER_OUTPUT_VALUE
         if v > 0.0:
-            upper_span = 255 - 126  # 129
-            mapped = 126 + int(round(min(1.0, v) * upper_span))
+            upper_span = MAX_OUTPUT - CENTER_OUTPUT_VALUE
+            mapped = CENTER_OUTPUT_VALUE + int(round(min(1.0, v) * upper_span))
         else:
-            # Negative side maps over lower span (126 steps)
-            lower_span = 126
-            mapped = 126 - int(round(min(1.0, abs(v)) * lower_span))
-        if mapped < 0:
-            return 0
-        if mapped > 255:
-            return 255
+            lower_span = CENTER_OUTPUT_VALUE
+            mapped = CENTER_OUTPUT_VALUE - int(round(min(1.0, abs(v)) * lower_span))
+        if mapped < MIN_OUTPUT:
+            return MIN_OUTPUT
+        if mapped > MAX_OUTPUT:
+            return MAX_OUTPUT
         return mapped
 
     return map_one(left_f), map_one(right_f)

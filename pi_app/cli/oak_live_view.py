@@ -35,12 +35,12 @@ LABELS = [
     "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor",
 ]
 PERSON_LABEL = 15
-NEUTRAL = 126
+from pi_app.control.mapping import CENTER_OUTPUT_VALUE as NEUTRAL, MAX_OUTPUT, MIN_OUTPUT
 
 
 def _scale_toward_neutral(byte_val: int, scale: float) -> int:
     result = NEUTRAL + (byte_val - NEUTRAL) * scale
-    return max(0, min(255, int(round(result))))
+    return max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(result))))
 
 
 # ---------------------------------------------------------------------------

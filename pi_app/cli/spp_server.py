@@ -12,34 +12,34 @@ except Exception:
     raise
 
 try:
-    # Local imports for protocol parsing (no auth)
     from pi_app.io.bt_proto import parse_cmd2, accept_cmd2, parse_v1, floats_to_bytes
+    from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[2]))
     from pi_app.io.bt_proto import parse_cmd2, accept_cmd2, parse_v1, floats_to_bytes  # type: ignore
+    from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT  # type: ignore
 
 SPP_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 
 
 def ints_to_bytes(left_i: int, right_i: int):
-    """Convert integer values (-1000 to 1000) to byte values (0-255)"""
     DEAD_BAND_INT = 20
     TOP_SNAP_INT = 950
-    
+
     def map_one(v: int) -> int:
         if v < -1000: v = -1000
         if v > 1000: v = 1000
-        if v >= TOP_SNAP_INT: return 255
-        if v <= -TOP_SNAP_INT: return 0
-        if -DEAD_BAND_INT <= v <= DEAD_BAND_INT: return 126
+        if v >= TOP_SNAP_INT: return MAX_OUTPUT
+        if v <= -TOP_SNAP_INT: return MIN_OUTPUT
+        if -DEAD_BAND_INT <= v <= DEAD_BAND_INT: return CENTER_OUTPUT_VALUE
         if v > 0:
-            upper_span = 255 - 126
-            mapped = 126 + int(round((v / 1000.0) * upper_span))
+            upper_span = MAX_OUTPUT - CENTER_OUTPUT_VALUE
+            mapped = CENTER_OUTPUT_VALUE + int(round((v / 1000.0) * upper_span))
         else:
-            lower_span = 126
-            mapped = 126 - int(round((abs(v) / 1000.0) * lower_span))
-        return max(0, min(255, mapped))
-    
+            lower_span = CENTER_OUTPUT_VALUE
+            mapped = CENTER_OUTPUT_VALUE - int(round((abs(v) / 1000.0) * lower_span))
+        return max(MIN_OUTPUT, min(MAX_OUTPUT, mapped))
+
     return map_one(left_i), map_one(right_i)
 
 

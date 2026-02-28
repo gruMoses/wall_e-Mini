@@ -8,11 +8,12 @@ from typing import Optional, Tuple
 import bluetooth  # pybluez
 
 from pi_app.io.bt_proto import parse_cmd2, accept_cmd2, parse_v1, floats_to_bytes
+from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT
 
 
 def _ints_to_bytes(left_i: int, right_i: int) -> Tuple[int, int]:
-    DEAD_BAND_INT = 20  # approx 2% of full-scale (1000)
-    TOP_SNAP_INT = 950  # snap to full scale when beyond this
+    DEAD_BAND_INT = 20
+    TOP_SNAP_INT = 950
 
     def map_one(v: int) -> int:
         if v < -1000:
@@ -20,23 +21,21 @@ def _ints_to_bytes(left_i: int, right_i: int) -> Tuple[int, int]:
         if v > 1000:
             v = 1000
         if v >= TOP_SNAP_INT:
-            return 255
+            return MAX_OUTPUT
         if v <= -TOP_SNAP_INT:
-            return 0
+            return MIN_OUTPUT
         if -DEAD_BAND_INT <= v <= DEAD_BAND_INT:
-            return 126
+            return CENTER_OUTPUT_VALUE
         if v > 0:
-            # Upper span from center 126 to 255 has 129 steps
-            upper_span = 255 - 126
-            mapped = 126 + int(round((v / 1000.0) * upper_span))
+            upper_span = MAX_OUTPUT - CENTER_OUTPUT_VALUE
+            mapped = CENTER_OUTPUT_VALUE + int(round((v / 1000.0) * upper_span))
         else:
-            # Lower span from center 126 down to 0 has 126 steps
-            lower_span = 126
-            mapped = 126 - int(round((abs(v) / 1000.0) * lower_span))
-        if mapped < 0:
-            return 0
-        if mapped > 255:
-            return 255
+            lower_span = CENTER_OUTPUT_VALUE
+            mapped = CENTER_OUTPUT_VALUE - int(round((abs(v) / 1000.0) * lower_span))
+        if mapped < MIN_OUTPUT:
+            return MIN_OUTPUT
+        if mapped > MAX_OUTPUT:
+            return MAX_OUTPUT
         return mapped
 
     return map_one(left_i), map_one(right_i)
@@ -44,8 +43,8 @@ def _ints_to_bytes(left_i: int, right_i: int) -> Tuple[int, int]:
 
 @dataclass
 class BtLatest:
-    left_byte: int = 126
-    right_byte: int = 126
+    left_byte: int = CENTER_OUTPUT_VALUE
+    right_byte: int = CENTER_OUTPUT_VALUE
     last_update_epoch_s: float = 0.0
 
 

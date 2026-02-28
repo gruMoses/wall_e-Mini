@@ -307,7 +307,6 @@ class ArduinoRCReader:
                     consecutive_errors = 0
                 time.sleep(0.01)
 
-    # Motor command sending for Arduino-based motor driver fallback
     def send_motor_command(self, left_byte: int, right_byte: int) -> None:
         ser = self._serial
         if ser is None:

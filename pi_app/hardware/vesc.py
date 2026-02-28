@@ -4,13 +4,15 @@ Minimal VESC CAN motor driver.
 Design:
 - Auto-detection is a lightweight check for the presence of CAN channel (default 'can0').
 - Control API matches MotorDriver used by Controller: set_tracks(left_byte, right_byte) and stop().
-- Byte mapping: 0..255 with 126 as neutral -> RPM in [-max_rpm, +max_rpm].
+- Byte mapping: 0..254 with 126 as neutral -> RPM in [-max_rpm, +max_rpm].
 """
 
 from __future__ import annotations
 
 import os
 from typing import Optional
+
+from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT
 
 
 class VescCanDriver:
@@ -85,18 +87,16 @@ class VescCanDriver:
 
     @staticmethod
     def _byte_to_rpm(byte_value: int, max_rpm: Optional[int] = None) -> int:
-        # Map 0..255 with 126 center to [-max_rpm .. +max_rpm]
         max_rpm_val = 3000 if max_rpm is None else max_rpm
-        clamped = min(255, max(0, byte_value))
-        center = 126
-        if clamped == center:
+        clamped = min(MAX_OUTPUT, max(MIN_OUTPUT, byte_value))
+        if clamped == CENTER_OUTPUT_VALUE:
             return 0
-        span = 255 - center  # 129
-        if clamped > center:
-            normalized = (clamped - center) / span  # 0..1
+        if clamped > CENTER_OUTPUT_VALUE:
+            span_up = MAX_OUTPUT - CENTER_OUTPUT_VALUE
+            normalized = (clamped - CENTER_OUTPUT_VALUE) / span_up
             return int(round(normalized * max_rpm_val))
         else:
-            normalized = (center - clamped) / center  # 0..1 using lower span 126
+            normalized = (CENTER_OUTPUT_VALUE - clamped) / CENTER_OUTPUT_VALUE
             return -int(round(normalized * max_rpm_val))
 
 

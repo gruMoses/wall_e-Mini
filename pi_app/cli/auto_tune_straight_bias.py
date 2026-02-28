@@ -22,7 +22,7 @@ except Exception:
     from config import config  # type: ignore
 
 
-CENTER_BYTE = 126
+from pi_app.control.mapping import CENTER_OUTPUT_VALUE as CENTER_BYTE
 
 
 def wait_for_arm(rc: ArduinoRCReader, high_threshold_us: int, debounce_s: float) -> None:
