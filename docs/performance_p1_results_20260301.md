@@ -179,5 +179,9 @@ Initial validation:
 - Stress + recording (`run_20260301_144004.log`):
   - mean `20.66ms`, p95 `23ms`, p99 `25ms`, max `26ms`, `>=30ms` `0.00%`
   - `recording_state`: mostly `RECORDING`/`LINGERING`
+- Follow-me probe (`follow_me_probe.py`, 35s window):
+  - mode rows: `FOLLOW_ME=327`, `MANUAL=3`
+  - tracking `30.61%` / persons-seen `30.61%` (scene-dependent)
+  - loop `mean 21.07ms`, p95 `25ms`, p99 `27ms`, max `35ms`, `>=30ms 0.91%`
 
 This is a strong improvement vs recent recording-enabled stress baselines and indicates MCAP image path load was a primary stress-tail source in obstacle-only sessions.
