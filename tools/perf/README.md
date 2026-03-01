@@ -5,6 +5,7 @@
 - `run_scenario.sh` - collects CPU/memory/disk/thermal stats for a timed run.
 - `oak_timing_probe.py` - captures OAK frame timing, drops, and host-latency CSV.
 - `follow_me_analyze.py` - summarizes FOLLOW_ME lock/reacquisition + loop timing from a log window.
+- `loop_tail_analyze.py` - profiles loop tail-latency conditions from run logs.
 
 ## Typical Usage
 
@@ -36,6 +37,11 @@ python3 ./tools/perf/follow_me_analyze.py \
   --log ./logs/latest.log \
   --last-seconds 45 \
   --follow-only
+
+# Analyze tail-latency conditions (default threshold 30ms)
+python3 ./tools/perf/loop_tail_analyze.py \
+  --log ./logs/latest.log \
+  --threshold-ms 30
 ```
 
 Outputs are written to `logs/perf/`.
