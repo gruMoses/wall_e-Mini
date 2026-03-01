@@ -250,6 +250,7 @@ class OakRecorder:
         # Rate limiters for MCAP snapshots
         self._last_mcap_rgb_ts = 0.0
         self._last_mcap_depth_ts = 0.0
+        self._last_mcap_telem_ts = 0.0
 
         # Latest telemetry (set by main loop, read by recorder)
         self._telemetry: RecordingTelemetry | None = None
@@ -609,8 +610,11 @@ class OakRecorder:
             self._last_mcap_depth_ts = now
             self._write_mcap_depth(writer, channels["depth"])
 
-        # Telemetry every tick (main loop already decimates to 10Hz)
-        self._write_mcap_telemetry(writer, channels["telemetry"], telemetry)
+        # Telemetry at configured rate to avoid per-tick serialization overhead.
+        telem_hz = max(0.5, float(getattr(self._cfg, "mcap_telemetry_hz", 10.0)))
+        if now - self._last_mcap_telem_ts >= 1.0 / telem_hz:
+            self._last_mcap_telem_ts = now
+            self._write_mcap_telemetry(writer, channels["telemetry"], telemetry)
 
     def _write_mcap_rgb(self, writer, channel_id: int, telemetry: RecordingTelemetry) -> None:
         """Write the latest annotated JPEG (already produced by _poll_rgb_preview) to MCAP."""

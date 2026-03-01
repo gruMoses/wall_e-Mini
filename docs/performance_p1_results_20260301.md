@@ -138,6 +138,17 @@ This confirms normal-load behavior is stable and that stress-tail latency remain
 
 This isolates recording/preview/serialization work as a major contributor to stress-tail latency when active.
 
+## MCAP telemetry write-rate tuning
+
+Added `oak_recording.mcap_telemetry_hz` (default `10.0`) and applied telemetry write-rate limiting in recorder MCAP path.
+
+Stress comparison (recording enabled):
+- Pre (`run_20260301_141745.log`): mean `23.47ms`, p95 `32ms`, p99 `60ms`, max `91ms`, `>=30ms` `8.26%`
+- Post 1 (`run_20260301_142343.log`): mean `22.99ms`, p95 `32ms`, p99 `40ms`, max `56ms`, `>=30ms` `9.01%`
+- Post 2 (`run_20260301_142515.log`): mean `23.04ms`, p95 `31ms`, p99 `50ms`, max `69ms`, `>=30ms` `6.38%`
+
+Trend: lower high-tail outliers (p99/max) with similar mean loop time.
+
 ## Remaining work / risks
 
 1. Full P2 offload step (device-side ROI spatial stats replacing host depth quantile path) remains open.
