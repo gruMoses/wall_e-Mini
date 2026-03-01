@@ -97,6 +97,20 @@
 - MCAP dependency was missing at runtime and was installed (`mcap==1.3.1`), restoring `session.mcap` outputs.
 - Queue-policy/drain tuning was tested and **reverted** after full 60s stress regression.
 - Added `--pid-csv` flag in `app.main` so high-rate PID CSV logging is opt-in instead of always on.
+- Added device-side ROI min-distance path via `SpatialLocationCalculator` and reduced host depth-telemetry computation cadence.
+- Added recorder trigger gating for obstacle-triggered sessions: armed-only + configurable scale threshold (`obstacle_trigger_scale`).
+
+## Incremental commit trail
+
+- `651dbce`: device-side ROI spatial depth path for obstacle distance.
+- `88adeff`: decimated host depth telemetry computation.
+- `4d98b79`: armed/threshold gate for obstacle-triggered recording.
+
+## Latest quick-regression snapshot
+
+- Nominal short run (`run_20260301_133300.log`): mean `20.76ms`, p95 `25ms`, max `25ms`, `>=30ms` `0.0%`.
+- Stress short run (`run_20260301_133406.log`): mean `23.69ms`, p95 `36ms`, p99 `55ms`, max `70ms`, `>=30ms` `10.47%`.
+- Note: short stress windows are noisy and startup-sensitive; use 60s+ repeated stress runs for release gating.
 
 ## Remaining work / risks
 
