@@ -185,3 +185,15 @@ Initial validation:
   - loop `mean 21.07ms`, p95 `25ms`, p99 `27ms`, max `35ms`, `>=30ms 0.91%`
 
 This is a strong improvement vs recent recording-enabled stress baselines and indicates MCAP image path load was a primary stress-tail source in obstacle-only sessions.
+
+## P2 offload increment: device-side median depth
+
+`oak_depth.py` now configures two `SpatialLocationCalculator` ROI outputs:
+- ROI #1: `MIN` for obstacle-nearest depth (`p5_mm` equivalent path)
+- ROI #2: `MEDIAN` (fallback to `AVERAGE` if unavailable) for `p50_mm`
+
+This removes host `np.median` as the primary p50 path and keeps host-side ROI downsampling mainly for `valid_pixel_pct` telemetry fallback.
+
+Smoke validation:
+- `p2_spatial_median_smoke` (`run_20260301_144640.log`): mean `19.89ms`, p95 `21ms`, max `21ms`
+- `depth_p50_mm` remained live and plausible over the run (`3824.1 .. 3920.7`)

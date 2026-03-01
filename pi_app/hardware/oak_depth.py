@@ -217,19 +217,33 @@ class OakDepthReader:
             mono_left.requestOutput((640, 400)).link(stereo.left)
             mono_right.requestOutput((640, 400)).link(stereo.right)
 
-            # Device-side ROI spatial depth for obstacle distance (offloads host quantile math).
+            # Device-side ROI spatial depth for obstacle distance + median depth.
             spatial_calc = pipeline.create(dai.node.SpatialLocationCalculator)
-            spatial_cfg = dai.SpatialLocationCalculatorConfigData()
-            spatial_cfg.depthThresholds.lowerThreshold = 100
-            spatial_cfg.depthThresholds.upperThreshold = 10000
             rw = self._obs_cfg.roi_width_pct
             rh = self._obs_cfg.roi_height_pct
-            spatial_cfg.roi = dai.Rect(
+            roi_rect = dai.Rect(
                 dai.Point2f(0.5 - rw / 2.0, 0.5 - rh / 2.0),
                 dai.Point2f(0.5 + rw / 2.0, 0.5 + rh / 2.0),
             )
-            spatial_cfg.calculationAlgorithm = dai.SpatialLocationCalculatorAlgorithm.MIN
-            spatial_calc.initialConfig.addROI(spatial_cfg)
+
+            spatial_min_cfg = dai.SpatialLocationCalculatorConfigData()
+            spatial_min_cfg.depthThresholds.lowerThreshold = 100
+            spatial_min_cfg.depthThresholds.upperThreshold = 10000
+            spatial_min_cfg.roi = roi_rect
+            spatial_min_cfg.calculationAlgorithm = dai.SpatialLocationCalculatorAlgorithm.MIN
+            spatial_calc.initialConfig.addROI(spatial_min_cfg)
+
+            spatial_med_cfg = dai.SpatialLocationCalculatorConfigData()
+            spatial_med_cfg.depthThresholds.lowerThreshold = 100
+            spatial_med_cfg.depthThresholds.upperThreshold = 10000
+            spatial_med_cfg.roi = roi_rect
+            spatial_median_algo = getattr(
+                dai.SpatialLocationCalculatorAlgorithm,
+                "MEDIAN",
+                dai.SpatialLocationCalculatorAlgorithm.AVERAGE,
+            )
+            spatial_med_cfg.calculationAlgorithm = spatial_median_algo
+            spatial_calc.initialConfig.addROI(spatial_med_cfg)
             stereo.depth.link(spatial_calc.inputDepth)
 
             model_desc = dai.NNModelDescription(model="mobilenet-ssd", platform="RVC2")
@@ -331,25 +345,19 @@ class OakDepthReader:
             roi = frame[y0:y1, x0:x1]
             p50 = None
             valid_pct = None
-            self._depth_stats_counter += 1
-            if self._depth_stats_counter >= self._depth_stats_decimation:
-                self._depth_stats_counter = 0
-                # Downsample for telemetry-only stats to keep host-side overhead low.
-                roi_small = roi[::4, ::4]
-                total_pixels = roi_small.size
-                valid = roi_small[roi_small > 0]
-                if valid.size > 0:
-                    p50 = float(np.median(valid))
-                    valid_pct = (valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
 
             p5 = None
             if in_spatial is not None:
                 try:
                     spatial_locations = in_spatial.getSpatialLocations()
                     if spatial_locations:
-                        z_mm = float(spatial_locations[0].spatialCoordinates.z)
-                        if z_mm > 0:
-                            p5 = z_mm
+                        min_z_mm = float(spatial_locations[0].spatialCoordinates.z)
+                        if min_z_mm > 0:
+                            p5 = min_z_mm
+                    if len(spatial_locations) > 1:
+                        med_z_mm = float(spatial_locations[1].spatialCoordinates.z)
+                        if med_z_mm > 0:
+                            p50 = med_z_mm
                 except Exception:
                     p5 = None
             if p5 is None:
@@ -358,6 +366,19 @@ class OakDepthReader:
                 if nonzero.size == 0:
                     return
                 p5 = float(np.min(nonzero))
+
+            self._depth_stats_counter += 1
+            if self._depth_stats_counter >= self._depth_stats_decimation:
+                self._depth_stats_counter = 0
+                # Downsample for telemetry-only stats to keep host-side overhead low.
+                roi_small = roi[::4, ::4]
+                total_pixels = roi_small.size
+                valid = roi_small[roi_small > 0]
+                if valid.size > 0:
+                    if p50 is None:
+                        p50 = float(np.median(valid))
+                    valid_pct = (valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
+
             now = time.monotonic()
             with self._lock:
                 prev_stats = self._depth_state.stats
