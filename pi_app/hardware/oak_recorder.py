@@ -400,6 +400,7 @@ class OakRecorder:
             and self._cfg.mcap_enabled
             and self._cfg.mcap_image_fps > 0
             and self._state in (_RecState.RECORDING, _RecState.LINGERING)
+            and self._mcap_images_allowed()
         )
         return has_web_client or needs_mcap_rgb
 
@@ -411,8 +412,17 @@ class OakRecorder:
             and self._cfg.mcap_enabled
             and self._cfg.mcap_depth_fps > 0
             and self._state in (_RecState.RECORDING, _RecState.LINGERING)
+            and self._mcap_images_allowed()
         )
         return has_web_client or needs_mcap_depth
+
+    def _mcap_images_allowed(self) -> bool:
+        if not bool(getattr(self._cfg, "mcap_images_follow_only", True)):
+            return True
+        t = self._telemetry
+        if t is None:
+            return False
+        return t.mode == "FOLLOW_ME" or len(t.person_detections) > 0
 
     # -- Trigger logic -------------------------------------------------------
 
@@ -599,14 +609,15 @@ class OakRecorder:
             return
         writer, _fh, channels = self._mcap_ctx
         now = time.monotonic()
+        images_allowed = self._mcap_images_allowed()
 
         # Annotated RGB snapshot at configured fps
-        if now - self._last_mcap_rgb_ts >= 1.0 / self._cfg.mcap_image_fps:
+        if images_allowed and now - self._last_mcap_rgb_ts >= 1.0 / self._cfg.mcap_image_fps:
             self._last_mcap_rgb_ts = now
             self._write_mcap_rgb(writer, channels["rgb"], telemetry)
 
         # Colorized depth snapshot at configured fps
-        if now - self._last_mcap_depth_ts >= 1.0 / self._cfg.mcap_depth_fps:
+        if images_allowed and now - self._last_mcap_depth_ts >= 1.0 / self._cfg.mcap_depth_fps:
             self._last_mcap_depth_ts = now
             self._write_mcap_depth(writer, channels["depth"])
 

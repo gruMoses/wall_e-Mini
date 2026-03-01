@@ -112,6 +112,8 @@ class OakRecordingConfig:
     mcap_image_fps: float = 3.0       # annotated RGB snapshot rate
     mcap_depth_fps: float = 1.0       # colorized depth snapshot rate
     mcap_telemetry_hz: float = 5.0
+    # If true, MCAP image snapshots are recorded only for follow/person contexts.
+    mcap_images_follow_only: bool = True
     # Local preview generation budget (used by web viewer + MCAP image capture path)
     preview_rgb_fps: float = 6.0
     preview_depth_fps: float = 3.0

@@ -167,3 +167,17 @@ Net: lower mean and much better high-tail outliers (p99/max), with a slight incr
 
 1. Full P2 offload step (device-side ROI spatial stats replacing host depth quantile path) remains open.
 2. Recording trigger policy may still over-record in tight indoor spaces when obstacle scaling stays below `1.0` for long periods.
+
+## MCAP image snapshots: follow/person-only gating
+
+Added `oak_recording.mcap_images_follow_only` (default `True`) and gated MCAP RGB/depth snapshot generation so obstacle-only recordings keep video+telemetry but skip MCAP image serialization work unless:
+- mode is `FOLLOW_ME`, or
+- person detections are present, or
+- a live web stream client is connected (preview still served for viewer clients).
+
+Initial validation:
+- Stress + recording (`run_20260301_144004.log`):
+  - mean `20.66ms`, p95 `23ms`, p99 `25ms`, max `26ms`, `>=30ms` `0.00%`
+  - `recording_state`: mostly `RECORDING`/`LINGERING`
+
+This is a strong improvement vs recent recording-enabled stress baselines and indicates MCAP image path load was a primary stress-tail source in obstacle-only sessions.
