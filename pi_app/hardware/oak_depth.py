@@ -256,7 +256,27 @@ class OakDepthReader:
             spatial_nn.setDepthLowerThreshold(int(self._fm_cfg.min_distance_m * 1000))
             spatial_nn.setDepthUpperThreshold(int(self._fm_cfg.max_distance_m * 1000))
 
-            det_q = spatial_nn.out.createOutputQueue(maxSize=4, blocking=False)
+            det_q = None
+            tracker_enabled = False
+            try:
+                object_tracker = pipeline.create(dai.node.ObjectTracker)
+                object_tracker.setDetectionLabelsToTrack([PERSON_LABEL])
+                object_tracker.setTrackerType(dai.TrackerType.SHORT_TERM_IMAGELESS)
+                object_tracker.setTrackerIdAssignmentPolicy(dai.TrackerIdAssignmentPolicy.SMALLEST_ID)
+
+                # Feed detections + RGB frames into device-side tracker.
+                spatial_nn.out.link(object_tracker.inputDetections)
+                spatial_nn.passthrough.link(object_tracker.inputTrackerFrame)
+                spatial_nn.passthrough.link(object_tracker.inputDetectionFrame)
+                det_q = object_tracker.out.createOutputQueue(maxSize=4, blocking=False)
+                tracker_enabled = True
+            except Exception:
+                logger.warning(
+                    "ObjectTracker init failed; falling back to raw detections",
+                    exc_info=True,
+                )
+                det_q = spatial_nn.out.createOutputQueue(maxSize=4, blocking=False)
+
             depth_q = spatial_nn.passthroughDepth.createOutputQueue(maxSize=4, blocking=False)
             spatial_depth_q = spatial_calc.out.createOutputQueue(maxSize=4, blocking=False)
             rgb_preview_q = cam_rgb.requestOutput((640, 480)).createOutputQueue(maxSize=1, blocking=False)
@@ -289,6 +309,8 @@ class OakDepthReader:
 
             pipeline.start()
             logger.info("OAK-D pipeline started (depthai v3)")
+            if tracker_enabled:
+                logger.info("OAK ObjectTracker enabled for person detections")
             self._device_ready.set()
 
         except Exception:
@@ -413,21 +435,67 @@ class OakDepthReader:
                     break
                 in_det = newer
             persons: list[PersonDetection] = []
-            for det in in_det.detections:
-                is_person = (det.label == PERSON_LABEL or
-                             getattr(det, "labelName", "") == "person")
-                if not is_person:
-                    continue
-                if det.confidence < self._fm_cfg.detection_confidence:
-                    continue
-                persons.append(
-                    PersonDetection(
-                        x_m=det.spatialCoordinates.x / 1000.0,
-                        z_m=det.spatialCoordinates.z / 1000.0,
-                        confidence=det.confidence,
-                        bbox=(det.xmin, det.ymin, det.xmax, det.ymax),
+            tracklets = getattr(in_det, "tracklets", None)
+            if tracklets is not None:
+                for trk in tracklets:
+                    src = getattr(trk, "srcImgDetection", None)
+                    if src is None:
+                        continue
+                    is_person = (
+                        getattr(src, "label", None) == PERSON_LABEL
+                        or getattr(src, "labelName", "") == "person"
                     )
-                )
+                    if not is_person:
+                        continue
+                    conf = float(getattr(src, "confidence", 0.0))
+                    if conf < self._fm_cfg.detection_confidence:
+                        continue
+                    st = getattr(trk, "status", None)
+                    st_name = getattr(st, "name", str(st)).upper() if st is not None else ""
+                    if "LOST" in st_name or "REMOVED" in st_name:
+                        continue
+                    spatial = getattr(trk, "spatialCoordinates", None)
+                    if spatial is None:
+                        spatial = getattr(src, "spatialCoordinates", None)
+                    if spatial is None:
+                        continue
+                    track_id = None
+                    if hasattr(trk, "id"):
+                        try:
+                            tid = int(getattr(trk, "id"))
+                            track_id = tid if tid >= 0 else None
+                        except Exception:
+                            track_id = None
+                    persons.append(
+                        PersonDetection(
+                            x_m=float(getattr(spatial, "x", 0.0)) / 1000.0,
+                            z_m=float(getattr(spatial, "z", 0.0)) / 1000.0,
+                            confidence=conf,
+                            bbox=(
+                                float(getattr(src, "xmin", 0.0)),
+                                float(getattr(src, "ymin", 0.0)),
+                                float(getattr(src, "xmax", 0.0)),
+                                float(getattr(src, "ymax", 0.0)),
+                            ),
+                            track_id=track_id,
+                        )
+                    )
+            else:
+                for det in getattr(in_det, "detections", []):
+                    is_person = (det.label == PERSON_LABEL or
+                                 getattr(det, "labelName", "") == "person")
+                    if not is_person:
+                        continue
+                    if det.confidence < self._fm_cfg.detection_confidence:
+                        continue
+                    persons.append(
+                        PersonDetection(
+                            x_m=det.spatialCoordinates.x / 1000.0,
+                            z_m=det.spatialCoordinates.z / 1000.0,
+                            confidence=det.confidence,
+                            bbox=(det.xmin, det.ymin, det.xmax, det.ymax),
+                        )
+                    )
             with self._lock:
                 self._det_state.persons = persons
                 self._det_state.timestamp = time.monotonic()

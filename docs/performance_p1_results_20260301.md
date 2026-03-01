@@ -233,3 +233,16 @@ Full-window results:
 - thermal: avg `52.81C`, max `55.4C`, throttle flags `0x0` (none)
 
 Conclusion: 30-minute full-feature soak passed with stable loop timing, low tail incidence, no thermal throttling, and no obvious memory growth.
+
+## ObjectTracker integration (in progress)
+
+Implemented device-side OAK `ObjectTracker` integration in `oak_depth.py`:
+- Tracked person detections now carry `track_id` into `PersonDetection`.
+- Pipeline attempts tracker path first and falls back to raw detector output if tracker init fails.
+- Follow controller now adds a continuity bonus for the previously selected `track_id` to reduce target flapping across close candidates.
+- Structured logs now include `follow_me.target_track_id` for analysis.
+
+Validation so far:
+- Unit tests: `pi_app/tests/test_follow_me.py` passed (`14/14`), including new continuity test.
+- Runtime smoke: `tracker_integration_smoke` app run completed cleanly.
+- Follow-me probe sanity (20s, no persons in frame): mode toggled correctly, no regressions/crashes.

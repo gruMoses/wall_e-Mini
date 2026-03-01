@@ -514,6 +514,7 @@ def run() -> None:
                             "tracking": telem.get("follow_me_tracking"),
                             "target_z_m": telem.get("follow_me_target_z_m"),
                             "target_x_m": telem.get("follow_me_target_x_m"),
+                            "target_track_id": telem.get("follow_me_target_track_id"),
                             "num_persons": telem.get("follow_me_num_persons"),
                         }),
                         "gps": round1({

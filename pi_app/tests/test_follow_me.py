@@ -11,8 +11,14 @@ class TestFollowMeController(unittest.TestCase):
         return FollowMeController(cfg)
 
     def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
-                bbox=(0.4, 0.3, 0.6, 0.8)) -> PersonDetection:
-        return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence, bbox=bbox)
+                bbox=(0.4, 0.3, 0.6, 0.8), track_id=None) -> PersonDetection:
+        return PersonDetection(
+            x_m=x_m,
+            z_m=z_m,
+            confidence=confidence,
+            bbox=bbox,
+            track_id=track_id,
+        )
 
     # --- No target ---
 
@@ -92,6 +98,20 @@ class TestFollowMeController(unittest.TestCase):
         fm.compute([close, far])
         status = fm.get_status()
         self.assertAlmostEqual(status["follow_me_target_z_m"], 1.5)
+
+    def test_prefers_previous_track_id_for_continuity(self):
+        fm = self._make()
+        first = self._person(x_m=0.0, z_m=2.0, bbox=(0.45, 0.3, 0.55, 0.8), track_id=11)
+        fm.compute([first])
+        status = fm.get_status()
+        self.assertEqual(status["follow_me_target_track_id"], 11)
+
+        # Frame 2: new ID is slightly better centered, but old tracked target remains valid.
+        prev_target = self._person(x_m=0.4, z_m=2.0, bbox=(0.62, 0.3, 0.78, 0.8), track_id=11)
+        newcomer = self._person(x_m=0.0, z_m=2.0, bbox=(0.45, 0.3, 0.55, 0.8), track_id=22)
+        fm.compute([prev_target, newcomer])
+        status = fm.get_status()
+        self.assertEqual(status["follow_me_target_track_id"], 11)
 
     # --- Status ---
 

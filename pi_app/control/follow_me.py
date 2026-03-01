@@ -27,11 +27,13 @@ class PersonDetection:
     z_m: float       # forward distance in meters
     confidence: float
     bbox: tuple[float, float, float, float]  # xmin, ymin, xmax, ymax (normalized 0-1)
+    track_id: int | None = None
 
 
 class FollowMeController:
     CENTER_WEIGHT = 0.6
     DEPTH_WEIGHT = 0.4
+    TRACK_ID_STICKY_BONUS = 0.3
 
     def __init__(self, config: FollowMeConfig) -> None:
         self._cfg = config
@@ -43,6 +45,7 @@ class FollowMeController:
         self._last_steer_offset: float = 0.0
         self._last_num_detections: int = 0
         self._last_target_confidence: float = 0.0
+        self._last_target_track_id: int | None = None
 
     def compute(self, detections: list[PersonDetection]) -> tuple[int, int]:
         """Compute motor bytes (left, right) to follow the best-scored person.
@@ -57,12 +60,14 @@ class FollowMeController:
             self._last_speed_offset = 0.0
             self._last_steer_offset = 0.0
             self._last_target_confidence = 0.0
+            self._last_target_track_id = None
             return NEUTRAL, NEUTRAL
 
         self._tracking = True
         self._last_target_z = target.z_m
         self._last_target_x = target.x_m
         self._last_target_confidence = target.confidence
+        self._last_target_track_id = target.track_id
 
         # Too close — stop to avoid crowding the person
         if target.z_m <= self._cfg.min_distance_m:
@@ -133,6 +138,13 @@ class FollowMeController:
                 self.CENTER_WEIGHT * center_closeness
                 + self.DEPTH_WEIGHT * depth_closeness
             )
+            if (
+                det.track_id is not None
+                and self._last_target_track_id is not None
+                and det.track_id == self._last_target_track_id
+            ):
+                # Prefer continuity when the tracked target remains valid.
+                score += self.TRACK_ID_STICKY_BONUS
             if score > best_score:
                 best_score = score
                 best = det
@@ -149,4 +161,5 @@ class FollowMeController:
             "follow_me_steer_offset": self._last_steer_offset,
             "follow_me_num_detections": self._last_num_detections,
             "follow_me_target_confidence": self._last_target_confidence,
+            "follow_me_target_track_id": self._last_target_track_id,
         }
