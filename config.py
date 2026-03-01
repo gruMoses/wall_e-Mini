@@ -20,7 +20,7 @@ class ImuSteeringConfig:
     # Control parameters
     max_correction: int = 220     # Maximum steering correction in byte units (0-255)
     deadband_deg: float = 0.9    # Minimum heading error to trigger correction (degrees)
-    max_integral: float = 40.0   # Maximum integral term to prevent windup
+    max_integral: float = 80.0   # Maximum integral term to prevent windup
     invert_output: bool = False   # Invert the sign of IMU steering correction (hardware-specific)
     # Steering neutral detection (hysteresis) to lock heading until commanded turn
     steering_neutral_enter: float = 0.08  # |steering_input| below this enters neutral
@@ -85,8 +85,8 @@ class FollowMeConfig:
     enabled: bool = True
     follow_distance_m: float = 1.5
     min_distance_m: float = 0.5
-    max_distance_m: float = 5.0
-    max_follow_speed_byte: int = 60
+    max_distance_m: float = 4.0
+    max_follow_speed_byte: int = 100
     steering_gain: float = 0.8
     detection_confidence: float = 0.5
     lost_target_timeout_s: float = 1.0
@@ -110,6 +110,9 @@ class OakRecordingConfig:
     mcap_enabled: bool = True
     mcap_image_fps: float = 5.0       # annotated RGB snapshot rate
     mcap_depth_fps: float = 2.0       # colorized depth snapshot rate
+    # Local preview generation budget (used by web viewer + MCAP image capture path)
+    preview_rgb_fps: float = 6.0
+    preview_depth_fps: float = 3.0
 
     # Storage management
     max_total_mb: int = 4000
@@ -122,6 +125,9 @@ class OakWebViewerConfig:
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 8080
+    rgb_stream_fps: float = 6.0
+    depth_stream_fps: float = 3.0
+    telemetry_hz: float = 4.0
 
 
 @dataclass(frozen=True)

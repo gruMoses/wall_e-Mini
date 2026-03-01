@@ -38,27 +38,42 @@ class FollowMeController:
         self._tracking = False
         self._last_target_z: float | None = None
         self._last_target_x: float | None = None
+        self._last_distance_error: float | None = None
+        self._last_speed_offset: float = 0.0
+        self._last_steer_offset: float = 0.0
+        self._last_num_detections: int = 0
+        self._last_target_confidence: float = 0.0
 
     def compute(self, detections: list[PersonDetection]) -> tuple[int, int]:
         """Compute motor bytes (left, right) to follow the best-scored person.
 
         Returns (NEUTRAL, NEUTRAL) when no valid target is found.
         """
+        self._last_num_detections = len(detections)
         target = self._select_target(detections)
         if target is None:
             self._tracking = False
+            self._last_distance_error = None
+            self._last_speed_offset = 0.0
+            self._last_steer_offset = 0.0
+            self._last_target_confidence = 0.0
             return NEUTRAL, NEUTRAL
 
         self._tracking = True
         self._last_target_z = target.z_m
         self._last_target_x = target.x_m
+        self._last_target_confidence = target.confidence
 
         # Too close — stop to avoid crowding the person
         if target.z_m <= self._cfg.min_distance_m:
+            self._last_distance_error = target.z_m - self._cfg.follow_distance_m
+            self._last_speed_offset = 0.0
+            self._last_steer_offset = 0.0
             return NEUTRAL, NEUTRAL
 
         # Speed: proportional to distance error from follow distance
         distance_error = target.z_m - self._cfg.follow_distance_m
+        self._last_distance_error = distance_error
         if distance_error <= 0:
             speed_offset = 0.0
         else:
@@ -69,6 +84,7 @@ class FollowMeController:
                 distance_error * speed_gain,
                 float(self._cfg.max_follow_speed_byte),
             )
+        self._last_speed_offset = speed_offset
 
         # Steering: proportional to lateral offset; positive x_m = person is right
         # Positive steer_offset turns the robot right (add to right, subtract from left)
@@ -78,6 +94,7 @@ class FollowMeController:
             * self._cfg.max_follow_speed_byte
             / max(self._cfg.max_distance_m, 0.1)
         )
+        self._last_steer_offset = steer_offset
 
         left = NEUTRAL + speed_offset + steer_offset
         right = NEUTRAL + speed_offset - steer_offset
@@ -127,4 +144,9 @@ class FollowMeController:
             "follow_me_tracking": self._tracking,
             "follow_me_target_z_m": self._last_target_z,
             "follow_me_target_x_m": self._last_target_x,
+            "follow_me_distance_error_m": self._last_distance_error,
+            "follow_me_speed_offset": self._last_speed_offset,
+            "follow_me_steer_offset": self._last_steer_offset,
+            "follow_me_num_detections": self._last_num_detections,
+            "follow_me_target_confidence": self._last_target_confidence,
         }

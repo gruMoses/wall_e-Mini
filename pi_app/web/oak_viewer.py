@@ -368,28 +368,42 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None) -> Flask:
 
     # -- MJPEG streams -------------------------------------------------------
 
-    def _mjpeg_generator(get_jpeg_fn, fps: float = 10.0):
+    def _mjpeg_generator(get_jpeg_fn, fps: float = 10.0, stream_name: str | None = None):
         interval = 1.0 / fps
-        while True:
-            jpeg = get_jpeg_fn()
-            frame = jpeg if jpeg else placeholder
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-            )
-            time.sleep(interval)
+        try:
+            if stream_name is not None and hasattr(recorder, "set_stream_client_connected"):
+                recorder.set_stream_client_connected(stream_name, True)
+            while True:
+                jpeg = get_jpeg_fn()
+                frame = jpeg if jpeg else placeholder
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+                )
+                time.sleep(interval)
+        finally:
+            if stream_name is not None and hasattr(recorder, "set_stream_client_connected"):
+                recorder.set_stream_client_connected(stream_name, False)
 
     @app.route("/stream/rgb")
     def stream_rgb():
         return Response(
-            _mjpeg_generator(recorder.get_latest_annotated_jpeg, fps=10),
+            _mjpeg_generator(
+                recorder.get_latest_annotated_jpeg,
+                fps=max(0.5, float(getattr(config, "rgb_stream_fps", 6.0))),
+                stream_name="rgb",
+            ),
             mimetype="multipart/x-mixed-replace; boundary=frame",
         )
 
     @app.route("/stream/depth")
     def stream_depth():
         return Response(
-            _mjpeg_generator(recorder.get_latest_depth_jpeg, fps=5),
+            _mjpeg_generator(
+                recorder.get_latest_depth_jpeg,
+                fps=max(0.5, float(getattr(config, "depth_stream_fps", 3.0))),
+                stream_name="depth",
+            ),
             mimetype="multipart/x-mixed-replace; boundary=frame",
         )
 
@@ -418,7 +432,8 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None) -> Flask:
                     ],
                 }
                 yield f"data: {json.dumps(obj)}\n\n"
-            time.sleep(0.2)
+            telemetry_hz = max(0.5, float(getattr(config, "telemetry_hz", 4.0)))
+            time.sleep(1.0 / telemetry_hz)
 
     @app.route("/api/telemetry")
     def api_telemetry():

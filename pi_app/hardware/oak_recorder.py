@@ -257,10 +257,18 @@ class OakRecorder:
 
         self._recording_queues: dict | None = None
 
-        # Always-on preview frame for the web viewer (updated every poll regardless of recording state)
+        # Always-on preview frame for the web viewer (rate-limited to avoid excessive CPU)
         self._latest_annotated_jpeg: bytes | None = None
         self._latest_depth_jpeg: bytes | None = None
         self._preview_lock = threading.Lock()
+        self._last_rgb_preview_ts = 0.0
+        self._last_depth_preview_ts = 0.0
+        rgb_fps = max(0.5, float(getattr(config, "preview_rgb_fps", 6.0)))
+        depth_fps = max(0.5, float(getattr(config, "preview_depth_fps", 3.0)))
+        self._rgb_preview_interval = 1.0 / rgb_fps
+        self._depth_preview_interval = 1.0 / depth_fps
+        self._rgb_stream_clients = 0
+        self._depth_stream_clients = 0
 
     # -- Public preview accessors (for web viewer) ---------------------------
 
@@ -276,6 +284,20 @@ class OakRecorder:
 
     def get_latest_telemetry(self) -> RecordingTelemetry | None:
         return self._telemetry
+
+    def set_stream_client_connected(self, stream: str, connected: bool) -> None:
+        """Track active web-stream clients to avoid unnecessary preview work."""
+        with self._preview_lock:
+            if stream == "rgb":
+                if connected:
+                    self._rgb_stream_clients += 1
+                elif self._rgb_stream_clients > 0:
+                    self._rgb_stream_clients -= 1
+            elif stream == "depth":
+                if connected:
+                    self._depth_stream_clients += 1
+                elif self._depth_stream_clients > 0:
+                    self._depth_stream_clients -= 1
 
     @property
     def recording_state(self) -> str:
@@ -351,14 +373,37 @@ class OakRecorder:
         # Always poll device queues for fresh frames (recording H.265 etc.)
         self._poll_device_queues()
 
-        # Always update preview frames for the web viewer
-        if rgb_frame is not None:
+        # Only generate preview frames when they are actually needed.
+        if rgb_frame is not None and self._needs_rgb_preview():
             self._update_rgb_preview(rgb_frame, telemetry)
-        self._poll_depth_preview()
+        if self._needs_depth_preview():
+            self._poll_depth_preview()
 
         # Write data if recording
         if self._state in (_RecState.RECORDING, _RecState.LINGERING):
             self._write_mcap_tick(telemetry)
+
+    def _needs_rgb_preview(self) -> bool:
+        with self._preview_lock:
+            has_web_client = self._rgb_stream_clients > 0
+        needs_mcap_rgb = (
+            self._mcap_ctx is not None
+            and self._cfg.mcap_enabled
+            and self._cfg.mcap_image_fps > 0
+            and self._state in (_RecState.RECORDING, _RecState.LINGERING)
+        )
+        return has_web_client or needs_mcap_rgb
+
+    def _needs_depth_preview(self) -> bool:
+        with self._preview_lock:
+            has_web_client = self._depth_stream_clients > 0
+        needs_mcap_depth = (
+            self._mcap_ctx is not None
+            and self._cfg.mcap_enabled
+            and self._cfg.mcap_depth_fps > 0
+            and self._state in (_RecState.RECORDING, _RecState.LINGERING)
+        )
+        return has_web_client or needs_mcap_depth
 
     # -- Trigger logic -------------------------------------------------------
 
@@ -473,9 +518,13 @@ class OakRecorder:
         # (RGB and depth previews are now handled directly in update())
 
     def _update_rgb_preview(self, frame, telemetry: RecordingTelemetry) -> None:
-        """Annotate an RGB frame and store JPEG for web viewer."""
+        """Annotate an RGB frame and store JPEG for web viewer (rate-limited)."""
         if cv2 is None or frame is None or telemetry is None:
             return
+        now = time.monotonic()
+        if now - self._last_rgb_preview_ts < self._rgb_preview_interval:
+            return
+        self._last_rgb_preview_ts = now
         try:
             annotated = _annotate_rgb(
                 frame,
@@ -483,7 +532,7 @@ class OakRecorder:
                 telemetry,
                 roi_pct=(0.5, 0.5),
             )
-            _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
             jpeg_bytes = jpeg.tobytes()
             with self._preview_lock:
                 self._latest_annotated_jpeg = jpeg_bytes
@@ -491,14 +540,18 @@ class OakRecorder:
             logger.debug("RGB preview error", exc_info=True)
 
     def _poll_depth_preview(self) -> None:
-        """Colorize the latest depth frame and store JPEG for web viewer."""
+        """Colorize the latest depth frame and store JPEG for web viewer (rate-limited)."""
         if cv2 is None or self._latest_depth_frame is None:
             return
+        now = time.monotonic()
+        if now - self._last_depth_preview_ts < self._depth_preview_interval:
+            return
+        self._last_depth_preview_ts = now
         try:
             colorized = _colorize_depth(self._latest_depth_frame)
             if colorized is None:
                 return
-            _, jpeg = cv2.imencode(".jpg", colorized, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            _, jpeg = cv2.imencode(".jpg", colorized, [cv2.IMWRITE_JPEG_QUALITY, 60])
             with self._preview_lock:
                 self._latest_depth_jpeg = jpeg.tobytes()
         except Exception:

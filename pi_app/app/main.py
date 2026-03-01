@@ -277,11 +277,43 @@ def run() -> None:
         # If file cannot be opened, continue without file logging
         log_fh = None
 
+    # High-rate PID tuning CSV (every loop tick, full precision)
+    _PID_CSV_COLS = (
+        "t_ms,heading_deg,target_deg,error_deg,yaw_rate_dps,"
+        "roll_deg,pitch_deg,p_term,i_term,d_term,"
+        "correction_raw,correction_applied,integral_accum,"
+        "steering_input,correction_blend,motor_l,motor_r,"
+        "ch1_us,ch2_us,armed,straight_intent,loop_dt_ms,"
+        "mode,fm_tracking,fm_target_z_m,fm_target_x_m,"
+        "fm_dist_err_m,fm_speed_offset,fm_steer_offset,"
+        "fm_num_det,fm_confidence,obstacle_dist_m,obstacle_scale"
+    )
+    pid_csv_path = logs_dir / f"pid_{run_dt.strftime('%Y%m%d_%H%M%S')}.csv"
+    pid_csv_fh = None
+    try:
+        pid_csv_fh = open(pid_csv_path, "w", encoding="utf-8", buffering=1)
+        pid_csv_fh.write(_PID_CSV_COLS + "\n")
+        try:
+            pid_latest = logs_dir / "pid_latest.csv"
+            if pid_latest.exists() or pid_latest.is_symlink():
+                pid_latest.unlink(missing_ok=True)
+            os.symlink(pid_csv_path.name, pid_latest)
+        except Exception:
+            pass
+    except Exception:
+        pid_csv_fh = None
+    pid_csv_t0 = None
+
     try:
         last_log_ts = 0.0
         log_interval = 0.1  # 10 Hz logging
         prev_loop_ts = time.monotonic()
         prev_imu_ts = getattr(controller, "_last_imu_update", None)
+        bt_shared_path = Path("/tmp/wall_e_bt_latest.json")
+        bt_cached_data = None
+        bt_cached_mtime_ns = None
+        bt_next_poll_t = 0.0
+        bt_poll_interval_s = 0.05
         while True:
             loop_now = time.monotonic()
             loop_dt_ms = int(round((loop_now - prev_loop_ts) * 1000))
@@ -300,12 +332,18 @@ def run() -> None:
             bt_override = None
             bt_age = None
             try:
-                import json
-                with open("/tmp/wall_e_bt_latest.json", "r") as sf:
-                    bt_data = json.load(sf)
-                    bt_age = time.time() - bt_data["last_update_epoch_s"]
+                if loop_now >= bt_next_poll_t:
+                    bt_next_poll_t = loop_now + bt_poll_interval_s
+                    st = bt_shared_path.stat()
+                    mtime_ns = st.st_mtime_ns
+                    if mtime_ns != bt_cached_mtime_ns:
+                        with bt_shared_path.open("r", encoding="utf-8") as sf:
+                            bt_cached_data = json.load(sf)
+                        bt_cached_mtime_ns = mtime_ns
+                if bt_cached_data is not None:
+                    bt_age = time.time() - bt_cached_data["last_update_epoch_s"]
                     if bt_age <= 0.6:  # Fresh BT command within 600ms
-                        bt_override = (bt_data["left_byte"], bt_data["right_byte"])
+                        bt_override = (bt_cached_data["left_byte"], bt_cached_data["right_byte"])
             except Exception:
                 pass  # No BT data available, use RC instead
             # Feed OAK-D Lite data to controller
@@ -494,6 +532,50 @@ def run() -> None:
                                 pass
             except Exception:
                 pass
+
+            # High-rate PID CSV row (every tick, no throttling)
+            try:
+                if pid_csv_fh is not None:
+                    if pid_csv_t0 is None:
+                        pid_csv_t0 = loop_now
+                    t_ms = int(round((loop_now - pid_csv_t0) * 1000))
+                    _imu = imu_status or {}
+                    pid_csv_fh.write(
+                        f"{t_ms},"
+                        f"{_imu.get('heading_deg', 0.0):.2f},"
+                        f"{_imu.get('target_heading_deg', 0.0):.2f},"
+                        f"{telem.get('pid_error_deg', 0.0):.3f},"
+                        f"{_imu.get('yaw_rate_dps', 0.0):.2f},"
+                        f"{_imu.get('roll_deg', 0.0):.2f},"
+                        f"{_imu.get('pitch_deg', 0.0):.2f},"
+                        f"{telem.get('pid_p', 0.0):.3f},"
+                        f"{telem.get('pid_i', 0.0):.3f},"
+                        f"{telem.get('pid_d', 0.0):.3f},"
+                        f"{telem.get('imu_correction_raw', '')!s},"
+                        f"{telem.get('imu_correction_applied', '')!s},"
+                        f"{_imu.get('integral_error', 0.0):.3f},"
+                        f"{telem.get('steering_input', 0.0):.4f},"
+                        f"{telem.get('correction_blend', '')!s},"
+                        f"{cmd.left_byte},{cmd.right_byte},"
+                        f"{s.ch1_us},{s.ch2_us},"
+                        f"{1 if cmd.is_armed else 0},"
+                        f"{1 if telem.get('straight_intent') else 0},"
+                        f"{loop_dt_ms},"
+                        f"{telem.get('mode', 'MANUAL')},"
+                        f"{1 if telem.get('follow_me_tracking') else 0},"
+                        f"{telem.get('follow_me_target_z_m', '')!s},"
+                        f"{telem.get('follow_me_target_x_m', '')!s},"
+                        f"{telem.get('follow_me_distance_error_m', '')!s},"
+                        f"{telem.get('follow_me_speed_offset', '')!s},"
+                        f"{telem.get('follow_me_steer_offset', '')!s},"
+                        f"{telem.get('follow_me_num_detections', 0)},"
+                        f"{telem.get('follow_me_target_confidence', '')!s},"
+                        f"{telem.get('obstacle_distance_m', '')!s},"
+                        f"{telem.get('obstacle_throttle_scale', '')!s}\n"
+                    )
+            except Exception:
+                pass
+
             time.sleep(0.02)
     except KeyboardInterrupt:
         pass
@@ -520,6 +602,12 @@ def run() -> None:
         except Exception:
             pass
         rc_reader.stop()
+        try:
+            if pid_csv_fh is not None:
+                pid_csv_fh.flush()
+                pid_csv_fh.close()
+        except Exception:
+            pass
         try:
             if log_fh is not None:
                 log_fh.flush()

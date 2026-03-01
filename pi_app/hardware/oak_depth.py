@@ -95,6 +95,7 @@ class OakDepthReader:
 
         # Populated by _run_pipeline when recording is enabled; consumed by OakRecorder
         self._device = None
+        self._recording_queues: dict | None = None
         self._device_ready = threading.Event()
 
     # -- Public API ----------------------------------------------------------
@@ -174,15 +175,15 @@ class OakDepthReader:
         """Wait for the pipeline to be ready, then return output queue dict.
 
         Returns None if pipeline never became ready or recording is disabled.
-        Note: In v3, queues are created during pipeline build and are not
-        accessible from the outside after start. Recording integration needs
-        to be reworked if enabled. Returns None for now.
         """
         if not self.recording_enabled:
             return None
         if not self._device_ready.wait(timeout=timeout_s):
             return None
-        return None
+        with self._lock:
+            if self._recording_queues is None:
+                return None
+            return dict(self._recording_queues)
 
     # -- Pipeline Construction & Run (depthai v3 API) -----------------------
 
@@ -239,8 +240,14 @@ class OakDepthReader:
                         30, dai.VideoEncoderProperties.Profile.H265_MAIN,
                     )
                     encoder.setBitrateKbps(self._rec_cfg.video_bitrate_kbps)
-                    cam_rgb.requestOutput((1920, 1080)).link(encoder.input)
+                    cam_rgb.requestOutput((1920, 1080), dai.ImgFrame.Type.NV12).link(encoder.input)
                     h265_q = encoder.bitstream.createOutputQueue()
+
+            rec_queues = {}
+            if h265_q is not None:
+                rec_queues["h265"] = h265_q
+            with self._lock:
+                self._recording_queues = rec_queues if rec_queues else None
 
             pipeline.start()
             logger.info("OAK-D pipeline started (depthai v3)")
@@ -265,6 +272,8 @@ class OakDepthReader:
             except Exception:
                 pass
             self._device = None
+            with self._lock:
+                self._recording_queues = None
             self._device_ready.clear()
 
     def _poll_depth(self, depth_q, np) -> None:
@@ -286,8 +295,13 @@ class OakDepthReader:
             valid = roi[roi > 0]
             if valid.size == 0:
                 return
-            p5 = float(np.percentile(valid, 5))
-            p50 = float(np.percentile(valid, 50))
+            # Use partition-based quantiles to avoid full sorting each poll.
+            n = int(valid.size)
+            k5 = max(0, int(0.05 * (n - 1)))
+            k50 = n // 2
+            q = np.partition(valid, (k5, k50))
+            p5 = float(q[k5])
+            p50 = float(q[k50])
             valid_pct = (valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
             now = time.monotonic()
             stats = DepthStats(
