@@ -97,9 +97,15 @@ def run() -> None:
         action="store_true",
         help="Write high-rate PID CSV (heavy disk I/O)",
     )
+    parser.add_argument(
+        "--disable-recording",
+        action="store_true",
+        help="Disable OAK recording pipeline for profiling/debug",
+    )
     args, _ = parser.parse_known_args()
     pid_debug = args.pid_debug or config.imu_steering.log_steering_corrections
     pid_csv_enabled = bool(args.pid_csv)
+    disable_recording = bool(args.disable_recording)
 
     rc_reader = ArduinoRCReader()
     port = rc_reader.start()
@@ -116,7 +122,11 @@ def run() -> None:
     if config.obstacle_avoidance.enabled or config.follow_me.enabled:
         try:
             if OakDepthReader.detect():
-                rec_cfg = config.oak_recording if config.oak_recording.enabled else None
+                rec_cfg = (
+                    config.oak_recording
+                    if (config.oak_recording.enabled and not disable_recording)
+                    else None
+                )
                 oak_reader = OakDepthReader(
                     config.obstacle_avoidance, config.follow_me,
                     recording_config=rec_cfg,

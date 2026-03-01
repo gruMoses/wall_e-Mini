@@ -125,6 +125,19 @@
 
 This confirms normal-load behavior is stable and that stress-tail latency remains the main remaining performance risk for deeper optimization work.
 
+## Recording overhead A/B under stress (new profiling flag)
+
+`app.main` now supports `--disable-recording` to isolate recording overhead during profiling.
+
+- Recording enabled (stress): `run_20260301_141745.log`
+  - mean `23.47ms`, p95 `32ms`, p99 `60ms`, max `91ms`, `>=30ms` `8.26%`
+  - `recording_state`: mostly `RECORDING`/`LINGERING`
+- Recording disabled (stress): `run_20260301_141602.log`
+  - mean `20.93ms`, p95 `22ms`, p99 `24ms`, max `32ms`, `>=30ms` `0.21%`
+  - `recording_state`: `None`
+
+This isolates recording/preview/serialization work as a major contributor to stress-tail latency when active.
+
 ## Remaining work / risks
 
 1. Full P2 offload step (device-side ROI spatial stats replacing host depth quantile path) remains open.
