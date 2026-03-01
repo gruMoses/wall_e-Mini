@@ -112,6 +112,19 @@
 - Stress short run (`run_20260301_133406.log`): mean `23.69ms`, p95 `36ms`, p99 `55ms`, max `70ms`, `>=30ms` `10.47%`.
 - Note: short stress windows are noisy and startup-sensitive; use 60s+ repeated stress runs for release gating.
 
+## Repeated validation (2x 60s nominal + 2x 60s stress)
+
+- Nominal repeats:
+  - `run_20260301_140056.log`: mean `21.30ms`, p95 `25ms`, p99 `31ms`, max `37ms`, `>=30ms` `1.71%`
+  - `run_20260301_140311.log`: mean `21.07ms`, p95 `25ms`, p99 `27ms`, max `35ms`, `>=30ms` `0.43%`
+  - Aggregate nominal mean: `21.19ms`; aggregate p95: `25ms`
+- Stress repeats:
+  - `run_20260301_140205.log`: mean `23.35ms`, p95 `33ms`, p99 `43ms`, max `65ms`, `>=30ms` `8.94%`
+  - `run_20260301_140422.log`: mean `23.53ms`, p95 `33ms`, p99 `44ms`, max `84ms`, `>=30ms` `9.89%`
+  - Aggregate stress mean: `23.44ms`; aggregate p95: `33ms`
+
+This confirms normal-load behavior is stable and that stress-tail latency remains the main remaining performance risk for deeper optimization work.
+
 ## Remaining work / risks
 
 1. Full P2 offload step (device-side ROI spatial stats replacing host depth quantile path) remains open.
