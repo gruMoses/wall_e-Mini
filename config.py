@@ -101,6 +101,7 @@ class OakRecordingConfig:
     # Trigger: record whenever obstacle avoidance is active or Follow Me is on
     pre_buffer_s: float = 2.0         # ring-buffer seconds kept before trigger fires
     post_event_linger_s: float = 3.0  # keep recording N seconds after last trigger
+    obstacle_trigger_scale: float = 0.95
 
     # H.265 video (on-device encoding, near-zero CPU cost)
     video_enabled: bool = True

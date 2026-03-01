@@ -407,9 +407,12 @@ class OakRecorder:
 
     # -- Trigger logic -------------------------------------------------------
 
-    @staticmethod
-    def _should_record(t: RecordingTelemetry) -> bool:
-        return t.mode == "FOLLOW_ME" or t.throttle_scale < 1.0
+    def _should_record(self, t: RecordingTelemetry) -> bool:
+        if t.mode == "FOLLOW_ME":
+            return True
+        if not t.is_armed:
+            return False
+        return t.throttle_scale < float(getattr(self._cfg, "obstacle_trigger_scale", 1.0))
 
     # -- Session management --------------------------------------------------
 
