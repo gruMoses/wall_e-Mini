@@ -91,7 +91,14 @@
 | `P1final2_S2_nominal_30s` (`run_20260301_125518.log`) | 20.05 | 21 | 21 | 22 | 0.00% |
 | `P1final2_S3_stress_30s` (`run_20260301_125555.log`) | 21.23 | 24 | 27 | 34 | 0.55% |
 
+## Additional follow-up findings
+
+- Live person-in-frame FOLLOW_ME validation passed with fast reacquisition and no loop-latency tail reintroduced.
+- MCAP dependency was missing at runtime and was installed (`mcap==1.3.1`), restoring `session.mcap` outputs.
+- Queue-policy/drain tuning was tested and **reverted** after full 60s stress regression.
+- Added `--pid-csv` flag in `app.main` so high-rate PID CSV logging is opt-in instead of always on.
+
 ## Remaining work / risks
 
-1. Follow-Me dynamic behavior has not yet been validated with a moving human target in this pass.
-2. Full P2 offload step (device-side ROI spatial stats replacing host depth quantile path) remains open.
+1. Full P2 offload step (device-side ROI spatial stats replacing host depth quantile path) remains open.
+2. Recording trigger policy may still over-record in tight indoor spaces when obstacle scaling stays below `1.0` for long periods.

@@ -92,8 +92,14 @@ def run() -> None:
         action="store_true",
         help="Print PID controller debug values",
     )
+    parser.add_argument(
+        "--pid-csv",
+        action="store_true",
+        help="Write high-rate PID CSV (heavy disk I/O)",
+    )
     args, _ = parser.parse_known_args()
     pid_debug = args.pid_debug or config.imu_steering.log_steering_corrections
+    pid_csv_enabled = bool(args.pid_csv)
 
     rc_reader = ArduinoRCReader()
     port = rc_reader.start()
@@ -277,31 +283,32 @@ def run() -> None:
         # If file cannot be opened, continue without file logging
         log_fh = None
 
-    # High-rate PID tuning CSV (every loop tick, full precision)
-    _PID_CSV_COLS = (
-        "t_ms,heading_deg,target_deg,error_deg,yaw_rate_dps,"
-        "roll_deg,pitch_deg,p_term,i_term,d_term,"
-        "correction_raw,correction_applied,integral_accum,"
-        "steering_input,correction_blend,motor_l,motor_r,"
-        "ch1_us,ch2_us,armed,straight_intent,loop_dt_ms,"
-        "mode,fm_tracking,fm_target_z_m,fm_target_x_m,"
-        "fm_dist_err_m,fm_speed_offset,fm_steer_offset,"
-        "fm_num_det,fm_confidence,obstacle_dist_m,obstacle_scale"
-    )
-    pid_csv_path = logs_dir / f"pid_{run_dt.strftime('%Y%m%d_%H%M%S')}.csv"
+    # High-rate PID tuning CSV (optional; every loop tick, full precision)
     pid_csv_fh = None
-    try:
-        pid_csv_fh = open(pid_csv_path, "w", encoding="utf-8", buffering=1)
-        pid_csv_fh.write(_PID_CSV_COLS + "\n")
+    if pid_csv_enabled:
+        _PID_CSV_COLS = (
+            "t_ms,heading_deg,target_deg,error_deg,yaw_rate_dps,"
+            "roll_deg,pitch_deg,p_term,i_term,d_term,"
+            "correction_raw,correction_applied,integral_accum,"
+            "steering_input,correction_blend,motor_l,motor_r,"
+            "ch1_us,ch2_us,armed,straight_intent,loop_dt_ms,"
+            "mode,fm_tracking,fm_target_z_m,fm_target_x_m,"
+            "fm_dist_err_m,fm_speed_offset,fm_steer_offset,"
+            "fm_num_det,fm_confidence,obstacle_dist_m,obstacle_scale"
+        )
+        pid_csv_path = logs_dir / f"pid_{run_dt.strftime('%Y%m%d_%H%M%S')}.csv"
         try:
-            pid_latest = logs_dir / "pid_latest.csv"
-            if pid_latest.exists() or pid_latest.is_symlink():
-                pid_latest.unlink(missing_ok=True)
-            os.symlink(pid_csv_path.name, pid_latest)
+            pid_csv_fh = open(pid_csv_path, "w", encoding="utf-8", buffering=1)
+            pid_csv_fh.write(_PID_CSV_COLS + "\n")
+            try:
+                pid_latest = logs_dir / "pid_latest.csv"
+                if pid_latest.exists() or pid_latest.is_symlink():
+                    pid_latest.unlink(missing_ok=True)
+                os.symlink(pid_csv_path.name, pid_latest)
+            except Exception:
+                pass
         except Exception:
-            pass
-    except Exception:
-        pid_csv_fh = None
+            pid_csv_fh = None
     pid_csv_t0 = None
 
     try:
