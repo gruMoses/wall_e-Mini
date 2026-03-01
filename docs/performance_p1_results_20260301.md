@@ -216,3 +216,20 @@ Second live probe (60s, same soak log):
 - max persons seen in-window: `2`
 - loss/reacquire: `11 / 11`
 - loop timing: mean `20.98ms`, p95 `25ms`, p99 `28ms`, max `40ms`, `>=30ms 0.88%`
+
+## 30-minute soak completion (`p2_soak_30m`)
+
+Soak artifacts:
+- Perf bundle: `logs/perf/20260301_144916_p2_soak_30m`
+- Structured run log: `logs/run_20260301_144928.log`
+
+Full-window results:
+- loop timing: mean `20.23ms`, p95 `21ms`, p99 `25ms`, max `47ms`, `>=30ms 0.13%` (`22/17435`)
+- mode mix: `MANUAL=16444`, `FOLLOW_ME=991`
+- recording state: `RECORDING=15944`, `LINGERING=1491`
+- follow-only slice: persons seen/tracking `10.6%`, max persons `2`, reacquire events `24`
+- app CPU (`pidstat`): mean `8.47%`, p95 `15%`, max `89%` (startup/transition spikes)
+- app RSS (`pidstat`): mean `327.9MB`, p95/max `329.8MB` (flat at end; no creep signal)
+- thermal: avg `52.81C`, max `55.4C`, throttle flags `0x0` (none)
+
+Conclusion: 30-minute full-feature soak passed with stable loop timing, low tail incidence, no thermal throttling, and no obvious memory growth.
