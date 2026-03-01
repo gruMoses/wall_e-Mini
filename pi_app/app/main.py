@@ -522,6 +522,7 @@ def run() -> None:
                             "wp_distance_m": telem.get("wp_distance_m"),
                             "wp_completed": telem.get("wp_completed"),
                         }),
+                        "recording_state": oak_recorder.recording_state if oak_recorder is not None else None,
                         "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
                         "loop_dt_ms": loop_dt_ms,

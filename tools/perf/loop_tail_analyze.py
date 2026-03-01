@@ -41,6 +41,7 @@ def main() -> int:
     mode_tail_ctr: Counter[str] = Counter()
     armed_tail_ctr: Counter[str] = Counter()
     scale_tail_ctr: Counter[str] = Counter()
+    rec_state_tail_ctr: Counter[str] = Counter()
     persons_tail_ctr: Counter[str] = Counter()
     event_tail_ctr: Counter[str] = Counter()
     worst: list[tuple[float, str]] = []
@@ -76,6 +77,7 @@ def main() -> int:
         else:
             scale = None
         scale_tail_ctr[_bucket_scale(scale)] += 1
+        rec_state_tail_ctr[str(obj.get("recording_state", "none"))] += 1
 
         follow = obj.get("follow_me")
         num_persons = 0
@@ -106,6 +108,7 @@ def main() -> int:
     print(f"mode_tail_dist={dict(mode_tail_ctr)}")
     print(f"armed_tail_dist={dict(armed_tail_ctr)}")
     print(f"scale_tail_dist={dict(scale_tail_ctr)}")
+    print(f"recording_state_tail_dist={dict(rec_state_tail_ctr)}")
     print(f"persons_tail_dist={dict(persons_tail_ctr)}")
     print(f"events_tail_top={dict(event_tail_ctr.most_common(8))}")
 
