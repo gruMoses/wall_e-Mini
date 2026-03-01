@@ -197,3 +197,4 @@ This removes host `np.median` as the primary p50 path and keeps host-side ROI do
 Smoke validation:
 - `p2_spatial_median_smoke` (`run_20260301_144640.log`): mean `19.89ms`, p95 `21ms`, max `21ms`
 - `depth_p50_mm` remained live and plausible over the run (`3824.1 .. 3920.7`)
+- Full 60s stress validation (`run_20260301_144748.log`): mean `20.68ms`, p95 `24ms`, p99 `25ms`, max `26ms`, `>=30ms 0.00%`
