@@ -198,3 +198,14 @@ Smoke validation:
 - `p2_spatial_median_smoke` (`run_20260301_144640.log`): mean `19.89ms`, p95 `21ms`, max `21ms`
 - `depth_p50_mm` remained live and plausible over the run (`3824.1 .. 3920.7`)
 - Full 60s stress validation (`run_20260301_144748.log`): mean `20.68ms`, p95 `24ms`, p99 `25ms`, max `26ms`, `>=30ms 0.00%`
+
+## Soak-window follow-me probe (live)
+
+During active soak log `run_20260301_144928.log`, an automated 45s FOLLOW_ME window was executed:
+- `FOLLOW_ME` rows: `424` (`MANUAL`: `1`)
+- persons seen / tracking: `9.18%`
+- loss/reacquire: `13 / 13`
+- max persons seen in-window: `1`
+- loop timing in probe window: mean `21.06ms`, p95 `26ms`, p99 `30ms`, max `47ms`, `>=30ms 1.41%`
+
+Interpretation: follow mode remained responsive with successful repeated reacquisition, and loop-tail remained low during active follow processing.
