@@ -4,14 +4,14 @@
 #define DEBUG 0
 
 const byte NUM_CHANNELS = 5;
-const byte chPins[NUM_CHANNELS] = {2, 3, 4, 10, 6}; // Ch1, Ch2, Ch3, Ch4, Ch5
+const byte chPins[NUM_CHANNELS] = {2, 3, 4, 5, 6}; // Ch1, Ch2, Ch3, Ch4, Ch5
 volatile unsigned long pulseWidths[NUM_CHANNELS] = {1500, 1500, 1500, 1500, 1500};
 volatile unsigned long pulseStart[NUM_CHANNELS] = {0, 0, 0, 0, 0};
 
 // Model X motor driver pin mapping (per attached photo)
-// Left motor: ENB(PWM)=D5, IN3=D7, IN4=D8
+// Left motor: ENB(PWM)=D10, IN3=D7, IN4=D8
 // Right motor: ENA(PWM)=D9, IN2=D11, IN1=D12
-const byte ENB_L = 5;   // Left speed PWM
+const byte ENB_L = 10;  // Left speed PWM
 const byte IN3_L = 7;   // Left dir 1
 const byte IN4_L = 8;   // Left dir 2
 const byte ENA_R = 9;   // Right speed PWM
