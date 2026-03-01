@@ -109,7 +109,7 @@ If issues occur with the new system:
 
 ## Next Steps
 
-1. **Update Arduino Firmware**: Flash new `arduino_rc_reader.ino` for motor control capability
+1. **Update Arduino Firmware**: Flash `arduino_rc_reader/arduino_rc_reader.ino` for motor control capability
 2. **Test IMU Calibration**: Run calibration tools if IMU hardware is present
 3. **Test Full System**: Start services and test RC control, Bluetooth, and IMU steering
 4. **Tune PID Gains**: Adjust steering PID values for your specific robot
