@@ -97,6 +97,8 @@ class OakDepthReader:
         self._device = None
         self._recording_queues: dict | None = None
         self._device_ready = threading.Event()
+        self._depth_stats_decimation = 3
+        self._depth_stats_counter = 0
 
     # -- Public API ----------------------------------------------------------
 
@@ -318,14 +320,18 @@ class OakDepthReader:
             y0 = int(h * (0.5 - rh / 2))
             y1 = int(h * (0.5 + rh / 2))
             roi = frame[y0:y1, x0:x1]
-            # Downsample for telemetry-only stats to keep host-side overhead low.
-            roi_small = roi[::4, ::4]
-            total_pixels = roi_small.size
-            valid = roi_small[roi_small > 0]
-            if valid.size == 0:
-                return
-            p50 = float(np.median(valid))
-            valid_pct = (valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
+            p50 = None
+            valid_pct = None
+            self._depth_stats_counter += 1
+            if self._depth_stats_counter >= self._depth_stats_decimation:
+                self._depth_stats_counter = 0
+                # Downsample for telemetry-only stats to keep host-side overhead low.
+                roi_small = roi[::4, ::4]
+                total_pixels = roi_small.size
+                valid = roi_small[roi_small > 0]
+                if valid.size > 0:
+                    p50 = float(np.median(valid))
+                    valid_pct = (valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
 
             p5 = None
             if in_spatial is not None:
@@ -339,8 +345,17 @@ class OakDepthReader:
                     p5 = None
             if p5 is None:
                 # Fallback when no fresh spatial packet is available.
-                p5 = float(np.min(valid))
+                nonzero = roi[roi > 0]
+                if nonzero.size == 0:
+                    return
+                p5 = float(np.min(nonzero))
             now = time.monotonic()
+            with self._lock:
+                prev_stats = self._depth_state.stats
+            if p50 is None:
+                p50 = prev_stats.p50_mm if prev_stats.p50_mm > 0 else p5
+            if valid_pct is None:
+                valid_pct = prev_stats.valid_pixel_pct
             stats = DepthStats(
                 min_distance_m=p5 / 1000.0,
                 p5_mm=p5,
