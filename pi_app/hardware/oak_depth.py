@@ -209,6 +209,21 @@ class OakDepthReader:
             mono_left.requestOutput((640, 400)).link(stereo.left)
             mono_right.requestOutput((640, 400)).link(stereo.right)
 
+            # Device-side ROI spatial depth for obstacle distance (offloads host quantile math).
+            spatial_calc = pipeline.create(dai.node.SpatialLocationCalculator)
+            spatial_cfg = dai.SpatialLocationCalculatorConfigData()
+            spatial_cfg.depthThresholds.lowerThreshold = 100
+            spatial_cfg.depthThresholds.upperThreshold = 10000
+            rw = self._obs_cfg.roi_width_pct
+            rh = self._obs_cfg.roi_height_pct
+            spatial_cfg.roi = dai.Rect(
+                dai.Point2f(0.5 - rw / 2.0, 0.5 - rh / 2.0),
+                dai.Point2f(0.5 + rw / 2.0, 0.5 + rh / 2.0),
+            )
+            spatial_cfg.calculationAlgorithm = dai.SpatialLocationCalculatorAlgorithm.MIN
+            spatial_calc.initialConfig.addROI(spatial_cfg)
+            stereo.depth.link(spatial_calc.inputDepth)
+
             model_desc = dai.NNModelDescription(model="mobilenet-ssd", platform="RVC2")
             spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork).build(
                 cam_rgb, stereo, model_desc,
@@ -221,6 +236,7 @@ class OakDepthReader:
 
             det_q = spatial_nn.out.createOutputQueue()
             depth_q = spatial_nn.passthroughDepth.createOutputQueue()
+            spatial_depth_q = spatial_calc.out.createOutputQueue()
             rgb_preview_q = cam_rgb.requestOutput((640, 480)).createOutputQueue()
 
             # IMU node (BMI270: accel + gyro at 100 Hz)
@@ -259,7 +275,7 @@ class OakDepthReader:
 
         try:
             while not self._stop_event.is_set() and pipeline.isRunning():
-                self._poll_depth(depth_q, np)
+                self._poll_depth(depth_q, spatial_depth_q, np)
                 self._poll_detections(det_q)
                 self._poll_rgb(rgb_preview_q)
                 self._poll_imu(imu_q)
@@ -276,12 +292,23 @@ class OakDepthReader:
                 self._recording_queues = None
             self._device_ready.clear()
 
-    def _poll_depth(self, depth_q, np) -> None:
+    def _poll_depth(self, depth_q, spatial_depth_q, np) -> None:
         """Extract minimum distance and rich stats from the center ROI."""
         try:
+            in_spatial = spatial_depth_q.tryGet()
+            while True:
+                newer_spatial = spatial_depth_q.tryGet()
+                if newer_spatial is None:
+                    break
+                in_spatial = newer_spatial
             in_depth = depth_q.tryGet()
             if in_depth is None:
                 return
+            while True:
+                newer_depth = depth_q.tryGet()
+                if newer_depth is None:
+                    break
+                in_depth = newer_depth
             frame = in_depth.getFrame()  # uint16, millimetres
             h, w = frame.shape
             rw = self._obs_cfg.roi_width_pct
@@ -291,18 +318,28 @@ class OakDepthReader:
             y0 = int(h * (0.5 - rh / 2))
             y1 = int(h * (0.5 + rh / 2))
             roi = frame[y0:y1, x0:x1]
-            total_pixels = roi.size
-            valid = roi[roi > 0]
+            # Downsample for telemetry-only stats to keep host-side overhead low.
+            roi_small = roi[::4, ::4]
+            total_pixels = roi_small.size
+            valid = roi_small[roi_small > 0]
             if valid.size == 0:
                 return
-            # Use partition-based quantiles to avoid full sorting each poll.
-            n = int(valid.size)
-            k5 = max(0, int(0.05 * (n - 1)))
-            k50 = n // 2
-            q = np.partition(valid, (k5, k50))
-            p5 = float(q[k5])
-            p50 = float(q[k50])
+            p50 = float(np.median(valid))
             valid_pct = (valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
+
+            p5 = None
+            if in_spatial is not None:
+                try:
+                    spatial_locations = in_spatial.getSpatialLocations()
+                    if spatial_locations:
+                        z_mm = float(spatial_locations[0].spatialCoordinates.z)
+                        if z_mm > 0:
+                            p5 = z_mm
+                except Exception:
+                    p5 = None
+            if p5 is None:
+                # Fallback when no fresh spatial packet is available.
+                p5 = float(np.min(valid))
             now = time.monotonic()
             stats = DepthStats(
                 min_distance_m=p5 / 1000.0,
