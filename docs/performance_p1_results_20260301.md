@@ -149,6 +149,20 @@ Stress comparison (recording enabled):
 
 Trend: lower high-tail outliers (p99/max) with similar mean loop time.
 
+## Lower default MCAP snapshot rates
+
+Defaults updated:
+- `mcap_image_fps`: `5.0 -> 3.0`
+- `mcap_depth_fps`: `2.0 -> 1.0`
+- `mcap_telemetry_hz`: `10.0 -> 5.0`
+
+Stress comparison (recording enabled):
+- Baseline (`run_20260301_142515.log`): mean `23.04ms`, p95 `31ms`, p99 `50ms`, max `69ms`, `>=30ms` `6.38%`
+- Low-MCAP #1 (`run_20260301_143115.log`): mean `22.82ms`, p95 `32ms`, p99 `45ms`, max `68ms`, `>=30ms` `7.31%`
+- Low-MCAP #2 (`run_20260301_143258.log`): mean `22.50ms`, p95 `31ms`, p99 `37ms`, max `59ms`, `>=30ms` `7.03%`
+
+Net: lower mean and much better high-tail outliers (p99/max), with a slight increase in `>=30ms` frequency.
+
 ## Remaining work / risks
 
 1. Full P2 offload step (device-side ROI spatial stats replacing host depth quantile path) remains open.

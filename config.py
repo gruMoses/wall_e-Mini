@@ -109,9 +109,9 @@ class OakRecordingConfig:
 
     # MCAP annotated snapshots + telemetry
     mcap_enabled: bool = True
-    mcap_image_fps: float = 5.0       # annotated RGB snapshot rate
-    mcap_depth_fps: float = 2.0       # colorized depth snapshot rate
-    mcap_telemetry_hz: float = 10.0
+    mcap_image_fps: float = 3.0       # annotated RGB snapshot rate
+    mcap_depth_fps: float = 1.0       # colorized depth snapshot rate
+    mcap_telemetry_hz: float = 5.0
     # Local preview generation budget (used by web viewer + MCAP image capture path)
     preview_rgb_fps: float = 6.0
     preview_depth_fps: float = 3.0
