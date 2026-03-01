@@ -504,14 +504,20 @@ class OakRecorder:
         h265_q = self._recording_queues.get("h265")
         if h265_q is not None:
             try:
-                pkt = h265_q.tryGet()
-                if pkt is not None:
+                drained_any = False
+                while True:
+                    pkt = h265_q.tryGet()
+                    if pkt is None:
+                        break
+                    drained_any = True
                     data = bytes(pkt.getData())
                     if self._state in (_RecState.RECORDING, _RecState.LINGERING):
                         if self._h265_queue is not None:
                             self._h265_queue.append(data)
                     else:
                         self._pre_buffer.append((time.monotonic(), data))
+                if drained_any:
+                    return
             except Exception:
                 pass
 

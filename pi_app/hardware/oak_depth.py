@@ -219,9 +219,9 @@ class OakDepthReader:
             spatial_nn.setDepthLowerThreshold(int(self._fm_cfg.min_distance_m * 1000))
             spatial_nn.setDepthUpperThreshold(int(self._fm_cfg.max_distance_m * 1000))
 
-            det_q = spatial_nn.out.createOutputQueue()
-            depth_q = spatial_nn.passthroughDepth.createOutputQueue()
-            rgb_preview_q = cam_rgb.requestOutput((640, 480)).createOutputQueue()
+            det_q = spatial_nn.out.createOutputQueue(maxSize=4, blocking=False)
+            depth_q = spatial_nn.passthroughDepth.createOutputQueue(maxSize=4, blocking=False)
+            rgb_preview_q = cam_rgb.requestOutput((640, 480)).createOutputQueue(maxSize=2, blocking=False)
 
             # IMU node (BMI270: accel + gyro at 100 Hz)
             imu_node = pipeline.create(dai.node.IMU)
@@ -241,7 +241,7 @@ class OakDepthReader:
                     )
                     encoder.setBitrateKbps(self._rec_cfg.video_bitrate_kbps)
                     cam_rgb.requestOutput((1920, 1080), dai.ImgFrame.Type.NV12).link(encoder.input)
-                    h265_q = encoder.bitstream.createOutputQueue()
+                    h265_q = encoder.bitstream.createOutputQueue(maxSize=60, blocking=False)
 
             rec_queues = {}
             if h265_q is not None:
@@ -282,6 +282,11 @@ class OakDepthReader:
             in_depth = depth_q.tryGet()
             if in_depth is None:
                 return
+            while True:
+                newer = depth_q.tryGet()
+                if newer is None:
+                    break
+                in_depth = newer
             frame = in_depth.getFrame()  # uint16, millimetres
             h, w = frame.shape
             rw = self._obs_cfg.roi_width_pct
@@ -325,6 +330,11 @@ class OakDepthReader:
             in_det = det_q.tryGet()
             if in_det is None:
                 return
+            while True:
+                newer = det_q.tryGet()
+                if newer is None:
+                    break
+                in_det = newer
             persons: list[PersonDetection] = []
             for det in in_det.detections:
                 is_person = (det.label == PERSON_LABEL or
@@ -353,6 +363,11 @@ class OakDepthReader:
             msg = rgb_q.tryGet()
             if msg is None:
                 return
+            while True:
+                newer = rgb_q.tryGet()
+                if newer is None:
+                    break
+                msg = newer
             frame = msg.getCvFrame()
             with self._lock:
                 self._rgb_state.frame = frame

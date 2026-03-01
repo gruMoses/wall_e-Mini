@@ -31,6 +31,10 @@
    - Replaced `np.percentile` with `np.partition`-based quantiles for depth ROI stats (`p5`, `p50`) to reduce host CPU work.
    - Implemented `get_recording_queues()` return path (was hardcoded `None`) and wired queue lifecycle.
    - Fixed encoder input format by requesting `NV12` from camera for `VideoEncoder` input.
+   - Tuned output queues to non-blocking bounded queues and latest-message draining for depth/detections/RGB.
+
+7. `pi_app/hardware/oak_recorder.py`
+   - Drains all available H.265 packets each poll to reduce backlog/drop risk under bursty encoder output.
 
 ## Validation matrix executed
 
@@ -45,6 +49,8 @@
 - Post-encoder quick regression:
   - `P1final2_S2_nominal_30s`
   - `P1final2_S3_stress_30s`
+- Queue-tuning smoke check:
+  - `queue_tuning_check_30s`
 
 ## Before vs after (key KPIs)
 
@@ -90,6 +96,12 @@
 |---|---:|---:|---:|---:|---:|
 | `P1final2_S2_nominal_30s` (`run_20260301_125518.log`) | 20.05 | 21 | 21 | 22 | 0.00% |
 | `P1final2_S3_stress_30s` (`run_20260301_125555.log`) | 21.23 | 24 | 27 | 34 | 0.55% |
+
+## Queue-tuning smoke check
+
+| Scenario | Mean (ms) | p95 (ms) | p99 (ms) | Max (ms) | % >= 30ms |
+|---|---:|---:|---:|---:|---:|
+| `queue_tuning_check_30s` (`run_20260301_131248.log`) | 21.16 | 25 | 28 | 30 | 0.53% |
 
 ## Remaining work / risks
 
