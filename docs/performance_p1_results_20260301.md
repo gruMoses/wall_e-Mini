@@ -246,3 +246,12 @@ Validation so far:
 - Unit tests: `pi_app/tests/test_follow_me.py` passed (`14/14`), including new continuity test.
 - Runtime smoke: `tracker_integration_smoke` app run completed cleanly.
 - Follow-me probe sanity (20s, no persons in frame): mode toggled correctly, no regressions/crashes.
+
+Single-person live validation (120s probe, occlusion/re-entry pattern):
+- probe window: `start=1772401422.328339`, `end=1772401542.3337545`
+- `FOLLOW_ME` rows: `365`; tracked rows: `252`; max persons: `1`
+- loss/reacquire: `16 / 16`
+- loop timing: mean `20.94ms`, p95 `25ms`, p99 `27ms`, max `35ms`, `>=30ms 0.36%`
+- tracker continuity: tracked rows with `target_track_id`: `252/252`, unique IDs observed: `{0}`, ID switches while tracked: `0`
+
+Result: tracker ID continuity held through the single-person test window (no tracked-ID flapping), with stable loop timing.
