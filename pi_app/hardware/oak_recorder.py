@@ -285,6 +285,14 @@ class OakRecorder:
     def get_latest_telemetry(self) -> RecordingTelemetry | None:
         return self._telemetry
 
+    def wants_rgb_preview(self) -> bool:
+        """Whether caller should fetch an RGB frame this tick."""
+        return self._needs_rgb_preview()
+
+    def wants_depth_preview(self) -> bool:
+        """Whether caller should fetch a depth frame this tick."""
+        return self._needs_depth_preview()
+
     def set_stream_client_connected(self, stream: str, connected: bool) -> None:
         """Track active web-stream clients to avoid unnecessary preview work."""
         with self._preview_lock:

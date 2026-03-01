@@ -373,6 +373,10 @@ def run() -> None:
             # Feed recorder (activity-triggered)
             if oak_recorder is not None:
                 try:
+                    need_rgb = oak_recorder.wants_rgb_preview()
+                    need_depth = oak_recorder.wants_depth_preview()
+                    if oak_reader is not None:
+                        oak_reader.set_rgb_poll_enabled(need_rgb)
                     rec_telem = RecordingTelemetry(
                         timestamp=time.time(),
                         mode=telem.get("mode", "MANUAL"),
@@ -387,8 +391,8 @@ def run() -> None:
                         follow_target_x_m=telem.get("follow_me_target_x_m"),
                         follow_target_z_m=telem.get("follow_me_target_z_m"),
                     )
-                    depth_frame = oak_reader.get_latest_depth_frame() if oak_reader else None
-                    rgb_frame = oak_reader.get_latest_rgb_frame() if oak_reader else None
+                    depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
+                    rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None
                     oak_recorder.update(rec_telem, depth_frame=depth_frame, rgb_frame=rgb_frame)
                 except Exception:
                     pass

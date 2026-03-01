@@ -99,6 +99,7 @@ class OakDepthReader:
         self._device_ready = threading.Event()
         self._depth_stats_decimation = 3
         self._depth_stats_counter = 0
+        self._rgb_poll_enabled = False
 
     # -- Public API ----------------------------------------------------------
 
@@ -154,6 +155,11 @@ class OakDepthReader:
         """Return the most recent RGB preview frame (BGR numpy) or None. Thread-safe."""
         with self._lock:
             return self._rgb_state.frame
+
+    def set_rgb_poll_enabled(self, enabled: bool) -> None:
+        """Enable/disable host RGB preview polling to reduce host copy load."""
+        with self._lock:
+            self._rgb_poll_enabled = bool(enabled)
 
     def get_imu_data(self) -> tuple[_ImuState, float]:
         """Return (imu_state_copy, age_s). Thread-safe."""
@@ -236,10 +242,10 @@ class OakDepthReader:
             spatial_nn.setDepthLowerThreshold(int(self._fm_cfg.min_distance_m * 1000))
             spatial_nn.setDepthUpperThreshold(int(self._fm_cfg.max_distance_m * 1000))
 
-            det_q = spatial_nn.out.createOutputQueue()
-            depth_q = spatial_nn.passthroughDepth.createOutputQueue()
-            spatial_depth_q = spatial_calc.out.createOutputQueue()
-            rgb_preview_q = cam_rgb.requestOutput((640, 480)).createOutputQueue()
+            det_q = spatial_nn.out.createOutputQueue(maxSize=4, blocking=False)
+            depth_q = spatial_nn.passthroughDepth.createOutputQueue(maxSize=4, blocking=False)
+            spatial_depth_q = spatial_calc.out.createOutputQueue(maxSize=4, blocking=False)
+            rgb_preview_q = cam_rgb.requestOutput((640, 480)).createOutputQueue(maxSize=1, blocking=False)
 
             # IMU node (BMI270: accel + gyro at 100 Hz)
             imu_node = pipeline.create(dai.node.IMU)
@@ -279,7 +285,10 @@ class OakDepthReader:
             while not self._stop_event.is_set() and pipeline.isRunning():
                 self._poll_depth(depth_q, spatial_depth_q, np)
                 self._poll_detections(det_q)
-                self._poll_rgb(rgb_preview_q)
+                with self._lock:
+                    rgb_enabled = self._rgb_poll_enabled
+                if rgb_enabled:
+                    self._poll_rgb(rgb_preview_q)
                 self._poll_imu(imu_q)
                 time.sleep(1.0 / self._obs_cfg.update_rate_hz)
         except Exception:
