@@ -17,6 +17,7 @@ import logging
 import threading
 import time
 from pathlib import Path
+from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 
@@ -359,6 +360,10 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None) -> Flask:
     app = Flask(__name__)
     app.config["PROPAGATE_EXCEPTIONS"] = False
     placeholder = _placeholder_jpeg()
+    rec_cache_lock = threading.Lock()
+    rec_cache: list[dict] = []
+    rec_cache_ts = 0.0
+    rec_cache_ttl_s = 5.0
 
     # -- Dashboard -----------------------------------------------------------
 
@@ -464,16 +469,23 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None) -> Flask:
 
     @app.route("/api/recordings")
     def api_recordings():
-        rec_dir = recorder.recordings_dir
-        sessions = []
-        if rec_dir.exists():
-            for d in sorted(rec_dir.iterdir(), reverse=True):
-                if not d.is_dir():
-                    continue
-                files = sorted(f.name for f in d.iterdir() if f.is_file())
-                if files:
-                    sessions.append({"name": d.name, "files": files})
-        return Response(json.dumps(sessions), content_type="application/json")
+        nonlocal rec_cache_ts, rec_cache
+        now = time.monotonic()
+        with rec_cache_lock:
+            if now - rec_cache_ts >= rec_cache_ttl_s:
+                rec_dir = recorder.recordings_dir
+                sessions = []
+                if rec_dir.exists():
+                    for d in sorted(rec_dir.iterdir(), reverse=True):
+                        if not d.is_dir():
+                            continue
+                        files = sorted(f.name for f in d.iterdir() if f.is_file())
+                        if files:
+                            sessions.append({"name": d.name, "files": files})
+                rec_cache = sessions
+                rec_cache_ts = now
+            payload = deepcopy(rec_cache)
+        return Response(json.dumps(payload), content_type="application/json")
 
     @app.route("/recordings/<session>/<filename>")
     def serve_recording(session: str, filename: str):
