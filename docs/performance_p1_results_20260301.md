@@ -209,3 +209,10 @@ During active soak log `run_20260301_144928.log`, an automated 45s FOLLOW_ME win
 - loop timing in probe window: mean `21.06ms`, p95 `26ms`, p99 `30ms`, max `47ms`, `>=30ms 1.41%`
 
 Interpretation: follow mode remained responsive with successful repeated reacquisition, and loop-tail remained low during active follow processing.
+
+Second live probe (60s, same soak log):
+- `FOLLOW_ME` rows: `565` (`MANUAL`: `1`)
+- persons seen / tracking: `11.66%`
+- max persons seen in-window: `2`
+- loss/reacquire: `11 / 11`
+- loop timing: mean `20.98ms`, p95 `25ms`, p99 `28ms`, max `40ms`, `>=30ms 0.88%`
