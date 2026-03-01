@@ -386,6 +386,11 @@ class OakDepthReader:
             in_det = det_q.tryGet()
             if in_det is None:
                 return
+            while True:
+                newer = det_q.tryGet()
+                if newer is None:
+                    break
+                in_det = newer
             persons: list[PersonDetection] = []
             for det in in_det.detections:
                 is_person = (det.label == PERSON_LABEL or
@@ -427,6 +432,11 @@ class OakDepthReader:
             imu_data = imu_q.tryGet()
             if imu_data is None:
                 return
+            while True:
+                newer = imu_q.tryGet()
+                if newer is None:
+                    break
+                imu_data = newer
             packets = imu_data.packets
             if not packets:
                 return
