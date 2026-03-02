@@ -23,9 +23,9 @@ The system implements a PID controller:
 - **Integral (I)**: Accumulates and corrects for systematic drift
 - **Derivative (D)**: Dampens oscillations using yaw rate
 
-### 2. Steering Input Detection
-- **Neutral steering** (|input| < 0.1): IMU compensation active
-- **Active steering** (|input| ≥ 0.1): IMU compensation disabled, target heading updated
+### 2. Steering Intent Detection
+- Compensation is strongest in straight-intent conditions and scales down as steering input grows.
+- Neutral/intent handling is controlled by hysteresis thresholds in `config.py`.
 
 ### 3. Fallback Behavior
 - If IMU is unavailable or fails, the system automatically falls back to RC-only control
@@ -38,20 +38,22 @@ Edit `config.py` to adjust IMU steering parameters:
 ```python
 @dataclass(frozen=True)
 class ImuSteeringConfig:
-    enabled: bool = True              # Enable/disable IMU steering
-    
-    # PID gains
-    kp: float = 2.0                  # Proportional gain
-    ki: float = 0.1                  # Integral gain  
-    kd: float = 0.5                  # Derivative gain
-    
-    # Control parameters
-    max_correction: int = 30         # Maximum correction (0-255)
-    deadband_deg: float = 2.0        # Minimum error to trigger correction
-    max_integral: float = 50.0       # Maximum integral term
-    
-    # Timing
-    update_rate_hz: float = 20.0     # IMU update rate
+    enabled: bool = True
+    kp: float = 1.7
+    ki: float = 0.4
+    kd: float = 0.08
+    max_correction: int = 220
+    deadband_deg: float = 0.9
+    max_integral: float = 80.0
+    steering_neutral_enter: float = 0.08
+    steering_neutral_exit: float = 0.15
+    neutral_dwell_s: float = 0.0
+    straight_equal_tolerance_us: int = 120
+    straight_min_throttle_us: int = 80
+    straight_relative_tolerance_pct: float = 0.35
+    straight_disengage_hysteresis_s: float = 0.80
+    correction_zero_at_steering: float = 0.50
+    update_rate_hz: float = 80.0
 ```
 
 To disable the magnetometer and rely solely on the accelerometer and gyro,
@@ -71,16 +73,28 @@ yaw is estimated by integrating the gyroscope.
 
 1. **Install dependencies**:
    ```bash
+   cd /home/pi/wall_e-Mini
    pip install -r requirements.txt
    ```
 
 2. **Connect IMU hardware** to I2C bus
 
-3. **Test IMU functionality**:
+3. **Test IMU functionality** (available tools):
    ```bash
-   cd wall_e-Mini
-   python3 pi_app/cli/test_imu.py
+   cd /home/pi/wall_e-Mini
+   python3 -m pi_app.cli.calibrate_imu
+   python3 -m pi_app.cli.advanced_imu_calibration
+   python3 -m pi_app.cli.imu_axis_mapping_tuner
+   python3 -m pi_app.cli.imu_cli_manual
    ```
+
+## Runtime Source Selection
+
+`config.py` controls IMU source priority:
+- `imu_source="auto"`: external I2C IMU first, fallback to OAK-D IMU
+- `imu_source="external"`: external only
+- `imu_source="oak_d"`: OAK-D onboard IMU only
+- `imu_source="none"`: disable IMU steering
 
 ## Integration
 

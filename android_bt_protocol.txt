@@ -4,13 +4,17 @@ Scope
 - This document describes exactly how the Raspberry Pi 5 communicates with the Android app over Bluetooth in the current codebase.
 - It covers: transport, setup on Raspberry Pi 5, message formats, server responses, freshness/anti-stale logic, input arbitration, and practical examples.
 - Only currently implemented/used behaviors are included.
+- Current architecture note: Bluetooth SPP server runs as an external process
+  (`pi_app/cli/spp_server.py`, usually via `wall-e-spp.service`) and writes
+  `/tmp/wall_e_bt_latest.json`. The main control loop reads that file.
 
 Transport overview
-- Primary mode: Classic Bluetooth SPP (RFCOMM) server implemented in-process via PyBluez.
+- Primary mode: Classic Bluetooth SPP (RFCOMM) server via PyBluez.
   - Service UUID (SPP): 00001101-0000-1000-8000-00805F9B34FB
   - Service name: "WALL-E Control"
   - Line-oriented UTF-8 text protocol, newline-delimited ("\n").
-- Optional mode: Kernel RFCOMM TTY device at /dev/rfcomm0 (if present) is preferred for input, but it only supports the legacy V1 protocol. If it is not connected, the in-process SPP server starts automatically and is used.
+- Legacy notes below mention `/dev/rfcomm0` and in-process variants. Treat those
+  as historical paths unless you intentionally deploy that older topology.
 
 Raspberry Pi 5 setup (Bluetooth + dependencies)
 1) Verify Bluetooth service and adapter
@@ -39,9 +43,12 @@ Raspberry Pi 5 setup (Bluetooth + dependencies)
   - sudo rfcomm bind 0 <ANDROID_MAC> 1
   - This creates /dev/rfcomm0 bound to the device and channel 1.
 
-Modes the code will use automatically
-- If /dev/rfcomm0 exists and is connected, the program reads V1 text lines from that TTY (RFCOMMDeviceCommandSource) and uses them if fresh.
-- Otherwise, the program starts the in-process PyBluez SPP server (BluetoothCommandServer) and uses that (supports V2 authenticated and V1 fallback per env vars).
+Modes in current deployment
+- `wall-e-spp.service` (or manual `spp_server.py`) handles Bluetooth transport.
+- The service writes current command bytes and freshness timestamp to
+  `/tmp/wall_e_bt_latest.json`.
+- Main loop consumes that file and applies BT control only while command age is
+  within the freshness window (`<= 0.6s`).
 
 Protocol V2 (unauthenticated; current)
 Handshake

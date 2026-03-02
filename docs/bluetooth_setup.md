@@ -2,6 +2,10 @@
 
 Adapter MAC: 88:A2:9E:03:1A:07
 
+This project uses an external SPP server process (`wall-e-spp.service`) that
+writes latest BT commands to `/tmp/wall_e_bt_latest.json`. The main control loop
+reads that file and treats commands as valid only while fresh.
+
 ### One-time prerequisites
 - Ensure the Bluetooth service is running: `systemctl is-active bluetooth`
 - Install tooling: `sudo apt-get update && sudo apt-get install -y bluez`
@@ -22,14 +26,18 @@ If the controller powers off during the restart, power it back on:
 bluetoothctl power on
 ```
 
-### Make the Pi always discoverable (installed by our service)
-We install a small systemd unit that, on boot, sets:
+### Make the Pi always discoverable (optional)
+You can use a boot-time helper service that sets:
 - `agent on`, `default-agent`
 - `pairable on`
 - `discoverable on`
 - `discoverable-timeout 0` (never times out)
 
-To (re)install manually:
+One local setup uses scripts under `/home/pi/bin`, but those files are not part
+of this repository. If you manage discoverability yourself, keep equivalent
+settings enabled.
+
+Example install flow (if those scripts exist on your system):
 ```bash
 sudo install -m 0755 /home/pi/bin/bt_always_discoverable.sh /usr/local/bin/bt_always_discoverable.sh
 sudo install -m 0644 /home/pi/bin/bt_always_discoverable.service /etc/systemd/system/bt_always_discoverable.service
@@ -47,7 +55,7 @@ trust <PHONE_MAC>
 connect <PHONE_MAC>
 ```
 
-### Protocol notes (final)
+### Protocol notes
 - We use Classic Bluetooth SPP (RFCOMM). Android connects with SPP UUID `00001101-0000-1000-8000-00805F9B34FB`.
 - The server sends a greeting: `SRV:HELLO ver=2 sn=<nonce>` (nonce is informational).
 - We accept two message formats from Android without authentication:
@@ -57,6 +65,13 @@ connect <PHONE_MAC>
   - `V1:<left_f>;<right_f>;<seq>` where floats are in [-1.0, 1.0].
 - Sequence numbers must strictly increase per connection.
 
+### Runtime data path
+- `pi_app/cli/spp_server.py` parses incoming commands and writes:
+  - `/tmp/wall_e_bt_latest.json`
+  - fields: `left_byte`, `right_byte`, `last_update_epoch_s`
+- `pi_app/app/main.py` reads this file and uses BT override only when command age
+  is `<= 0.6s`.
+
 ### Run an RFCOMM SPP server (for testing)
 Install PyBluez from apt (avoids pip restrictions):
 ```bash
@@ -65,7 +80,8 @@ sudo apt-get install -y python3-bluez
 
 Start the simple SPP server (root required for SDP advertise):
 ```bash
-sudo python3 /home/pi/pi_app/cli/spp_server.py
+cd /home/pi/wall_e-Mini
+sudo python3 pi_app/cli/spp_server.py
 ```
 This advertises the SPP UUID `00001101-0000-1000-8000-00805F9B34FB` as "WALL-E Control" so Android can open an RFCOMM socket instead of defaulting to an audio profile.
 

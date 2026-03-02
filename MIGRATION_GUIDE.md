@@ -1,5 +1,10 @@
 # WALL-E Migration Guide: v1 to wall_e-Mini
 
+> Historical migration record. This document captures the original transition
+> from v1 and may not reflect current runtime behavior. For current operations,
+> refer to `README.md` and docs under `docs/` (especially `services.md`,
+> `hardware_mapping.md`, `testing.md`).
+
 This document outlines the migration from the original monolithic WALL-E control system to the new modular wall_e-Mini system.
 
 ## Overview of Changes

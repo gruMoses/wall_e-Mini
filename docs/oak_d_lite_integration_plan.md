@@ -1,12 +1,17 @@
 # OAK-D Lite Integration: Obstacle Avoidance + Follow Me
 
+> Historical design document. This file describes the implementation plan used
+> during development and is not the canonical source of current runtime behavior.
+> For current behavior, refer to `README.md`, `docs/hardware_mapping.md`,
+> `docs/testing.md`, and code in `pi_app/control` + `pi_app/hardware`.
+
 Integrate an OAK-D Lite stereo depth camera into Wall-E Mini for (1) forward obstacle avoidance with graduated throttle reduction, and (2) a Follow Me mode that uses on-device person detection to autonomously track and follow a person.
 
 ---
 
 ## Part 1: Obstacle Avoidance
 
-### Behavior
+### Behavior (original plan)
 
 - **Beyond `slow_distance_m`**: Full speed, no intervention
 - **Between `slow_distance_m` and `stop_distance_m`**: Linear throttle reduction (1.0 down to 0.0)
@@ -101,10 +106,13 @@ Where `_scale_toward_neutral(byte_val, scale)` interpolates between the commande
 
 ## Part 2: Follow Me Mode
 
-### Behavior
+### Behavior (original plan)
 
-- **Activation**: 4 rapid taps on Channel 3 while armed (arm→disarm cycles within ~2 seconds) enters Follow Me mode
-- **Deactivation**: A single Channel 3 disarm tap exits Follow Me AND disarms the robot
+- **Current implementation note**: Follow Me activation is now handled by CH4
+  thresholds in safety logic (high enters while armed, low exits). The original
+  CH3 multi-tap concept below is retained for historical context only.
+- **Activation (original plan)**: 4 rapid taps on Channel 3 while armed (arm→disarm cycles within ~2 seconds) enters Follow Me mode
+- **Deactivation (original plan)**: A single Channel 3 disarm tap exits Follow Me AND disarms the robot
 - When active, the robot autonomously follows the person nearest the center of the frame and closest in depth
 - **Speed**: Proportional to distance — faster when far from target distance, decelerates as it approaches, stops at target follow distance
 - **Steering**: Proportional to the person's horizontal offset from frame center — further off-center means harder turn
