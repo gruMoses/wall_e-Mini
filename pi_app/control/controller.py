@@ -108,9 +108,13 @@ class Controller:
         # by system clock adjustments.
         self._last_imu_update = time.monotonic()
         if config.imu_steering.enabled:
-            rate_hz = getattr(config.imu_steering, "update_rate_hz", 0)
+            rate_hz = float(getattr(config.imu_steering, "update_rate_hz", 0))
             if rate_hz <= 0:
                 raise ValueError("config.imu_steering.update_rate_hz must be positive")
+            oak_poll_hz = float(getattr(config.imu_steering, "oak_imu_poll_hz", rate_hz))
+            if oak_poll_hz > 0:
+                # Keep controller update cadence aligned to available OAK IMU ingestion cadence.
+                rate_hz = min(rate_hz, oak_poll_hz)
             self._imu_update_interval = 1.0 / rate_hz
         else:
             self._imu_update_interval = 1.0
@@ -484,9 +488,6 @@ class Controller:
                 'is_calibrated': status.is_calibrated,
                 'error_count': status.error_count,
             }
-            for k, v in status_dict.items():
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    status_dict[k] = int(round(v))
             return status_dict
         except Exception:
             return None

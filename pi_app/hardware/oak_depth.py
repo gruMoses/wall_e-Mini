@@ -69,6 +69,31 @@ class _ImuState:
     gy_rads: float = 0.0
     gz_rads: float = 0.0
     timestamp: float = 0.0
+    device_timestamp_s: float = 0.0
+
+
+@dataclass
+class _ImuMetrics:
+    """Lightweight IMU observability counters."""
+    queue_msgs_received: int = 0
+    queue_msgs_consumed: int = 0
+    queue_msgs_dropped: int = 0
+    queue_drain_count: int = 0
+    packets_received: int = 0
+    packets_consumed: int = 0
+    packets_coalesced: int = 0
+    last_batch_packets: int = 0
+    last_drain_msgs: int = 0
+    cadence_samples: int = 0
+    cadence_last_s: float = 0.0
+    cadence_min_s: float = 0.0
+    cadence_max_s: float = 0.0
+    cadence_avg_s: float = 0.0
+    error_count: int = 0
+    first_error_ts: float = 0.0
+    last_error_ts: float = 0.0
+    last_error_msg: str = ""
+    warning_emits: int = 0
 
 
 class OakDepthReader:
@@ -79,6 +104,9 @@ class OakDepthReader:
         obstacle_config: ObstacleAvoidanceConfig,
         follow_me_config: FollowMeConfig,
         recording_config: OakRecordingConfig | None = None,
+        imu_poll_hz: float = 60.0,
+        imu_packet_mode: str = "latest",
+        imu_max_packets_per_poll: int = 4,
     ) -> None:
         self._obs_cfg = obstacle_config
         self._fm_cfg = follow_me_config
@@ -88,6 +116,9 @@ class OakDepthReader:
         self._det_state = _DetectionState(persons=[])
         self._rgb_state = _RgbState()
         self._imu_state = _ImuState()
+        self._imu_metrics = _ImuMetrics()
+        self._imu_prev_consumed_ts = 0.0
+        self._imu_last_warn_ts = 0.0
         self._lock = threading.Lock()
 
         self._thread: threading.Thread | None = None
@@ -100,6 +131,10 @@ class OakDepthReader:
         self._depth_stats_decimation = 3
         self._depth_stats_counter = 0
         self._rgb_poll_enabled = False
+        self._imu_poll_interval_s = 1.0 / max(1.0, float(imu_poll_hz))
+        mode = str(imu_packet_mode or "latest").strip().lower()
+        self._imu_packet_mode = mode if mode in ("latest", "bounded") else "latest"
+        self._imu_max_packets_per_poll = max(1, int(imu_max_packets_per_poll))
 
     # -- Public API ----------------------------------------------------------
 
@@ -173,7 +208,38 @@ class OakDepthReader:
                 gy_rads=self._imu_state.gy_rads,
                 gz_rads=self._imu_state.gz_rads,
                 timestamp=self._imu_state.timestamp,
+                device_timestamp_s=self._imu_state.device_timestamp_s,
             ), age
+
+    def get_imu_metrics(self) -> dict:
+        """Return a thread-safe snapshot of IMU observability counters."""
+        now = time.monotonic()
+        with self._lock:
+            m = self._imu_metrics
+            last_ts = self._imu_state.timestamp
+            return {
+                "queue_msgs_received": m.queue_msgs_received,
+                "queue_msgs_consumed": m.queue_msgs_consumed,
+                "queue_msgs_dropped": m.queue_msgs_dropped,
+                "queue_drain_count": m.queue_drain_count,
+                "packets_received": m.packets_received,
+                "packets_consumed": m.packets_consumed,
+                "packets_coalesced": m.packets_coalesced,
+                "last_batch_packets": m.last_batch_packets,
+                "last_drain_msgs": m.last_drain_msgs,
+                "cadence_samples": m.cadence_samples,
+                "cadence_last_s": m.cadence_last_s,
+                "cadence_min_s": m.cadence_min_s,
+                "cadence_max_s": m.cadence_max_s,
+                "cadence_avg_s": m.cadence_avg_s,
+                "error_count": m.error_count,
+                "first_error_ts": m.first_error_ts,
+                "last_error_ts": m.last_error_ts,
+                "last_error_msg": m.last_error_msg,
+                "warning_emits": m.warning_emits,
+                "last_sample_timestamp": last_ts,
+                "last_sample_age_s": (now - last_ts) if last_ts else float("inf"),
+            }
 
     @property
     def recording_enabled(self) -> bool:
@@ -268,17 +334,22 @@ class OakDepthReader:
                 spatial_nn.out.link(object_tracker.inputDetections)
                 spatial_nn.passthrough.link(object_tracker.inputTrackerFrame)
                 spatial_nn.passthrough.link(object_tracker.inputDetectionFrame)
-                det_q = object_tracker.out.createOutputQueue(maxSize=4, blocking=False)
+                # Control loop consumes only newest detections; drop stale packets for low latency.
+                det_q = object_tracker.out.createOutputQueue(maxSize=1, blocking=False)
                 tracker_enabled = True
             except Exception:
                 logger.warning(
                     "ObjectTracker init failed; falling back to raw detections",
                     exc_info=True,
                 )
-                det_q = spatial_nn.out.createOutputQueue(maxSize=4, blocking=False)
+                # Same low-latency policy in fallback path when tracker is unavailable.
+                det_q = spatial_nn.out.createOutputQueue(maxSize=1, blocking=False)
 
-            depth_q = spatial_nn.passthroughDepth.createOutputQueue(maxSize=4, blocking=False)
-            spatial_depth_q = spatial_calc.out.createOutputQueue(maxSize=4, blocking=False)
+            # Obstacle avoidance wants freshest depth only; avoid host backlog.
+            depth_q = spatial_nn.passthroughDepth.createOutputQueue(maxSize=1, blocking=False)
+            # Spatial ROI depth is also control-critical, so prefer newest sample.
+            spatial_depth_q = spatial_calc.out.createOutputQueue(maxSize=1, blocking=False)
+            # Preview feed is operator/control UX, so keep latest-frame semantics.
             rgb_preview_q = cam_rgb.requestOutput((640, 480)).createOutputQueue(maxSize=1, blocking=False)
 
             # IMU node (BMI270: accel + gyro at 100 Hz)
@@ -299,7 +370,8 @@ class OakDepthReader:
                     )
                     encoder.setBitrateKbps(self._rec_cfg.video_bitrate_kbps)
                     cam_rgb.requestOutput((1920, 1080), dai.ImgFrame.Type.NV12).link(encoder.input)
-                    h265_q = encoder.bitstream.createOutputQueue()
+                    # Recording path should stay buffered to absorb disk/encoder jitter.
+                    h265_q = encoder.bitstream.createOutputQueue(maxSize=30, blocking=False)
 
             rec_queues = {}
             if h265_q is not None:
@@ -318,6 +390,7 @@ class OakDepthReader:
             return
 
         try:
+            next_imu_poll = time.monotonic()
             while not self._stop_event.is_set() and pipeline.isRunning():
                 self._poll_depth(depth_q, spatial_depth_q, np)
                 self._poll_detections(det_q)
@@ -325,7 +398,18 @@ class OakDepthReader:
                     rgb_enabled = self._rgb_poll_enabled
                 if rgb_enabled:
                     self._poll_rgb(rgb_preview_q)
-                self._poll_imu(imu_q)
+                # IMU polling can run at a different cadence than depth polling.
+                # Cap catch-up polls per outer loop to avoid runaway CPU under load.
+                imu_polls = 0
+                max_catchup = 4
+                now = time.monotonic()
+                while now >= next_imu_poll and imu_polls < max_catchup:
+                    self._poll_imu(imu_q)
+                    next_imu_poll += self._imu_poll_interval_s
+                    imu_polls += 1
+                    now = time.monotonic()
+                if now - next_imu_poll > (self._imu_poll_interval_s * max_catchup):
+                    next_imu_poll = now
                 time.sleep(1.0 / self._obs_cfg.update_rate_hz)
         except Exception:
             logger.exception("OAK-D pipeline error")
@@ -521,25 +605,139 @@ class OakDepthReader:
             imu_data = imu_q.tryGet()
             if imu_data is None:
                 return
+            drained_msgs = 0
+            all_packets = list(getattr(imu_data, "packets", []) or [])
             while True:
                 newer = imu_q.tryGet()
                 if newer is None:
                     break
-                imu_data = newer
-            packets = imu_data.packets
-            if not packets:
+                drained_msgs += 1
+                newer_packets = getattr(newer, "packets", None)
+                if newer_packets:
+                    all_packets.extend(list(newer_packets))
+            if not all_packets:
+                with self._lock:
+                    m = self._imu_metrics
+                    m.queue_msgs_received += (1 + drained_msgs)
+                    m.queue_msgs_dropped += drained_msgs
+                    if drained_msgs > 0:
+                        m.queue_drain_count += 1
+                    m.last_drain_msgs = drained_msgs
                 return
-            pkt = packets[-1]
-            accel = pkt.acceleroMeter
-            gyro = pkt.gyroscope
+            total_packets = len(all_packets)
+            if self._imu_packet_mode == "bounded":
+                selected = all_packets[-self._imu_max_packets_per_poll:]
+            else:
+                selected = [all_packets[-1]]
+
             now = time.monotonic()
             with self._lock:
-                self._imu_state.ax_mss = accel.x
-                self._imu_state.ay_mss = accel.y
-                self._imu_state.az_mss = accel.z
-                self._imu_state.gx_rads = gyro.x
-                self._imu_state.gy_rads = gyro.y
-                self._imu_state.gz_rads = gyro.z
-                self._imu_state.timestamp = now
+                m = self._imu_metrics
+                m.queue_msgs_received += (1 + drained_msgs)
+                m.queue_msgs_consumed += 1
+                m.queue_msgs_dropped += drained_msgs
+                if drained_msgs > 0:
+                    m.queue_drain_count += 1
+                m.last_drain_msgs = drained_msgs
+                m.last_batch_packets = total_packets
+                m.packets_received += total_packets
+                m.packets_consumed += len(selected)
+                m.packets_coalesced += max(0, total_packets - len(selected))
+
+                for pkt in selected:
+                    accel = pkt.acceleroMeter
+                    gyro = pkt.gyroscope
+                    device_ts_s = 0.0
+                    # Prefer device timestamps when available; used downstream for dt integration.
+                    for ts_src in (gyro, accel, pkt):
+                        ts = None
+                        try:
+                            getter = getattr(ts_src, "getTimestampDevice", None)
+                            if callable(getter):
+                                ts = getter()
+                            elif hasattr(ts_src, "timestampDevice"):
+                                ts = getattr(ts_src, "timestampDevice")
+                        except Exception:
+                            ts = None
+                        if ts is None:
+                            try:
+                                getter = getattr(ts_src, "getTimestamp", None)
+                                if callable(getter):
+                                    ts = getter()
+                                elif hasattr(ts_src, "timestamp"):
+                                    ts = getattr(ts_src, "timestamp")
+                            except Exception:
+                                ts = None
+                        if ts is None:
+                            continue
+                        try:
+                            if hasattr(ts, "total_seconds"):
+                                device_ts_s = float(ts.total_seconds())
+                            elif hasattr(ts, "timestamp"):
+                                device_ts_s = float(ts.timestamp())
+                            elif isinstance(ts, (int, float)):
+                                device_ts_s = float(ts)
+                        except Exception:
+                            device_ts_s = 0.0
+                        if device_ts_s > 0.0:
+                            break
+
+                    self._imu_state.ax_mss = accel.x
+                    self._imu_state.ay_mss = accel.y
+                    self._imu_state.az_mss = accel.z
+                    self._imu_state.gx_rads = gyro.x
+                    self._imu_state.gy_rads = gyro.y
+                    self._imu_state.gz_rads = gyro.z
+                    self._imu_state.timestamp = now
+                    self._imu_state.device_timestamp_s = device_ts_s
+
+                    sample_ts = device_ts_s if device_ts_s > 0.0 else now
+                    prev_ts = self._imu_prev_consumed_ts
+                    if prev_ts > 0.0:
+                        dt = sample_ts - prev_ts
+                        if dt <= 0.0:
+                            dt = now - prev_ts
+                        m.cadence_last_s = dt
+                        if m.cadence_samples == 0:
+                            m.cadence_min_s = dt
+                            m.cadence_max_s = dt
+                            m.cadence_avg_s = dt
+                        else:
+                            if dt < m.cadence_min_s:
+                                m.cadence_min_s = dt
+                            if dt > m.cadence_max_s:
+                                m.cadence_max_s = dt
+                            n = m.cadence_samples
+                            m.cadence_avg_s += (dt - m.cadence_avg_s) / (n + 1)
+                        m.cadence_samples += 1
+                    self._imu_prev_consumed_ts = sample_ts
         except Exception:
+            now = time.monotonic()
+            warn_summary = None
+            with self._lock:
+                m = self._imu_metrics
+                m.error_count += 1
+                if m.first_error_ts == 0.0:
+                    m.first_error_ts = now
+                m.last_error_ts = now
+                m.last_error_msg = "IMU poll error"
+                # Emit warning on first error, then at most every 30s.
+                should_warn = (m.warning_emits == 0) or (now - getattr(self, "_imu_last_warn_ts", 0.0) >= 30.0)
+                if should_warn:
+                    self._imu_last_warn_ts = now
+                    m.warning_emits += 1
+                    warn_summary = (
+                        m.error_count,
+                        m.queue_msgs_received,
+                        m.queue_msgs_consumed,
+                        m.packets_received,
+                        m.packets_consumed,
+                        m.packets_coalesced,
+                    )
+            if warn_summary is not None:
+                err_count, q_recv, q_cons, p_recv, p_cons, p_coal = warn_summary
+                logger.warning(
+                    "IMU poll path errors=%d q_recv=%d q_cons=%d p_recv=%d p_cons=%d p_coalesced=%d",
+                    err_count, q_recv, q_cons, p_recv, p_cons, p_coal,
+                )
             logger.debug("IMU poll error", exc_info=True)

@@ -108,11 +108,9 @@ Where `_scale_toward_neutral(byte_val, scale)` interpolates between the commande
 
 ### Behavior (original plan)
 
-- **Current implementation note**: Follow Me activation is now handled by CH4
-  thresholds in safety logic (high enters while armed, low exits). The original
-  CH3 multi-tap concept below is retained for historical context only.
-- **Activation (original plan)**: 4 rapid taps on Channel 3 while armed (arm→disarm cycles within ~2 seconds) enters Follow Me mode
-- **Deactivation (original plan)**: A single Channel 3 disarm tap exits Follow Me AND disarms the robot
+- **Activation (current)**: CH4 high threshold while armed enters Follow Me mode
+- **Deactivation (current)**: CH4 low threshold exits Follow Me mode
+- **Historical note**: Early design discussed CH3 multi-tap activation, but runtime behavior uses CH4 thresholds
 - When active, the robot autonomously follows the person nearest the center of the frame and closest in depth
 - **Speed**: Proportional to distance — faster when far from target distance, decelerates as it approaches, stops at target follow distance
 - **Steering**: Proportional to the person's horizontal offset from frame center — further off-center means harder turn
@@ -125,7 +123,7 @@ Where `_scale_toward_neutral(byte_val, scale)` interpolates between the commande
 flowchart TD
     OAK["OakDepthReader\n(background thread)"] -->|"depth frames"| OA["ObstacleAvoidance"]
     OAK -->|"spatial detections\n(person bbox + XYZ)"| FM["FollowMeController"]
-    CH3["Ch3 Tap Detector"] -->|"4x tap / 1x tap"| MODE["Mode State\n(MANUAL / FOLLOW_ME)"]
+    CH4["Ch4 threshold switch"] -->|"high enter / low exit"| MODE["Mode State\n(MANUAL / FOLLOW_ME)"]
     MODE --> CTRL["Controller.process()"]
     FM -->|"auto steer + throttle"| CTRL
     OA -->|"throttle scale"| CTRL
@@ -157,15 +155,15 @@ Person-following controller with proportional steering and speed.
 - **Lost target**: returns neutral commands (126, 126) immediately when no valid person detection
 - `get_status()` returns tracking state for telemetry (target distance, offset, tracking/lost)
 
-#### 8. Safety: Ch3 Tap Detector (modification to `safety.py`)
+#### 8. Safety: CH4 Threshold Follow Me Switching (modification to `safety.py`)
 
-Add tap-counting state to `SafetyState` and detection logic to `update_safety()`:
+Current implementation uses CH4 threshold mode switching in `update_safety()`:
 
-- Track Ch3 arm/disarm transitions with timestamps
-- A "tap" = one arm→disarm cycle (Ch3 goes high then low)
-- If 4 taps occur within `tap_window_s` (default 2.0s) while starting from armed state: emit `SafetyEvent.FOLLOW_ME_ENTERED`
-- Any single disarm while in Follow Me mode: emit `SafetyEvent.FOLLOW_ME_EXITED` and `SafetyEvent.DISARMED`
-- Tap counter resets if window expires without reaching 4
+- Follow Me enters when `ch4 >= follow_me_enter_us` while armed
+- Follow Me exits when `ch4 <= follow_me_exit_us`
+- CH3 remains arm/disarm only (no multi-tap activation path)
+- Disarm behavior remains independent and still emits `SafetyEvent.DISARMED`
+- Historical note: this replaced an earlier CH3 multi-tap activation concept from the original plan
 
 ### Config Additions
 
@@ -181,9 +179,11 @@ class FollowMeConfig:
     max_follow_speed_byte: int = 60      # Max speed offset from neutral (126 +/- this)
     steering_gain: float = 0.8           # Proportional gain for horizontal tracking
     detection_confidence: float = 0.5    # Minimum detection confidence
-    tap_window_s: float = 2.0            # Time window for 4-tap activation
-    tap_count: int = 4                   # Number of taps to activate
 ```
+
+Follow Me enter/exit thresholds are currently part of `SafetyParams` in
+`pi_app/control/safety.py` (`follow_me_high_threshold_us` /
+`follow_me_low_threshold_us`), not `FollowMeConfig`.
 
 ### Modifications to Existing Files
 
@@ -195,7 +195,7 @@ class FollowMeConfig:
   - Poll `FollowMeController` for autonomous steering/throttle commands
   - Still apply obstacle avoidance throttle scaling on top
   - Still respect emergency stop (Ch5)
-- Mode transitions driven by `SafetyEvent.FOLLOW_ME_ENTERED` / `FOLLOW_ME_EXITED`
+- Mode transitions driven by CH4 threshold events (`SafetyEvent.FOLLOW_ME_ENTERED` / `FOLLOW_ME_EXITED`)
 
 #### Main: `main.py`
 
@@ -225,7 +225,7 @@ Before the code can work, the Pi needs one-time setup:
 
 - Unit tests for `ObstacleAvoidanceController.compute_throttle_scale()` (pure math, no hardware)
 - Unit tests for `Controller` with a mock obstacle avoidance controller
-- Unit tests for Ch3 tap detector (tap sequences, timeouts, edge cases)
+- Unit tests for CH4 Follow Me threshold transitions (enter/exit hysteresis and edge cases)
 - Unit tests for `FollowMeController` target selection and proportional control (mock detections)
 - Unit tests for `Controller` mode switching (manual -> follow me -> disarm)
 - CLI tool `pi_app/cli/test_oak_depth.py` to verify depth + person detection before integrating into the main loop
@@ -236,7 +236,7 @@ Before the code can work, the Pi needs one-time setup:
 2. `config.py` — add both config dataclasses
 3. `oak_depth.py` — hardware reader (depth + spatial detection)
 4. `obstacle_avoidance.py` — throttle scaling logic
-5. `safety.py` — Ch3 tap detector
+5. `safety.py` — CH4 threshold Follow Me switching
 6. `follow_me.py` — person tracking controller
 7. `controller.py` — integrate obstacle avoidance, mode switching, follow me
 8. `main.py` — wire everything together

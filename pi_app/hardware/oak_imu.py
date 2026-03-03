@@ -29,6 +29,10 @@ class OakImuReader:
         oak_reader: OakDepthReader,
         complementary_alpha_rp: float = 0.98,
         gyro_bias_samples: int = 200,
+        nmni_enabled: bool = False,
+        nmni_threshold_dps: float = 0.3,
+        bias_adapt_enabled: bool = False,
+        bias_adapt_alpha: float = 0.001,
     ) -> None:
         self._oak = oak_reader
         self.alpha_rp = complementary_alpha_rp
@@ -41,8 +45,13 @@ class OakImuReader:
         self.gyro_bias_dps = (0.0, 0.0, 0.0)
 
         self._last_monotonic: Optional[float] = None
+        self._last_device_ts_s: Optional[float] = None
         self._initialized = False
         self._gyro_bias_samples = gyro_bias_samples
+        self._nmni_enabled = bool(nmni_enabled)
+        self._nmni_threshold_dps = float(nmni_threshold_dps)
+        self._bias_adapt_enabled = bool(bias_adapt_enabled)
+        self._bias_adapt_alpha = max(0.0, min(1.0, float(bias_adapt_alpha)))
 
     def calibrate_gyro(self, duration_s: float = 3.0) -> tuple:
         """Collect gyro samples from OAK-D IMU to estimate bias."""
@@ -75,19 +84,50 @@ class OakImuReader:
         """Read latest IMU data from OAK-D and return in ImuReader format."""
         imu_state, age = self._oak.get_imu_data()
 
-        now = time.monotonic()
-        if self._last_monotonic is None:
+        # Prefer propagated device timestamp for dt; fall back to host monotonic.
+        dt = None
+        dev_ts = float(getattr(imu_state, "device_timestamp_s", 0.0) or 0.0)
+        if dev_ts > 0.0:
+            if self._last_device_ts_s is None:
+                self._last_device_ts_s = dev_ts
+            dt_dev = dev_ts - self._last_device_ts_s
+            if dt_dev > 0.0:
+                dt = dt_dev
+            self._last_device_ts_s = dev_ts
+        if dt is None:
+            now = time.monotonic()
+            if self._last_monotonic is None:
+                self._last_monotonic = now
+            dt = now - self._last_monotonic
             self._last_monotonic = now
-        dt = max(1e-3, now - self._last_monotonic)
-        self._last_monotonic = now
+        dt = max(1e-3, float(dt))
 
         ax_g = imu_state.ax_mss / G_MSS
         ay_g = imu_state.ay_mss / G_MSS
         az_g = imu_state.az_mss / G_MSS
 
-        gx_dps = math.degrees(imu_state.gx_rads) - self.gyro_bias_dps[0]
-        gy_dps = math.degrees(imu_state.gy_rads) - self.gyro_bias_dps[1]
-        gz_dps = math.degrees(imu_state.gz_rads) - self.gyro_bias_dps[2]
+        gx_raw_dps = math.degrees(imu_state.gx_rads)
+        gy_raw_dps = math.degrees(imu_state.gy_rads)
+        gz_raw_dps = math.degrees(imu_state.gz_rads)
+        gx_dps = gx_raw_dps - self.gyro_bias_dps[0]
+        gy_dps = gy_raw_dps - self.gyro_bias_dps[1]
+        gz_dps = gz_raw_dps - self.gyro_bias_dps[2]
+        if self._nmni_enabled and abs(gz_dps) < self._nmni_threshold_dps:
+            gz_dps = 0.0
+        if self._bias_adapt_enabled:
+            # Low-rate stationary bias adaptation (optional; disabled by default).
+            if (
+                abs(gx_dps) < self._nmni_threshold_dps
+                and abs(gy_dps) < self._nmni_threshold_dps
+                and abs(gz_dps) < self._nmni_threshold_dps
+            ):
+                a = self._bias_adapt_alpha
+                bx, by, bz = self.gyro_bias_dps
+                self.gyro_bias_dps = (
+                    (1.0 - a) * bx + a * gx_raw_dps,
+                    (1.0 - a) * by + a * gy_raw_dps,
+                    (1.0 - a) * bz + a * gz_raw_dps,
+                )
 
         # Accel-based roll and pitch
         norm = math.sqrt(ax_g * ax_g + ay_g * ay_g + az_g * az_g) or 1.0

@@ -122,6 +122,7 @@ class ImuSteeringCompensator:
             "d_term": 0.0,
             "correction": 0.0,
         }
+        self._yaw_rate_ema: Optional[float] = None
         # Track saturation from previous iteration to apply simple anti-windup
         self._last_saturated: bool = False
         
@@ -281,8 +282,16 @@ class ImuSteeringCompensator:
             # Integral term
             i_term = self.config.ki * self.state.integral_error
             
-            # Derivative term (yaw rate damping)
-            d_term = -self.config.kd * self.state.yaw_rate_dps
+            # Derivative term (yaw rate damping). Optional EMA filter is disabled by default.
+            d_yaw = self.state.yaw_rate_dps
+            alpha_d = float(getattr(self.config, "dterm_ema_alpha", 0.0))
+            if 0.0 < alpha_d < 1.0:
+                if self._yaw_rate_ema is None:
+                    self._yaw_rate_ema = d_yaw
+                else:
+                    self._yaw_rate_ema = alpha_d * self._yaw_rate_ema + (1.0 - alpha_d) * d_yaw
+                d_yaw = self._yaw_rate_ema
+            d_term = -self.config.kd * d_yaw
             
             # Combine terms (raw before clamp)
             raw = p_term + i_term + d_term

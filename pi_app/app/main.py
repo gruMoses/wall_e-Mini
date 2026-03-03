@@ -130,6 +130,9 @@ def run() -> None:
                 oak_reader = OakDepthReader(
                     config.obstacle_avoidance, config.follow_me,
                     recording_config=rec_cfg,
+                    imu_poll_hz=float(getattr(config.imu_steering, "oak_imu_poll_hz", 60.0)),
+                    imu_packet_mode=str(getattr(config.imu_steering, "oak_imu_packet_mode", "latest")),
+                    imu_max_packets_per_poll=int(getattr(config.imu_steering, "oak_imu_max_packets_per_poll", 4)),
                 )
                 oak_reader.start()
                 print("OAK-D Lite detected and started")
@@ -184,7 +187,13 @@ def run() -> None:
                 from pi_app.hardware.oak_imu import OakImuReader
                 print("Initializing OAK-D onboard IMU...")
                 time.sleep(0.5)  # let the pipeline push a few IMU frames
-                imu = OakImuReader(oak_reader)
+                imu = OakImuReader(
+                    oak_reader,
+                    nmni_enabled=bool(getattr(config.imu_steering, "oak_nmni_enabled", False)),
+                    nmni_threshold_dps=float(getattr(config.imu_steering, "oak_nmni_threshold_dps", 0.3)),
+                    bias_adapt_enabled=bool(getattr(config.imu_steering, "oak_bias_adapt_enabled", False)),
+                    bias_adapt_alpha=float(getattr(config.imu_steering, "oak_bias_adapt_alpha", 0.001)),
+                )
                 imu_source_used = "oak_d"
             except Exception as e:
                 print(f"  OAK-D IMU initialization failed: {e}")
@@ -331,6 +340,14 @@ def run() -> None:
         bt_cached_mtime_ns = None
         bt_next_poll_t = 0.0
         bt_poll_interval_s = 0.05
+        oak_imu_metrics_getter = None
+        if oak_reader is not None:
+            try:
+                maybe_getter = getattr(oak_reader, "get_imu_metrics", None)
+                if callable(maybe_getter):
+                    oak_imu_metrics_getter = maybe_getter
+            except Exception:
+                oak_imu_metrics_getter = None
         while True:
             loop_now = time.monotonic()
             loop_dt_ms = int(round((loop_now - prev_loop_ts) * 1000))
@@ -482,6 +499,22 @@ def run() -> None:
                 now_ts = time.time()
                 if now_ts - last_log_ts >= log_interval:
                     last_log_ts = now_ts
+                    imu_pipeline = None
+                    if oak_reader is not None:
+                        imu_pipeline = {"metrics_available": False}
+                        if oak_imu_metrics_getter is not None:
+                            try:
+                                imu_metrics = oak_imu_metrics_getter()
+                                if isinstance(imu_metrics, dict):
+                                    imu_pipeline["metrics_available"] = True
+                                    # Keep IMU pipeline timing metrics at full precision.
+                                    imu_pipeline.update(imu_metrics)
+                                elif hasattr(imu_metrics, "__dict__"):
+                                    imu_pipeline["metrics_available"] = True
+                                    # Keep IMU pipeline timing metrics at full precision.
+                                    imu_pipeline.update(vars(imu_metrics))
+                            except Exception:
+                                pass
                     log_obj = {
                         "ts": to_int(now_ts),
                         "ts_iso": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
@@ -489,12 +522,12 @@ def run() -> None:
                         "mode": telem.get("mode", "MANUAL"),
                         "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
                         "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
-                        "imu": to_int(imu_status) if imu_status else None,
-                        "imu_steering": to_int({
+                        "imu": imu_status if imu_status else None,
+                        "imu_steering": {
                             "steering_input": telem.get("steering_input"),
                             "correction_raw": telem.get("imu_correction_raw"),
                             "correction_applied": telem.get("imu_correction_applied"),
-                        }),
+                        },
                         "pid": round1({
                             "error_deg": telem.get("pid_error_deg"),
                             "p": telem.get("pid_p"),
@@ -538,6 +571,7 @@ def run() -> None:
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
                         "loop_dt_ms": loop_dt_ms,
                         "imu_dt_ms": imu_dt_ms,
+                        "imu_pipeline": imu_pipeline,
                         "events": [e.name for e in events] if events else [],
                     }
                     line = json.dumps(log_obj)

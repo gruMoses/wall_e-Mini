@@ -43,7 +43,21 @@ class ImuSteeringConfig:
     log_steering_corrections: bool = False  # Enable debug logging of steering corrections
     
     # Timing
-    update_rate_hz: float = 80.0  # IMU update rate
+    update_rate_hz: float = 60.0  # Controller-side IMU update cap (aligned with default OAK IMU poll)
+    # OAK-D IMU ingestion controls (IMU-3):
+    # - "latest": consume newest packet only (lowest CPU, current default)
+    # - "bounded": consume up to oak_imu_max_packets_per_poll packets each poll
+    oak_imu_packet_mode: str = "latest"
+    oak_imu_max_packets_per_poll: int = 4
+    # Optional dedicated OAK IMU polling cadence (separate from depth poll loop).
+    oak_imu_poll_hz: float = 60.0
+    # Optional OAK yaw drift mitigations (IMU-5). NMNI enabled by default after validation.
+    oak_nmni_enabled: bool = True
+    oak_nmni_threshold_dps: float = 0.3
+    oak_bias_adapt_enabled: bool = False
+    oak_bias_adapt_alpha: float = 0.001
+    # Optional derivative-term EMA filtering (0.0 disables).
+    dterm_ema_alpha: float = 0.0
 
     # Fallback behavior
     fallback_on_error: bool = True  # Use RC control if IMU fails
