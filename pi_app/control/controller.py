@@ -133,6 +133,16 @@ class Controller:
         self._gps_reading: GpsReading | None = None
         self._person_detections: list[PersonDetection] = []
 
+        # Calibration mode: when True, process() outputs neutral and skips logic
+        self._calibration_mode = False
+
+        # Final-stage slew limiter state.
+        self._slew_last_left = CENTER_OUTPUT_VALUE
+        self._slew_last_right = CENTER_OUTPUT_VALUE
+        self._slew_last_update = time.monotonic()
+        self._slew_initialized = False
+        self._slew_seen_non_neutral = False
+
     def _reset_imu_timestamp(self, now: float) -> None:
         """Reset the monotonic timestamp used to throttle IMU updates.
 
@@ -166,6 +176,25 @@ class Controller:
         if self._mode == "FOLLOW_ME":
             self._mode = "MANUAL"
 
+    @property
+    def motor_driver(self) -> MotorDriver:
+        return self._motor
+
+    def enter_calibration_mode(self) -> None:
+        """Pause normal control; process() will output neutral commands."""
+        self._mode = "MANUAL"
+        self._calibration_mode = True
+        self._motor.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+
+    def exit_calibration_mode(self) -> None:
+        """Resume normal control loop."""
+        self._calibration_mode = False
+        self._motor.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+
+    @property
+    def in_calibration_mode(self) -> bool:
+        return self._calibration_mode
+
     def activate_waypoint_nav(self) -> None:
         """Enter WAYPOINT_NAV mode (call from UI / CLI)."""
         if self._waypoint_nav is not None and not self._waypoint_nav.completed:
@@ -185,6 +214,44 @@ class Controller:
         result = CENTER_OUTPUT_VALUE + (byte_val - CENTER_OUTPUT_VALUE) * scale
         return max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(result))))
 
+    def _reset_slew_state(self, now_s: float) -> None:
+        self._slew_last_left = CENTER_OUTPUT_VALUE
+        self._slew_last_right = CENTER_OUTPUT_VALUE
+        self._slew_last_update = now_s
+        self._slew_initialized = False
+        self._slew_seen_non_neutral = False
+
+    @staticmethod
+    def _slew_toward_target(
+        previous: int,
+        target: int,
+        max_accel_delta: float,
+        max_decel_delta: float,
+    ) -> int:
+        prev_mag = abs(previous - CENTER_OUTPUT_VALUE)
+        tgt_mag = abs(target - CENTER_OUTPUT_VALUE)
+        delta = target - previous
+        if delta == 0:
+            return previous
+
+        limit = max_accel_delta if tgt_mag > prev_mag else max_decel_delta
+        if limit <= 0:
+            return previous
+        if abs(delta) <= limit:
+            return target
+        stepped = previous + int(round(limit if delta > 0 else -limit))
+        return max(MIN_OUTPUT, min(MAX_OUTPUT, stepped))
+
+    def _slew_rates_for_mode(self, mode: str) -> tuple[float, float]:
+        slewc = getattr(config, "slew_limiter", None)
+        if slewc is None:
+            return 1e9, 1e9
+        if mode == "FOLLOW_ME":
+            return float(slewc.follow_me_accel_bps), float(slewc.follow_me_decel_bps)
+        if mode == "WAYPOINT_NAV":
+            return float(slewc.waypoint_nav_accel_bps), float(slewc.waypoint_nav_decel_bps)
+        return float(slewc.manual_accel_bps), float(slewc.manual_decel_bps)
+
     def process(
         self,
         rc: RCInputs,
@@ -194,10 +261,20 @@ class Controller:
         epoch_now = now_epoch_s if now_epoch_s is not None else time.time()
         mono_now = time.monotonic()
 
+        if self._calibration_mode:
+            cmd = DriveCommand(
+                left_byte=CENTER_OUTPUT_VALUE,
+                right_byte=CENTER_OUTPUT_VALUE,
+                is_armed=self._safety_state.is_armed,
+                emergency_active=self._safety_state.emergency_active,
+            )
+            return cmd, [], {"mode": "CALIBRATING", "calibration": True}
+
         # RC staleness watchdog: if no RC update for >1s, force disarm
         rc_age = epoch_now - rc.last_update_epoch_s if rc.last_update_epoch_s > 0.0 else 0.0
         if rc_age > RC_STALE_TIMEOUT_S:
             self._motor.stop()
+            self._reset_slew_state(mono_now)
             self._relay.set_armed(False)
             self._safety_state = SafetyState(
                 is_armed=False,
@@ -310,29 +387,34 @@ class Controller:
         rel_pct = getattr(config.imu_steering, 'straight_relative_tolerance_pct', 0.15)
         hysteresis_s = getattr(config.imu_steering, 'straight_disengage_hysteresis_s', 0.0)
 
-        # Use actual motor commands for moving_ok when Bluetooth is active
-        if bt_override_bytes is not None:
-            # For Bluetooth, use the motor byte values to determine if moving
+        # Derive moving_ok from the appropriate source
+        if self._mode in ("FOLLOW_ME", "WAYPOINT_NAV"):
+            left_diff = abs(left - CENTER_OUTPUT_VALUE)
+            right_diff = abs(right - CENTER_OUTPUT_VALUE)
+            moving_ok = max(left_diff, right_diff) >= 4
+        elif bt_override_bytes is not None:
             bt_left, bt_right = bt_override_bytes
             bt_left_diff = abs(bt_left - CENTER_OUTPUT_VALUE)
             bt_right_diff = abs(bt_right - CENTER_OUTPUT_VALUE)
-            moving_ok = max(bt_left_diff, bt_right_diff) >= 20  # Minimum movement threshold
+            moving_ok = max(bt_left_diff, bt_right_diff) >= 20
         else:
-            # For RC, use the original logic
             d1 = rc.ch1_us - 1500
             d2 = rc.ch2_us - 1500
             moving_ok = max(abs(d1), abs(d2)) >= min_th
 
         # Determine equal_ok based on input source
-        if bt_override_bytes is not None:
-            # For Bluetooth, check if both motors are similar (straight intent)
+        if self._mode in ("FOLLOW_ME", "WAYPOINT_NAV"):
+            abs_diff = abs(left - right)
+            equal_abs_ok = abs_diff <= 10
+            max_abs = max(abs(left - CENTER_OUTPUT_VALUE), abs(right - CENTER_OUTPUT_VALUE), 1)
+            equal_rel_ok = (abs_diff / max_abs) <= rel_pct
+        elif bt_override_bytes is not None:
             bt_left, bt_right = bt_override_bytes
             abs_diff = abs(bt_left - bt_right)
             equal_abs_ok = abs_diff <= 10
             max_abs = max(abs(bt_left - CENTER_OUTPUT_VALUE), abs(bt_right - CENTER_OUTPUT_VALUE), 1)
             equal_rel_ok = (abs_diff / max_abs) <= rel_pct
         else:
-            # For RC, use the original logic
             abs_diff = abs(rc.ch1_us - rc.ch2_us)
             equal_abs_ok = abs_diff <= tol
             # Relative check (difference relative to magnitude)
@@ -401,17 +483,101 @@ class Controller:
             telemetry.update(oa_status)
         telemetry["obstacle_throttle_scale"] = obstacle_scale
         telemetry["obstacle_distance_m"] = self._obstacle_distance_m
+        telemetry["slew_mode"] = self._mode
+        telemetry["slew_enabled"] = bool(getattr(getattr(config, "slew_limiter", None), "enabled", False))
+        telemetry["slew_bypassed"] = False
+        telemetry["slew_hard_stop_active"] = False
+        telemetry["slew_in_left"] = int(left)
+        telemetry["slew_in_right"] = int(right)
+        telemetry["slew_out_left"] = int(left)
+        telemetry["slew_out_right"] = int(right)
+        telemetry["slew_delta_left"] = 0
+        telemetry["slew_delta_right"] = 0
 
         # If disarmed, force neutral outputs
         if not self._safety_state.is_armed:
             left = right = CENTER_OUTPUT_VALUE
             self._motor.stop()
+            self._reset_slew_state(mono_now)
+            telemetry["slew_out_left"] = left
+            telemetry["slew_out_right"] = right
+            telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
+            telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
         else:
+            left_in = int(left)
+            right_in = int(right)
+            slewc = getattr(config, "slew_limiter", None)
+            mode_for_slew = self._mode
+            slewc_enabled = bool(getattr(slewc, "enabled", False))
+            hard_stop_threshold = float(getattr(slewc, "hard_stop_scale_threshold", 0.0))
+            hard_stop_active = bool(self._safety_state.emergency_active) or any(
+                e is SafetyEvent.EMERGENCY_TRIGGERED for e in events
+            ) or obstacle_scale <= hard_stop_threshold
+            slew_bypassed = False
+
+            if slewc_enabled:
+                bypass_on_hard_stop = bool(getattr(slewc, "bypass_on_hard_stop", True))
+                if hard_stop_active and bypass_on_hard_stop:
+                    slew_bypassed = True
+                    left = left_in
+                    right = right_in
+                    self._slew_initialized = True
+                    self._slew_seen_non_neutral = (
+                        left != CENTER_OUTPUT_VALUE or right != CENTER_OUTPUT_VALUE
+                    )
+                    self._slew_last_update = mono_now
+                    self._slew_last_left = left
+                    self._slew_last_right = right
+                else:
+                    accel_bps, decel_bps = self._slew_rates_for_mode(mode_for_slew)
+                    if hard_stop_active and not bypass_on_hard_stop:
+                        decel_bps = float(getattr(slewc, "emergency_decel_bps", decel_bps))
+
+                    dt_s = max(0.0, mono_now - self._slew_last_update)
+                    snap_first = bool(getattr(slewc, "snap_first_command", True))
+                    wants_motion = (
+                        left_in != CENTER_OUTPUT_VALUE or right_in != CENTER_OUTPUT_VALUE
+                    )
+                    if snap_first and (not self._slew_seen_non_neutral) and wants_motion:
+                        left = left_in
+                        right = right_in
+                    else:
+                        max_accel_delta = max(0.0, accel_bps * dt_s)
+                        max_decel_delta = max(0.0, decel_bps * dt_s)
+                        left = self._slew_toward_target(
+                            self._slew_last_left, left_in, max_accel_delta, max_decel_delta
+                        )
+                        right = self._slew_toward_target(
+                            self._slew_last_right, right_in, max_accel_delta, max_decel_delta
+                        )
+                    self._slew_initialized = True
+                    if left != CENTER_OUTPUT_VALUE or right != CENTER_OUTPUT_VALUE:
+                        self._slew_seen_non_neutral = True
+                    self._slew_last_update = mono_now
+                    self._slew_last_left = left
+                    self._slew_last_right = right
+            else:
+                left = left_in
+                right = right_in
+                self._slew_initialized = True
+                self._slew_seen_non_neutral = (
+                    left != CENTER_OUTPUT_VALUE or right != CENTER_OUTPUT_VALUE
+                )
+                self._slew_last_update = mono_now
+                self._slew_last_left = left
+                self._slew_last_right = right
+
             if left > MAX_OUTPUT:
                 left = MAX_OUTPUT
             if right > MAX_OUTPUT:
                 right = MAX_OUTPUT
             self._motor.set_tracks(left, right)
+            telemetry["slew_bypassed"] = slew_bypassed
+            telemetry["slew_hard_stop_active"] = hard_stop_active
+            telemetry["slew_out_left"] = left
+            telemetry["slew_out_right"] = right
+            telemetry["slew_delta_left"] = left - left_in
+            telemetry["slew_delta_right"] = right - right_in
 
         # Reflect arm relay state
         self._relay.set_armed(self._safety_state.is_armed)

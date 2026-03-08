@@ -49,6 +49,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   header { background: #1a1d27; padding: 12px 24px; display: flex;
            align-items: center; justify-content: space-between; border-bottom: 1px solid #2a2d37; }
   header h1 { font-size: 18px; font-weight: 600; color: #fff; }
+  header .nav-link { color: #7aa2f7; text-decoration: none; font-size: 13px; font-weight: 500; }
+  header .nav-link:hover { text-decoration: underline; }
+  .hdr-right { display: flex; align-items: center; gap: 14px; }
   .rec-badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;
                text-transform: uppercase; letter-spacing: 0.5px; }
   .rec-idle { background: #2a2d37; color: #888; }
@@ -117,7 +120,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
 <header>
   <h1>WALL-E Mini — OAK-D Live</h1>
-  <span id="rec-badge" class="rec-badge rec-idle">IDLE</span>
+  <div class="hdr-right">
+    <a href="/calibrate" class="nav-link">Calibrate</a>
+    <span id="rec-badge" class="rec-badge rec-idle">IDLE</span>
+  </div>
 </header>
 <div class="container">
   <div class="streams">
@@ -507,10 +513,14 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None) -> Flask:
 class OakWebViewer:
     """Runs the Flask web viewer on a daemon thread."""
 
-    def __init__(self, config: OakWebViewerConfig, recorder, controller=None) -> None:
+    def __init__(self, config: OakWebViewerConfig, recorder, controller=None,
+                 oak_reader=None, motor_driver=None, imu_reader=None) -> None:
         self._config = config
         self._recorder = recorder
         self._controller = controller
+        self._oak_reader = oak_reader
+        self._motor_driver = motor_driver
+        self._imu_reader = imu_reader
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -525,6 +535,23 @@ class OakWebViewer:
     def _run(self) -> None:
         try:
             app = create_app(self._recorder, self._config, controller=self._controller)
+
+            try:
+                from pi_app.web.calibration_wizard import (
+                    CalibrationManager, create_calibration_blueprint,
+                )
+                cal_mgr = CalibrationManager(
+                    controller=self._controller,
+                    oak_reader=self._oak_reader,
+                    motor_driver=self._motor_driver,
+                    imu_reader=self._imu_reader,
+                )
+                bp = create_calibration_blueprint(cal_mgr)
+                app.register_blueprint(bp)
+                logger.info("Calibration wizard registered at /calibrate")
+            except Exception:
+                logger.exception("Calibration wizard failed to load — skipping")
+
             app.run(
                 host=self._config.host,
                 port=self._config.port,

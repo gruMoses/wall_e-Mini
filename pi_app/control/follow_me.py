@@ -9,6 +9,7 @@ follow the person at a configurable distance.
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,7 @@ class FollowMeController:
     def __init__(self, config: FollowMeConfig) -> None:
         self._cfg = config
         self._tracking = False
+        self._dynamic_follow_dist: float | None = None
         self._last_target_z: float | None = None
         self._last_target_x: float | None = None
         self._last_distance_error: float | None = None
@@ -46,6 +48,12 @@ class FollowMeController:
         self._last_num_detections: int = 0
         self._last_target_confidence: float = 0.0
         self._last_target_track_id: int | None = None
+        self._last_valid_time: float = 0.0
+        self._held_left: int = NEUTRAL
+        self._held_right: int = NEUTRAL
+        self._smoothed_x: float = 0.0
+        self._prev_smoothed_x: float = 0.0
+        self._prev_x_time: float = 0.0
 
     def compute(self, detections: list[PersonDetection]) -> tuple[int, int]:
         """Compute motor bytes (left, right) to follow the best-scored person.
@@ -55,35 +63,46 @@ class FollowMeController:
         self._last_num_detections = len(detections)
         target = self._select_target(detections)
         if target is None:
+            elapsed = time.monotonic() - self._last_valid_time
+            if self._last_valid_time > 0.0 and elapsed < self._cfg.lost_target_timeout_s:
+                return self._held_left, self._held_right
             self._tracking = False
+            self._dynamic_follow_dist = None
             self._last_distance_error = None
             self._last_speed_offset = 0.0
             self._last_steer_offset = 0.0
             self._last_target_confidence = 0.0
             self._last_target_track_id = None
+            self._held_left = NEUTRAL
+            self._held_right = NEUTRAL
             return NEUTRAL, NEUTRAL
 
+        if not self._tracking:
+            self._dynamic_follow_dist = target.z_m
         self._tracking = True
+        self._last_valid_time = time.monotonic()
         self._last_target_z = target.z_m
         self._last_target_x = target.x_m
         self._last_target_confidence = target.confidence
         self._last_target_track_id = target.track_id
 
+        follow_dist = self._dynamic_follow_dist or self._cfg.follow_distance_m
+
         # Too close — stop to avoid crowding the person
         if target.z_m <= self._cfg.min_distance_m:
-            self._last_distance_error = target.z_m - self._cfg.follow_distance_m
+            self._last_distance_error = target.z_m - follow_dist
             self._last_speed_offset = 0.0
             self._last_steer_offset = 0.0
             return NEUTRAL, NEUTRAL
 
         # Speed: proportional to distance error from follow distance
-        distance_error = target.z_m - self._cfg.follow_distance_m
+        distance_error = target.z_m - follow_dist
         self._last_distance_error = distance_error
         if distance_error <= 0:
             speed_offset = 0.0
         else:
             speed_gain = self._cfg.max_follow_speed_byte / max(
-                self._cfg.max_distance_m - self._cfg.follow_distance_m, 0.1
+                self._cfg.max_distance_m - follow_dist, 0.1
             )
             speed_offset = min(
                 distance_error * speed_gain,
@@ -91,23 +110,36 @@ class FollowMeController:
             )
         self._last_speed_offset = speed_offset
 
-        # Steering: proportional to lateral offset; positive x_m = person is right
-        # Positive steer_offset turns the robot right (add to right, subtract from left)
-        steer_offset = (
-            target.x_m
-            * self._cfg.steering_gain
-            * self._cfg.max_follow_speed_byte
-            / max(self._cfg.max_distance_m, 0.1)
-        )
+        # Steering: PD control on lateral offset for damped tracking.
+        # P term: proportional to x_m (turns toward person)
+        # D term: proportional to dx/dt (brakes the swing before overshoot)
+        now = time.monotonic()
+        alpha = getattr(self._cfg, "steering_ema_alpha", 0.4)
+        if self._prev_x_time == 0.0:
+            self._smoothed_x = target.x_m
+        else:
+            self._smoothed_x = alpha * target.x_m + (1.0 - alpha) * self._smoothed_x
+
+        dt = now - self._prev_x_time if self._prev_x_time > 0.0 else 0.0
+        dx_dt = (self._smoothed_x - self._prev_smoothed_x) / dt if dt > 0.01 else 0.0
+        self._prev_smoothed_x = self._smoothed_x
+        self._prev_x_time = now
+
+        scale = self._cfg.max_follow_speed_byte / max(self._cfg.max_distance_m, 0.1)
+        p_steer = target.x_m * self._cfg.steering_gain * scale
+        d_gain = getattr(self._cfg, "steering_derivative_gain", 0.0)
+        d_steer = dx_dt * d_gain * scale
+        steer_offset = p_steer + d_steer
         self._last_steer_offset = steer_offset
 
         left = NEUTRAL + speed_offset + steer_offset
         right = NEUTRAL + speed_offset - steer_offset
 
-        return (
-            max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(left)))),
-            max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(right)))),
-        )
+        left_out = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(left))))
+        right_out = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(right))))
+        self._held_left = left_out
+        self._held_right = right_out
+        return left_out, right_out
 
     def _select_target(
         self, detections: list[PersonDetection]
@@ -156,6 +188,7 @@ class FollowMeController:
             "follow_me_tracking": self._tracking,
             "follow_me_target_z_m": self._last_target_z,
             "follow_me_target_x_m": self._last_target_x,
+            "follow_me_follow_dist_m": self._dynamic_follow_dist,
             "follow_me_distance_error_m": self._last_distance_error,
             "follow_me_speed_offset": self._last_speed_offset,
             "follow_me_steer_offset": self._last_steer_offset,

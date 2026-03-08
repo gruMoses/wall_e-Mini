@@ -142,6 +142,7 @@ def _annotate_rgb(
     detections: list[PersonDetection],
     telemetry: RecordingTelemetry,
     roi_pct: tuple[float, float] = (0.5, 0.5),
+    roi_vertical_offset_pct: float = 0.0,
 ) -> np.ndarray:
     """Draw bounding boxes, ROI, and status text onto an RGB preview frame."""
     if cv2 is None or np is None:
@@ -149,10 +150,11 @@ def _annotate_rgb(
     img = frame.copy()
     h, w = img.shape[:2]
 
-    # ROI rectangle
+    # ROI rectangle (shifted vertically when offset is set)
     rw, rh = roi_pct
+    cy = max(rh / 2.0, min(1.0 - rh / 2.0, 0.5 + roi_vertical_offset_pct))
     x0, x1 = int(w * (0.5 - rw / 2)), int(w * (0.5 + rw / 2))
-    y0, y1 = int(h * (0.5 - rh / 2)), int(h * (0.5 + rh / 2))
+    y0, y1 = int(h * (cy - rh / 2)), int(h * (cy + rh / 2))
     cv2.rectangle(img, (x0, y0), (x1, y1), _COLOR_ROI, 1)
 
     # Pick the best detection (highest z_m closeness + center closeness)
@@ -224,8 +226,9 @@ class OakRecorder:
         recorder.stop()              # flushes and closes files
     """
 
-    def __init__(self, config: OakRecordingConfig) -> None:
+    def __init__(self, config: OakRecordingConfig, roi_vertical_offset_pct: float = 0.0) -> None:
         self._cfg = config
+        self._roi_v_offset = float(roi_vertical_offset_pct)
         rec_dir = Path(config.recording_dir)
         if not rec_dir.is_absolute():
             rec_dir = Path(__file__).resolve().parents[2] / rec_dir
@@ -553,6 +556,7 @@ class OakRecorder:
                 telemetry.person_detections,
                 telemetry,
                 roi_pct=(0.5, 0.5),
+                roi_vertical_offset_pct=self._roi_v_offset,
             )
             _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
             jpeg_bytes = jpeg.tobytes()

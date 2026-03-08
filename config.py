@@ -88,6 +88,7 @@ class ObstacleAvoidanceConfig:
     stop_distance_m: float = 0.4
     roi_width_pct: float = 0.5
     roi_height_pct: float = 0.5
+    roi_vertical_offset_pct: float = -0.20  # negative = shift ROI upward
     update_rate_hz: float = 15.0
     stale_timeout_s: float = 0.5
     stale_policy: str = "clear"  # "stop" or "clear" when depth data is stale
@@ -101,9 +102,35 @@ class FollowMeConfig:
     min_distance_m: float = 0.5
     max_distance_m: float = 4.0
     max_follow_speed_byte: int = 100
-    steering_gain: float = 0.8
+    steering_gain: float = 1.4
+    steering_derivative_gain: float = 0.25  # damps lateral overshoot (scales dx/dt)
+    steering_ema_alpha: float = 0.3        # smooths x_m before derivative (0=heavy, 1=none)
     detection_confidence: float = 0.5
     lost_target_timeout_s: float = 1.0
+
+
+@dataclass(frozen=True)
+class SlewLimiterConfig:
+    """Final-stage motor command slew limiter configuration."""
+    enabled: bool = True
+
+    # Mode-aware asymmetric limits in byte-units per second.
+    # MANUAL is intentionally quicker than autonomous modes.
+    manual_accel_bps: float = 250.0
+    manual_decel_bps: float = 350.0
+    follow_me_accel_bps: float = 140.0
+    follow_me_decel_bps: float = 220.0
+    waypoint_nav_accel_bps: float = 140.0
+    waypoint_nav_decel_bps: float = 220.0
+
+    # Hard-stop behavior: bypass slew limiter when a stop-critical governor is active.
+    bypass_on_hard_stop: bool = True
+    hard_stop_scale_threshold: float = 0.0
+    # If bypass is disabled, this fast decel cap can still be used by caller logic.
+    emergency_decel_bps: float = 2000.0
+
+    # First armed command after neutral/disarm can either snap to target or ramp from neutral.
+    snap_first_command: bool = True
 
 
 @dataclass(frozen=True)
@@ -193,6 +220,9 @@ class Config:
 
     # Follow Me person-tracking mode
     follow_me: FollowMeConfig = FollowMeConfig()
+
+    # Final motor-output slew limiter
+    slew_limiter: SlewLimiterConfig = SlewLimiterConfig()
 
     # OAK-D recording (video + MCAP)
     oak_recording: OakRecordingConfig = OakRecordingConfig()

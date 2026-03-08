@@ -287,20 +287,22 @@ class OakDepthReader:
             spatial_calc = pipeline.create(dai.node.SpatialLocationCalculator)
             rw = self._obs_cfg.roi_width_pct
             rh = self._obs_cfg.roi_height_pct
+            rv = getattr(self._obs_cfg, "roi_vertical_offset_pct", 0.0)
+            cy = max(rh / 2.0, min(1.0 - rh / 2.0, 0.5 + rv))
             roi_rect = dai.Rect(
-                dai.Point2f(0.5 - rw / 2.0, 0.5 - rh / 2.0),
-                dai.Point2f(0.5 + rw / 2.0, 0.5 + rh / 2.0),
+                dai.Point2f(0.5 - rw / 2.0, cy - rh / 2.0),
+                dai.Point2f(0.5 + rw / 2.0, cy + rh / 2.0),
             )
 
             spatial_min_cfg = dai.SpatialLocationCalculatorConfigData()
-            spatial_min_cfg.depthThresholds.lowerThreshold = 100
+            spatial_min_cfg.depthThresholds.lowerThreshold = 400
             spatial_min_cfg.depthThresholds.upperThreshold = 10000
             spatial_min_cfg.roi = roi_rect
             spatial_min_cfg.calculationAlgorithm = dai.SpatialLocationCalculatorAlgorithm.MIN
             spatial_calc.initialConfig.addROI(spatial_min_cfg)
 
             spatial_med_cfg = dai.SpatialLocationCalculatorConfigData()
-            spatial_med_cfg.depthThresholds.lowerThreshold = 100
+            spatial_med_cfg.depthThresholds.lowerThreshold = 400
             spatial_med_cfg.depthThresholds.upperThreshold = 10000
             spatial_med_cfg.roi = roi_rect
             spatial_median_algo = getattr(
@@ -444,34 +446,32 @@ class OakDepthReader:
             h, w = frame.shape
             rw = self._obs_cfg.roi_width_pct
             rh = self._obs_cfg.roi_height_pct
+            rv = getattr(self._obs_cfg, "roi_vertical_offset_pct", 0.0)
+            cy = max(rh / 2.0, min(1.0 - rh / 2.0, 0.5 + rv))
             x0 = int(w * (0.5 - rw / 2))
             x1 = int(w * (0.5 + rw / 2))
-            y0 = int(h * (0.5 - rh / 2))
-            y1 = int(h * (0.5 + rh / 2))
+            y0 = int(h * (cy - rh / 2))
+            y1 = int(h * (cy + rh / 2))
             roi = frame[y0:y1, x0:x1]
             p50 = None
             valid_pct = None
 
-            p5 = None
+            # Use device-side spatial calculator for median only.
             if in_spatial is not None:
                 try:
                     spatial_locations = in_spatial.getSpatialLocations()
-                    if spatial_locations:
-                        min_z_mm = float(spatial_locations[0].spatialCoordinates.z)
-                        if min_z_mm > 0:
-                            p5 = min_z_mm
                     if len(spatial_locations) > 1:
                         med_z_mm = float(spatial_locations[1].spatialCoordinates.z)
                         if med_z_mm > 0:
                             p50 = med_z_mm
                 except Exception:
-                    p5 = None
-            if p5 is None:
-                # Fallback when no fresh spatial packet is available.
-                nonzero = roi[roi > 0]
-                if nonzero.size == 0:
-                    return
-                p5 = float(np.min(nonzero))
+                    pass
+
+            # Host-side 5th percentile for obstacle distance (robust to stereo artifacts).
+            valid = roi[roi > 400]
+            if valid.size == 0:
+                return
+            p5 = float(np.percentile(valid, 5))
 
             self._depth_stats_counter += 1
             if self._depth_stats_counter >= self._depth_stats_decimation:

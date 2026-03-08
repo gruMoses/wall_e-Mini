@@ -1,61 +1,86 @@
-# WALL-E Mini Performance Optimization TODO
+# WALL-E Mini Unified Roadmap & TODO
 
-Last updated: 2026-03-02
-Scope: Reduce Pi CPU load and maximize OAK-D offload while preserving safety/control behavior.
+Last updated: 2026-03-03  
+Scope: Single source of truth for active engineering work and prioritized enhancements.
 
-## Status Snapshot
+## Current Status
 
-- [x] Research complete (code audit + OAK-D docs + live runtime checks)
-- [x] OAK-connected live evidence captured from current logs/processes
-- [ ] Phase 0 baseline matrix captured under controlled scenarios (3x each scenario still pending)
-- [x] Phase 1 quick wins implemented
-- [x] Phase 2 OAK offload/dataflow improvements implemented
-- [x] Full regression + soak validation complete
+- [x] OAK-D performance optimization phases (P1-P4) implemented and validated
+- [x] IMU fidelity program (IMU-0..IMU-5) implemented and validated
+- [x] Conservative IMU default enabled (`oak_nmni_enabled=True`)
+- [ ] Program-level process hardening still open (strict baseline repeat policy + per-phase rerun discipline)
 
 ---
 
-## Active Backlog
+## P0 Open Program Items (Do Next)
 
-### Open Items
-
-- [ ] Complete strict P0 matrix requirement (3x repeats for every listed scenario):
+- [ ] Complete strict baseline matrix requirement (3x each scenario):
   - idle
   - control-loop only
   - OAK pipeline only
   - full stack nominal
-  - full stack under CPU stress
-  - thermal soak (20 min)
-- [ ] Re-run full baseline matrix after each phase (program-level discipline).
-- [ ] Enforce and document "after each phase" rerun discipline in one canonical validation report.
+  - full stack stress
+  - 20+ min thermal soak
+- [ ] Enforce rerun discipline after each future phase/change.
+- [ ] Publish one canonical validation report template that all future feature work follows.
 
-## Notes From Current Live Evidence
+---
 
-- Current `latest.log` shows active OAK depth data and mostly stable loop timing with occasional long-tail spikes.
-- Historical logs show heavier jitter under loaded OAK/full-feature scenarios.
-- Biggest remaining Pi-side cost centers are host frame math, annotation/JPEG/MCAP work, and high-frequency hot-loop overhead.
+## Active Engineering Backlog
 
-### Handoff Docs
+### P1 (High Impact, Near Term)
 
-- IMU program final handoff: `docs/imu_fidelity_completion_summary_20260302.md`
-- IMU phase details:
+- [ ] Wheel speed feedback via VESC telemetry read-back in `VescCanDriver`
+  - parse status CAN frames and expose RPM/speed API
+- [ ] Slew rate limiter for track commands (mode-aware, accel/decel asymmetric)
+- [ ] Terrain roughness governor (accel RMS + high-pass + speed scaling)
+- [ ] Tilt protection governor (roll/pitch-based speed reduction + hard stop at extreme tilt)
+
+### P2 (Medium-High Impact)
+
+- [ ] Backlash compensation
+  - measurement pre-step + compensator strategy (pulse/dead-zone inverse/hysteresis)
+- [ ] Follow Me smoothing bundle
+  - distance dead zone, steering EMA, comfort approach speed
+- [ ] Unified speed-governor architecture (`final_scale = min(all_limiters)`)
+- [ ] Stuck detection + recovery routine
+
+### P3 (Medium Impact)
+
+- [ ] Depth predictive slowdown (time-to-collision + continuous braking curve)
+- [ ] Gain scheduling (speed/mode/surface indexed PID sets)
+- [ ] RTK GPS hardening
+  - reconnection/backoff, quality transition handling, startup convergence policy
+
+### P4 (Longer Horizon)
+
+- [ ] Inertial navigation aiding (GPS + IMU + odometry fusion)
+- [ ] Terrain classification (stretch)
+- [ ] Creative/demo features (LED ring, sound, voice, auto-docking)
+
+---
+
+## Completed Highlights (Condensed)
+
+- [x] OAK depth offload, queue-policy tuning, recorder load reductions
+- [x] Follow Me tracker continuity and docs alignment
+- [x] IMU device timestamp propagation and controller cadence alignment
+- [x] IMU telemetry precision restoration
+- [x] IMU bounded ingestion mode + safe fallback controls
+- [x] Optional drift/noise features implemented; conservative defaults validated
+
+---
+
+## Validation & Handoff References
+
+- IMU final handoff: `docs/imu_fidelity_completion_summary_20260302.md`
+- IMU phase validation docs:
   - `docs/imu0_instrumentation_snapshot_20260302.md`
   - `docs/imu1_timestamp_validation_20260302.md`
   - `docs/imu2_status_precision_validation_20260302.md`
   - `docs/imu3_bounded_ingestion_implementation_20260302.md`
   - `docs/imu4_cadence_alignment_validation_20260302.md`
   - `docs/imu5_optional_features_implementation_20260302.md`
-
-### Active Remaining Items
-
-- [ ] Complete strict P0 matrix requirement (3x repeats for every listed scenario).
-- [ ] Enforce and document "after each phase" rerun discipline in one canonical validation report.
-
----
-
-## Completed Milestones (Condensed)
-
-- [x] P1 CPU quick wins implemented.
-- [x] P2 OAK offload/dataflow improvements implemented.
-- [x] P3 Follow-Me stability/docs alignment completed.
-- [x] Program-level regression + soak validation completed.
-- [x] IMU fidelity program (IMU-0..IMU-5) completed.
+- Performance baseline/report docs:
+  - `docs/performance_baseline_report_20260301.md`
+  - `docs/performance_p1_results_20260301.md`

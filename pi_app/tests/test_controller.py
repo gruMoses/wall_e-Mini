@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from pi_app.control.controller import Controller, RCInputs, MotorDriver, ArmRelay, ShutdownScheduler, RC_STALE_TIMEOUT_S
 from pi_app.control.mapping import MIN_PULSE_WIDTH_US, MAX_PULSE_WIDTH_US, MAX_OUTPUT, MIN_OUTPUT, CENTER_OUTPUT_VALUE
-from pi_app.control.safety import SafetyEvent
+from pi_app.control.safety import SafetyEvent, SafetyParams
 from config import config as default_config
 
 
@@ -144,6 +144,75 @@ class TestRCStaleness(unittest.TestCase):
         self.assertTrue(cmd.is_armed)
         self.assertNotIn(SafetyEvent.RC_STALE, events)
         self.assertFalse(telem.get("rc_stale", False))
+
+
+class TestSlewLimiter(unittest.TestCase):
+    def _make_controller(self):
+        motor = FakeMotor()
+        relay = FakeRelay()
+        shutdown = FakeShutdown()
+        params = SafetyParams(debounce_seconds=0.0)
+        c = Controller(
+            motor_driver=motor,
+            arm_relay=relay,
+            shutdown_scheduler=shutdown,
+            safety_params=params,
+        )
+        return c, motor
+
+    def test_manual_asymmetric_accel_decel(self):
+        slew_cfg = replace(
+            default_config.slew_limiter,
+            enabled=True,
+            manual_accel_bps=100.0,
+            manual_decel_bps=300.0,
+            snap_first_command=False,
+        )
+        test_cfg = replace(default_config, slew_limiter=slew_cfg)
+        arm_rc = RCInputs(
+            ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0
+        )
+        with patch("pi_app.control.controller.config", test_cfg):
+            with patch("pi_app.control.controller.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2, 0.3]):
+                c, motor = self._make_controller()
+                c.process(arm_rc, now_epoch_s=0.1)
+                cmd1, _, _ = c.process(arm_rc, now_epoch_s=0.2, bt_override_bytes=(220, 220))
+                cmd2, _, _ = c.process(arm_rc, now_epoch_s=0.3, bt_override_bytes=(126, 126))
+
+        # 100 bps * 0.1s = 10 byte accel step from neutral
+        self.assertEqual(cmd1.left_byte, 136)
+        self.assertEqual(cmd1.right_byte, 136)
+        # 300 bps * 0.1s = 30 byte decel step toward neutral
+        self.assertEqual(cmd2.left_byte, 126)
+        self.assertEqual(cmd2.right_byte, 126)
+        self.assertEqual(motor.commands[-1], (126, 126))
+
+    def test_mode_aware_profile_follow_me_slower_than_manual(self):
+        slew_cfg = replace(
+            default_config.slew_limiter,
+            enabled=True,
+            manual_accel_bps=200.0,
+            follow_me_accel_bps=50.0,
+            manual_decel_bps=200.0,
+            follow_me_decel_bps=200.0,
+            snap_first_command=False,
+        )
+        test_cfg = replace(default_config, slew_limiter=slew_cfg)
+        arm_rc = RCInputs(
+            ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0
+        )
+        with patch("pi_app.control.controller.config", test_cfg):
+            with patch("pi_app.control.controller.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2, 0.3]):
+                c, _ = self._make_controller()
+                c.process(arm_rc, now_epoch_s=0.1)
+                manual_cmd, _, _ = c.process(arm_rc, now_epoch_s=0.2, bt_override_bytes=(200, 200))
+                c._mode = "FOLLOW_ME"
+                follow_cmd, _, _ = c.process(arm_rc, now_epoch_s=0.3, bt_override_bytes=(200, 200))
+
+        self.assertEqual(manual_cmd.left_byte, 146)  # 200 bps * 0.1s = +20
+        # FOLLOW_ME accel is lower; second step advances only 5 bytes.
+        self.assertEqual(follow_cmd.left_byte, 151)
+        self.assertEqual(follow_cmd.right_byte, 151)
 
 
 if __name__ == "__main__":

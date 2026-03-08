@@ -144,7 +144,10 @@ def run() -> None:
                     print("  Follow Me mode available (Ch4 switch to activate)")
                 if rec_cfg is not None:
                     try:
-                        oak_recorder = OakRecorder(config.oak_recording)
+                        oak_recorder = OakRecorder(
+                            config.oak_recording,
+                            roi_vertical_offset_pct=getattr(config.obstacle_avoidance, "roi_vertical_offset_pct", 0.0),
+                        )
                         oak_recorder.start(oak_reader)
                         print("  Activity-triggered recording enabled")
                     except Exception as e:
@@ -158,6 +161,7 @@ def run() -> None:
 
     # Initialize IMU and steering compensator (after OAK-D so oak_d fallback is available).
     # Priority: external I2C IMU (best quality) > OAK-D onboard IMU > none.
+    imu = None
     imu_source_cfg = getattr(config, "imu_source", "auto")
     if config.imu_steering.enabled and imu_source_cfg != "none":
         imu = None
@@ -267,7 +271,13 @@ def run() -> None:
     oak_web_viewer = None
     if config.oak_web_viewer.enabled and oak_recorder is not None:
         try:
-            oak_web_viewer = OakWebViewer(config.oak_web_viewer, oak_recorder, controller=controller)
+            oak_web_viewer = OakWebViewer(
+                config.oak_web_viewer, oak_recorder,
+                controller=controller,
+                oak_reader=oak_reader,
+                motor_driver=motor_driver,
+                imu_reader=imu,
+            )
             oak_web_viewer.start()
             print(f"Web viewer at http://0.0.0.0:{config.oak_web_viewer.port}/")
         except Exception as e:

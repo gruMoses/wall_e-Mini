@@ -1,11 +1,12 @@
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from pi_app.control.controller import Controller, RCInputs
 from pi_app.control.safety import SafetyEvent, SafetyParams
 from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
 from pi_app.control.follow_me import FollowMeController, PersonDetection
-from config import ObstacleAvoidanceConfig, FollowMeConfig
+from config import ObstacleAvoidanceConfig, FollowMeConfig, config as default_config
 
 
 class FakeMotor:
@@ -119,6 +120,36 @@ class TestControllerObstacleAvoidance(unittest.TestCase):
         ctrl.process(ARMED_RC, now_epoch_s=0.5)
         cmd, events, telem = ctrl.process(FWD_RC, now_epoch_s=1.0)
         self.assertAlmostEqual(telem["obstacle_throttle_scale"], 1.0)
+
+    def test_hard_stop_obstacle_bypasses_slew_limiter(self):
+        oa_cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5)
+        slew_cfg = replace(
+            default_config.slew_limiter,
+            enabled=True,
+            manual_accel_bps=40.0,
+            manual_decel_bps=40.0,
+            bypass_on_hard_stop=True,
+            hard_stop_scale_threshold=0.0,
+            snap_first_command=False,
+        )
+        test_cfg = replace(default_config, slew_limiter=slew_cfg)
+        with patch("pi_app.control.controller.config", test_cfg):
+            with patch("pi_app.control.controller.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2, 0.21]):
+                ctrl, _ = self._make_controller(oa_config=oa_cfg)
+                ctrl.process(ARMED_RC, now_epoch_s=1.0)  # arm
+
+                ctrl.set_obstacle_data(distance_m=5.0, age_s=0.0)
+                cmd_a, _, telem_a = ctrl.process(FWD_RC, now_epoch_s=1.1)
+                self.assertEqual(cmd_a.left_byte, 130)  # 40 bps * 0.1s from neutral
+
+                ctrl.set_obstacle_data(distance_m=0.4, age_s=0.0)  # hard stop scale = 0
+                cmd_b, _, telem_b = ctrl.process(FWD_RC, now_epoch_s=1.2)
+
+        self.assertEqual(cmd_b.left_byte, 126)
+        self.assertEqual(cmd_b.right_byte, 126)
+        self.assertFalse(telem_a["slew_bypassed"])
+        self.assertTrue(telem_b["slew_bypassed"])
+        self.assertTrue(telem_b["slew_hard_stop_active"])
 
 
 class TestControllerFollowMe(unittest.TestCase):
