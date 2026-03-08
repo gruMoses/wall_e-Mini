@@ -199,6 +199,17 @@ class WaypointNavConfig:
 
 
 @dataclass(frozen=True)
+class GestureConfig:
+    """Configuration for hand-gesture activation/deactivation of Follow Me."""
+    enabled: bool = True
+    activation_sequence: tuple = (3, 4, 3)   # finger counts to start Follow Me
+    stop_gesture: str = "FIVE"               # open palm to stop Follow Me
+    hold_frames: int = 12         # consecutive frames a gesture must be stable
+    sequence_timeout_s: float = 3.0  # max seconds between sequence steps
+    cooldown_s: float = 2.0       # ignore gestures briefly after activate/deactivate
+
+
+@dataclass(frozen=True)
 class Config:
     """Main configuration class."""
     
@@ -220,6 +231,9 @@ class Config:
 
     # Follow Me person-tracking mode
     follow_me: FollowMeConfig = FollowMeConfig()
+
+    # Hand-gesture Follow Me activation
+    gesture: GestureConfig = GestureConfig()
 
     # Final motor-output slew limiter
     slew_limiter: SlewLimiterConfig = SlewLimiterConfig()
