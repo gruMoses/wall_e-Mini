@@ -37,7 +37,7 @@ except ImportError:
 import sys
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from config import OakRecordingConfig
+from config import OakRecordingConfig, ObstacleAvoidanceConfig
 from pi_app.control.follow_me import PersonDetection
 from pi_app.hardware.oak_depth import DepthStats
 
@@ -71,6 +71,12 @@ class RecordingTelemetry:
     follow_tracking: bool = False
     follow_target_x_m: float | None = None
     follow_target_z_m: float | None = None
+    gps_lat: float | None = None
+    gps_lon: float | None = None
+    gps_alt_m: float | None = None
+    gps_fix: int | None = None
+    gps_sats: int | None = None
+    gps_hdop: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -141,21 +147,52 @@ def _annotate_rgb(
     frame: np.ndarray,
     detections: list[PersonDetection],
     telemetry: RecordingTelemetry,
-    roi_pct: tuple[float, float] = (0.5, 0.5),
-    roi_vertical_offset_pct: float = 0.0,
+    obs_cfg: ObstacleAvoidanceConfig | None = None,
 ) -> np.ndarray:
-    """Draw bounding boxes, ROI, and status text onto an RGB preview frame."""
+    """Draw bounding boxes, ground-plane trapezoid ROI, and status text."""
     if cv2 is None or np is None:
         return frame
     img = frame.copy()
     h, w = img.shape[:2]
 
-    # ROI rectangle (shifted vertically when offset is set)
-    rw, rh = roi_pct
-    cy = max(rh / 2.0, min(1.0 - rh / 2.0, 0.5 + roi_vertical_offset_pct))
-    x0, x1 = int(w * (0.5 - rw / 2)), int(w * (0.5 + rw / 2))
-    y0, y1 = int(h * (cy - rh / 2)), int(h * (cy + rh / 2))
-    cv2.rectangle(img, (x0, y0), (x1, y1), _COLOR_ROI, 1)
+    if obs_cfg is None:
+        obs_cfg = ObstacleAvoidanceConfig()
+
+    rw = obs_cfg.roi_width_pct
+    rh = obs_cfg.roi_height_pct
+    rv = getattr(obs_cfg, "roi_vertical_offset_pct", 0.0)
+    cy_norm = max(rh / 2.0, min(1.0 - rh / 2.0, 0.5 + rv))
+    y0 = int(h * (cy_norm - rh / 2))
+    y1 = int(h * (cy_norm + rh / 2))
+
+    robot_w = getattr(obs_cfg, "robot_width_m", 0.0)
+    cam_h = getattr(obs_cfg, "camera_height_m", 0.0)
+
+    if robot_w > 0 and cam_h > 0:
+        cx_img = int(w / 2.0)
+        cy_horizon = int(h / 2.0)
+
+        # Ground-plane corridor triangle (cyan)
+        pts = np.array([
+            [0, h - 1],
+            [w - 1, h - 1],
+            [cx_img, cy_horizon],
+        ], np.int32)
+        cv2.polylines(img, [pts], isClosed=True, color=_COLOR_ROI, thickness=1)
+
+        # Depth ROI band (yellow dashed horizontal lines)
+        roi_color = (0, 200, 255)
+        dash_len = 12
+        for y_line in (y0, y1):
+            for x_start in range(0, w, dash_len * 2):
+                x_end = min(x_start + dash_len, w)
+                cv2.line(img, (x_start, y_line), (x_end, y_line), roi_color, 1)
+        cv2.putText(img, "ROI", (4, y0 + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, roi_color, 1, cv2.LINE_AA)
+    else:
+        x0 = int(w * (0.5 - rw / 2))
+        x1 = int(w * (0.5 + rw / 2))
+        cv2.rectangle(img, (x0, y0), (x1, y1), _COLOR_ROI, 1)
 
     # Pick the best detection (highest z_m closeness + center closeness)
     best_idx = -1
@@ -226,9 +263,15 @@ class OakRecorder:
         recorder.stop()              # flushes and closes files
     """
 
-    def __init__(self, config: OakRecordingConfig, roi_vertical_offset_pct: float = 0.0) -> None:
+    def __init__(
+        self,
+        config: OakRecordingConfig,
+        roi_vertical_offset_pct: float = 0.0,
+        obstacle_config: ObstacleAvoidanceConfig | None = None,
+    ) -> None:
         self._cfg = config
         self._roi_v_offset = float(roi_vertical_offset_pct)
+        self._obs_cfg = obstacle_config
         rec_dir = Path(config.recording_dir)
         if not rec_dir.is_absolute():
             rec_dir = Path(__file__).resolve().parents[2] / rec_dir
@@ -555,8 +598,7 @@ class OakRecorder:
                 frame,
                 telemetry.person_detections,
                 telemetry,
-                roi_pct=(0.5, 0.5),
-                roi_vertical_offset_pct=self._roi_v_offset,
+                obs_cfg=self._obs_cfg,
             )
             _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
             jpeg_bytes = jpeg.tobytes()

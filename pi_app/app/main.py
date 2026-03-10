@@ -161,6 +161,7 @@ def run() -> None:
                         oak_recorder = OakRecorder(
                             config.oak_recording,
                             roi_vertical_offset_pct=getattr(config.obstacle_avoidance, "roi_vertical_offset_pct", 0.0),
+                            obstacle_config=config.obstacle_avoidance,
                         )
                         oak_recorder.start(oak_reader)
                         print("  Activity-triggered recording enabled")
@@ -444,6 +445,12 @@ def run() -> None:
                         follow_tracking=telem.get("follow_me_tracking", False),
                         follow_target_x_m=telem.get("follow_me_target_x_m"),
                         follow_target_z_m=telem.get("follow_me_target_z_m"),
+                        gps_lat=gps_reading.latitude if gps_reading else None,
+                        gps_lon=gps_reading.longitude if gps_reading else None,
+                        gps_alt_m=gps_reading.altitude_m if gps_reading else None,
+                        gps_fix=gps_reading.fix_quality if gps_reading else None,
+                        gps_sats=gps_reading.satellites_used if gps_reading else None,
+                        gps_hdop=gps_reading.hdop if gps_reading else None,
                     )
                     depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
                     rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None

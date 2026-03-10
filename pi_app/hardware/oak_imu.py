@@ -53,6 +53,13 @@ class OakImuReader:
         self._bias_adapt_enabled = bool(bias_adapt_enabled)
         self._bias_adapt_alpha = max(0.0, min(1.0, float(bias_adapt_alpha)))
 
+        # EMA-smoothed accelerometer for gravity projection (reduces
+        # vibration noise while preserving the true gravity direction).
+        self._accel_ema_alpha = 0.12
+        self._ax_ema: Optional[float] = None
+        self._ay_ema: Optional[float] = None
+        self._az_ema: Optional[float] = None
+
     def calibrate_gyro(self, duration_s: float = 3.0) -> tuple:
         """Collect gyro samples from OAK-D IMU to estimate bias."""
         xs, ys, zs = [], [], []
@@ -112,10 +119,7 @@ class OakImuReader:
         gx_dps = gx_raw_dps - self.gyro_bias_dps[0]
         gy_dps = gy_raw_dps - self.gyro_bias_dps[1]
         gz_dps = gz_raw_dps - self.gyro_bias_dps[2]
-        if self._nmni_enabled and abs(gz_dps) < self._nmni_threshold_dps:
-            gz_dps = 0.0
         if self._bias_adapt_enabled:
-            # Low-rate stationary bias adaptation (optional; disabled by default).
             if (
                 abs(gx_dps) < self._nmni_threshold_dps
                 and abs(gy_dps) < self._nmni_threshold_dps
@@ -129,9 +133,23 @@ class OakImuReader:
                     (1.0 - a) * bz + a * gz_raw_dps,
                 )
 
-        # Accel-based roll and pitch
-        norm = math.sqrt(ax_g * ax_g + ay_g * ay_g + az_g * az_g) or 1.0
-        ax_n, ay_n, az_n = ax_g / norm, ay_g / norm, az_g / norm
+        # EMA-smooth the accelerometer to filter out driving vibration
+        # while preserving the true gravity direction for yaw projection.
+        a = self._accel_ema_alpha
+        if self._ax_ema is None:
+            self._ax_ema, self._ay_ema, self._az_ema = ax_g, ay_g, az_g
+        else:
+            self._ax_ema = a * ax_g + (1.0 - a) * self._ax_ema
+            self._ay_ema = a * ay_g + (1.0 - a) * self._ay_ema
+            self._az_ema = a * az_g + (1.0 - a) * self._az_ema
+
+        # Use RAW accel for roll/pitch telemetry (complementary filter
+        # already handles smoothing there).
+        a_norm_sq_raw = ax_g * ax_g + ay_g * ay_g + az_g * az_g
+        a_norm_raw = math.sqrt(a_norm_sq_raw) or 1.0
+        ax_n = ax_g / a_norm_raw
+        ay_n = ay_g / a_norm_raw
+        az_n = az_g / a_norm_raw
         roll_acc = math.atan2(ay_n, az_n)
         pitch_acc = math.atan2(-ax_n, math.sqrt(ay_n * ay_n + az_n * az_n))
 
@@ -139,15 +157,34 @@ class OakImuReader:
         gy = math.radians(gy_dps)
         gz = math.radians(gz_dps)
 
+        # Smoothed accel for gravity projection
+        sx, sy, sz = self._ax_ema, self._ay_ema, self._az_ema
+        a_norm_sq = sx * sx + sy * sy + sz * sz
+
         if not self._initialized:
             self.roll_rad = roll_acc
             self.pitch_rad = pitch_acc
             self.yaw_rad = 0.0
             self._initialized = True
+            yaw_rate_world_dps = 0.0
         else:
             self.roll_rad = self.alpha_rp * (self.roll_rad + gx * dt) + (1.0 - self.alpha_rp) * roll_acc
             self.pitch_rad = self.alpha_rp * (self.pitch_rad + gy * dt) + (1.0 - self.alpha_rp) * pitch_acc
-            self.yaw_rad += gz * dt
+
+            # Project body-frame angular velocity onto the EMA-smoothed
+            # gravity direction.  Smoothing removes vibration spikes that
+            # were producing noisy yaw rates on pavement.
+            if a_norm_sq > 0.25:
+                yaw_rate_rads = (gx * sx + gy * sy + gz * sz) / a_norm_sq
+            else:
+                yaw_rate_rads = gz
+
+            yaw_rate_world_dps = math.degrees(yaw_rate_rads)
+            if self._nmni_enabled and abs(yaw_rate_world_dps) < self._nmni_threshold_dps:
+                yaw_rate_world_dps = 0.0
+                yaw_rate_rads = 0.0
+
+            self.yaw_rad += yaw_rate_rads * dt
 
         heading_deg = (-math.degrees(self.yaw_rad) + 360.0) % 360.0
 
@@ -161,7 +198,7 @@ class OakImuReader:
             "az_g": az_g,
             "gx_dps": gx_dps,
             "gy_dps": gy_dps,
-            "gz_dps": gz_dps,
+            "gz_dps": yaw_rate_world_dps,
             "mx_g": 0.0,
             "my_g": 0.0,
             "mz_g": 0.0,
