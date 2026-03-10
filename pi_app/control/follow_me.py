@@ -54,6 +54,8 @@ class FollowMeController:
         self._smoothed_x: float = 0.0
         self._prev_smoothed_x: float = 0.0
         self._prev_x_time: float = 0.0
+        self._prev_steer_offset: float = 0.0
+        self._prev_steer_time: float = 0.0
 
     def compute(self, detections: list[PersonDetection]) -> tuple[int, int]:
         """Compute motor bytes (left, right) to follow the best-scored person.
@@ -65,7 +67,16 @@ class FollowMeController:
         if target is None:
             elapsed = time.monotonic() - self._last_valid_time
             if self._last_valid_time > 0.0 and elapsed < self._cfg.lost_target_timeout_s:
-                return self._held_left, self._held_right
+                search_pct = getattr(self._cfg, "lost_target_search_steer_pct", 0.25)
+                max_steer = self._cfg.max_follow_speed_byte * search_pct
+                if self._last_target_x is not None and abs(self._last_target_x) > 0.05:
+                    direction = 1.0 if self._last_target_x > 0 else -1.0
+                    steer = direction * max_steer
+                else:
+                    steer = 0.0
+                left = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + steer)))
+                right = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL - steer)))
+                return left, right
             self._tracking = False
             self._dynamic_follow_dist = None
             self._last_distance_error = None
@@ -130,6 +141,19 @@ class FollowMeController:
         d_gain = getattr(self._cfg, "steering_derivative_gain", 0.0)
         d_steer = dx_dt * d_gain * scale
         steer_offset = p_steer + d_steer
+
+        max_rate = getattr(self._cfg, "max_steer_delta_per_s", 1e9)
+        max_abs = getattr(self._cfg, "max_steer_offset_byte", 1e9)
+        dt_steer = now - self._prev_steer_time if self._prev_steer_time > 0.0 else 0.0
+        if dt_steer > 0.001 and max_rate < 1e6:
+            max_delta = max_rate * dt_steer
+            delta = steer_offset - self._prev_steer_offset
+            if abs(delta) > max_delta:
+                steer_offset = self._prev_steer_offset + max_delta * (1.0 if delta > 0 else -1.0)
+        steer_offset = max(-max_abs, min(max_abs, steer_offset))
+        self._prev_steer_offset = steer_offset
+        self._prev_steer_time = now
+
         self._last_steer_offset = steer_offset
 
         left = NEUTRAL + speed_offset + steer_offset

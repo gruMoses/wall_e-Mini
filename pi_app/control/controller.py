@@ -480,6 +480,20 @@ class Controller:
                 blend = max(0.0, 1.0 - (si / zero_at))
             telemetry["correction_blend"] = blend
             corr = imu_correction * blend
+
+            # Speed-dependent gain scheduling: attenuate correction at high
+            # wheel speed where each byte produces more turning force.
+            speed_scale = 1.0
+            gs_enabled = bool(getattr(config.imu_steering, 'gain_schedule_enabled', False))
+            if gs_enabled and moving_ok:
+                ref = float(getattr(config.imu_steering, 'gain_schedule_ref_speed_byte', 50.0))
+                speed_byte = max(abs(left - CENTER_OUTPUT_VALUE),
+                                 abs(right - CENTER_OUTPUT_VALUE))
+                if ref > 0.0 and speed_byte > ref:
+                    speed_scale = ref / speed_byte
+                corr = corr * speed_scale
+            telemetry["speed_gain_scale"] = speed_scale
+
             # Apply corrections only when moving to avoid idle spin corrections
             if moving_ok and abs(corr) > 0.0:
                 # Apply so that positive correction increases left and decreases right
@@ -564,6 +578,8 @@ class Controller:
 
                     dt_s = max(0.0, mono_now - self._slew_last_update)
                     snap_first = bool(getattr(slewc, "snap_first_command", True))
+                    if mode_for_slew == "FOLLOW_ME":
+                        snap_first = bool(getattr(slewc, "snap_first_follow_me", snap_first))
                     wants_motion = (
                         left_in != CENTER_OUTPUT_VALUE or right_in != CENTER_OUTPUT_VALUE
                     )

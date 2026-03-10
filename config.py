@@ -12,15 +12,15 @@ class ImuSteeringConfig:
     # Enable/disable IMU steering
     enabled: bool = True
     
-    # PID gains for heading control (updated from auto-tune)
-    kp: float = 1.7    # Proportional gain (heading error to steering correction)
-    ki: float = 0.4 # Integral gain (accumulated drift correction)
-    kd: float = 0.08   # Derivative gain (yaw rate damping)
+    # PID gains for heading control
+    kp: float = 0.7       # Proportional gain (heading error to steering correction)
+    ki: float = 0.08      # Integral gain (slow bias removal; high values cause oscillation)
+    kd: float = 0.5       # Derivative gain (yaw rate damping)
     
     # Control parameters
-    max_correction: int = 220     # Maximum steering correction in byte units (0-255)
+    max_correction: int = 25      # Maximum steering correction in byte units (0-255)
     deadband_deg: float = 0.9    # Minimum heading error to trigger correction (degrees)
-    max_integral: float = 80.0   # Maximum integral term to prevent windup
+    max_integral: float = 30.0   # Maximum integral term to prevent windup
     invert_output: bool = False   # Invert the sign of IMU steering correction (hardware-specific)
     # Steering neutral detection (hysteresis) to lock heading until commanded turn
     steering_neutral_enter: float = 0.08  # |steering_input| below this enters neutral
@@ -57,7 +57,13 @@ class ImuSteeringConfig:
     oak_bias_adapt_enabled: bool = False
     oak_bias_adapt_alpha: float = 0.001
     # Optional derivative-term EMA filtering (0.0 disables).
-    dterm_ema_alpha: float = 0.0
+    dterm_ema_alpha: float = 0.3
+
+    # Speed-dependent gain scheduling: at higher wheel speed, each byte of
+    # correction produces more turning, so we attenuate the PID output.
+    # scale = ref / max(speed, ref)  where speed = max distance-from-neutral.
+    gain_schedule_enabled: bool = True
+    gain_schedule_ref_speed_byte: float = 50.0
 
     # Fallback behavior
     fallback_on_error: bool = True  # Use RC control if IMU fails
@@ -86,9 +92,14 @@ class ObstacleAvoidanceConfig:
     enabled: bool = True
     slow_distance_m: float = 1.5
     stop_distance_m: float = 0.4
-    roi_width_pct: float = 0.5
+    roi_width_pct: float = 0.80
     roi_height_pct: float = 0.5
     roi_vertical_offset_pct: float = -0.20  # negative = shift ROI upward
+    camera_height_m: float = 0.497
+    robot_width_m: float = 0.820
+    camera_hfov_deg: float = 73.0
+    min_depth_mm: int = 600            # reject stereo readings below this (OAK-D Lite noise floor)
+    min_valid_pct: float = 8.0         # ignore corridor if fewer than this % of pixels are valid
     update_rate_hz: float = 15.0
     stale_timeout_s: float = 0.5
     stale_policy: str = "clear"  # "stop" or "clear" when depth data is stale
@@ -102,11 +113,14 @@ class FollowMeConfig:
     min_distance_m: float = 0.5
     max_distance_m: float = 4.0
     max_follow_speed_byte: int = 100
-    steering_gain: float = 1.4
-    steering_derivative_gain: float = 0.25  # damps lateral overshoot (scales dx/dt)
+    steering_gain: float = 0.8
+    steering_derivative_gain: float = 0.981  # damps lateral overshoot (scales dx/dt)
     steering_ema_alpha: float = 0.3        # smooths x_m before derivative (0=heavy, 1=none)
     detection_confidence: float = 0.5
     lost_target_timeout_s: float = 1.0
+    lost_target_search_steer_pct: float = 0.25  # fraction of max_follow_speed_byte for search turn
+    max_steer_delta_per_s: float = 80.0          # steering differential slew limit (bytes/s)
+    max_steer_offset_byte: float = 50.0          # absolute cap on steer_offset (bytes)
 
 
 @dataclass(frozen=True)
@@ -131,6 +145,7 @@ class SlewLimiterConfig:
 
     # First armed command after neutral/disarm can either snap to target or ramp from neutral.
     snap_first_command: bool = True
+    snap_first_follow_me: bool = False  # Follow Me always ramps from neutral
 
 
 @dataclass(frozen=True)

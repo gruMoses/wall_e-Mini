@@ -594,7 +594,13 @@ class OakDepthReader:
     # -- Depth / detection / RGB / IMU polling --------------------------------
 
     def _poll_depth(self, depth_q, spatial_depth_q, np) -> None:
-        """Extract minimum distance and rich stats from the center ROI."""
+        """Extract minimum distance using trapezoidal corridor masking.
+
+        Instead of a fixed-width rectangular ROI, each depth pixel is checked
+        against the robot's physical width projected at that pixel's depth.
+        Pixels whose real-world X offset exceeds half the robot width are
+        excluded, producing a depth-dependent (trapezoidal) check region.
+        """
         try:
             in_spatial = spatial_depth_q.tryGet()
             while True:
@@ -612,17 +618,39 @@ class OakDepthReader:
                 in_depth = newer_depth
             frame = in_depth.getFrame()  # uint16, millimetres
             h, w = frame.shape
-            rw = self._obs_cfg.roi_width_pct
+
             rh = self._obs_cfg.roi_height_pct
             rv = getattr(self._obs_cfg, "roi_vertical_offset_pct", 0.0)
-            cy = max(rh / 2.0, min(1.0 - rh / 2.0, 0.5 + rv))
-            x0 = int(w * (0.5 - rw / 2))
-            x1 = int(w * (0.5 + rw / 2))
-            y0 = int(h * (cy - rh / 2))
-            y1 = int(h * (cy + rh / 2))
-            roi = frame[y0:y1, x0:x1]
+            cy_norm = max(rh / 2.0, min(1.0 - rh / 2.0, 0.5 + rv))
+            y0 = int(h * (cy_norm - rh / 2))
+            y1 = int(h * (cy_norm + rh / 2))
+            band = frame[y0:y1, :]
+
+            robot_half_mm = getattr(self._obs_cfg, "robot_width_m", 0.0) * 500.0
+            min_depth_mm = int(getattr(self._obs_cfg, "min_depth_mm", 600))
+            min_valid_pct = float(getattr(self._obs_cfg, "min_valid_pct", 8.0))
             p50 = None
             valid_pct = None
+
+            if robot_half_mm > 0:
+                import math
+                hfov = getattr(self._obs_cfg, "camera_hfov_deg", 73.0)
+                fx = (w / 2.0) / math.tan(math.radians(hfov / 2.0))
+                cx = w / 2.0
+                threshold = fx * robot_half_mm
+
+                x_offsets = np.abs(np.arange(w, dtype=np.float32) - cx)
+                depths_f = band.astype(np.float32)
+                in_corridor = (depths_f * x_offsets[np.newaxis, :]) <= threshold
+                valid_mask = (band > min_depth_mm) & in_corridor
+                valid_depths = band[valid_mask]
+            else:
+                rw = self._obs_cfg.roi_width_pct
+                x0 = int(w * (0.5 - rw / 2))
+                x1 = int(w * (0.5 + rw / 2))
+                roi = band[:, x0:x1]
+                valid_mask = roi > min_depth_mm
+                valid_depths = roi[valid_mask]
 
             # Use device-side spatial calculator for median only.
             if in_spatial is not None:
@@ -635,23 +663,34 @@ class OakDepthReader:
                 except Exception:
                     pass
 
-            # Host-side 5th percentile for obstacle distance (robust to stereo artifacts).
-            valid = roi[roi > 400]
-            if valid.size == 0:
+            if valid_depths.size == 0:
                 return
-            p5 = float(np.percentile(valid, 5))
+
+            total_corridor_pixels = band.shape[0] * band.shape[1]
+            corridor_valid_pct = (valid_depths.size / total_corridor_pixels) * 100.0 if total_corridor_pixels > 0 else 0.0
+            if corridor_valid_pct < min_valid_pct:
+                return
+
+            p5 = float(np.percentile(valid_depths, 5))
 
             self._depth_stats_counter += 1
             if self._depth_stats_counter >= self._depth_stats_decimation:
                 self._depth_stats_counter = 0
-                # Downsample for telemetry-only stats to keep host-side overhead low.
-                roi_small = roi[::4, ::4]
-                total_pixels = roi_small.size
-                valid = roi_small[roi_small > 0]
-                if valid.size > 0:
+                band_small = band[::4, ::4]
+                if robot_half_mm > 0:
+                    x_off_small = np.abs(np.arange(band_small.shape[1], dtype=np.float32) - band_small.shape[1] / 2.0)
+                    fx_small = fx * (band_small.shape[1] / w)
+                    thr_small = fx_small * robot_half_mm
+                    d_small = band_small.astype(np.float32)
+                    corr_mask = (d_small * x_off_small[np.newaxis, :]) <= thr_small
+                    stat_valid = band_small[(band_small > 0) & corr_mask]
+                else:
+                    stat_valid = band_small[band_small > 0]
+                total_pixels = band_small.size
+                if stat_valid.size > 0:
                     if p50 is None:
-                        p50 = float(np.median(valid))
-                    valid_pct = (valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
+                        p50 = float(np.median(stat_valid))
+                    valid_pct = (stat_valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
 
             now = time.monotonic()
             with self._lock:
