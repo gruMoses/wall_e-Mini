@@ -111,16 +111,17 @@ class FollowMeConfig:
     enabled: bool = True
     follow_distance_m: float = 1.5
     min_distance_m: float = 0.5
-    max_distance_m: float = 4.0
-    max_follow_speed_byte: int = 100
-    steering_gain: float = 0.8
-    steering_derivative_gain: float = 0.981  # damps lateral overshoot (scales dx/dt)
+    max_distance_m: float = 6.0
+    max_speed_error_m: float = 2.5   # distance error at which max speed is reached (decoupled from detection range)
+    max_follow_speed_byte: int = 115
+    steering_gain: float = 0.35
+    steering_derivative_gain: float = 0.06  # calibrated from Phase 2 plant model
     steering_ema_alpha: float = 0.3        # smooths x_m before derivative (0=heavy, 1=none)
     detection_confidence: float = 0.5
     lost_target_timeout_s: float = 1.0
     lost_target_search_steer_pct: float = 0.25  # fraction of max_follow_speed_byte for search turn
-    max_steer_delta_per_s: float = 80.0          # steering differential slew limit (bytes/s)
-    max_steer_offset_byte: float = 50.0          # absolute cap on steer_offset (bytes)
+    max_steer_delta_per_s: float = 35.0          # steering differential slew limit (bytes/s)
+    max_steer_offset_byte: float = 15.0          # ~22 deg/s max turn — handles direction changes
 
 
 @dataclass(frozen=True)
@@ -132,8 +133,8 @@ class SlewLimiterConfig:
     # MANUAL is intentionally quicker than autonomous modes.
     manual_accel_bps: float = 250.0
     manual_decel_bps: float = 350.0
-    follow_me_accel_bps: float = 140.0
-    follow_me_decel_bps: float = 220.0
+    follow_me_accel_bps: float = 200.0
+    follow_me_decel_bps: float = 250.0
     waypoint_nav_accel_bps: float = 140.0
     waypoint_nav_decel_bps: float = 220.0
 

@@ -393,8 +393,14 @@ class Controller:
             right = map_pulse_to_byte_saturated(rc.ch2_us, f_full, r_full)
             steering_input = self._bytes_to_steering_input(left, right)
 
-        # Apply IMU steering compensation if available and enabled
-        imu_correction = self._apply_imu_compensation(steering_input, mono_now)
+        # Apply IMU steering compensation — skip in Follow Me mode where the
+        # controller intentionally changes heading to track a person.
+        if self._mode == "FOLLOW_ME":
+            imu_correction = None
+            if self._imu_compensator is not None:
+                self._imu_compensator.reset_target_heading()
+        else:
+            imu_correction = self._apply_imu_compensation(steering_input, mono_now)
         telemetry["steering_input"] = steering_input
         telemetry["imu_correction_raw"] = imu_correction
 
