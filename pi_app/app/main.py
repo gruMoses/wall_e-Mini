@@ -212,6 +212,9 @@ def run() -> None:
                     nmni_threshold_dps=float(getattr(config.imu_steering, "oak_nmni_threshold_dps", 0.3)),
                     bias_adapt_enabled=bool(getattr(config.imu_steering, "oak_bias_adapt_enabled", False)),
                     bias_adapt_alpha=float(getattr(config.imu_steering, "oak_bias_adapt_alpha", 0.001)),
+                    use_gravity_projected_yaw_rate=bool(
+                        getattr(config.imu_steering, "oak_use_gravity_projected_yaw_rate", False)
+                    ),
                 )
                 imu_source_used = "oak_d"
             except Exception as e:

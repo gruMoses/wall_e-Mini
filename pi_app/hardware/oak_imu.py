@@ -33,6 +33,7 @@ class OakImuReader:
         nmni_threshold_dps: float = 0.3,
         bias_adapt_enabled: bool = False,
         bias_adapt_alpha: float = 0.001,
+        use_gravity_projected_yaw_rate: bool = False,
     ) -> None:
         self._oak = oak_reader
         self.alpha_rp = complementary_alpha_rp
@@ -52,6 +53,7 @@ class OakImuReader:
         self._nmni_threshold_dps = float(nmni_threshold_dps)
         self._bias_adapt_enabled = bool(bias_adapt_enabled)
         self._bias_adapt_alpha = max(0.0, min(1.0, float(bias_adapt_alpha)))
+        self._use_gravity_projected_yaw_rate = bool(use_gravity_projected_yaw_rate)
 
         # EMA-smoothed accelerometer for gravity projection (reduces
         # vibration noise while preserving the true gravity direction).
@@ -59,6 +61,28 @@ class OakImuReader:
         self._ax_ema: Optional[float] = None
         self._ay_ema: Optional[float] = None
         self._az_ema: Optional[float] = None
+
+    @staticmethod
+    def _compute_yaw_rate_rads(
+        gx: float,
+        gy: float,
+        gz: float,
+        sx: float,
+        sy: float,
+        sz: float,
+        use_gravity_projected: bool,
+    ) -> float:
+        """Compute world-yaw rate from gyro, optionally using gravity projection.
+
+        Direct-gyro mode is the default to avoid lever-arm acceleration coupling
+        when the IMU is offset from the robot pivot.
+        """
+        if not use_gravity_projected:
+            return gz
+        a_norm_sq = sx * sx + sy * sy + sz * sz
+        if a_norm_sq > 0.25:
+            return (gx * sx + gy * sy + gz * sz) / a_norm_sq
+        return gz
 
     def calibrate_gyro(self, duration_s: float = 3.0) -> tuple:
         """Collect gyro samples from OAK-D IMU to estimate bias."""
@@ -157,9 +181,8 @@ class OakImuReader:
         gy = math.radians(gy_dps)
         gz = math.radians(gz_dps)
 
-        # Smoothed accel for gravity projection
+        # Smoothed accel for optional gravity projection.
         sx, sy, sz = self._ax_ema, self._ay_ema, self._az_ema
-        a_norm_sq = sx * sx + sy * sy + sz * sz
 
         if not self._initialized:
             self.roll_rad = roll_acc
@@ -171,13 +194,9 @@ class OakImuReader:
             self.roll_rad = self.alpha_rp * (self.roll_rad + gx * dt) + (1.0 - self.alpha_rp) * roll_acc
             self.pitch_rad = self.alpha_rp * (self.pitch_rad + gy * dt) + (1.0 - self.alpha_rp) * pitch_acc
 
-            # Project body-frame angular velocity onto the EMA-smoothed
-            # gravity direction.  Smoothing removes vibration spikes that
-            # were producing noisy yaw rates on pavement.
-            if a_norm_sq > 0.25:
-                yaw_rate_rads = (gx * sx + gy * sy + gz * sz) / a_norm_sq
-            else:
-                yaw_rate_rads = gz
+            yaw_rate_rads = self._compute_yaw_rate_rads(
+                gx, gy, gz, sx, sy, sz, self._use_gravity_projected_yaw_rate
+            )
 
             yaw_rate_world_dps = math.degrees(yaw_rate_rads)
             if self._nmni_enabled and abs(yaw_rate_world_dps) < self._nmni_threshold_dps:

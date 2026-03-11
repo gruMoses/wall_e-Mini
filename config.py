@@ -57,6 +57,9 @@ class ImuSteeringConfig:
     oak_nmni_threshold_dps: float = 0.3
     oak_bias_adapt_enabled: bool = False
     oak_bias_adapt_alpha: float = 0.001
+    # IMU lever-arm mitigation: use direct gyro yaw rate by default.
+    # Gravity-projected yaw rate can be re-enabled for A/B testing.
+    oak_use_gravity_projected_yaw_rate: bool = False
     # Optional derivative-term EMA filtering (0.0 disables).
     dterm_ema_alpha: float = 0.3
 
