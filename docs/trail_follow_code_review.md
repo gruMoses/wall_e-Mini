@@ -1,189 +1,199 @@
-# Trail Follow / Pure Pursuit — Code Review Findings
+# Trail Follow / Pure Pursuit - Consolidated Review and Hardening Plan
 
-**Branch:** `feature/trail-follow-pure-pursuit`
-**Date:** 2026-03-10
-**Updated:** 2026-03-10 (incorporated field-testing context and prior tuning history)
-**Reviewer:** Claude (automated deep-dive, 6 parallel analysis agents)
-
----
-
-## Design Context & Prior Art
-
-A previous Cursor plan (`follow_me_recovery_and_torque_b2f697dc.plan.md` on the Pi) covered the older direct-pursuit phase. Key context from that work and subsequent field testing:
-
-- **Steer rate limiting was intentionally removed** after field testing showed it hurt responsiveness. Findings in this review should NOT recommend re-adding steer output rate limiting. Hysteresis on *mode decisions* is fair game; slew on *steer output* is not.
-- **Lost-target behavior has changed** from "drive straight" to trail-aware recovery. The old plan's assumptions about lost-target are stale, but new edge cases (like zero-speed at moment of loss) are introduced.
-- **`snap_first_follow_me` ramp-up guidance** from the old plan remains valid — safer initial engagement behavior.
-- **Torque management insight still valid:** Independent L/R slew limiting is not the same as differential steering slew. A sharp differential command (left +15, right -15) gets slewed at the same per-motor rate as a symmetric speed change (both +15), but the mechanical stress and wheel slip are very different. This concern lives outside trail-follow code but affects it during aggressive trail-pursuit steering corrections.
+**Branch:** `feature/trail-follow-pure-pursuit`  
+**Date:** 2026-03-10  
+**Updated:** 2026-03-10 (consolidated findings + execution roadmap)
 
 ---
 
-## HIGH Severity (Should fix before merging)
+## Context
 
-### 1. `imu_status` used before assignment — `main.py:448`
-**Type:** Bug (introduced by this branch)
-
-`imu_status` is referenced in the `RecordingTelemetry` construction at line 448 but isn't assigned until line 482. On the first loop iteration, this causes a `NameError` silently caught by the outer `try/except` at line 468. On subsequent iterations, it uses the stale value from the previous cycle.
-
-**Fix:** Initialize `imu_status = None` (or a sentinel) before the telemetry block, or move the `imu_status` assignment above its first use.
+- Steer output rate limiting was intentionally removed after field testing; do not reintroduce it.
+- Lost-target behavior moved from direct blind driving to trail-aware recovery.
+- Differential torque concerns still matter, but should be handled through safer mode logic and speed policies, not steer slew.
 
 ---
 
-### 2. Lost-target zero-speed bug — `follow_me.py:_handle_lost_target()`
-**Type:** Bug (behavioral)
+## Priority Findings
 
-When `_last_speed_offset` is 0 at the moment the person is lost, `fwd = 0 * 0.5 = 0` but the trail pursuit still produces a nonzero `steer_byte`. This results in `left = NEUTRAL + 0 + steer` and `right = NEUTRAL + 0 - steer` — one motor forward, one reverse. The robot spins in place instead of following the trail.
+## Critical
 
-**Fix:** Ensure a minimum forward speed during lost-target trail following, e.g. `fwd = max(half_speed, MIN_LOST_TARGET_SPEED)`.
+1. **Unauthenticated BT command acceptance** (`pi_app/io/bt_proto.py`): accepts any well-formed command; no HMAC/nonce verification.
+2. **Follow Me mode-state desync risk** (`pi_app/control/controller.py`, `pi_app/control/safety.py`): web activation sets `_mode` directly without safety-state authority.
 
----
+## High
 
-### 3. No dt clamp in odometry — `odometry.py:update()`
-**Type:** Bug (robustness)
+3. **`imu_status` used before assignment** in recorder telemetry path (`pi_app/app/main.py`).
+4. **Lost-target zero-speed spin case** in `_handle_lost_target()` (`pi_app/control/follow_me.py`).
+5. **No odometry `dt` clamp** causing pose teleport after stalls (`pi_app/control/odometry.py`).
+6. **No guaranteed motor neutral/stop on all shutdown/fault paths** (`pi_app/app/main.py`).
+7. **Timestamp precision loss (`ts` int rounding)** harms replay/calibration (`pi_app/app/main.py`).
+8. **Calibration parser reads wrong key paths** (`pi_app/cli/follow_me_calibration.py`).
+9. **No E2E/lost-target integration tests** for safety-critical trail-follow behavior.
 
-If the OAK-D pipeline stalls for a few seconds (thermal throttle, USB hiccup), the large `dt` multiplied by speed causes the pose to teleport. There's no upper bound on `dt`.
+## Medium
 
-**Fix:** Add `dt = min(dt, MAX_DT)` (e.g. 0.2s). Discard the update entirely if `dt` exceeds a threshold.
+10. Spin-in-place overestimates forward speed in odometry.
+11. No NaN/inf heading guard in odometry.
+12. No hysteresis for direct/trail mode switching.
+13. Pure pursuit closest-point search can snap backward on crossing trails.
+14. Replay uses first detection only; no multi-person replay fidelity.
+15. Telemetry key mismatch around detection count naming.
+16. Waypoint speed interpolation can divide by zero on bad config.
+17. Lockfile unlink behavior in launcher is race-prone.
 
----
+## Low
 
-### 4. Simulator uses open-loop odometry — `trail_replay.py`
-**Type:** Design flaw
-
-The simulator feeds the *logged* motor bytes to odometry rather than the *simulated* ones. After the first steering divergence, the odometry drifts from what the simulated controller would actually produce, making comparisons unreliable.
-
-**Fix:** Feed the simulator's own output motor bytes back into odometry for a proper closed-loop replay. Optionally keep open-loop as a separate comparison mode.
-
----
-
-### 5. No lost-target trail-following test
-**Type:** Coverage gap (safety-critical path has zero tests)
-
-The `_handle_lost_target()` → trail pursuit path is never tested. This is the most safety-sensitive code path (robot moving autonomously without a visible target).
-
-**Fix:** Add tests for: person lost with trail available, person lost with empty trail, person lost with `_last_speed_offset = 0` (catches bug #2).
+- Cleanup items: dead config, unused `speed_hint`, naming/duplication nits, performance nits in replay merge.
 
 ---
 
-### 6. No end-to-end integration test
-**Type:** Coverage gap
+## Claim Validation Status (Deep Pass)
 
-No test exercises the full pipeline: detection → `update_pose()` → `compute()` → trail drop → person lost → trail pursuit → motor bytes. Each module is tested in isolation but the integration is untested.
+Validated against current code as of this update:
 
-**Fix:** Add a multi-step test that simulates a person walking, disappearing, and the robot following the trail back.
+### Confirmed bugs / defects (direct code evidence)
 
----
+- Unauthenticated BT command acceptance (`pi_app/io/bt_proto.py`).
+- `imu_status` used before assignment in recorder telemetry build (`pi_app/app/main.py`).
+- Lost-target zero-speed trail-pursuit can command spin-in-place (`pi_app/control/follow_me.py`).
+- Odometry lacks `dt` clamp and finite heading guards (`pi_app/control/odometry.py`).
+- Timestamp precision loss from `ts` integer rounding (`pi_app/app/main.py`).
+- Calibration parser reads follow-me fields from wrong object path (`pi_app/cli/follow_me_calibration.py`).
+- Detection-count telemetry key mismatch (`follow_me_num_persons` writer vs `follow_me_num_detections` readers).
+- Waypoint interpolation divide-by-zero risk when radii are equal (`pi_app/control/waypoint_nav.py`).
 
-## MEDIUM Severity (Should address before field testing)
+### Confirmed coverage gaps
 
-### 7. Spin-in-place overestimates speed — `odometry.py`
+- No tests hit lost-target recovery paths (`_handle_lost_target`) in Follow Me.
+- No tests cover `update_pose()`/trail-mode integration in controller-level behavior.
+- No replay-tool test coverage exists for parser/compatibility behavior.
 
-Speed is computed as `max(0, left-NEUTRAL) + max(0, right-NEUTRAL)` averaged. When one motor goes forward and the other reverse (turning in place), this still reports a forward speed, causing phantom odometry drift.
+### Confirmed architectural/safety risks (real, but require policy decision)
 
-**Fix:** Use `max(0, min(left, right) - NEUTRAL)` or detect counter-rotating motors and set speed to 0.
+- Follow Me mode authority split (`_mode` direct writes vs safety state); risk accepted only if explicitly intended.
+- No explicit final motor neutral command in global `finally` path; behavior depends on lower-level stop semantics.
+- Lockfile removal in launcher can undermine strict singleton guarantees under race conditions.
 
----
+### Plausible optimizations / scenario-dependent recommendations
 
-### 8. No NaN/inf guard on heading — `odometry.py`
-
-If the IMU returns NaN or inf (glitch, sensor fault), `math.cos(NaN)` = NaN, and every subsequent pose update is poisoned forever.
-
-**Fix:** Guard with `if not math.isfinite(heading_deg): return` at the top of `update()`.
-
----
-
-### 9. No hysteresis on trail/direct mode switching — `follow_me.py`
-
-The decision between trail pursuit and direct pursuit uses fixed thresholds (`direct_pursuit_distance_m`, `direct_pursuit_lateral_m`). When the person oscillates around these thresholds, the controller flips modes every cycle, causing jerky steering.
-
-**Fix:** Add a small hysteresis band on the *mode decision* (e.g. switch to direct at 2.0m, switch back to trail at 2.5m). Do **NOT** add steer output rate limiting — that was intentionally removed after field testing for responsiveness.
-
----
-
-### 10. Global closest-point search in pure pursuit — `pure_pursuit.py:45-48`
-
-The closest trail point is found globally via `min(range(len(trail)), ...)`. On a trail that crosses itself, this can snap the lookahead backward to a previously-visited segment.
-
-**Fix:** Maintain a running index and only search forward from the last known closest point.
+- Pure pursuit backward-snap on crossing trails (depends on path geometry).
+- Direct/trail mode hysteresis to reduce mode flapping (depends on field behavior).
+- Replay multi-detection fidelity and closed-loop replay mode (analysis-quality improvements).
 
 ---
 
-### 11. Lookahead distance from trail point, not robot — `pure_pursuit.py:49-67`
+## What Is Verified Good
 
-The lookahead walk starts from the closest trail point and accumulates segment lengths. It should measure from the robot's position along the trail to correctly handle cases where the robot is between trail points.
-
-**Fix:** Start accumulation from the robot-to-closest-point distance, not from zero.
-
----
-
-### 12. Simulator single-detection limitation — `trail_replay.py`
-
-Only the first person detection per frame is used. Multi-person scenarios (e.g. someone walking through frame) aren't replayed correctly.
-
-**Fix:** Pass the full detection list and let `FollowMeController.compute()` handle selection (as it does in production).
+- Camera-to-world transform sign conventions.
+- Pure pursuit curvature sign chain and directionality.
+- Trail ordering/min-spacing/prune behavior.
+- Existing module-level unit tests passing.
 
 ---
 
-### 13. `PursuitConfig.max_speed_byte` is dead config
+## Execution Roadmap (Detailed)
 
-Defined in the dataclass but never referenced anywhere. Misleading for future maintainers.
+## Phase 0: Baseline and Guardrails
 
-**Fix:** Remove it, or use it to clamp `speed_byte` in `compute()`.
+- Freeze baseline run artifacts and collect short reproducible traces.
+- Add fixture corpus for parser/replay regression.
+- Define success metrics for each phase.
+
+## Phase 1: Security Hardening (Must-do First)
+
+1. Enforce CMD2 authentication:
+   - HMAC-SHA256 verification
+   - nonce binding + timestamp freshness
+   - strict sequence replay protection
+2. Introduce fail-closed default mode; dev bypass must be explicit.
+3. Add auth-reject telemetry counters.
+
+**Acceptance:** unauthenticated motion command path closed by default.
+
+## Phase 2: Safety and Mode Integrity
+
+1. Make safety the single source of truth for Follow Me state transitions.
+2. Guard `FOLLOW_ME_ENTERED` when Follow Me controller unavailable.
+3. Force MANUAL on every disarm path (all modes).
+4. Add explicit transition reason telemetry.
+
+**Acceptance:** no stale FOLLOW_ME mode after disarm/rearm cycles.
+
+## Phase 3: Runtime Fail-safe Reliability
+
+1. Guarantee motor neutral/stop in global shutdown/finally.
+2. Wrap control-loop `process()` with fail-safe neutral/disarm behavior.
+3. Replace broad silent catches in critical paths with bounded reporting.
+
+**Acceptance:** injected exceptions still produce deterministic neutral output.
+
+## Phase 4: Telemetry Contract Unification
+
+1. Publish telemetry schema v2 in docs.
+2. Fix producer issues:
+   - move `imu_status` assignment before recorder telemetry construction
+   - standardize detection-count key naming
+   - preserve timestamp/GPS precision
+3. Ensure MCAP/JSON parity for follow-tracking/targets and odometry fields.
+4. Fix consumers:
+   - calibration parser key paths
+   - replay parser compatibility and version handling
+
+**Acceptance:** replay and calibration consume the same schema without ad hoc fallback.
+
+## Phase 5: Control Robustness and Numerical Hardening
+
+1. Lost-target minimum forward speed in trail pursuit.
+2. Odometry guards:
+   - `dt` clamp / discard on extreme gaps
+   - NaN/inf heading reject
+   - spin-in-place forward-speed correction
+3. Add mode-switch hysteresis (direct/trail decision only).
+4. Add waypoint config validation for denominator safety.
+
+**Acceptance:** no pose teleport, no NaN poisoning, no threshold chatter.
+
+## Phase 6: Test and CI Expansion
+
+1. Safety-critical integration tests:
+   - detection -> trail -> loss -> trail recovery
+   - disarm/emergency mode exits
+2. Telemetry schema contract tests (JSON + MCAP producers and parsers).
+3. BT auth rejection matrix tests.
+4. Coverage gates for critical modules and changed lines.
+
+**Acceptance:** CI blocks regressions on safety/security/schema behavior.
+
+## Phase 7: Staged Rollout
+
+1. Bench safety tests (auth rejects, disarm neutral guarantees).
+2. Indoor low-speed autonomy tests.
+3. Outdoor supervised validation with logs and replay calibration checks.
+
+**Acceptance:** no unexpected mode transitions, safe recovery behavior confirmed.
 
 ---
 
-### 14. `speed_hint` stored in TrailPoint but never consumed
+## Implementation Checklist
 
-`trail.py` stores `speed_hint` on every point, `follow_me.py` passes `_last_speed_offset` as the hint, but `pure_pursuit.py` never reads it.
-
-**Fix:** Either wire it into the pursuit speed (use trail speed hints to modulate following speed) or remove it to avoid dead data.
-
----
-
-### 15. One-cycle-delayed motor values in `update_pose()` — `controller.py`
-
-`update_pose()` receives `self._slew_last_left/right` which are the *previous* cycle's post-slew values, because the current cycle's slew is computed after `compute()` returns. At 10 Hz this is ~100ms lag in the odometry motor input.
-
-**Fix:** Either reorder to slew → update_pose → compute (requires restructuring), or accept as known limitation and document it. At 10 Hz this is likely acceptable but worth noting.
-
----
-
-### 16. Simulator default config mismatch — `trail_replay.py`
-
-Always uses `trail_follow_enabled=True` regardless of the original run's config. This means simulated output won't match actual behavior if the original run had trail following disabled.
-
-**Fix:** Read config from the log metadata or accept it as a "what-if" tool (but document this).
+- [ ] BT auth verification and replay protection
+- [ ] Follow Me mode-state unification
+- [ ] Shutdown fail-safe neutral command
+- [ ] Recorder telemetry ordering fix (`imu_status`)
+- [ ] Timestamp/GPS precision fixes
+- [ ] Calibration/replay parser alignment
+- [ ] Lost-target minimum forward speed
+- [ ] Odometry dt/NaN/spin guards
+- [ ] Direct/trail hysteresis
+- [ ] Waypoint config validation
+- [ ] Safety/E2E integration tests
+- [ ] Telemetry contract tests
+- [ ] CI coverage gates
 
 ---
 
-## LOW Severity (Cleanup / nice-to-have)
+## Notes
 
-| # | Finding | File |
-|---|---------|------|
-| 17 | `NEUTRAL = 126` duplicated (also in `mapping.py`) | `odometry.py` |
-| 18 | `RobotPose` should be `frozen=True` dataclass | `odometry.py` |
-| 19 | Misleading test name `test_turns_toward_left_point` (point is actually right in this coord system) | `test_trail_follow.py` |
-| 20 | Non-atomic deque rebuild in `prune()` (clear + re-add vs reassignment) | `trail.py` |
-| 21 | Many defensive `getattr()` calls on frozen dataclass fields | `follow_me.py` |
-| 22 | `heading=0` used as sentinel in simulator but is a valid compass reading (true north) | `trail_replay.py` |
-| 23 | O(N*M) heading merge in simulator could be slow on large logs | `trail_replay.py` |
-
----
-
-## What's Correct (Verified)
-
-These areas were specifically verified and are **solid**:
-
-- **Camera-to-world transform** — sign conventions correct, verified independently by 2 agents
-- **Pure pursuit curvature math** — `kappa = 2*local_y/L^2` is textbook correct
-- **Full sign chain** — target right → positive local_y → positive kappa → positive steer_byte → left motor faster → robot turns right. Consistent with direct pursuit.
-- **Trail ordering** — deque preserves insertion order through all operations
-- **Prune logic** — correctly removes behind+close points and aged-out points
-- **Min-spacing enforcement** — prevents trail clutter
-- **All 21 existing unit tests pass**
-
----
-
-## Missing: No Real Follow-Me Logs
-
-No actual Follow Me run logs exist in the repo. The simulator cannot be cross-referenced against real-world data yet.
+- This document is the single source for suggestions and remediation planning for this branch.
+- Keep new findings appended here under a dated "Addendum" section to avoid suggestion-file sprawl.
