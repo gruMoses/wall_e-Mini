@@ -1,3 +1,4 @@
+import dataclasses
 import math
 import sys
 import unittest
@@ -75,6 +76,69 @@ class TestDeadReckonOdometry(unittest.TestCase):
         self.assertAlmostEqual(odo.pose.x, 0.0, places=5)
         self.assertAlmostEqual(odo.pose.y, 0.0, places=5)
         self.assertAlmostEqual(odo.pose.theta, 0.0, places=5)
+
+    def test_dt_clamp_no_teleport(self):
+        odo = DeadReckonOdometry(speed_scale=0.01)
+        # First update at t=0.0 seeds the timestamp (dt=0, no integration).
+        odo.update(0.0, 176, 176, 0.0)
+        self.assertAlmostEqual(odo.pose.x, 0.0, places=5)
+
+        # Large gap (5s) simulates pipeline stall; dt > MAX_DT skips position.
+        odo.update(0.0, 176, 176, 5.0)
+        self.assertAlmostEqual(odo.pose.x, 0.0, places=5)
+        self.assertAlmostEqual(odo.pose.y, 0.0, places=5)
+
+        # Normal update (dt=0.1s) should integrate position normally.
+        odo.update(0.0, 176, 176, 5.1)
+        self.assertAlmostEqual(odo.pose.x, 0.05, places=3)
+        self.assertAlmostEqual(odo.pose.y, 0.0, places=3)
+
+    def test_nan_heading_ignored(self):
+        odo = DeadReckonOdometry(speed_scale=0.01)
+        odo.update(0.0, 176, 176, 0.0)
+        odo.update(0.0, 176, 176, 0.1)
+        # Establish a known pose.
+        x_before = odo.pose.x
+        y_before = odo.pose.y
+        theta_before = odo.pose.theta
+        ts_before = odo.pose.timestamp
+
+        # NaN heading must be rejected; pose stays unchanged.
+        odo.update(float('nan'), 176, 176, 0.2)
+        self.assertAlmostEqual(odo.pose.x, x_before, places=5)
+        self.assertAlmostEqual(odo.pose.y, y_before, places=5)
+        self.assertAlmostEqual(odo.pose.theta, theta_before, places=5)
+        self.assertAlmostEqual(odo.pose.timestamp, ts_before, places=5)
+
+    def test_inf_heading_ignored(self):
+        odo = DeadReckonOdometry(speed_scale=0.01)
+        odo.update(0.0, 176, 176, 0.0)
+        odo.update(0.0, 176, 176, 0.1)
+        x_before = odo.pose.x
+        y_before = odo.pose.y
+        theta_before = odo.pose.theta
+        ts_before = odo.pose.timestamp
+
+        # +inf heading must be rejected; pose stays unchanged.
+        odo.update(float('inf'), 176, 176, 0.2)
+        self.assertAlmostEqual(odo.pose.x, x_before, places=5)
+        self.assertAlmostEqual(odo.pose.y, y_before, places=5)
+        self.assertAlmostEqual(odo.pose.theta, theta_before, places=5)
+        self.assertAlmostEqual(odo.pose.timestamp, ts_before, places=5)
+
+    def test_spin_in_place_zero_speed(self):
+        odo = DeadReckonOdometry(speed_scale=0.01)
+        odo.update(0.0, 176, 76, 0.0)
+        odo.update(0.0, 176, 76, 0.1)
+        # Counter-rotating motors: left forward (176>126), right reverse (76<126).
+        # Speed should be zero, so no position change.
+        self.assertAlmostEqual(odo.pose.x, 0.0, places=5)
+        self.assertAlmostEqual(odo.pose.y, 0.0, places=5)
+
+    def test_frozen_pose(self):
+        odo = DeadReckonOdometry()
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            odo.pose.x = 999
 
 
 class TestTrailManager(unittest.TestCase):

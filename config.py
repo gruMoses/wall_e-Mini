@@ -1,6 +1,7 @@
 """
 Configuration file for WALL-E Mini robot control system.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass
 
