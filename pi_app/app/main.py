@@ -366,6 +366,7 @@ def run() -> None:
         bt_cached_mtime_ns = None
         bt_next_poll_t = 0.0
         bt_poll_interval_s = 0.05
+        imu_status = None
         oak_imu_metrics_getter = None
         if oak_reader is not None:
             try:
@@ -560,7 +561,7 @@ def run() -> None:
                             except Exception:
                                 pass
                     log_obj = {
-                        "ts": to_int(now_ts),
+                        "ts": round(now_ts, 3),
                         "ts_iso": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
                         "src": src,
                         "mode": telem.get("mode", "MANUAL"),
@@ -700,6 +701,11 @@ def run() -> None:
         pass
     finally:
         print()
+        try:
+            if motor_driver is not None:
+                motor_driver.stop()
+        except Exception:
+            pass
         try:
             if oak_recorder is not None:
                 oak_recorder.stop()

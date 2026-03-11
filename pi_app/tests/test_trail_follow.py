@@ -28,21 +28,23 @@ class TestDeadReckonOdometry(unittest.TestCase):
     def test_straight_forward(self):
         odo = DeadReckonOdometry(speed_scale=0.01)
         odo.update(0.0, 176, 176, 0.0)
-        odo.update(0.0, 176, 176, 1.0)
-        self.assertAlmostEqual(odo.pose.x, 0.5, places=2)
-        self.assertAlmostEqual(odo.pose.y, 0.0, places=2)
+        odo.update(0.0, 176, 176, 0.1)
+        # v = 50 * 0.01 = 0.5 m/s, dt = 0.1s => 0.05m
+        self.assertAlmostEqual(odo.pose.x, 0.05, places=3)
+        self.assertAlmostEqual(odo.pose.y, 0.0, places=3)
 
     def test_heading_changes_direction(self):
         odo = DeadReckonOdometry(speed_scale=0.01)
         odo.update(90.0, 176, 176, 0.0)
-        odo.update(90.0, 176, 176, 1.0)
-        self.assertAlmostEqual(odo.pose.x, 0.0, places=2)
-        self.assertAlmostEqual(odo.pose.y, 0.5, places=2)
+        odo.update(90.0, 176, 176, 0.1)
+        # v = 0.5 m/s, dt = 0.1s, heading=90deg => move in +Y
+        self.assertAlmostEqual(odo.pose.x, 0.0, places=3)
+        self.assertAlmostEqual(odo.pose.y, 0.05, places=3)
 
     def test_reverse_ignored(self):
         odo = DeadReckonOdometry(speed_scale=0.01)
         odo.update(0.0, 100, 100, 0.0)
-        odo.update(0.0, 100, 100, 1.0)
+        odo.update(0.0, 100, 100, 0.1)
         self.assertAlmostEqual(odo.pose.x, 0.0, places=5)
         self.assertAlmostEqual(odo.pose.y, 0.0, places=5)
 

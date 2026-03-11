@@ -6,9 +6,10 @@ import math
 from dataclasses import dataclass
 
 NEUTRAL = 126
+MAX_DT = 0.2
 
 
-@dataclass
+@dataclass(frozen=True)
 class RobotPose:
     x: float
     y: float
@@ -25,16 +26,23 @@ class DeadReckonOdometry:
     def update(
         self, heading_deg: float, motor_l: int, motor_r: int, timestamp: float
     ) -> RobotPose:
+        if not math.isfinite(heading_deg):
+            return self._pose
+
         theta = math.radians(heading_deg)
         dt = (timestamp - self._prev_timestamp) if self._prev_timestamp is not None else 0.0
         self._prev_timestamp = timestamp
 
-        offset_l = max(0, motor_l - NEUTRAL)
-        offset_r = max(0, motor_r - NEUTRAL)
-        avg_offset = (offset_l + offset_r) / 2.0
-        v = avg_offset * self.speed_scale
+        # Detect counter-rotating motors (spin in place) and zero out speed.
+        if (motor_l > NEUTRAL and motor_r < NEUTRAL) or (motor_l < NEUTRAL and motor_r > NEUTRAL):
+            v = 0.0
+        else:
+            offset_l = max(0, motor_l - NEUTRAL)
+            offset_r = max(0, motor_r - NEUTRAL)
+            avg_offset = (offset_l + offset_r) / 2.0
+            v = avg_offset * self.speed_scale
 
-        if dt > 0:
+        if 0 < dt <= MAX_DT:
             self._pose = RobotPose(
                 x=self._pose.x + v * math.cos(theta) * dt,
                 y=self._pose.y + v * math.sin(theta) * dt,
@@ -42,6 +50,8 @@ class DeadReckonOdometry:
                 timestamp=timestamp,
             )
         else:
+            # dt <= 0 (first call) or dt > MAX_DT (pipeline stall) --
+            # update heading only, do not integrate position.
             self._pose = RobotPose(
                 x=self._pose.x,
                 y=self._pose.y,

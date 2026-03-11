@@ -44,6 +44,7 @@ class FollowMeController:
     CENTER_WEIGHT = 0.6
     DEPTH_WEIGHT = 0.4
     TRACK_ID_STICKY_BONUS = 0.3
+    _MIN_LOST_TARGET_SPEED = 5  # minimum fwd speed during lost-target trail following
 
     def __init__(self, config: FollowMeConfig) -> None:
         self._cfg = config
@@ -66,6 +67,7 @@ class FollowMeController:
         # Trail-following subsystems (feature-flagged)
         self._trail_enabled = bool(getattr(config, "trail_follow_enabled", False))
         self._pursuit_mode: str = "direct"  # "direct" or "trail"
+        self._last_pursuit_mode: str = "direct"  # hysteresis tracker
         self._odometry: DeadReckonOdometry | None = None
         self._trail: TrailManager | None = None
         self._pursuit: PurePursuitController | None = None
@@ -175,22 +177,38 @@ class FollowMeController:
             direct_dist = getattr(self._cfg, "direct_pursuit_distance_m", 2.0)
             direct_lat = getattr(self._cfg, "direct_pursuit_lateral_m", 0.3)
 
-            # Use trail when we have enough points AND person isn't close+centered
-            person_close_centered = (
-                target.z_m < direct_dist and abs(target.x_m) < direct_lat
-            )
-            if len(trail_pts) >= min_pts and not person_close_centered:
+            # Hysteresis: use different thresholds for entering vs exiting
+            # trail mode to avoid flip-flopping when person oscillates near
+            # the threshold boundary.
+            if self._last_pursuit_mode == "trail":
+                # Currently in trail mode — switch to direct only when
+                # person is clearly close AND centered (tighter thresholds).
+                use_direct = (
+                    target.z_m < direct_dist
+                    and abs(target.x_m) < direct_lat
+                )
+            else:
+                # Currently in direct mode — switch to trail only when
+                # person is clearly far OR off-center (wider thresholds).
+                use_direct = not (
+                    target.z_m > direct_dist * 1.3
+                    or abs(target.x_m) > direct_lat * 1.5
+                )
+
+            if len(trail_pts) >= min_pts and not use_direct:
                 pose = self._odometry.pose
                 cmd = self._pursuit.compute(pose, trail_pts, speed_offset)
                 if cmd is not None:
                     use_trail = True
                     self._pursuit_mode = "trail"
+                    self._last_pursuit_mode = "trail"
                     self._pursuit_lookahead_x = cmd.lookahead_x
                     self._pursuit_lookahead_y = cmd.lookahead_y
                     return cmd.steer_byte
 
         # Direct pursuit fallback: PD on lateral offset
         self._pursuit_mode = "direct"
+        self._last_pursuit_mode = "direct"
         return self._direct_pursuit_steer(target, now)
 
     def _direct_pursuit_steer(self, target: PersonDetection, now: float) -> float:
@@ -229,7 +247,8 @@ class FollowMeController:
                 min_pts = getattr(self._cfg, "min_trail_points_for_pursuit", 2)
                 if len(trail_pts) >= min_pts:
                     pose = self._odometry.pose
-                    fwd = self._last_speed_offset * 0.5
+                    fwd = max(self._last_speed_offset * 0.5,
+                              self._MIN_LOST_TARGET_SPEED)
                     cmd = self._pursuit.compute(pose, trail_pts, fwd)
                     if cmd is not None:
                         self._pursuit_mode = "trail"
@@ -267,6 +286,7 @@ class FollowMeController:
         self._held_left = NEUTRAL
         self._held_right = NEUTRAL
         self._pursuit_mode = "direct"
+        self._last_pursuit_mode = "direct"
         if self._trail is not None:
             self._trail.clear()
         if self._odometry is not None:

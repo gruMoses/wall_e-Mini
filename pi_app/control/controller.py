@@ -176,6 +176,7 @@ class Controller:
         """Enter FOLLOW_ME mode from web UI. Returns True if activated."""
         if self._follow_me is not None and self._safety_state.is_armed:
             self._mode = "FOLLOW_ME"
+            self._safety_state.set_follow_me_active(True)
             return True
         return False
 
@@ -183,6 +184,7 @@ class Controller:
         """Return to MANUAL mode from Follow Me."""
         if self._mode == "FOLLOW_ME":
             self._mode = "MANUAL"
+            self._safety_state.set_follow_me_active(False)
             if self._gesture is not None:
                 self._gesture.notify_external_deactivation()
 

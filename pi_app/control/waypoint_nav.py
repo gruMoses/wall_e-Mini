@@ -142,6 +142,8 @@ class WaypointNavController:
     def _speed_for_distance(self, dist_m: float) -> int:
         if dist_m <= self._cfg.arrival_radius_m:
             return 0
+        if self._cfg.slow_radius_m <= self._cfg.arrival_radius_m:
+            return self._cfg.cruise_speed_byte
         if dist_m <= self._cfg.slow_radius_m:
             frac = (dist_m - self._cfg.arrival_radius_m) / (
                 self._cfg.slow_radius_m - self._cfg.arrival_radius_m

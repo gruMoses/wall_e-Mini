@@ -31,6 +31,10 @@ class SafetyState:
     follow_me_active: bool = False
     last_ch4_high: bool = False
 
+    def set_follow_me_active(self, active: bool) -> None:
+        """Allow external callers (e.g. web UI) to sync follow-me state."""
+        self.follow_me_active = active
+
 
 def update_safety(
     state: SafetyState,
