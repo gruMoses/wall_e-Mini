@@ -71,6 +71,16 @@ class RecordingTelemetry:
     follow_tracking: bool = False
     follow_target_x_m: float | None = None
     follow_target_z_m: float | None = None
+    heading_deg: float | None = None
+    yaw_rate_dps: float | None = None
+    pursuit_mode: str | None = None
+    trail_length: int | None = None
+    odom_x: float | None = None
+    odom_y: float | None = None
+    odom_theta_deg: float | None = None
+    speed_offset: float | None = None
+    steer_offset: float | None = None
+    distance_error_m: float | None = None
     gps_lat: float | None = None
     gps_lon: float | None = None
     gps_alt_m: float | None = None
@@ -736,6 +746,25 @@ class OakRecorder:
                  "conf": round(d.confidence, 2), "bbox": [round(b, 3) for b in d.bbox]}
                 for d in t.person_detections
             ]
+        if t.heading_deg is not None:
+            obj["heading_deg"] = round(t.heading_deg, 1)
+        if t.yaw_rate_dps is not None:
+            obj["yaw_rate_dps"] = round(t.yaw_rate_dps, 1)
+        if t.pursuit_mode is not None:
+            obj["pursuit_mode"] = t.pursuit_mode
+            obj["trail_length"] = t.trail_length or 0
+        if t.odom_x is not None:
+            obj["odom"] = {
+                "x": round(t.odom_x, 3),
+                "y": round(t.odom_y or 0, 3),
+                "theta_deg": round(t.odom_theta_deg or 0, 1),
+            }
+        if t.speed_offset is not None:
+            obj["speed_offset"] = round(t.speed_offset, 1)
+        if t.steer_offset is not None:
+            obj["steer_offset"] = round(t.steer_offset, 1)
+        if t.distance_error_m is not None:
+            obj["distance_error_m"] = round(t.distance_error_m, 2)
         data = json.dumps(obj).encode("utf-8")
         log_ns = int(t.timestamp * 1e9)
         writer.add_message(

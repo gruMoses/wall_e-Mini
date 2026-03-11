@@ -38,6 +38,11 @@ class ReplayFrame:
     person_bbox: tuple[float, float, float, float]
     tracking: bool
     actual_steer: float  # actual motor differential / 2
+    actual_speed_offset: float | None = None
+    actual_steer_offset: float | None = None
+    actual_pursuit_mode: str | None = None
+    actual_distance_error_m: float | None = None
+    all_detections: list | None = None
 
 
 def load_json_log(path: str) -> list[ReplayFrame]:
@@ -53,6 +58,7 @@ def load_json_log(path: str) -> list[ReplayFrame]:
             imu = d.get("imu", {})
             motor = d.get("motor", {})
             fm = d.get("follow_me", {})
+            dets = d.get("detections") or []
 
             ml = int(motor.get("L", 126))
             mr = int(motor.get("R", 126))
@@ -61,6 +67,13 @@ def load_json_log(path: str) -> list[ReplayFrame]:
             z = fm.get("target_z_m")
             tracking = bool(fm.get("tracking"))
 
+            conf = float(fm.get("confidence") or (0.9 if tracking and x is not None else 0.0))
+            bbox = (0.3, 0.1, 0.7, 0.9)
+            if dets:
+                det0 = dets[0]
+                conf = float(det0.get("conf", conf))
+                bbox = tuple(det0.get("bbox", list(bbox)))
+
             frames.append(ReplayFrame(
                 timestamp=float(d.get("ts", 0)),
                 heading_deg=float(imu.get("heading_deg", 0)),
@@ -68,10 +81,15 @@ def load_json_log(path: str) -> list[ReplayFrame]:
                 motor_r=mr,
                 person_x_m=x,
                 person_z_m=z,
-                person_conf=0.9 if tracking and x is not None else 0.0,
-                person_bbox=(0.3, 0.1, 0.7, 0.9),
+                person_conf=conf,
+                person_bbox=bbox,
                 tracking=tracking,
                 actual_steer=(ml - mr) / 2.0,
+                actual_speed_offset=fm.get("speed_offset"),
+                actual_steer_offset=fm.get("steer_offset"),
+                actual_pursuit_mode=fm.get("pursuit_mode"),
+                actual_distance_error_m=fm.get("distance_error_m"),
+                all_detections=dets if dets else None,
             ))
     return frames
 
@@ -103,9 +121,12 @@ def load_mcap_session(session_dir: str) -> list[ReplayFrame]:
                 conf = det.get("conf", 0.9)
                 bbox = tuple(det.get("bbox", [0.3, 0.1, 0.7, 0.9]))
 
+            heading = d.get("heading_deg")
+            odom = d.get("odom", {})
+
             frames.append(ReplayFrame(
                 timestamp=float(d.get("timestamp", 0)),
-                heading_deg=0.0,  # MCAP telemetry lacks IMU heading
+                heading_deg=float(heading) if heading is not None else 0.0,
                 motor_l=ml,
                 motor_r=mr,
                 person_x_m=x,
@@ -114,6 +135,11 @@ def load_mcap_session(session_dir: str) -> list[ReplayFrame]:
                 person_bbox=bbox,
                 tracking=x is not None,
                 actual_steer=(ml - mr) / 2.0,
+                actual_speed_offset=d.get("speed_offset"),
+                actual_steer_offset=d.get("steer_offset"),
+                actual_pursuit_mode=d.get("pursuit_mode"),
+                actual_distance_error_m=d.get("distance_error_m"),
+                all_detections=dets if dets else None,
             ))
     return frames
 
@@ -213,41 +239,70 @@ def print_report(frames: list[ReplayFrame], results: list[dict]) -> None:
         print("No data to report.")
         return
 
+    import statistics
+
     t0 = results[0]["t"]
     duration = results[-1]["t"] - t0
     trail_frames = sum(1 for r in results if r["pursuit_mode"] == "trail")
     direct_frames = sum(1 for r in results if r["pursuit_mode"] == "direct")
 
-    print("=" * 72)
+    has_actual_mode = any(f.actual_pursuit_mode for f in frames)
+
+    print("=" * 80)
     print("TRAIL FOLLOW REPLAY REPORT")
-    print("=" * 72)
+    print("=" * 80)
     print(f"Frames: {len(results)}  Duration: {duration:.1f}s")
-    print(f"Trail pursuit: {trail_frames} frames ({trail_frames/len(results)*100:.0f}%)")
-    print(f"Direct pursuit: {direct_frames} frames ({direct_frames/len(results)*100:.0f}%)")
+    print(f"Sim trail pursuit: {trail_frames} frames ({trail_frames/len(results)*100:.0f}%)")
+    print(f"Sim direct pursuit: {direct_frames} frames ({direct_frames/len(results)*100:.0f}%)")
+    if has_actual_mode:
+        act_trail = sum(1 for f in frames if f.actual_pursuit_mode == "trail")
+        act_direct = sum(1 for f in frames if f.actual_pursuit_mode == "direct")
+        print(f"Actual trail pursuit: {act_trail} frames ({act_trail/len(frames)*100:.0f}%)")
+        print(f"Actual direct pursuit: {act_direct} frames ({act_direct/len(frames)*100:.0f}%)")
+
+    tracking_frames = sum(1 for f in frames if f.tracking)
+    lost_frames = len(frames) - tracking_frames
+    print(f"Tracking: {tracking_frames} frames ({tracking_frames/len(frames)*100:.0f}%)  "
+          f"Lost: {lost_frames} ({lost_frames/len(frames)*100:.0f}%)")
     print()
 
-    print(f"{'t':>5s} {'x_m':>5s} {'z_m':>5s} {'hdg':>5s} {'act':>5s} "
-          f"{'sim':>5s} {'mode':>6s} {'trail':>5s} {'odom':>12s}")
-    print("-" * 72)
+    header = (f"{'t':>5s} {'x_m':>5s} {'z_m':>5s} {'d_err':>5s} {'hdg':>5s} "
+              f"{'act':>5s} {'sim':>5s} {'mode':>6s} {'trail':>5s} {'odom':>12s}")
+    print(header)
+    print("-" * 80)
 
     step = max(1, len(results) // 40)
     for i in range(0, len(results), step):
         r = results[i]
+        f = frames[i]
         t = r["t"] - t0
         x_s = f"{r['x_m']:5.2f}" if r["x_m"] is not None else "  ---"
         z_s = f"{r['z_m']:5.2f}" if r["z_m"] is not None else "  ---"
+        d_err = f.actual_distance_error_m
+        d_s = f"{d_err:5.2f}" if d_err is not None else "  ---"
         odom_s = f"({r['odom_x']:5.2f},{r['odom_y']:5.2f})"
-        print(f"{t:5.1f} {x_s} {z_s} {r['heading']:5.0f} "
+        print(f"{t:5.1f} {x_s} {z_s} {d_s} {r['heading']:5.0f} "
               f"{r['actual_steer']:+5.1f} {r['sim_steer']:+5.1f} "
               f"{r['pursuit_mode']:>6s} {r['trail_length']:5d} {odom_s}")
 
     steer_diffs = [abs(r["sim_steer"] - r["actual_steer"]) for r in results]
-    import statistics
     print()
     print(f"Steering difference (sim vs actual):")
     print(f"  Mean: {statistics.mean(steer_diffs):.1f} bytes")
     print(f"  P90:  {sorted(steer_diffs)[int(len(steer_diffs)*0.9)]:.1f} bytes")
     print(f"  Max:  {max(steer_diffs):.1f} bytes")
+
+    if any(f.actual_speed_offset is not None for f in frames):
+        speed_diffs = []
+        for f, r in zip(frames, results):
+            if f.actual_speed_offset is not None:
+                sim_speed = (r["sim_left"] + r["sim_right"]) / 2.0 - 126
+                speed_diffs.append(abs(sim_speed - f.actual_speed_offset))
+        if speed_diffs:
+            print(f"\nSpeed offset difference (sim vs actual):")
+            print(f"  Mean: {statistics.mean(speed_diffs):.1f} bytes")
+            print(f"  P90:  {sorted(speed_diffs)[int(len(speed_diffs)*0.9)]:.1f} bytes")
+            print(f"  Max:  {max(speed_diffs):.1f} bytes")
 
 
 def print_trail_map(results: list[dict]) -> None:
