@@ -123,6 +123,20 @@ class FollowMeConfig:
     max_steer_delta_per_s: float = 35.0          # steering differential slew limit (bytes/s)
     max_steer_offset_byte: float = 15.0          # ~22 deg/s max turn — handles direction changes
 
+    # Trail-following Pure Pursuit (breadcrumb path instead of direct pursuit)
+    trail_follow_enabled: bool = True
+    trail_speed_scale_mps_per_byte: float = 0.01  # calibrate: m/s per motor byte offset
+    trail_max_points: int = 100
+    trail_min_spacing_m: float = 0.3
+    trail_max_age_s: float = 30.0
+    trail_consume_radius_m: float = 0.4
+    pursuit_lookahead_base_m: float = 1.0
+    pursuit_lookahead_speed_scale: float = 0.005
+    pursuit_wheelbase_m: float = 0.28             # track width wheel-to-wheel
+    direct_pursuit_distance_m: float = 2.0        # use direct pursuit when person is closer
+    direct_pursuit_lateral_m: float = 0.3         # ...and lateral offset is small
+    min_trail_points_for_pursuit: int = 2
+
 
 @dataclass(frozen=True)
 class SlewLimiterConfig:

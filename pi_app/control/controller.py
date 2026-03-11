@@ -372,6 +372,15 @@ class Controller:
             if nav_st.completed:
                 self._mode = "MANUAL"
         elif self._mode == "FOLLOW_ME" and self._follow_me is not None:
+            heading = 0.0
+            if self._imu_compensator is not None:
+                try:
+                    heading = self._imu_compensator.get_status().heading_deg
+                except Exception:
+                    pass
+            self._follow_me.update_pose(
+                heading, self._slew_last_left, self._slew_last_right, mono_now
+            )
             detections = self._person_detections or []
             left, right = self._follow_me.compute(detections)
             steering_input = self._bytes_to_steering_input(left, right)

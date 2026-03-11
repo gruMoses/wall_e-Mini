@@ -4,10 +4,16 @@ Autonomous person-following controller.
 Pure logic — no hardware dependency. Given a list of spatial person detections,
 selects the best target and computes differential-drive motor commands to
 follow the person at a configurable distance.
+
+Supports two steering modes:
+  - Direct pursuit (PD on lateral offset) — original behavior
+  - Trail-following Pure Pursuit (breadcrumb path) — follows the path
+    the person walked, not a straight line to their current position
 """
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -17,6 +23,9 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from config import FollowMeConfig
 from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT
+from pi_app.control.odometry import DeadReckonOdometry
+from pi_app.control.pure_pursuit import PurePursuitController, PursuitConfig
+from pi_app.control.trail import TrailConfig, TrailManager
 
 NEUTRAL = CENTER_OUTPUT_VALUE
 
@@ -53,8 +62,43 @@ class FollowMeController:
         self._smoothed_x: float = 0.0
         self._prev_smoothed_x: float = 0.0
         self._prev_x_time: float = 0.0
-        self._prev_steer_offset: float = 0.0
-        self._prev_steer_time: float = 0.0
+
+        # Trail-following subsystems (feature-flagged)
+        self._trail_enabled = bool(getattr(config, "trail_follow_enabled", False))
+        self._pursuit_mode: str = "direct"  # "direct" or "trail"
+        self._odometry: DeadReckonOdometry | None = None
+        self._trail: TrailManager | None = None
+        self._pursuit: PurePursuitController | None = None
+        self._pursuit_lookahead_x: float = 0.0
+        self._pursuit_lookahead_y: float = 0.0
+        self._trail_length: int = 0
+
+        if self._trail_enabled:
+            self._odometry = DeadReckonOdometry(
+                speed_scale=getattr(config, "trail_speed_scale_mps_per_byte", 0.01)
+            )
+            self._trail = TrailManager(TrailConfig(
+                max_trail_points=getattr(config, "trail_max_points", 100),
+                min_spacing_m=getattr(config, "trail_min_spacing_m", 0.3),
+                max_age_s=getattr(config, "trail_max_age_s", 30.0),
+                consume_radius_m=getattr(config, "trail_consume_radius_m", 0.4),
+            ))
+            self._pursuit = PurePursuitController(PursuitConfig(
+                lookahead_base_m=getattr(config, "pursuit_lookahead_base_m", 1.0),
+                lookahead_speed_scale=getattr(config, "pursuit_lookahead_speed_scale", 0.005),
+                wheelbase_m=getattr(config, "pursuit_wheelbase_m", 0.28),
+                max_steer_byte=getattr(config, "max_steer_offset_byte", 15.0),
+                max_speed_byte=float(config.max_follow_speed_byte),
+            ))
+
+    def update_pose(self, heading_deg: float, motor_l: int, motor_r: int,
+                    timestamp: float) -> None:
+        """Feed IMU heading and actual motor commands for odometry.
+
+        Called by controller.py each cycle before compute().
+        """
+        if self._odometry is not None:
+            self._odometry.update(heading_deg, motor_l, motor_r, timestamp)
 
     def compute(self, detections: list[PersonDetection]) -> tuple[int, int]:
         """Compute motor bytes (left, right) to follow the best-scored person.
@@ -63,35 +107,13 @@ class FollowMeController:
         """
         self._last_num_detections = len(detections)
         target = self._select_target(detections)
+        now = time.monotonic()
+
         if target is None:
-            elapsed = time.monotonic() - self._last_valid_time
-            if self._last_valid_time > 0.0 and elapsed < self._cfg.lost_target_timeout_s:
-                search_pct = getattr(self._cfg, "lost_target_search_steer_pct", 0.25)
-                max_steer = self._cfg.max_follow_speed_byte * search_pct
-                steer_cap = getattr(self._cfg, "max_steer_offset_byte", 1e9)
-                if steer_cap < 1e6:
-                    max_steer = min(max_steer, steer_cap)
-                if self._last_target_x is not None and abs(self._last_target_x) > 0.05:
-                    direction = 1.0 if self._last_target_x > 0 else -1.0
-                    steer = direction * max_steer
-                else:
-                    steer = 0.0
-                fwd = self._last_speed_offset * 0.5
-                left = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd + steer)))
-                right = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd - steer)))
-                return left, right
-            self._tracking = False
-            self._last_distance_error = None
-            self._last_speed_offset = 0.0
-            self._last_steer_offset = 0.0
-            self._last_target_confidence = 0.0
-            self._last_target_track_id = None
-            self._held_left = NEUTRAL
-            self._held_right = NEUTRAL
-            return NEUTRAL, NEUTRAL
+            return self._handle_lost_target(now)
 
         self._tracking = True
-        self._last_valid_time = time.monotonic()
+        self._last_valid_time = now
         self._last_target_z = target.z_m
         self._last_target_x = target.x_m
         self._last_target_confidence = target.confidence
@@ -99,14 +121,13 @@ class FollowMeController:
 
         follow_dist = self._cfg.follow_distance_m
 
-        # Too close — stop to avoid crowding the person
         if target.z_m <= self._cfg.min_distance_m:
             self._last_distance_error = target.z_m - follow_dist
             self._last_speed_offset = 0.0
             self._last_steer_offset = 0.0
             return NEUTRAL, NEUTRAL
 
-        # Speed: proportional to distance error from follow distance
+        # Speed: proportional to distance error
         distance_error = target.z_m - follow_dist
         self._last_distance_error = distance_error
         if distance_error <= 0:
@@ -120,10 +141,60 @@ class FollowMeController:
             )
         self._last_speed_offset = speed_offset
 
-        # Steering: PD control on lateral offset for damped tracking.
-        # P term: proportional to x_m (turns toward person)
-        # D term: proportional to dx/dt (brakes the swing before overshoot)
-        now = time.monotonic()
+        # Add person to trail (world-frame breadcrumb)
+        if self._trail_enabled and self._odometry is not None and self._trail is not None:
+            wx, wy = self._odometry.camera_to_world(target.x_m, target.z_m)
+            self._trail.add_point(wx, wy, now, speed_hint=speed_offset)
+            pose = self._odometry.pose
+            self._trail.prune(pose.x, pose.y, pose.theta, now)
+
+        # Decide steering mode: trail pursuit vs direct
+        steer_offset = self._compute_steering(target, speed_offset, now)
+
+        self._last_steer_offset = steer_offset
+
+        left = NEUTRAL + speed_offset + steer_offset
+        right = NEUTRAL + speed_offset - steer_offset
+
+        left_out = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(left))))
+        right_out = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(right))))
+        self._held_left = left_out
+        self._held_right = right_out
+        return left_out, right_out
+
+    def _compute_steering(self, target: PersonDetection, speed_offset: float,
+                          now: float) -> float:
+        """Choose between trail pursuit and direct pursuit for steering."""
+        use_trail = False
+
+        if (self._trail_enabled and self._pursuit is not None
+                and self._odometry is not None and self._trail is not None):
+            trail_pts = self._trail.get_trail()
+            self._trail_length = len(trail_pts)
+            min_pts = getattr(self._cfg, "min_trail_points_for_pursuit", 2)
+            direct_dist = getattr(self._cfg, "direct_pursuit_distance_m", 2.0)
+            direct_lat = getattr(self._cfg, "direct_pursuit_lateral_m", 0.3)
+
+            # Use trail when we have enough points AND person isn't close+centered
+            person_close_centered = (
+                target.z_m < direct_dist and abs(target.x_m) < direct_lat
+            )
+            if len(trail_pts) >= min_pts and not person_close_centered:
+                pose = self._odometry.pose
+                cmd = self._pursuit.compute(pose, trail_pts, speed_offset)
+                if cmd is not None:
+                    use_trail = True
+                    self._pursuit_mode = "trail"
+                    self._pursuit_lookahead_x = cmd.lookahead_x
+                    self._pursuit_lookahead_y = cmd.lookahead_y
+                    return cmd.steer_byte
+
+        # Direct pursuit fallback: PD on lateral offset
+        self._pursuit_mode = "direct"
+        return self._direct_pursuit_steer(target, now)
+
+    def _direct_pursuit_steer(self, target: PersonDetection, now: float) -> float:
+        """Original PD steering on lateral offset."""
         alpha = getattr(self._cfg, "steering_ema_alpha", 0.4)
         if self._prev_x_time == 0.0:
             self._smoothed_x = target.x_m
@@ -143,27 +214,69 @@ class FollowMeController:
 
         max_abs = getattr(self._cfg, "max_steer_offset_byte", 1e9)
         steer_offset = max(-max_abs, min(max_abs, steer_offset))
+        return steer_offset
 
-        self._last_steer_offset = steer_offset
+    def _handle_lost_target(self, now: float) -> tuple[int, int]:
+        """Handle when no person is detected."""
+        elapsed = now - self._last_valid_time
 
-        left = NEUTRAL + speed_offset + steer_offset
-        right = NEUTRAL + speed_offset - steer_offset
+        if self._last_valid_time > 0.0 and elapsed < self._cfg.lost_target_timeout_s:
+            # Trail following: continue along the trail
+            if (self._trail_enabled and self._pursuit is not None
+                    and self._odometry is not None and self._trail is not None):
+                trail_pts = self._trail.get_trail()
+                self._trail_length = len(trail_pts)
+                min_pts = getattr(self._cfg, "min_trail_points_for_pursuit", 2)
+                if len(trail_pts) >= min_pts:
+                    pose = self._odometry.pose
+                    fwd = self._last_speed_offset * 0.5
+                    cmd = self._pursuit.compute(pose, trail_pts, fwd)
+                    if cmd is not None:
+                        self._pursuit_mode = "trail"
+                        self._pursuit_lookahead_x = cmd.lookahead_x
+                        self._pursuit_lookahead_y = cmd.lookahead_y
+                        left = NEUTRAL + fwd + cmd.steer_byte
+                        right = NEUTRAL + fwd - cmd.steer_byte
+                        left_out = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(left))))
+                        right_out = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(right))))
+                        return left_out, right_out
 
-        left_out = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(left))))
-        right_out = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(right))))
-        self._held_left = left_out
-        self._held_right = right_out
-        return left_out, right_out
+            # Fallback: original search turn
+            search_pct = getattr(self._cfg, "lost_target_search_steer_pct", 0.25)
+            max_steer = self._cfg.max_follow_speed_byte * search_pct
+            steer_cap = getattr(self._cfg, "max_steer_offset_byte", 1e9)
+            if steer_cap < 1e6:
+                max_steer = min(max_steer, steer_cap)
+            if self._last_target_x is not None and abs(self._last_target_x) > 0.05:
+                direction = 1.0 if self._last_target_x > 0 else -1.0
+                steer = direction * max_steer
+            else:
+                steer = 0.0
+            fwd = self._last_speed_offset * 0.5
+            left = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd + steer)))
+            right = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd - steer)))
+            return left, right
+
+        # Full timeout — stop and reset
+        self._tracking = False
+        self._last_distance_error = None
+        self._last_speed_offset = 0.0
+        self._last_steer_offset = 0.0
+        self._last_target_confidence = 0.0
+        self._last_target_track_id = None
+        self._held_left = NEUTRAL
+        self._held_right = NEUTRAL
+        self._pursuit_mode = "direct"
+        if self._trail is not None:
+            self._trail.clear()
+        if self._odometry is not None:
+            self._odometry.reset()
+        return NEUTRAL, NEUTRAL
 
     def _select_target(
         self, detections: list[PersonDetection]
     ) -> PersonDetection | None:
-        """Pick the person most likely to be the intended follow target.
-
-        Scoring: weighted combination of proximity to frame center (bbox) and
-        closeness in depth.  Detections outside the configured distance range
-        or below the confidence threshold are discarded.
-        """
+        """Pick the person most likely to be the intended follow target."""
         best: PersonDetection | None = None
         best_score = -1.0
 
@@ -189,7 +302,6 @@ class FollowMeController:
                 and self._last_target_track_id is not None
                 and det.track_id == self._last_target_track_id
             ):
-                # Prefer continuity when the tracked target remains valid.
                 score += self.TRACK_ID_STICKY_BONUS
             if score > best_score:
                 best_score = score
@@ -198,7 +310,7 @@ class FollowMeController:
         return best
 
     def get_status(self) -> dict:
-        return {
+        status = {
             "follow_me_tracking": self._tracking,
             "follow_me_target_z_m": self._last_target_z,
             "follow_me_target_x_m": self._last_target_x,
@@ -208,4 +320,15 @@ class FollowMeController:
             "follow_me_num_detections": self._last_num_detections,
             "follow_me_target_confidence": self._last_target_confidence,
             "follow_me_target_track_id": self._last_target_track_id,
+            "follow_me_pursuit_mode": self._pursuit_mode,
         }
+        if self._trail_enabled:
+            status["trail_length"] = self._trail_length
+            status["trail_lookahead_x"] = self._pursuit_lookahead_x
+            status["trail_lookahead_y"] = self._pursuit_lookahead_y
+            if self._odometry is not None:
+                pose = self._odometry.pose
+                status["odom_x"] = round(pose.x, 3)
+                status["odom_y"] = round(pose.y, 3)
+                status["odom_theta_deg"] = round(math.degrees(pose.theta), 1)
+        return status
