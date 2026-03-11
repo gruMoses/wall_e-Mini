@@ -2,7 +2,19 @@
 
 **Branch:** `feature/trail-follow-pure-pursuit`
 **Date:** 2026-03-10
+**Updated:** 2026-03-10 (incorporated field-testing context and prior tuning history)
 **Reviewer:** Claude (automated deep-dive, 6 parallel analysis agents)
+
+---
+
+## Design Context & Prior Art
+
+A previous Cursor plan (`follow_me_recovery_and_torque_b2f697dc.plan.md` on the Pi) covered the older direct-pursuit phase. Key context from that work and subsequent field testing:
+
+- **Steer rate limiting was intentionally removed** after field testing showed it hurt responsiveness. Findings in this review should NOT recommend re-adding steer output rate limiting. Hysteresis on *mode decisions* is fair game; slew on *steer output* is not.
+- **Lost-target behavior has changed** from "drive straight" to trail-aware recovery. The old plan's assumptions about lost-target are stale, but new edge cases (like zero-speed at moment of loss) are introduced.
+- **`snap_first_follow_me` ramp-up guidance** from the old plan remains valid — safer initial engagement behavior.
+- **Torque management insight still valid:** Independent L/R slew limiting is not the same as differential steering slew. A sharp differential command (left +15, right -15) gets slewed at the same per-motor rate as a symmetric speed change (both +15), but the mechanical stress and wheel slip are very different. This concern lives outside trail-follow code but affects it during aggressive trail-pursuit steering corrections.
 
 ---
 
@@ -84,7 +96,7 @@ If the IMU returns NaN or inf (glitch, sensor fault), `math.cos(NaN)` = NaN, and
 
 The decision between trail pursuit and direct pursuit uses fixed thresholds (`direct_pursuit_distance_m`, `direct_pursuit_lateral_m`). When the person oscillates around these thresholds, the controller flips modes every cycle, causing jerky steering.
 
-**Fix:** Add a small hysteresis band (e.g. switch to direct at 2.0m, switch back to trail at 2.5m).
+**Fix:** Add a small hysteresis band on the *mode decision* (e.g. switch to direct at 2.0m, switch back to trail at 2.5m). Do **NOT** add steer output rate limiting — that was intentionally removed after field testing for responsiveness.
 
 ---
 
