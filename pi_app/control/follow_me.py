@@ -39,7 +39,6 @@ class FollowMeController:
     def __init__(self, config: FollowMeConfig) -> None:
         self._cfg = config
         self._tracking = False
-        self._dynamic_follow_dist: float | None = None
         self._last_target_z: float | None = None
         self._last_target_x: float | None = None
         self._last_distance_error: float | None = None
@@ -54,6 +53,8 @@ class FollowMeController:
         self._smoothed_x: float = 0.0
         self._prev_smoothed_x: float = 0.0
         self._prev_x_time: float = 0.0
+        self._prev_steer_offset: float = 0.0
+        self._prev_steer_time: float = 0.0
 
     def compute(self, detections: list[PersonDetection]) -> tuple[int, int]:
         """Compute motor bytes (left, right) to follow the best-scored person.
@@ -65,9 +66,21 @@ class FollowMeController:
         if target is None:
             elapsed = time.monotonic() - self._last_valid_time
             if self._last_valid_time > 0.0 and elapsed < self._cfg.lost_target_timeout_s:
-                return self._held_left, self._held_right
+                search_pct = getattr(self._cfg, "lost_target_search_steer_pct", 0.25)
+                max_steer = self._cfg.max_follow_speed_byte * search_pct
+                steer_cap = getattr(self._cfg, "max_steer_offset_byte", 1e9)
+                if steer_cap < 1e6:
+                    max_steer = min(max_steer, steer_cap)
+                if self._last_target_x is not None and abs(self._last_target_x) > 0.05:
+                    direction = 1.0 if self._last_target_x > 0 else -1.0
+                    steer = direction * max_steer
+                else:
+                    steer = 0.0
+                fwd = self._last_speed_offset * 0.5
+                left = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd + steer)))
+                right = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd - steer)))
+                return left, right
             self._tracking = False
-            self._dynamic_follow_dist = None
             self._last_distance_error = None
             self._last_speed_offset = 0.0
             self._last_steer_offset = 0.0
@@ -77,8 +90,6 @@ class FollowMeController:
             self._held_right = NEUTRAL
             return NEUTRAL, NEUTRAL
 
-        if not self._tracking:
-            self._dynamic_follow_dist = target.z_m
         self._tracking = True
         self._last_valid_time = time.monotonic()
         self._last_target_z = target.z_m
@@ -86,7 +97,7 @@ class FollowMeController:
         self._last_target_confidence = target.confidence
         self._last_target_track_id = target.track_id
 
-        follow_dist = self._dynamic_follow_dist or self._cfg.follow_distance_m
+        follow_dist = self._cfg.follow_distance_m
 
         # Too close — stop to avoid crowding the person
         if target.z_m <= self._cfg.min_distance_m:
@@ -101,9 +112,8 @@ class FollowMeController:
         if distance_error <= 0:
             speed_offset = 0.0
         else:
-            speed_gain = self._cfg.max_follow_speed_byte / max(
-                self._cfg.max_distance_m - follow_dist, 0.1
-            )
+            max_speed_err = getattr(self._cfg, "max_speed_error_m", 2.5)
+            speed_gain = self._cfg.max_follow_speed_byte / max(max_speed_err, 0.1)
             speed_offset = min(
                 distance_error * speed_gain,
                 float(self._cfg.max_follow_speed_byte),
@@ -130,6 +140,10 @@ class FollowMeController:
         d_gain = getattr(self._cfg, "steering_derivative_gain", 0.0)
         d_steer = dx_dt * d_gain * scale
         steer_offset = p_steer + d_steer
+
+        max_abs = getattr(self._cfg, "max_steer_offset_byte", 1e9)
+        steer_offset = max(-max_abs, min(max_abs, steer_offset))
+
         self._last_steer_offset = steer_offset
 
         left = NEUTRAL + speed_offset + steer_offset
@@ -188,7 +202,6 @@ class FollowMeController:
             "follow_me_tracking": self._tracking,
             "follow_me_target_z_m": self._last_target_z,
             "follow_me_target_x_m": self._last_target_x,
-            "follow_me_follow_dist_m": self._dynamic_follow_dist,
             "follow_me_distance_error_m": self._last_distance_error,
             "follow_me_speed_offset": self._last_speed_offset,
             "follow_me_steer_offset": self._last_steer_offset,

@@ -17,6 +17,7 @@ from pi_app.control.state import DriveCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
 from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
 from pi_app.control.follow_me import FollowMeController, PersonDetection
+from pi_app.control.gesture_control import GestureStateMachine, GestureEvent, HandData
 from pi_app.control.waypoint_nav import WaypointNavController
 from pi_app.hardware.rtk_gps import GpsReading
 from config import config
@@ -95,6 +96,7 @@ class Controller:
         obstacle_avoidance: Optional[ObstacleAvoidanceController] = None,
         follow_me: Optional[FollowMeController] = None,
         waypoint_nav: Optional[WaypointNavController] = None,
+        gesture_controller: Optional[GestureStateMachine] = None,
     ) -> None:
         self._motor = motor_driver or NoopMotorDriver()
         self._relay = arm_relay or NoopArmRelay()
@@ -123,15 +125,17 @@ class Controller:
         self._straight_latched = False
         self._straight_disengage_deadline = 0.0
 
-        # Obstacle avoidance, Follow Me, and Waypoint Nav
+        # Obstacle avoidance, Follow Me, Waypoint Nav, and Gesture control
         self._obstacle_avoidance = obstacle_avoidance
         self._follow_me = follow_me
         self._waypoint_nav = waypoint_nav
+        self._gesture = gesture_controller
         self._mode = "MANUAL"  # "MANUAL", "FOLLOW_ME", or "WAYPOINT_NAV"
         self._obstacle_distance_m: float | None = None
         self._obstacle_age_s: float | None = None
         self._gps_reading: GpsReading | None = None
         self._person_detections: list[PersonDetection] = []
+        self._hand_data: HandData | None = None
 
         # Calibration mode: when True, process() outputs neutral and skips logic
         self._calibration_mode = False
@@ -160,6 +164,10 @@ class Controller:
         """Feed latest person detections from OakDepthReader."""
         self._person_detections = detections
 
+    def set_hand_data(self, data: HandData | None) -> None:
+        """Feed latest hand landmark data from OakDepthReader."""
+        self._hand_data = data
+
     def set_gps_reading(self, reading: GpsReading | None) -> None:
         """Feed latest reading from RtkGpsReader."""
         self._gps_reading = reading
@@ -175,6 +183,8 @@ class Controller:
         """Return to MANUAL mode from Follow Me."""
         if self._mode == "FOLLOW_ME":
             self._mode = "MANUAL"
+            if self._gesture is not None:
+                self._gesture.notify_external_deactivation()
 
     @property
     def motor_driver(self) -> MotorDriver:
@@ -306,9 +316,24 @@ class Controller:
                 self._mode = "FOLLOW_ME"
             elif ev in (SafetyEvent.FOLLOW_ME_EXITED, SafetyEvent.EMERGENCY_TRIGGERED):
                 self._mode = "MANUAL"
+                if self._gesture is not None:
+                    self._gesture.notify_external_deactivation()
         # Disarm exits waypoint nav
         if not self._safety_state.is_armed and self._mode == "WAYPOINT_NAV":
             self._mode = "MANUAL"
+
+        # Hand-gesture Follow Me activation/deactivation
+        gesture_event: GestureEvent | None = None
+        if self._gesture is not None:
+            gesture_event = self._gesture.update(self._hand_data)
+            if gesture_event is GestureEvent.ACTIVATE:
+                if self._follow_me is not None and self._safety_state.is_armed:
+                    self._mode = "FOLLOW_ME"
+                else:
+                    gesture_event = None  # cannot activate
+            elif gesture_event is GestureEvent.DEACTIVATE:
+                if self._mode == "FOLLOW_ME":
+                    self._mode = "MANUAL"
 
         # Emergency triggered: stop motors, disarm, schedule shutdown
         if any(e is SafetyEvent.EMERGENCY_TRIGGERED for e in events):
@@ -318,6 +343,10 @@ class Controller:
 
         # Command computation
         telemetry: dict = {"mode": self._mode}
+        if self._gesture is not None:
+            telemetry["gesture_phase"] = self._gesture.phase_name
+            if gesture_event is not None:
+                telemetry["gesture_event"] = gesture_event.name
 
         if self._mode == "WAYPOINT_NAV" and self._waypoint_nav is not None:
             gps = self._gps_reading
@@ -364,8 +393,14 @@ class Controller:
             right = map_pulse_to_byte_saturated(rc.ch2_us, f_full, r_full)
             steering_input = self._bytes_to_steering_input(left, right)
 
-        # Apply IMU steering compensation if available and enabled
-        imu_correction = self._apply_imu_compensation(steering_input, mono_now)
+        # Apply IMU steering compensation — skip in Follow Me mode where the
+        # controller intentionally changes heading to track a person.
+        if self._mode == "FOLLOW_ME":
+            imu_correction = None
+            if self._imu_compensator is not None:
+                self._imu_compensator.reset_target_heading()
+        else:
+            imu_correction = self._apply_imu_compensation(steering_input, mono_now)
         telemetry["steering_input"] = steering_input
         telemetry["imu_correction_raw"] = imu_correction
 
@@ -451,6 +486,20 @@ class Controller:
                 blend = max(0.0, 1.0 - (si / zero_at))
             telemetry["correction_blend"] = blend
             corr = imu_correction * blend
+
+            # Speed-dependent gain scheduling: attenuate correction at high
+            # wheel speed where each byte produces more turning force.
+            speed_scale = 1.0
+            gs_enabled = bool(getattr(config.imu_steering, 'gain_schedule_enabled', False))
+            if gs_enabled and moving_ok:
+                ref = float(getattr(config.imu_steering, 'gain_schedule_ref_speed_byte', 50.0))
+                speed_byte = max(abs(left - CENTER_OUTPUT_VALUE),
+                                 abs(right - CENTER_OUTPUT_VALUE))
+                if ref > 0.0 and speed_byte > ref:
+                    speed_scale = ref / speed_byte
+                corr = corr * speed_scale
+            telemetry["speed_gain_scale"] = speed_scale
+
             # Apply corrections only when moving to avoid idle spin corrections
             if moving_ok and abs(corr) > 0.0:
                 # Apply so that positive correction increases left and decreases right
@@ -535,6 +584,8 @@ class Controller:
 
                     dt_s = max(0.0, mono_now - self._slew_last_update)
                     snap_first = bool(getattr(slewc, "snap_first_command", True))
+                    if mode_for_slew == "FOLLOW_ME":
+                        snap_first = bool(getattr(slewc, "snap_first_follow_me", snap_first))
                     wants_motion = (
                         left_in != CENTER_OUTPUT_VALUE or right_in != CENTER_OUTPUT_VALUE
                     )

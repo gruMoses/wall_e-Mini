@@ -163,6 +163,26 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="label">Armed</div>
       <div class="value" id="t-armed">—</div>
     </div>
+    <div class="telem-card">
+      <div class="label">GPS Fix</div>
+      <div class="value" id="t-gps-fix">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">Satellites</div>
+      <div class="value blue" id="t-gps-sats">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">HDOP</div>
+      <div class="value" id="t-gps-hdop">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">GPS Position</div>
+      <div class="value" id="t-gps-pos" style="font-size:14px;">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">Altitude</div>
+      <div class="value" id="t-gps-alt">—</div>
+    </div>
   </div>
   <div id="tracking-panel" class="tracking-panel tracking-off">
     <div class="follow-btn-row">
@@ -237,6 +257,22 @@ sse.onmessage = function(e) {
   const armedEl = document.getElementById('t-armed');
   armedEl.textContent = d.is_armed ? 'YES' : 'NO';
   armedEl.className = 'value ' + (d.is_armed ? 'green' : 'red');
+  const fixNames = {0:'None',1:'GPS',2:'DGPS',4:'RTK Fix',5:'RTK Float'};
+  const fixEl = document.getElementById('t-gps-fix');
+  if (d.gps_fix != null) {
+    fixEl.textContent = (fixNames[d.gps_fix] || d.gps_fix);
+    fixEl.className = 'value ' + (d.gps_fix >= 4 ? 'green' : d.gps_fix >= 1 ? 'yellow' : 'red');
+  } else { fixEl.textContent = '—'; fixEl.className = 'value'; }
+  document.getElementById('t-gps-sats').textContent = d.gps_sats != null ? d.gps_sats : '—';
+  const hdopEl = document.getElementById('t-gps-hdop');
+  if (d.gps_hdop != null) {
+    hdopEl.textContent = d.gps_hdop.toFixed(2);
+    hdopEl.className = 'value ' + (d.gps_hdop <= 1.0 ? 'green' : d.gps_hdop <= 2.0 ? 'yellow' : 'red');
+  } else { hdopEl.textContent = '—'; hdopEl.className = 'value'; }
+  document.getElementById('t-gps-pos').textContent =
+    d.gps_lat != null ? d.gps_lat.toFixed(7) + ', ' + d.gps_lon.toFixed(7) : '—';
+  document.getElementById('t-gps-alt').textContent =
+    d.gps_alt_m != null ? d.gps_alt_m.toFixed(1) + ' m' : '—';
   const badge = document.getElementById('rec-badge');
   const rs = d.recording_state || 'IDLE';
   badge.textContent = rs;
@@ -441,6 +477,12 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None) -> Flask:
                          "conf": round(d.confidence, 2)}
                         for d in t.person_detections
                     ],
+                    "gps_lat": round(t.gps_lat, 7) if t.gps_lat is not None else None,
+                    "gps_lon": round(t.gps_lon, 7) if t.gps_lon is not None else None,
+                    "gps_alt_m": round(t.gps_alt_m, 1) if t.gps_alt_m is not None else None,
+                    "gps_fix": t.gps_fix,
+                    "gps_sats": t.gps_sats,
+                    "gps_hdop": round(t.gps_hdop, 2) if t.gps_hdop is not None else None,
                 }
                 yield f"data: {json.dumps(obj)}\n\n"
             telemetry_hz = max(0.5, float(getattr(config, "telemetry_hz", 4.0)))

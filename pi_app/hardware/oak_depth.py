@@ -6,6 +6,7 @@ APIs consumed by the main control loop:
   - get_min_distance()      -> (distance_m, age_s)  for obstacle avoidance
   - get_person_detections() -> list[PersonDetection]  for Follow Me
   - get_depth_stats()       -> DepthStats              for enriched telemetry
+  - get_hand_data()         -> HandData | None          for gesture control
 
 When recording is enabled, exposes additional queues for the recorder:
   - get_recording_queues()  -> dict of XLinkOut queue names
@@ -14,6 +15,8 @@ When recording is enabled, exposes additional queues for the recorder:
 from __future__ import annotations
 
 import logging
+import marshal  # kept for _build_hand_tracker_script compatibility
+import re
 import sys
 import threading
 import time
@@ -22,12 +25,16 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from config import ObstacleAvoidanceConfig, FollowMeConfig, OakRecordingConfig
+from config import ObstacleAvoidanceConfig, FollowMeConfig, GestureConfig, OakRecordingConfig
 from pi_app.control.follow_me import PersonDetection
+from pi_app.control.gesture_control import HandData
 
 logger = logging.getLogger(__name__)
 
 PERSON_LABEL = 15  # MobileNet-SSD label index for "person"
+
+_HAND_MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "hand"
+_HAND_SCRIPT_TEMPLATE = _HAND_MODELS_DIR / "hand_tracker_script.py"
 
 
 @dataclass
@@ -57,6 +64,12 @@ class _DetectionState:
 @dataclass
 class _RgbState:
     frame: object = None  # numpy BGR array or None
+    timestamp: float = 0.0
+
+
+@dataclass
+class _HandState:
+    hand_data: HandData | None = None
     timestamp: float = 0.0
 
 
@@ -104,6 +117,7 @@ class OakDepthReader:
         obstacle_config: ObstacleAvoidanceConfig,
         follow_me_config: FollowMeConfig,
         recording_config: OakRecordingConfig | None = None,
+        gesture_config: GestureConfig | None = None,
         imu_poll_hz: float = 60.0,
         imu_packet_mode: str = "latest",
         imu_max_packets_per_poll: int = 4,
@@ -111,10 +125,13 @@ class OakDepthReader:
         self._obs_cfg = obstacle_config
         self._fm_cfg = follow_me_config
         self._rec_cfg = recording_config
+        self._gesture_cfg = gesture_config
 
         self._depth_state = _DepthState()
         self._det_state = _DetectionState(persons=[])
         self._rgb_state = _RgbState()
+        self._hand_state = _HandState()
+        self._lm_net = None  # lazy-loaded OpenCV DNN for host-side LM
         self._imu_state = _ImuState()
         self._imu_metrics = _ImuMetrics()
         self._imu_prev_consumed_ts = 0.0
@@ -190,6 +207,11 @@ class OakDepthReader:
         """Return the most recent RGB preview frame (BGR numpy) or None. Thread-safe."""
         with self._lock:
             return self._rgb_state.frame
+
+    def get_hand_data(self) -> HandData | None:
+        """Return latest hand landmark data or None. Thread-safe."""
+        with self._lock:
+            return self._hand_state.hand_data
 
     def set_rgb_poll_enabled(self, enabled: bool) -> None:
         """Enable/disable host RGB preview polling to reduce host copy load."""
@@ -319,40 +341,61 @@ class OakDepthReader:
                 cam_rgb, stereo, model_desc,
             )
             spatial_nn.setConfidenceThreshold(self._fm_cfg.detection_confidence)
+            spatial_nn.setNumInferenceThreads(1)
+            spatial_nn.setNumShavesPerInferenceThread(4)
             spatial_nn.input.setBlocking(False)
             spatial_nn.setBoundingBoxScaleFactor(0.5)
             spatial_nn.setDepthLowerThreshold(int(self._fm_cfg.min_distance_m * 1000))
             spatial_nn.setDepthUpperThreshold(int(self._fm_cfg.max_distance_m * 1000))
 
+            # Check if hand tracking will be enabled (before tracker setup).
+            gesture_enabled = (
+                self._gesture_cfg is not None
+                and self._gesture_cfg.enabled
+                and _HAND_MODELS_DIR.is_dir()
+            )
+
             det_q = None
             tracker_enabled = False
-            try:
-                object_tracker = pipeline.create(dai.node.ObjectTracker)
-                object_tracker.setDetectionLabelsToTrack([PERSON_LABEL])
-                object_tracker.setTrackerType(dai.TrackerType.SHORT_TERM_IMAGELESS)
-                object_tracker.setTrackerIdAssignmentPolicy(dai.TrackerIdAssignmentPolicy.SMALLEST_ID)
-
-                # Feed detections + RGB frames into device-side tracker.
-                spatial_nn.out.link(object_tracker.inputDetections)
-                spatial_nn.passthrough.link(object_tracker.inputTrackerFrame)
-                spatial_nn.passthrough.link(object_tracker.inputDetectionFrame)
-                # Control loop consumes only newest detections; drop stale packets for low latency.
-                det_q = object_tracker.out.createOutputQueue(maxSize=1, blocking=False)
-                tracker_enabled = True
-            except Exception:
-                logger.warning(
-                    "ObjectTracker init failed; falling back to raw detections",
-                    exc_info=True,
-                )
-                # Same low-latency policy in fallback path when tracker is unavailable.
+            if gesture_enabled:
+                # ObjectTracker's passthrough fan-out stalls the pipeline when
+                # PD is also consuming camera frames.  Fall back to raw
+                # detections so both person-following and hand gestures work.
                 det_q = spatial_nn.out.createOutputQueue(maxSize=1, blocking=False)
+                logger.warning(
+                    "ObjectTracker skipped (hand-tracking active); using raw detections",
+                )
+            else:
+                try:
+                    object_tracker = pipeline.create(dai.node.ObjectTracker)
+                    object_tracker.setDetectionLabelsToTrack([PERSON_LABEL])
+                    object_tracker.setTrackerType(dai.TrackerType.SHORT_TERM_IMAGELESS)
+                    object_tracker.setTrackerIdAssignmentPolicy(dai.TrackerIdAssignmentPolicy.SMALLEST_ID)
+
+                    spatial_nn.out.link(object_tracker.inputDetections)
+                    spatial_nn.passthrough.link(object_tracker.inputTrackerFrame)
+                    spatial_nn.passthrough.link(object_tracker.inputDetectionFrame)
+                    det_q = object_tracker.out.createOutputQueue(maxSize=1, blocking=False)
+                    tracker_enabled = True
+                except Exception:
+                    logger.warning(
+                        "ObjectTracker init failed; falling back to raw detections",
+                        exc_info=True,
+                    )
+                    det_q = spatial_nn.out.createOutputQueue(maxSize=1, blocking=False)
 
             # Obstacle avoidance wants freshest depth only; avoid host backlog.
             depth_q = spatial_nn.passthroughDepth.createOutputQueue(maxSize=1, blocking=False)
             # Spatial ROI depth is also control-critical, so prefer newest sample.
             spatial_depth_q = spatial_calc.out.createOutputQueue(maxSize=1, blocking=False)
-            # Preview feed is operator/control UX, so keep latest-frame semantics.
-            rgb_preview_q = cam_rgb.requestOutput((640, 480)).createOutputQueue(maxSize=1, blocking=False)
+
+            # Preview feed -- when hand tracking is active the preview queue
+            # comes from _build_hand_tracking_nodes (shared camera output).
+            if not gesture_enabled:
+                rgb_preview_out = cam_rgb.requestOutput((640, 480))
+                rgb_preview_q = rgb_preview_out.createOutputQueue(maxSize=1, blocking=False)
+            else:
+                rgb_preview_q = None  # set below after hand pipeline build
 
             # IMU node (BMI270: accel + gyro at 100 Hz)
             imu_node = pipeline.create(dai.node.IMU)
@@ -362,9 +405,28 @@ class OakDepthReader:
             imu_node.setMaxBatchReports(10)
             imu_q = imu_node.out.createOutputQueue()
 
+            # -- Hand tracking pipeline (host-orchestrated) --
+            hand_queues = None
+            logger.warning("HAND_INIT: gesture_enabled=%s", gesture_enabled)
+            if gesture_enabled:
+                try:
+                    hand_rgb_q = self._build_hand_tracking_nodes(
+                        pipeline, dai, cam_rgb,
+                    )
+                    hand_queues = hand_rgb_q
+                    rgb_preview_q = hand_rgb_q
+                    logger.warning("Hand-tracking pipeline nodes created OK (host-side MediaPipe)")
+                except Exception:
+                    logger.warning(
+                        "Hand-tracking pipeline init failed; gestures disabled",
+                        exc_info=True,
+                    )
+                    hand_queues = None
+
             # Optional recording queues (v3: create from node outputs, no XLinkOut)
+            # Disable recording when hand tracking is active to stay within ISP limits
             h265_q = None
-            if self._rec_cfg is not None and self._rec_cfg.enabled:
+            if self._rec_cfg is not None and self._rec_cfg.enabled and hand_queues is None:
                 if self._rec_cfg.video_enabled:
                     encoder = pipeline.create(dai.node.VideoEncoder)
                     encoder.setDefaultProfilePreset(
@@ -385,6 +447,8 @@ class OakDepthReader:
             logger.info("OAK-D pipeline started (depthai v3)")
             if tracker_enabled:
                 logger.info("OAK ObjectTracker enabled for person detections")
+            if hand_queues is not None:
+                logger.info("Hand-gesture tracking enabled (PD on-device, LM on host)")
             self._device_ready.set()
 
         except Exception:
@@ -396,9 +460,11 @@ class OakDepthReader:
             while not self._stop_event.is_set() and pipeline.isRunning():
                 self._poll_depth(depth_q, spatial_depth_q, np)
                 self._poll_detections(det_q)
+                if hand_queues is not None:
+                    self._poll_hand(hand_queues)
                 with self._lock:
                     rgb_enabled = self._rgb_poll_enabled
-                if rgb_enabled:
+                if rgb_enabled and rgb_preview_q is not None:
                     self._poll_rgb(rgb_preview_q)
                 # IMU polling can run at a different cadence than depth polling.
                 # Cap catch-up polls per outer loop to avoid runaway CPU under load.
@@ -425,8 +491,116 @@ class OakDepthReader:
                 self._recording_queues = None
             self._device_ready.clear()
 
+    # -- Hand-tracking pipeline helpers -----------------------------------------
+
+    def _build_hand_tracking_nodes(self, pipeline, dai, cam_rgb):
+        """Create a camera output for host-side hand tracking via MediaPipe.
+
+        All hand detection and landmark inference runs on the Pi CPU using
+        MediaPipe Hands.  The OAK-D only provides an RGB stream.
+
+        Returns rgb_q (host output queue for camera frames).
+        """
+        hand_cam_out = cam_rgb.requestOutput((640, 480))
+        rgb_q = hand_cam_out.createOutputQueue(maxSize=1, blocking=False)
+        return rgb_q
+
+    @staticmethod
+    def _build_hand_tracker_script(
+        pad_h: int,
+        img_h: int,
+        img_w: int,
+        frame_size: int,
+        crop_w: int,
+        pd_score_thresh: float = 0.5,
+        lm_score_thresh: float = 0.5,
+    ) -> str:
+        """Read the Script node template and substitute geometry tokens."""
+        template = _HAND_SCRIPT_TEMPLATE.read_text()
+        replacements = {
+            "_PAD_H": str(pad_h),
+            "_IMG_H": str(img_h),
+            "_IMG_W": str(img_w),
+            "_FRAME_SIZE": str(frame_size),
+            "_CROP_W": str(crop_w),
+            "_PD_SCORE_THRESH": str(pd_score_thresh),
+            "_LM_SCORE_THRESH": str(lm_score_thresh),
+        }
+        for token, value in replacements.items():
+            template = template.replace(token, value)
+        # Strip the module docstring (triple-quoted block at top)
+        template = re.sub(r'^""".*?"""', '', template, count=1, flags=re.DOTALL)
+        # Strip comments (the Script node's Python 3.9 runtime is limited)
+        template = re.sub(r'#.*', '', template)
+        template = re.sub(r'\n\s*\n', '\n', template)
+        return template
+
+    def _ensure_mp_hands(self):
+        """Lazy-load the MediaPipe Hands solution."""
+        if self._lm_net is not None:
+            return self._lm_net
+        import mediapipe as _mp
+        self._lm_net = _mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+            model_complexity=0,
+        )
+        logger.warning("Host-side MediaPipe Hands model loaded")
+        return self._lm_net
+
+    def _poll_hand(self, rgb_q) -> None:
+        """Full hand tracking on host via MediaPipe Hands."""
+        import cv2 as _cv2
+        try:
+            cam_msg = rgb_q.tryGet()
+            if cam_msg is None:
+                return
+
+            while True:
+                newer = rgb_q.tryGet()
+                if newer is None:
+                    break
+                cam_msg = newer
+
+            frame = cam_msg.getCvFrame()
+            if frame is None:
+                return
+
+            rgb_frame = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
+            hands = self._ensure_mp_hands()
+            results = hands.process(rgb_frame)
+
+            if not results.multi_hand_landmarks:
+                with self._lock:
+                    self._hand_state.hand_data = None
+                    self._hand_state.timestamp = time.monotonic()
+                return
+
+            hand_lm = results.multi_hand_landmarks[0]
+            landmarks = []
+            for lm in hand_lm.landmark:
+                landmarks.append([lm.x, lm.y, lm.z])
+
+            hd = HandData(norm_landmarks=landmarks, lm_score=1.0)
+            with self._lock:
+                self._hand_state.hand_data = hd
+                self._hand_state.timestamp = time.monotonic()
+
+        except Exception:
+            logger.warning("Hand poll error", exc_info=True)
+
+    # -- Depth / detection / RGB / IMU polling --------------------------------
+
     def _poll_depth(self, depth_q, spatial_depth_q, np) -> None:
-        """Extract minimum distance and rich stats from the center ROI."""
+        """Extract minimum distance using trapezoidal corridor masking.
+
+        Instead of a fixed-width rectangular ROI, each depth pixel is checked
+        against the robot's physical width projected at that pixel's depth.
+        Pixels whose real-world X offset exceeds half the robot width are
+        excluded, producing a depth-dependent (trapezoidal) check region.
+        """
         try:
             in_spatial = spatial_depth_q.tryGet()
             while True:
@@ -444,17 +618,39 @@ class OakDepthReader:
                 in_depth = newer_depth
             frame = in_depth.getFrame()  # uint16, millimetres
             h, w = frame.shape
-            rw = self._obs_cfg.roi_width_pct
+
             rh = self._obs_cfg.roi_height_pct
             rv = getattr(self._obs_cfg, "roi_vertical_offset_pct", 0.0)
-            cy = max(rh / 2.0, min(1.0 - rh / 2.0, 0.5 + rv))
-            x0 = int(w * (0.5 - rw / 2))
-            x1 = int(w * (0.5 + rw / 2))
-            y0 = int(h * (cy - rh / 2))
-            y1 = int(h * (cy + rh / 2))
-            roi = frame[y0:y1, x0:x1]
+            cy_norm = max(rh / 2.0, min(1.0 - rh / 2.0, 0.5 + rv))
+            y0 = int(h * (cy_norm - rh / 2))
+            y1 = int(h * (cy_norm + rh / 2))
+            band = frame[y0:y1, :]
+
+            robot_half_mm = getattr(self._obs_cfg, "robot_width_m", 0.0) * 500.0
+            min_depth_mm = int(getattr(self._obs_cfg, "min_depth_mm", 600))
+            min_valid_pct = float(getattr(self._obs_cfg, "min_valid_pct", 8.0))
             p50 = None
             valid_pct = None
+
+            if robot_half_mm > 0:
+                import math
+                hfov = getattr(self._obs_cfg, "camera_hfov_deg", 73.0)
+                fx = (w / 2.0) / math.tan(math.radians(hfov / 2.0))
+                cx = w / 2.0
+                threshold = fx * robot_half_mm
+
+                x_offsets = np.abs(np.arange(w, dtype=np.float32) - cx)
+                depths_f = band.astype(np.float32)
+                in_corridor = (depths_f * x_offsets[np.newaxis, :]) <= threshold
+                valid_mask = (band > min_depth_mm) & in_corridor
+                valid_depths = band[valid_mask]
+            else:
+                rw = self._obs_cfg.roi_width_pct
+                x0 = int(w * (0.5 - rw / 2))
+                x1 = int(w * (0.5 + rw / 2))
+                roi = band[:, x0:x1]
+                valid_mask = roi > min_depth_mm
+                valid_depths = roi[valid_mask]
 
             # Use device-side spatial calculator for median only.
             if in_spatial is not None:
@@ -467,23 +663,34 @@ class OakDepthReader:
                 except Exception:
                     pass
 
-            # Host-side 5th percentile for obstacle distance (robust to stereo artifacts).
-            valid = roi[roi > 400]
-            if valid.size == 0:
+            if valid_depths.size == 0:
                 return
-            p5 = float(np.percentile(valid, 5))
+
+            total_corridor_pixels = band.shape[0] * band.shape[1]
+            corridor_valid_pct = (valid_depths.size / total_corridor_pixels) * 100.0 if total_corridor_pixels > 0 else 0.0
+            if corridor_valid_pct < min_valid_pct:
+                return
+
+            p5 = float(np.percentile(valid_depths, 5))
 
             self._depth_stats_counter += 1
             if self._depth_stats_counter >= self._depth_stats_decimation:
                 self._depth_stats_counter = 0
-                # Downsample for telemetry-only stats to keep host-side overhead low.
-                roi_small = roi[::4, ::4]
-                total_pixels = roi_small.size
-                valid = roi_small[roi_small > 0]
-                if valid.size > 0:
+                band_small = band[::4, ::4]
+                if robot_half_mm > 0:
+                    x_off_small = np.abs(np.arange(band_small.shape[1], dtype=np.float32) - band_small.shape[1] / 2.0)
+                    fx_small = fx * (band_small.shape[1] / w)
+                    thr_small = fx_small * robot_half_mm
+                    d_small = band_small.astype(np.float32)
+                    corr_mask = (d_small * x_off_small[np.newaxis, :]) <= thr_small
+                    stat_valid = band_small[(band_small > 0) & corr_mask]
+                else:
+                    stat_valid = band_small[band_small > 0]
+                total_pixels = band_small.size
+                if stat_valid.size > 0:
                     if p50 is None:
-                        p50 = float(np.median(valid))
-                    valid_pct = (valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
+                        p50 = float(np.median(stat_valid))
+                    valid_pct = (stat_valid.size / total_pixels) * 100.0 if total_pixels > 0 else 0.0
 
             now = time.monotonic()
             with self._lock:

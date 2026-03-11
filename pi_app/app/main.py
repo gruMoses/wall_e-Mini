@@ -28,6 +28,7 @@ try:
     from pi_app.control.imu_steering import ImuSteeringCompensator
     from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
     from pi_app.control.follow_me import FollowMeController
+    from pi_app.control.gesture_control import GestureStateMachine
     from pi_app.control.waypoint_nav import (
         WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
     )
@@ -46,6 +47,7 @@ except ModuleNotFoundError:
     from pi_app.control.imu_steering import ImuSteeringCompensator  # type: ignore
     from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController  # type: ignore
     from pi_app.control.follow_me import FollowMeController  # type: ignore
+    from pi_app.control.gesture_control import GestureStateMachine  # type: ignore
     from pi_app.control.waypoint_nav import (  # type: ignore
         WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
     )
@@ -119,6 +121,7 @@ def run() -> None:
     oak_recorder = None
     obstacle_ctrl = None
     follow_me_ctrl = None
+    gesture_ctrl = None
     if config.obstacle_avoidance.enabled or config.follow_me.enabled:
         try:
             if OakDepthReader.detect():
@@ -127,9 +130,11 @@ def run() -> None:
                     if (config.oak_recording.enabled and not disable_recording)
                     else None
                 )
+                gesture_cfg = config.gesture if config.gesture.enabled else None
                 oak_reader = OakDepthReader(
                     config.obstacle_avoidance, config.follow_me,
                     recording_config=rec_cfg,
+                    gesture_config=gesture_cfg,
                     imu_poll_hz=float(getattr(config.imu_steering, "oak_imu_poll_hz", 60.0)),
                     imu_packet_mode=str(getattr(config.imu_steering, "oak_imu_packet_mode", "latest")),
                     imu_max_packets_per_poll=int(getattr(config.imu_steering, "oak_imu_max_packets_per_poll", 4)),
@@ -142,11 +147,21 @@ def run() -> None:
                 if config.follow_me.enabled:
                     follow_me_ctrl = FollowMeController(config.follow_me)
                     print("  Follow Me mode available (Ch4 switch to activate)")
+                if gesture_cfg is not None:
+                    gesture_ctrl = GestureStateMachine(
+                        activation_sequence=gesture_cfg.activation_sequence,
+                        stop_gesture=gesture_cfg.stop_gesture,
+                        hold_frames=gesture_cfg.hold_frames,
+                        sequence_timeout_s=gesture_cfg.sequence_timeout_s,
+                        cooldown_s=gesture_cfg.cooldown_s,
+                    )
+                    print("  Hand-gesture Follow Me activation enabled (3-4-3 / palm stop)")
                 if rec_cfg is not None:
                     try:
                         oak_recorder = OakRecorder(
                             config.oak_recording,
                             roi_vertical_offset_pct=getattr(config.obstacle_avoidance, "roi_vertical_offset_pct", 0.0),
+                            obstacle_config=config.obstacle_avoidance,
                         )
                         oak_recorder.start(oak_reader)
                         print("  Activity-triggered recording enabled")
@@ -264,6 +279,7 @@ def run() -> None:
         obstacle_avoidance=obstacle_ctrl,
         follow_me=follow_me_ctrl,
         waypoint_nav=waypoint_nav_ctrl,
+        gesture_controller=gesture_ctrl,
     )
     bt_server = None  # Set to None to indicate external SPP service is used
 
@@ -400,6 +416,8 @@ def run() -> None:
                 if follow_me_ctrl is not None:
                     oak_persons = oak_reader.get_person_detections()
                     controller.set_person_detections(oak_persons)
+                if gesture_ctrl is not None:
+                    controller.set_hand_data(oak_reader.get_hand_data())
             # Feed GPS data to controller
             gps_reading = None
             if gps_reader is not None:
@@ -427,6 +445,12 @@ def run() -> None:
                         follow_tracking=telem.get("follow_me_tracking", False),
                         follow_target_x_m=telem.get("follow_me_target_x_m"),
                         follow_target_z_m=telem.get("follow_me_target_z_m"),
+                        gps_lat=gps_reading.latitude if gps_reading else None,
+                        gps_lon=gps_reading.longitude if gps_reading else None,
+                        gps_alt_m=gps_reading.altitude_m if gps_reading else None,
+                        gps_fix=gps_reading.fix_quality if gps_reading else None,
+                        gps_sats=gps_reading.satellites_used if gps_reading else None,
+                        gps_hdop=gps_reading.hdop if gps_reading else None,
                     )
                     depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
                     rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None
