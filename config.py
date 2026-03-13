@@ -137,11 +137,13 @@ class FollowMeConfig:
     trail_min_spacing_m: float = 0.3
     trail_max_age_s: float = 30.0
     trail_consume_radius_m: float = 0.4
+    trail_max_step_m: float = 1.2             # reject impossible breadcrumb jumps
+    trail_max_speed_mps: float = 2.5          # reject implausible point-to-point speed
     pursuit_lookahead_base_m: float = 1.0
-    pursuit_lookahead_speed_scale: float = 0.005
-    pursuit_wheelbase_m: float = 0.28             # track width wheel-to-wheel
-    direct_pursuit_distance_m: float = 3.5        # keep direct pursuit active longer for gentle-turn tracking
-    direct_pursuit_lateral_m: float = 1.0         # allow larger lateral offset before switching to trail mode
+    pursuit_lookahead_speed_scale: float = 0.0015
+    pursuit_wheelbase_m: float = 0.7              # increase trail-mode turn authority (latest run under-steered)
+    direct_pursuit_distance_m: float = 2.0        # switch to trail mode sooner (safer around turns/obstacles)
+    direct_pursuit_lateral_m: float = 0.7         # switch to trail sooner on lateral moves (less immediate cut-in turning)
     min_trail_points_for_pursuit: int = 2
 
 

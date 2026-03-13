@@ -74,6 +74,11 @@ class FollowMeController:
         self._pursuit_lookahead_x: float = 0.0
         self._pursuit_lookahead_y: float = 0.0
         self._trail_length: int = 0
+        self._trail_distance_m: float = 0.0
+        self._trail_rejected_jump_count: int = 0
+        self._trail_rejected_speed_count: int = 0
+        self._last_target_world_x: float | None = None
+        self._last_target_world_y: float | None = None
 
         if self._trail_enabled:
             self._odometry = DeadReckonOdometry(
@@ -84,6 +89,8 @@ class FollowMeController:
                 min_spacing_m=getattr(config, "trail_min_spacing_m", 0.3),
                 max_age_s=getattr(config, "trail_max_age_s", 30.0),
                 consume_radius_m=getattr(config, "trail_consume_radius_m", 0.4),
+                max_step_m=getattr(config, "trail_max_step_m", 1.2),
+                max_speed_mps=getattr(config, "trail_max_speed_mps", 2.5),
             ))
             self._pursuit = PurePursuitController(PursuitConfig(
                 lookahead_base_m=getattr(config, "pursuit_lookahead_base_m", 1.0),
@@ -146,9 +153,14 @@ class FollowMeController:
         # Add person to trail (world-frame breadcrumb)
         if self._trail_enabled and self._odometry is not None and self._trail is not None:
             wx, wy = self._odometry.camera_to_world(target.x_m, target.z_m)
+            self._last_target_world_x = wx
+            self._last_target_world_y = wy
             self._trail.add_point(wx, wy, now, speed_hint=speed_offset)
             pose = self._odometry.pose
             self._trail.prune(pose.x, pose.y, pose.theta, now)
+            self._trail_distance_m = self._trail.trail_distance()
+            self._trail_rejected_jump_count = self._trail.rejected_jump_count
+            self._trail_rejected_speed_count = self._trail.rejected_speed_count
 
         # Decide steering mode: trail pursuit vs direct
         steer_offset = self._compute_steering(target, speed_offset, now)
@@ -247,6 +259,9 @@ class FollowMeController:
                     and elapsed < trail_max_s):
                 trail_pts = self._trail.get_trail()
                 self._trail_length = len(trail_pts)
+                self._trail_distance_m = self._trail.trail_distance()
+                self._trail_rejected_jump_count = self._trail.rejected_jump_count
+                self._trail_rejected_speed_count = self._trail.rejected_speed_count
                 min_pts = getattr(self._cfg, "min_trail_points_for_pursuit", 2)
                 if len(trail_pts) >= min_pts:
                     pose = self._odometry.pose
@@ -293,6 +308,11 @@ class FollowMeController:
         self._last_pursuit_mode = "direct"
         if self._trail is not None:
             self._trail.clear()
+        self._trail_distance_m = 0.0
+        self._trail_rejected_jump_count = 0
+        self._trail_rejected_speed_count = 0
+        self._last_target_world_x = None
+        self._last_target_world_y = None
         if self._odometry is not None:
             self._odometry.reset()
         return NEUTRAL, NEUTRAL
@@ -348,8 +368,13 @@ class FollowMeController:
         }
         if self._trail_enabled:
             status["trail_length"] = self._trail_length
+            status["trail_distance_m"] = round(self._trail_distance_m, 2)
+            status["trail_rejected_jump_count"] = self._trail_rejected_jump_count
+            status["trail_rejected_speed_count"] = self._trail_rejected_speed_count
             status["trail_lookahead_x"] = self._pursuit_lookahead_x
             status["trail_lookahead_y"] = self._pursuit_lookahead_y
+            status["follow_me_target_world_x"] = self._last_target_world_x
+            status["follow_me_target_world_y"] = self._last_target_world_y
             if self._odometry is not None:
                 pose = self._odometry.pose
                 status["odom_x"] = round(pose.x, 3)

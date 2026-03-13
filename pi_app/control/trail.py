@@ -21,12 +21,18 @@ class TrailConfig:
     min_spacing_m: float = 0.3
     max_age_s: float = 30.0
     consume_radius_m: float = 0.4
+    # Reject implausible breadcrumb jumps that usually come from transient
+    # detection/transform glitches rather than true person motion.
+    max_step_m: float = 1.2
+    max_speed_mps: float = 2.5
 
 
 class TrailManager:
     def __init__(self, config: TrailConfig) -> None:
         self._config = config
         self._trail: deque[TrailPoint] = deque(maxlen=config.max_trail_points)
+        self._rejected_jump_count: int = 0
+        self._rejected_speed_count: int = 0
 
     def add_point(
         self,
@@ -41,6 +47,16 @@ class TrailManager:
             return
         last = self._trail[-1]
         dist = math.hypot(world_x - last.x, world_y - last.y)
+
+        # Reject impossible jumps (telemetry/noise spikes) before spacing logic.
+        if dist > self._config.max_step_m:
+            self._rejected_jump_count += 1
+            return
+        dt = timestamp - last.timestamp
+        if dt > 1e-3 and (dist / dt) > self._config.max_speed_mps:
+            self._rejected_speed_count += 1
+            return
+
         if dist >= self._config.min_spacing_m:
             self._trail.append(point)
 
@@ -93,3 +109,11 @@ class TrailManager:
             total += math.hypot(p.x - prev.x, p.y - prev.y)
             prev = p
         return total
+
+    @property
+    def rejected_jump_count(self) -> int:
+        return self._rejected_jump_count
+
+    @property
+    def rejected_speed_count(self) -> int:
+        return self._rejected_speed_count
