@@ -183,6 +183,22 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="label">Altitude</div>
       <div class="value" id="t-gps-alt">—</div>
     </div>
+    <div class="telem-card">
+      <div class="label">LoRa Link</div>
+      <div class="value" id="t-lora-link">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">Camera Pipeline</div>
+      <div class="value" id="t-cam-pipeline">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">RGB Age</div>
+      <div class="value" id="t-cam-rgb-age">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">Depth Age</div>
+      <div class="value" id="t-cam-depth-age">—</div>
+    </div>
   </div>
   <div id="tracking-panel" class="tracking-panel tracking-off">
     <div class="follow-btn-row">
@@ -273,6 +289,53 @@ sse.onmessage = function(e) {
     d.gps_lat != null ? d.gps_lat.toFixed(7) + ', ' + d.gps_lon.toFixed(7) : '—';
   document.getElementById('t-gps-alt').textContent =
     d.gps_alt_m != null ? d.gps_alt_m.toFixed(1) + ' m' : '—';
+  const loraEl = document.getElementById('t-lora-link');
+  if (d.gps_diff_age_s != null) {
+    const da = d.gps_diff_age_s;
+    const fix = d.gps_fix || 0;
+    let txt = da.toFixed(1) + 's';
+    let cls;
+    if (da < 2 && fix >= 4) { cls = 'green'; }
+    else if (da < 5) { cls = 'yellow'; }
+    else if (da < 15) { cls = 'yellow'; }
+    else { cls = 'red'; txt = 'Lost'; }
+    if (d.gps_station_id) txt += ' #' + d.gps_station_id;
+    loraEl.textContent = txt;
+    loraEl.className = 'value ' + cls;
+  } else {
+    loraEl.textContent = (d.gps_fix != null && d.gps_fix < 4) ? 'No Link' : '—';
+    loraEl.className = 'value ' + (d.gps_fix != null && d.gps_fix < 4 ? 'red' : '');
+  }
+  const cam = d.camera_health || {};
+  const pipeEl = document.getElementById('t-cam-pipeline');
+  const rgbAgeEl = document.getElementById('t-cam-rgb-age');
+  const depthAgeEl = document.getElementById('t-cam-depth-age');
+  if (cam.pipeline_running === true) {
+    pipeEl.textContent = cam.is_stale ? 'STALE' : 'RUNNING';
+    pipeEl.className = 'value ' + (cam.is_stale ? 'yellow' : 'green');
+  } else if (cam.pipeline_running === false) {
+    pipeEl.textContent = 'STOPPED';
+    pipeEl.className = 'value red';
+  } else {
+    pipeEl.textContent = '—';
+    pipeEl.className = 'value';
+  }
+  const rgbAge = cam.rgb_age_s;
+  if (rgbAge != null) {
+    rgbAgeEl.textContent = rgbAge.toFixed(2) + 's';
+    rgbAgeEl.className = 'value ' + (rgbAge <= 1.5 ? 'green' : rgbAge <= 3.0 ? 'yellow' : 'red');
+  } else {
+    rgbAgeEl.textContent = '—';
+    rgbAgeEl.className = 'value';
+  }
+  const depthAge = cam.depth_age_s;
+  if (depthAge != null) {
+    depthAgeEl.textContent = depthAge.toFixed(2) + 's';
+    depthAgeEl.className = 'value ' + (depthAge <= 1.0 ? 'green' : depthAge <= 2.5 ? 'yellow' : 'red');
+  } else {
+    depthAgeEl.textContent = '—';
+    depthAgeEl.className = 'value';
+  }
   const badge = document.getElementById('rec-badge');
   const rs = d.recording_state || 'IDLE';
   badge.textContent = rs;
@@ -394,7 +457,7 @@ def _placeholder_jpeg() -> bytes:
 # Flask app factory
 # ---------------------------------------------------------------------------
 
-def create_app(recorder, config: OakWebViewerConfig, controller=None) -> Flask:
+def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader=None) -> Flask:
     """Create the Flask app wired to the given OakRecorder and Controller instances."""
     if Flask is None:
         raise ImportError("Flask is required for the web viewer: pip install flask")
@@ -483,7 +546,16 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None) -> Flask:
                     "gps_fix": t.gps_fix,
                     "gps_sats": t.gps_sats,
                     "gps_hdop": round(t.gps_hdop, 2) if t.gps_hdop is not None else None,
+                    "gps_diff_age_s": round(t.gps_diff_age_s, 2) if t.gps_diff_age_s is not None else None,
+                    "gps_station_id": t.gps_station_id,
                 }
+                if oak_reader is not None:
+                    try:
+                        get_health = getattr(oak_reader, "get_health", None)
+                        if callable(get_health):
+                            obj["camera_health"] = get_health()
+                    except Exception:
+                        obj["camera_health"] = None
                 yield f"data: {json.dumps(obj)}\n\n"
             telemetry_hz = max(0.5, float(getattr(config, "telemetry_hz", 4.0)))
             time.sleep(1.0 / telemetry_hz)
@@ -576,7 +648,12 @@ class OakWebViewer:
 
     def _run(self) -> None:
         try:
-            app = create_app(self._recorder, self._config, controller=self._controller)
+            app = create_app(
+                self._recorder,
+                self._config,
+                controller=self._controller,
+                oak_reader=self._oak_reader,
+            )
 
             try:
                 from pi_app.web.calibration_wizard import (

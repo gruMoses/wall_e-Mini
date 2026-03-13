@@ -28,6 +28,10 @@ _REG_GPS_STATE = 19
 _REG_USE_STAR = 20
 _REG_HDOP_Z = 21
 _REG_ALT_H = 23
+_REG_DIF_Z = 29
+_REG_DIF_X = 30
+_REG_DIFID_H = 31
+_REG_DIFID_L = 32
 _REG_I2C_ID = 50
 _REG_DATA_FLUSH = 80
 _REG_OPERATION = 93
@@ -42,7 +46,9 @@ class GpsReading:
     fix_quality: int
     satellites_used: int
     hdop: float
-    timestamp: float  # time.monotonic()
+    diff_age_s: float   # seconds since last RTK correction via LoRa
+    station_id: int     # base station ID (0 = none)
+    timestamp: float    # time.monotonic()
 
 
 class RtkGpsReader:
@@ -139,8 +145,8 @@ class RtkGpsReader:
         if flush[0] == 0:
             return
 
-        # Bulk-read registers 0-28 (covers all fields through altitude)
-        raw = i2c.read_i2c_block_data(addr, 0, 29)
+        # Bulk-read registers 0-32 (covers all fields through station ID)
+        raw = i2c.read_i2c_block_data(addr, 0, 33)
 
         lat = self._parse_lat(raw)
         lon = self._parse_lon(raw)
@@ -148,6 +154,8 @@ class RtkGpsReader:
         sats = raw[_REG_USE_STAR]
         hdop = raw[_REG_HDOP_Z] + raw[_REG_HDOP_Z + 1] / 100.0
         alt = self._parse_alt(raw)
+        diff_age = raw[_REG_DIF_Z] + raw[_REG_DIF_X] / 100.0
+        station_id = raw[_REG_DIFID_H] * 256 + raw[_REG_DIFID_L]
 
         if quality < self._cfg.min_quality:
             return
@@ -159,6 +167,8 @@ class RtkGpsReader:
             fix_quality=quality,
             satellites_used=sats,
             hdop=hdop,
+            diff_age_s=diff_age,
+            station_id=station_id,
             timestamp=time.monotonic(),
         )
         with self._lock:

@@ -122,14 +122,17 @@ class FollowMeConfig:
     steering_derivative_gain: float = 0.06  # calibrated from Phase 2 plant model
     steering_ema_alpha: float = 0.3        # smooths x_m before derivative (0=heavy, 1=none)
     detection_confidence: float = 0.5
-    lost_target_timeout_s: float = 1.0
+    lost_target_timeout_s: float = 3.5  # tolerate medium turn/occlusion dropouts without full stop
+    # Allow continued blind trail pursuit longer than short target-drop timeout.
+    # This is the key behavior needed to keep moving around corners after LOS loss.
+    lost_target_trail_pursuit_max_s: float = 8.0
     lost_target_search_steer_pct: float = 0.25  # fraction of max_follow_speed_byte for search turn
     max_steer_delta_per_s: float = 35.0          # steering differential slew limit (bytes/s)
     max_steer_offset_byte: float = 15.0          # ~22 deg/s max turn — handles direction changes
 
     # Trail-following Pure Pursuit (breadcrumb path instead of direct pursuit)
     trail_follow_enabled: bool = True
-    trail_speed_scale_mps_per_byte: float = 0.01  # calibrate: m/s per motor byte offset
+    trail_speed_scale_mps_per_byte: float = 0.0016  # calibrated from 10s VESC runs (~26.5 in @170, ~35 in @180)
     trail_max_points: int = 100
     trail_min_spacing_m: float = 0.3
     trail_max_age_s: float = 30.0
@@ -137,8 +140,8 @@ class FollowMeConfig:
     pursuit_lookahead_base_m: float = 1.0
     pursuit_lookahead_speed_scale: float = 0.005
     pursuit_wheelbase_m: float = 0.28             # track width wheel-to-wheel
-    direct_pursuit_distance_m: float = 2.0        # use direct pursuit when person is closer
-    direct_pursuit_lateral_m: float = 0.3         # ...and lateral offset is small
+    direct_pursuit_distance_m: float = 3.5        # keep direct pursuit active longer for gentle-turn tracking
+    direct_pursuit_lateral_m: float = 1.0         # allow larger lateral offset before switching to trail mode
     min_trail_points_for_pursuit: int = 2
 
 

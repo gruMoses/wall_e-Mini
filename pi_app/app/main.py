@@ -371,6 +371,8 @@ def run() -> None:
         bt_poll_interval_s = 0.05
         imu_status = None
         oak_imu_metrics_getter = None
+        oak_health_getter = None
+        oak_prev_stale = None
         if oak_reader is not None:
             try:
                 maybe_getter = getattr(oak_reader, "get_imu_metrics", None)
@@ -378,6 +380,12 @@ def run() -> None:
                     oak_imu_metrics_getter = maybe_getter
             except Exception:
                 oak_imu_metrics_getter = None
+            try:
+                maybe_health = getattr(oak_reader, "get_health", None)
+                if callable(maybe_health):
+                    oak_health_getter = maybe_health
+            except Exception:
+                oak_health_getter = None
         while True:
             loop_now = time.monotonic()
             loop_dt_ms = int(round((loop_now - prev_loop_ts) * 1000))
@@ -413,6 +421,7 @@ def run() -> None:
             # Feed OAK-D Lite data to controller
             oak_depth_stats = None
             oak_persons = []
+            oak_camera_health = None
             if oak_reader is not None:
                 dist_m, dist_age = oak_reader.get_min_distance()
                 controller.set_obstacle_data(dist_m, dist_age)
@@ -422,6 +431,11 @@ def run() -> None:
                     controller.set_person_detections(oak_persons)
                 if gesture_ctrl is not None:
                     controller.set_hand_data(oak_reader.get_hand_data())
+                if oak_health_getter is not None:
+                    try:
+                        oak_camera_health = oak_health_getter()
+                    except Exception:
+                        oak_camera_health = None
             # Feed GPS data to controller
             gps_reading = None
             if gps_reader is not None:
@@ -465,6 +479,8 @@ def run() -> None:
                         gps_fix=gps_reading.fix_quality if gps_reading else None,
                         gps_sats=gps_reading.satellites_used if gps_reading else None,
                         gps_hdop=gps_reading.hdop if gps_reading else None,
+                        gps_diff_age_s=gps_reading.diff_age_s if gps_reading else None,
+                        gps_station_id=gps_reading.station_id if gps_reading else None,
                     )
                     depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
                     rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None
@@ -512,12 +528,36 @@ def run() -> None:
             if oak_reader is not None:
                 dist_str = f"{oa_dist:.2f}m" if oa_dist is not None else "?"
                 oak_info = f"  OAK({dist_str} scl={oa_scale:.1f})"
+                if isinstance(oak_camera_health, dict):
+                    is_stale = bool(oak_camera_health.get("is_stale", False))
+                    if oak_prev_stale is None:
+                        oak_prev_stale = is_stale
+                    elif oak_prev_stale != is_stale:
+                        state = "STALE" if is_stale else "HEALTHY"
+                        age_parts = []
+                        for key in ("loop_age_s", "depth_age_s", "detections_age_s", "rgb_age_s"):
+                            val = oak_camera_health.get(key)
+                            if isinstance(val, (int, float)):
+                                age_parts.append(f"{key}={val:.2f}")
+                        print(f"\nOAK camera health transition -> {state} ({', '.join(age_parts)})")
+                        if is_stale:
+                            err_keys = (
+                                "last_pipeline_error",
+                                "last_depth_error",
+                                "last_detection_error",
+                                "last_rgb_error",
+                                "last_imu_error",
+                            )
+                            errs = [oak_camera_health.get(k) for k in err_keys if oak_camera_health.get(k)]
+                            if errs:
+                                print(f"OAK last errors: {' | '.join(str(e) for e in errs)}")
+                        oak_prev_stale = is_stale
             mode_info = f"  [{mode_str}]" if mode_str != "MANUAL" else ""
 
             gps_info = ""
             if gps_reader is not None:
                 if gps_reading is not None:
-                    gps_info = f"  GPS(q{gps_reading.fix_quality} sat={gps_reading.satellites_used})"
+                    gps_info = f"  GPS(q{gps_reading.fix_quality} sat={gps_reading.satellites_used} dif={gps_reading.diff_age_s:.1f}s)"
                 else:
                     gps_info = "  GPS(no fix)"
 
@@ -623,6 +663,8 @@ def run() -> None:
                             "fix": gps_reading.fix_quality if gps_reading else None,
                             "sats": gps_reading.satellites_used if gps_reading else None,
                             "hdop": gps_reading.hdop if gps_reading else None,
+                            "diff_age_s": gps_reading.diff_age_s if gps_reading else None,
+                            "station_id": gps_reading.station_id if gps_reading else None,
                         }),
                         "waypoint_nav": round1({
                             "wp_index": telem.get("wp_index"),
@@ -638,6 +680,7 @@ def run() -> None:
                         "loop_dt_ms": loop_dt_ms,
                         "imu_dt_ms": imu_dt_ms,
                         "imu_pipeline": imu_pipeline,
+                        "oak_camera_health": oak_camera_health,
                         "events": [e.name for e in events] if events else [],
                     }
                     line = json.dumps(log_obj)

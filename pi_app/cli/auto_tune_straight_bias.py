@@ -163,7 +163,11 @@ def main() -> None:
 
     if VescCanDriver.detect():
         print("VESC over CAN detected; using VESC driver")
-        motor = VescCanDriver()
+        motor = VescCanDriver(
+            left_id=2,
+            right_id=1,
+            max_rpm=getattr(config, "vesc", None).max_erpm if hasattr(config, "vesc") else 15000,
+        )
     else:
         print("VESC not detected; using Arduino Model X motor driver (via Arduino)")
         motor = ArduinoModelXDriver(rc_reader=rc)

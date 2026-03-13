@@ -77,7 +77,7 @@ class FollowMeController:
 
         if self._trail_enabled:
             self._odometry = DeadReckonOdometry(
-                speed_scale=getattr(config, "trail_speed_scale_mps_per_byte", 0.01)
+                speed_scale=getattr(config, "trail_speed_scale_mps_per_byte", 0.0016)
             )
             self._trail = TrailManager(TrailConfig(
                 max_trail_points=getattr(config, "trail_max_points", 100),
@@ -238,10 +238,13 @@ class FollowMeController:
         """Handle when no person is detected."""
         elapsed = now - self._last_valid_time
 
-        if self._last_valid_time > 0.0 and elapsed < self._cfg.lost_target_timeout_s:
-            # Trail following: continue along the trail
+        if self._last_valid_time > 0.0:
+            # Trail-follow blind pursuit can continue longer than short detection timeout.
+            # This lets the robot keep following where the person likely went around turns.
+            trail_max_s = getattr(self._cfg, "lost_target_trail_pursuit_max_s", self._cfg.lost_target_timeout_s)
             if (self._trail_enabled and self._pursuit is not None
-                    and self._odometry is not None and self._trail is not None):
+                    and self._odometry is not None and self._trail is not None
+                    and elapsed < trail_max_s):
                 trail_pts = self._trail.get_trail()
                 self._trail_length = len(trail_pts)
                 min_pts = getattr(self._cfg, "min_trail_points_for_pursuit", 2)
@@ -260,21 +263,22 @@ class FollowMeController:
                         right_out = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(right))))
                         return left_out, right_out
 
-            # Fallback: original search turn
-            search_pct = getattr(self._cfg, "lost_target_search_steer_pct", 0.25)
-            max_steer = self._cfg.max_follow_speed_byte * search_pct
-            steer_cap = getattr(self._cfg, "max_steer_offset_byte", 1e9)
-            if steer_cap < 1e6:
-                max_steer = min(max_steer, steer_cap)
-            if self._last_target_x is not None and abs(self._last_target_x) > 0.05:
-                direction = 1.0 if self._last_target_x > 0 else -1.0
-                steer = direction * max_steer
-            else:
-                steer = 0.0
-            fwd = self._last_speed_offset * 0.5
-            left = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd + steer)))
-            right = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd - steer)))
-            return left, right
+            # Fallback: short-window search turn.
+            if elapsed < self._cfg.lost_target_timeout_s:
+                search_pct = getattr(self._cfg, "lost_target_search_steer_pct", 0.25)
+                max_steer = self._cfg.max_follow_speed_byte * search_pct
+                steer_cap = getattr(self._cfg, "max_steer_offset_byte", 1e9)
+                if steer_cap < 1e6:
+                    max_steer = min(max_steer, steer_cap)
+                if self._last_target_x is not None and abs(self._last_target_x) > 0.05:
+                    direction = 1.0 if self._last_target_x > 0 else -1.0
+                    steer = direction * max_steer
+                else:
+                    steer = 0.0
+                fwd = self._last_speed_offset * 0.5
+                left = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd + steer)))
+                right = max(MIN_OUTPUT, min(MAX_OUTPUT, int(NEUTRAL + fwd - steer)))
+                return left, right
 
         # Full timeout — stop and reset
         self._tracking = False

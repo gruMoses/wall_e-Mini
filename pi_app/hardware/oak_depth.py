@@ -152,6 +152,16 @@ class OakDepthReader:
         mode = str(imu_packet_mode or "latest").strip().lower()
         self._imu_packet_mode = mode if mode in ("latest", "bounded") else "latest"
         self._imu_max_packets_per_poll = max(1, int(imu_max_packets_per_poll))
+        self._pipeline_running = False
+        self._last_pipeline_loop_ts = 0.0
+        self._last_depth_poll_ts = 0.0
+        self._last_detection_poll_ts = 0.0
+        self._last_rgb_poll_ts = 0.0
+        self._last_pipeline_error_msg = ""
+        self._last_depth_error_msg = ""
+        self._last_detection_error_msg = ""
+        self._last_rgb_error_msg = ""
+        self._last_imu_error_msg = ""
 
     # -- Public API ----------------------------------------------------------
 
@@ -262,6 +272,70 @@ class OakDepthReader:
                 "last_sample_timestamp": last_ts,
                 "last_sample_age_s": (now - last_ts) if last_ts else float("inf"),
             }
+
+    def get_health(self) -> dict:
+        """Return OAK pipeline health snapshot for observability."""
+        now = time.monotonic()
+        hz = max(1.0, float(getattr(self._obs_cfg, "update_rate_hz", 10.0)))
+        loop_stale_s = max(0.5, 5.0 / hz)
+        depth_stale_s = max(1.0, 12.0 / hz)
+        det_stale_s = max(1.0, 12.0 / hz)
+        rgb_stale_s = 3.0
+
+        with self._lock:
+            running = bool(self._pipeline_running)
+            loop_ts = self._last_pipeline_loop_ts
+            depth_ts = self._last_depth_poll_ts
+            det_ts = self._last_detection_poll_ts
+            rgb_ts = self._last_rgb_poll_ts
+            depth_state_ts = self._depth_state.timestamp
+            rgb_state_ts = self._rgb_state.timestamp
+            pipe_err = self._last_pipeline_error_msg
+            depth_err = self._last_depth_error_msg
+            det_err = self._last_detection_error_msg
+            rgb_err = self._last_rgb_error_msg
+            imu_err = self._last_imu_error_msg
+
+        loop_age_s = (now - loop_ts) if loop_ts > 0.0 else float("inf")
+        depth_age_s = (now - depth_ts) if depth_ts > 0.0 else float("inf")
+        det_age_s = (now - det_ts) if det_ts > 0.0 else float("inf")
+        rgb_age_s = (now - rgb_ts) if rgb_ts > 0.0 else float("inf")
+        depth_frame_age_s = (now - depth_state_ts) if depth_state_ts > 0.0 else float("inf")
+        rgb_frame_age_s = (now - rgb_state_ts) if rgb_state_ts > 0.0 else float("inf")
+
+        loop_stale = (not running) or (loop_age_s > loop_stale_s)
+        depth_stale = depth_age_s > depth_stale_s
+        det_stale = det_age_s > det_stale_s
+        rgb_stale = rgb_age_s > rgb_stale_s
+
+        return {
+            "pipeline_running": running,
+            "loop_age_s": round(loop_age_s, 3) if loop_age_s != float("inf") else None,
+            "depth_age_s": round(depth_age_s, 3) if depth_age_s != float("inf") else None,
+            "detections_age_s": round(det_age_s, 3) if det_age_s != float("inf") else None,
+            "rgb_age_s": round(rgb_age_s, 3) if rgb_age_s != float("inf") else None,
+            "depth_frame_age_s": round(depth_frame_age_s, 3) if depth_frame_age_s != float("inf") else None,
+            "rgb_frame_age_s": round(rgb_frame_age_s, 3) if rgb_frame_age_s != float("inf") else None,
+            "loop_stale": loop_stale,
+            "depth_stale": depth_stale,
+            "detections_stale": det_stale,
+            "rgb_stale": rgb_stale,
+            "is_stale": loop_stale or depth_stale or det_stale or rgb_stale,
+            "last_pipeline_error": pipe_err or None,
+            "last_depth_error": depth_err or None,
+            "last_detection_error": det_err or None,
+            "last_rgb_error": rgb_err or None,
+            "last_imu_error": imu_err or None,
+        }
+
+    @staticmethod
+    def _format_err(prefix: str, exc: Exception) -> str:
+        msg = str(exc).strip()
+        if len(msg) > 220:
+            msg = msg[:220] + "..."
+        if msg:
+            return f"{prefix}: {exc.__class__.__name__}: {msg}"
+        return f"{prefix}: {exc.__class__.__name__}"
 
     @property
     def recording_enabled(self) -> bool:
@@ -450,14 +524,23 @@ class OakDepthReader:
             if hand_queues is not None:
                 logger.info("Hand-gesture tracking enabled (PD on-device, LM on host)")
             self._device_ready.set()
+            with self._lock:
+                self._pipeline_running = True
+                self._last_pipeline_loop_ts = time.monotonic()
+                self._last_pipeline_error_msg = ""
 
         except Exception:
             logger.exception("Failed to build/start OAK-D pipeline")
+            with self._lock:
+                self._pipeline_running = False
+                self._last_pipeline_error_msg = "pipeline_start_failed"
             return
 
         try:
             next_imu_poll = time.monotonic()
             while not self._stop_event.is_set() and pipeline.isRunning():
+                with self._lock:
+                    self._last_pipeline_loop_ts = time.monotonic()
                 self._poll_depth(depth_q, spatial_depth_q, np)
                 self._poll_detections(det_q)
                 if hand_queues is not None:
@@ -479,8 +562,10 @@ class OakDepthReader:
                 if now - next_imu_poll > (self._imu_poll_interval_s * max_catchup):
                     next_imu_poll = now
                 time.sleep(1.0 / self._obs_cfg.update_rate_hz)
-        except Exception:
+        except Exception as e:
             logger.exception("OAK-D pipeline error")
+            with self._lock:
+                self._last_pipeline_error_msg = self._format_err("pipeline_loop", e)
         finally:
             try:
                 pipeline.stop()
@@ -488,6 +573,7 @@ class OakDepthReader:
                 pass
             self._device = None
             with self._lock:
+                self._pipeline_running = False
                 self._recording_queues = None
             self._device_ready.clear()
 
@@ -711,7 +797,11 @@ class OakDepthReader:
                 self._depth_state.timestamp = now
                 self._depth_state.stats = stats
                 self._depth_state.raw_frame = frame
-        except Exception:
+                self._last_depth_poll_ts = now
+                self._last_depth_error_msg = ""
+        except Exception as e:
+            with self._lock:
+                self._last_depth_error_msg = self._format_err("poll_depth", e)
             logger.debug("Depth poll error", exc_info=True)
 
     def _poll_detections(self, det_q) -> None:
@@ -790,7 +880,11 @@ class OakDepthReader:
             with self._lock:
                 self._det_state.persons = persons
                 self._det_state.timestamp = time.monotonic()
-        except Exception:
+                self._last_detection_poll_ts = self._det_state.timestamp
+                self._last_detection_error_msg = ""
+        except Exception as e:
+            with self._lock:
+                self._last_detection_error_msg = self._format_err("poll_detections", e)
             logger.debug("Detection poll error", exc_info=True)
 
     def _poll_rgb(self, rgb_q) -> None:
@@ -803,7 +897,11 @@ class OakDepthReader:
             with self._lock:
                 self._rgb_state.frame = frame
                 self._rgb_state.timestamp = time.monotonic()
-        except Exception:
+                self._last_rgb_poll_ts = self._rgb_state.timestamp
+                self._last_rgb_error_msg = ""
+        except Exception as e:
+            with self._lock:
+                self._last_rgb_error_msg = self._format_err("poll_rgb", e)
             logger.debug("RGB poll error", exc_info=True)
 
     def _poll_imu(self, imu_q) -> None:
@@ -928,6 +1026,7 @@ class OakDepthReader:
                     m.first_error_ts = now
                 m.last_error_ts = now
                 m.last_error_msg = "IMU poll error"
+                self._last_imu_error_msg = "poll_imu error"
                 # Emit warning on first error, then at most every 30s.
                 should_warn = (m.warning_emits == 0) or (now - getattr(self, "_imu_last_warn_ts", 0.0) >= 30.0)
                 if should_warn:

@@ -399,3 +399,78 @@ Can add this as Phase 0 in the calibration tool, or just measure with a tape mea
 - No new Python packages required.
 - No new hardware required.
 - Uses existing IMU heading, motor commands, and person detections.
+
+---
+
+## Addendum: Field Notes + Tomorrow Checklist (2026-03-12)
+
+This addendum captures what was learned during evening field testing and defines
+the exact checklist to resume tomorrow in daylight.
+
+### What We Learned Today
+
+- Direct Follow Me baseline is strong:
+  - With `trail_follow_enabled=False`, straight + gentle-turn behavior was nearly ideal.
+  - This confirms base PD follow behavior is not the primary issue.
+- Trail mode improvement is real but still needs safety margin:
+  - Re-enabling trail mode with conservative direct gating improved behavior.
+  - Robot still stopped after longer visual dropout during larger turn/occlusion events.
+- Stop root cause was detection-loss timeout, not obstacle scaling:
+  - In the problematic run, obstacle throttle remained `1.0` (no obstacle slowdown/stop trigger).
+  - Detection stream dropped to zero long enough to exceed loss timeout behavior.
+- Corner-cut risk remains the critical open item:
+  - One tight-corner event clipped a building edge (no damage).
+  - This validates the need for safer trail-follow tuning before close-proximity corner runs.
+
+### Config/Behavior Changes Made Today
+
+- Increased short detection-loss tolerance:
+  - `lost_target_timeout_s` raised to `3.5`.
+- Added longer blind trail-pursuit window:
+  - `lost_target_trail_pursuit_max_s = 8.0`.
+  - Behavior now continues trail pursuit after short LOS loss, and only fully resets
+    after longer capped blind pursuit.
+- Kept conservative direct/trail switching thresholds:
+  - `direct_pursuit_distance_m = 3.5`
+  - `direct_pursuit_lateral_m = 1.0`
+
+### Tomorrow: Trail Mode Test TODO (Daylight Session)
+
+- [ ] **Safety prep before first run**
+  - Use open area first; avoid tight building-edge runs on first pass.
+  - Keep spotter positioned near robot path at all times.
+  - Run with known-good arming/disarming behavior confirmed.
+
+- [ ] **Scenario A: Baseline trail-on validation**
+  - Straight walk ~10 m, gentle 10-20 deg turn, then straight ~5 m.
+  - Goal: verify no unexpected stop and smooth turn continuation.
+
+- [ ] **Scenario B: Controlled occlusion test**
+  - Introduce brief partial LOS loss (person passes behind mild obstruction).
+  - Goal: robot keeps moving on trail and reacquires without hard stop.
+
+- [ ] **Scenario C: Moderate corner test (not wall-hugging)**
+  - One wider corner with extra clearance from hard obstacles.
+  - Goal: reduce corner cut while maintaining continuity (no reset stop).
+
+- [ ] **Log analysis after each scenario**
+  - Inspect only the last contiguous `FOLLOW_ME` segment of each run.
+  - Record:
+    - longest `num_detections=0` span while `tracking=True`
+    - whether `tracking` flipped false
+    - `pursuit_mode` distribution (`direct` vs `trail`)
+    - minimum obstacle distance and throttle scale
+    - any stop event timestamp + preceding 3-5 s telemetry
+
+- [ ] **Tuning pass order (only if needed)**
+  - First: trail geometry (`pursuit_lookahead_base_m`, `pursuit_lookahead_speed_scale`).
+  - Second: direct/trail handoff thresholds (`direct_pursuit_distance_m`, `direct_pursuit_lateral_m`).
+  - Third: blind-pursuit limits (`lost_target_timeout_s`, `lost_target_trail_pursuit_max_s`).
+  - Keep one global speed scale unchanged unless evidence shows clear bias.
+
+### Acceptance Criteria For Tomorrow
+
+- [ ] No hard stop during short-to-medium LOS dropouts.
+- [ ] Robot resumes/reacquires without manual intervention in controlled occlusion.
+- [ ] Corner approach does not aggressively cut inside toward nearby structures.
+- [ ] Trail mode remains at least as reliable as today's direct-only baseline in open runs.

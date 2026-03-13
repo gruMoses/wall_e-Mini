@@ -87,6 +87,8 @@ class RecordingTelemetry:
     gps_fix: int | None = None
     gps_sats: int | None = None
     gps_hdop: float | None = None
+    gps_diff_age_s: float | None = None
+    gps_station_id: int | None = None
 
 
 # ---------------------------------------------------------------------------
