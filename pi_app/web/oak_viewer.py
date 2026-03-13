@@ -519,14 +519,23 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
 
     # -- Telemetry SSE -------------------------------------------------------
 
+    def _finite_or_none(v, ndigits=3):
+        """Round a float for JSON; replace inf/nan with None."""
+        if v is None:
+            return None
+        import math
+        if not math.isfinite(v):
+            return None
+        return round(v, ndigits)
+
     def _sse_generator():
         while True:
             t = recorder.get_latest_telemetry()
             if t is not None:
                 obj = {
                     "mode": t.mode,
-                    "throttle_scale": round(t.throttle_scale, 3),
-                    "obstacle_distance_m": round(t.obstacle_distance_m, 3) if t.obstacle_distance_m else None,
+                    "throttle_scale": _finite_or_none(t.throttle_scale, 3),
+                    "obstacle_distance_m": _finite_or_none(t.obstacle_distance_m, 3),
                     "motor_left": t.motor_left,
                     "motor_right": t.motor_right,
                     "is_armed": t.is_armed,

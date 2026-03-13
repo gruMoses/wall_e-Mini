@@ -134,7 +134,7 @@ class RtkGpsReader:
                 try:
                     self._poll(i2c, addr)
                 except Exception:
-                    logger.debug("RTK GPS poll error", exc_info=True)
+                    logger.warning("RTK GPS poll error", exc_info=True)
                 time.sleep(interval)
         finally:
             i2c.close()
@@ -145,8 +145,9 @@ class RtkGpsReader:
         if flush[0] == 0:
             return
 
-        # Bulk-read registers 0-32 (covers all fields through station ID)
-        raw = i2c.read_i2c_block_data(addr, 0, 33)
+        # smbus2 limits block reads to 32 bytes; split across the boundary.
+        raw = i2c.read_i2c_block_data(addr, 0, 32)
+        raw.append(i2c.read_i2c_block_data(addr, 32, 1)[0])
 
         lat = self._parse_lat(raw)
         lon = self._parse_lon(raw)

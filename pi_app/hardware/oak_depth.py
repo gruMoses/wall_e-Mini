@@ -155,6 +155,9 @@ class OakDepthReader:
         self._pipeline_running = False
         self._last_pipeline_loop_ts = 0.0
         self._last_depth_poll_ts = 0.0
+        self._last_depth_recv_ts = 0.0
+        self._depth_recv_count = 0
+        self._depth_quality_reject_count = 0
         self._last_detection_poll_ts = 0.0
         self._last_rgb_poll_ts = 0.0
         self._last_pipeline_error_msg = ""
@@ -286,6 +289,9 @@ class OakDepthReader:
             running = bool(self._pipeline_running)
             loop_ts = self._last_pipeline_loop_ts
             depth_ts = self._last_depth_poll_ts
+            depth_recv_ts = self._last_depth_recv_ts
+            depth_recv_count = self._depth_recv_count
+            depth_reject_count = self._depth_quality_reject_count
             det_ts = self._last_detection_poll_ts
             rgb_ts = self._last_rgb_poll_ts
             depth_state_ts = self._depth_state.timestamp
@@ -298,13 +304,14 @@ class OakDepthReader:
 
         loop_age_s = (now - loop_ts) if loop_ts > 0.0 else float("inf")
         depth_age_s = (now - depth_ts) if depth_ts > 0.0 else float("inf")
+        depth_recv_age_s = (now - depth_recv_ts) if depth_recv_ts > 0.0 else float("inf")
         det_age_s = (now - det_ts) if det_ts > 0.0 else float("inf")
         rgb_age_s = (now - rgb_ts) if rgb_ts > 0.0 else float("inf")
         depth_frame_age_s = (now - depth_state_ts) if depth_state_ts > 0.0 else float("inf")
         rgb_frame_age_s = (now - rgb_state_ts) if rgb_state_ts > 0.0 else float("inf")
 
         loop_stale = (not running) or (loop_age_s > loop_stale_s)
-        depth_stale = depth_age_s > depth_stale_s
+        depth_stale = depth_recv_age_s > depth_stale_s
         det_stale = det_age_s > det_stale_s
         rgb_stale = rgb_age_s > rgb_stale_s
 
@@ -312,6 +319,9 @@ class OakDepthReader:
             "pipeline_running": running,
             "loop_age_s": round(loop_age_s, 3) if loop_age_s != float("inf") else None,
             "depth_age_s": round(depth_age_s, 3) if depth_age_s != float("inf") else None,
+            "depth_recv_age_s": round(depth_recv_age_s, 3) if depth_recv_age_s != float("inf") else None,
+            "depth_recv_count": depth_recv_count,
+            "depth_quality_reject_count": depth_reject_count,
             "detections_age_s": round(det_age_s, 3) if det_age_s != float("inf") else None,
             "rgb_age_s": round(rgb_age_s, 3) if rgb_age_s != float("inf") else None,
             "depth_frame_age_s": round(depth_frame_age_s, 3) if depth_frame_age_s != float("inf") else None,
@@ -458,7 +468,6 @@ class OakDepthReader:
                     )
                     det_q = spatial_nn.out.createOutputQueue(maxSize=1, blocking=False)
 
-            # Obstacle avoidance wants freshest depth only; avoid host backlog.
             depth_q = spatial_nn.passthroughDepth.createOutputQueue(maxSize=1, blocking=False)
             # Spatial ROI depth is also control-critical, so prefer newest sample.
             spatial_depth_q = spatial_calc.out.createOutputQueue(maxSize=1, blocking=False)
@@ -703,6 +712,11 @@ class OakDepthReader:
                     break
                 in_depth = newer_depth
             frame = in_depth.getFrame()  # uint16, millimetres
+            recv_now = time.monotonic()
+            with self._lock:
+                self._last_depth_recv_ts = recv_now
+                self._depth_recv_count += 1
+                self._depth_state.raw_frame = frame
             h, w = frame.shape
 
             rh = self._obs_cfg.roi_height_pct
@@ -750,11 +764,15 @@ class OakDepthReader:
                     pass
 
             if valid_depths.size == 0:
+                with self._lock:
+                    self._depth_quality_reject_count += 1
                 return
 
             total_corridor_pixels = band.shape[0] * band.shape[1]
             corridor_valid_pct = (valid_depths.size / total_corridor_pixels) * 100.0 if total_corridor_pixels > 0 else 0.0
             if corridor_valid_pct < min_valid_pct:
+                with self._lock:
+                    self._depth_quality_reject_count += 1
                 return
 
             p5 = float(np.percentile(valid_depths, 5))
@@ -796,7 +814,6 @@ class OakDepthReader:
                 self._depth_state.min_distance_m = p5 / 1000.0
                 self._depth_state.timestamp = now
                 self._depth_state.stats = stats
-                self._depth_state.raw_frame = frame
                 self._last_depth_poll_ts = now
                 self._last_depth_error_msg = ""
         except Exception as e:
