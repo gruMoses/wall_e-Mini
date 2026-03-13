@@ -1,6 +1,7 @@
 """
 Configuration file for WALL-E Mini robot control system.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -226,6 +227,16 @@ class GestureConfig:
 
 
 @dataclass(frozen=True)
+class PropertyMapConfig:
+    """Configuration for the property map feature."""
+    enabled: bool = True
+    image_path: str = "property_map.jpg"
+    calibration_path: str = "map_calibration.json"
+    max_serve_width: int = 4096
+    trail_max_points: int = 500
+
+
+@dataclass(frozen=True)
 class Config:
     """Main configuration class."""
     
@@ -274,6 +285,9 @@ class Config:
     # Whether to use the magnetometer for yaw/heading fusion
     imu_use_magnetometer: bool = False
     
+    # Property map overlay
+    property_map: PropertyMapConfig = PropertyMapConfig()
+
     # Debug settings
     log_imu_data: bool = False
 

@@ -77,6 +77,7 @@ class RecordingTelemetry:
     gps_fix: int | None = None
     gps_sats: int | None = None
     gps_hdop: float | None = None
+    imu_heading_deg: float | None = None
 
 
 # ---------------------------------------------------------------------------

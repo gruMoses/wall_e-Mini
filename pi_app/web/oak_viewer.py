@@ -121,6 +121,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <header>
   <h1>WALL-E Mini — OAK-D Live</h1>
   <div class="hdr-right">
+    <a href="/map" class="nav-link">Map</a>
     <a href="/calibrate" class="nav-link">Calibrate</a>
     <span id="rec-badge" class="rec-badge rec-idle">IDLE</span>
   </div>
@@ -483,6 +484,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None) -> Flask:
                     "gps_fix": t.gps_fix,
                     "gps_sats": t.gps_sats,
                     "gps_hdop": round(t.gps_hdop, 2) if t.gps_hdop is not None else None,
+                    "imu_heading_deg": round(t.imu_heading_deg, 1) if t.imu_heading_deg is not None else None,
                 }
                 yield f"data: {json.dumps(obj)}\n\n"
             telemetry_hz = max(0.5, float(getattr(config, "telemetry_hz", 4.0)))
@@ -593,6 +595,17 @@ class OakWebViewer:
                 logger.info("Calibration wizard registered at /calibrate")
             except Exception:
                 logger.exception("Calibration wizard failed to load — skipping")
+
+            try:
+                from pi_app.web.property_map import create_map_blueprint
+                map_bp = create_map_blueprint(
+                    recorder=self._recorder,
+                    controller=self._controller,
+                )
+                app.register_blueprint(map_bp)
+                logger.info("Property map registered at /map")
+            except Exception:
+                logger.exception("Property map failed to load — skipping")
 
             app.run(
                 host=self._config.host,
