@@ -74,6 +74,8 @@ class FollowMeController:
         self._pursuit_lookahead_x: float = 0.0
         self._pursuit_lookahead_y: float = 0.0
         self._trail_length: int = 0
+        self._curvature_at_lookahead: float = 0.0
+        self._speed_limited: bool = False
 
         if self._trail_enabled:
             self._odometry = DeadReckonOdometry(
@@ -84,13 +86,23 @@ class FollowMeController:
                 min_spacing_m=getattr(config, "trail_min_spacing_m", 0.3),
                 max_age_s=getattr(config, "trail_max_age_s", 30.0),
                 consume_radius_m=getattr(config, "trail_consume_radius_m", 0.4),
+                smoothing_enabled=getattr(config, "trail_smoothing_enabled", True),
+                smoothing_window=getattr(config, "trail_smoothing_window", 5),
+                smoothing_poly_order=getattr(config, "trail_smoothing_poly_order", 2),
             ))
             self._pursuit = PurePursuitController(PursuitConfig(
-                lookahead_base_m=getattr(config, "pursuit_lookahead_base_m", 1.0),
-                lookahead_speed_scale=getattr(config, "pursuit_lookahead_speed_scale", 0.005),
+                lookahead_time_s=getattr(config, "pursuit_lookahead_time_s", 0.8),
+                lookahead_min_m=getattr(config, "pursuit_lookahead_min_m", 0.5),
+                lookahead_max_m=getattr(config, "pursuit_lookahead_max_m", 2.5),
+                speed_scale_mps_per_byte=getattr(config, "trail_speed_scale_mps_per_byte", 0.0016),
                 wheelbase_m=getattr(config, "pursuit_wheelbase_m", 0.28),
                 max_steer_byte=getattr(config, "max_steer_offset_byte", 15.0),
                 max_speed_byte=float(config.max_follow_speed_byte),
+                curvature_scaling_enabled=getattr(config, "pursuit_curvature_scaling_enabled", True),
+                curvature_alpha=getattr(config, "pursuit_curvature_alpha", 5.0),
+                min_speed_byte=getattr(config, "pursuit_min_speed_byte", 15.0),
+                lookahead_curvature_points=getattr(config, "pursuit_lookahead_curvature_points", 5),
+                max_accel_byte_per_s=getattr(config, "pursuit_max_accel_byte_per_s", 50.0),
             ))
 
     def update_pose(self, heading_deg: float, motor_l: int, motor_r: int,
@@ -171,7 +183,7 @@ class FollowMeController:
 
         if (self._trail_enabled and self._pursuit is not None
                 and self._odometry is not None and self._trail is not None):
-            trail_pts = self._trail.get_trail()
+            trail_pts = self._trail.get_smoothed_trail()
             self._trail_length = len(trail_pts)
             min_pts = getattr(self._cfg, "min_trail_points_for_pursuit", 2)
             direct_dist = getattr(self._cfg, "direct_pursuit_distance_m", 2.0)
@@ -197,13 +209,21 @@ class FollowMeController:
 
             if len(trail_pts) >= min_pts and not use_direct:
                 pose = self._odometry.pose
-                cmd = self._pursuit.compute(pose, trail_pts, speed_offset)
+                # Use smoothed trail and curvature for better tracking
+                smoothed = self._trail.get_smoothed_trail()
+                curvatures = TrailManager.compute_curvatures(smoothed)
+                cmd = self._pursuit.compute(
+                    pose, smoothed, speed_offset,
+                    curvatures=curvatures, now=now,
+                )
                 if cmd is not None:
                     use_trail = True
                     self._pursuit_mode = "trail"
                     self._last_pursuit_mode = "trail"
                     self._pursuit_lookahead_x = cmd.lookahead_x
                     self._pursuit_lookahead_y = cmd.lookahead_y
+                    self._curvature_at_lookahead = cmd.curvature_at_lookahead
+                    self._speed_limited = cmd.speed_limited
                     return cmd.steer_byte
 
         # Direct pursuit fallback: PD on lateral offset
@@ -245,14 +265,18 @@ class FollowMeController:
             if (self._trail_enabled and self._pursuit is not None
                     and self._odometry is not None and self._trail is not None
                     and elapsed < trail_max_s):
-                trail_pts = self._trail.get_trail()
+                trail_pts = self._trail.get_smoothed_trail()
                 self._trail_length = len(trail_pts)
                 min_pts = getattr(self._cfg, "min_trail_points_for_pursuit", 2)
                 if len(trail_pts) >= min_pts:
                     pose = self._odometry.pose
                     fwd = max(self._last_speed_offset * 0.5,
                               self._MIN_LOST_TARGET_SPEED)
-                    cmd = self._pursuit.compute(pose, trail_pts, fwd)
+                    curvatures = TrailManager.compute_curvatures(trail_pts)
+                    cmd = self._pursuit.compute(
+                        pose, trail_pts, fwd,
+                        curvatures=curvatures, now=now,
+                    )
                     if cmd is not None:
                         self._pursuit_mode = "trail"
                         self._pursuit_lookahead_x = cmd.lookahead_x
@@ -293,6 +317,8 @@ class FollowMeController:
         self._last_pursuit_mode = "direct"
         if self._trail is not None:
             self._trail.clear()
+        if self._pursuit is not None:
+            self._pursuit.reset()
         if self._odometry is not None:
             self._odometry.reset()
         return NEUTRAL, NEUTRAL
@@ -350,6 +376,8 @@ class FollowMeController:
             status["trail_length"] = self._trail_length
             status["trail_lookahead_x"] = self._pursuit_lookahead_x
             status["trail_lookahead_y"] = self._pursuit_lookahead_y
+            status["trail_curvature_at_lookahead"] = round(self._curvature_at_lookahead, 4)
+            status["trail_speed_limited"] = self._speed_limited
             if self._odometry is not None:
                 pose = self._odometry.pose
                 status["odom_x"] = round(pose.x, 3)
