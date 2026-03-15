@@ -505,6 +505,9 @@ def run() -> None:
             # Suppress BT extrema debug output to keep CLI clean
             # Get IMU status for display
             imu_status = controller.get_imu_status()
+            # Populate IMU heading in recorder telemetry (for map overlay)
+            if imu_status and imu_status.get('is_available'):
+                rec_telem.imu_heading_deg = imu_status.get('heading_deg')
             # Prepare concise IMU info (heading → target)
             if imu_status and imu_status.get('is_available'):
                 imu_info = f"IMU {imu_status['heading_deg']:.0f}°→{imu_status['target_heading_deg']:.0f}°"

@@ -94,6 +94,7 @@ class RecordingTelemetry:
     gps_hdop: float | None = None
     gps_diff_age_s: float | None = None
     gps_station_id: int | None = None
+    imu_heading_deg: float | None = None
 
 
 # ---------------------------------------------------------------------------
