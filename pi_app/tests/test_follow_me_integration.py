@@ -169,40 +169,24 @@ class TestModeSwitch(unittest.TestCase):
         for i in range(20):
             t += 0.1
             fm.update_pose(heading_deg=0.0, motor_l=160, motor_r=160, timestamp=t)
-            # Person at 4 m -- well above the 2.0 * 1.3 = 2.6 m threshold
-            # needed to switch from direct to trail mode.
             fm.compute([_person(x_m=0.0, z_m=4.0)])
 
-        # After enough cycles with the person far away, the controller should
-        # be in trail mode.
         self.assertEqual(fm._pursuit_mode, "trail",
                          "Controller should be in trail mode after tracking far target")
 
         # Phase 2: Oscillate the person distance around the threshold.
-        # The direct_pursuit_distance_m = 2.0, so 1.9 and 2.1 are just barely
-        # on each side. With hysteresis, once in trail mode, the controller
-        # should only switch to direct when the person is clearly close
-        # (z_m < direct_dist AND |x_m| < direct_lat).
-        # At z_m=2.1 (just above threshold), it should stay in trail mode.
-        # At z_m=1.9 (just below threshold), hysteresis should still keep it
-        # in trail mode because the person needs to be clearly close AND centered.
         mode_history = []
         for i in range(10):
             t += 0.1
             fm.update_pose(heading_deg=0.0, motor_l=160, motor_r=160, timestamp=t)
-            # Oscillate between z_m=1.9 and z_m=2.1
             z = 2.1 if i % 2 == 0 else 1.9
             fm.compute([_person(x_m=0.0, z_m=z)])
             mode_history.append(fm._pursuit_mode)
 
-        # Count mode transitions: should not flip every cycle.
         transitions = sum(
             1 for a, b in zip(mode_history, mode_history[1:]) if a != b
         )
 
-        # With proper hysteresis, oscillating near the threshold should produce
-        # far fewer transitions than the number of cycles. Without hysteresis
-        # it would flip every cycle (9 transitions for 10 entries).
         self.assertLess(transitions, len(mode_history) - 1,
                         f"Too many mode transitions ({transitions}) -- "
                         f"hysteresis should prevent flapping. "

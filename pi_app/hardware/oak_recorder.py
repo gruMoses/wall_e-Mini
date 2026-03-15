@@ -75,6 +75,11 @@ class RecordingTelemetry:
     yaw_rate_dps: float | None = None
     pursuit_mode: str | None = None
     trail_length: int | None = None
+    trail_distance_m: float | None = None
+    trail_rejected_jump_count: int | None = None
+    trail_rejected_speed_count: int | None = None
+    follow_target_world_x: float | None = None
+    follow_target_world_y: float | None = None
     odom_x: float | None = None
     odom_y: float | None = None
     odom_theta_deg: float | None = None
@@ -755,6 +760,17 @@ class OakRecorder:
         if t.pursuit_mode is not None:
             obj["pursuit_mode"] = t.pursuit_mode
             obj["trail_length"] = t.trail_length or 0
+        if t.trail_distance_m is not None:
+            obj["trail_distance_m"] = round(t.trail_distance_m, 2)
+        if t.trail_rejected_jump_count is not None:
+            obj["trail_rejected_jump_count"] = int(t.trail_rejected_jump_count)
+        if t.trail_rejected_speed_count is not None:
+            obj["trail_rejected_speed_count"] = int(t.trail_rejected_speed_count)
+        if t.follow_target_world_x is not None and t.follow_target_world_y is not None:
+            obj["follow_target_world"] = {
+                "x": round(t.follow_target_world_x, 3),
+                "y": round(t.follow_target_world_y, 3),
+            }
         if t.odom_x is not None:
             obj["odom"] = {
                 "x": round(t.odom_x, 3),

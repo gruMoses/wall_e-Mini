@@ -377,6 +377,9 @@ class Controller:
             heading = 0.0
             if self._imu_compensator is not None:
                 try:
+                    dt = mono_now - self._last_imu_update
+                    self._imu_compensator.update(0.0, max(dt, 0.001))
+                    self._last_imu_update = mono_now
                     heading = self._imu_compensator.get_status().heading_deg
                 except Exception:
                     pass
