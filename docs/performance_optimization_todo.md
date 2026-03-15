@@ -1,6 +1,6 @@
 # WALL-E Mini Unified Roadmap & TODO
 
-Last updated: 2026-03-03  
+Last updated: 2026-03-15  
 Scope: Single source of truth for active engineering work and prioritized enhancements.
 
 ## Current Status
@@ -37,6 +37,25 @@ Scope: Single source of truth for active engineering work and prioritized enhanc
 - [ ] Tilt protection governor (roll/pitch-based speed reduction + hard stop at extreme tilt)
 
 ### P2 (Medium-High Impact)
+
+- [ ] **Trail-following steering: heading-noise contaminates breadcrumbs**
+  - Root cause: `camera_to_world` projects `(x_cam, z_cam)` through the instantaneous IMU heading. At 3 m range, ±5° of heading noise creates ±0.26 m lateral scatter in crumb world-y positions. A 20° heading drift manufactures a ~1 m phantom curve in the trail that pure pursuit follows instead of the person's actual path.
+  - **Option 1 — Log-replay simulator (do first).**
+    Build an offline replay harness that reads a real `.log` file and feeds recorded `heading_deg`, `target_z_m`, `target_x_m`, and motor bytes through `FollowMeController` tick-by-tick. Dump computed trail crumbs, lookahead point, and steer per cycle. Enables rapid parameter / algorithm iteration without the robot. Would have caught the sign bug in minutes.
+  - **Option 2 — 2D physics simulator.**
+    Add differential-drive kinematics (motor bytes → heading rate + forward velocity). Define synthetic person trajectories (straight + left turn, right turn, U-turn, walk around obstacle). Inject configurable IMU noise. Generate synthetic camera detections from known person position. Run `FollowMeController` in the loop, plot robot vs person path, and score tracking accuracy. Enables parameter sweeps and regression tests on scenarios we haven't physically run.
+  - **Option 3 — Noise-immune trail crumbs (the algorithmic fix).**
+    Use the simulator to validate before deploying. Candidate approaches:
+    - EMA-filtered heading for crumb projection (smooth out high-frequency noise).
+    - Lay crumbs based on person bearing angle rather than full world projection (heading-noise-immune for lateral position).
+    - Use the trail's own accumulated direction as the heading reference instead of the noisy IMU, at least for the lateral component.
+    - Reject crumbs whose lateral position jumps more than expected given the person's camera-frame movement between frames.
+
+- [ ] **OAK camera staleness recovery (USB disconnect / no auto-reconnect)**
+  - Root cause: when OAK-D USB disconnects (power/cable/hub), device re-enumerates but the running process keeps the old device handle; depth/detection queues stop receiving frames → `oak_camera_health` goes stale; only recovery today is restarting the service.
+  - Add staleness-based recovery: if `oak_camera_health.is_stale` and e.g. `depth_recv_age_s > 60`, optionally restart the OAK reader thread (stop pipeline, reopen device, restart pipeline) so the process reconnects to the device without a full service restart.
+  - Log the first transition to stale (e.g. once per run) with `depth_recv_age_s` and a note that USB disconnect is likely.
+  - Optional: watch dmesg or udev for OAK USB disconnect and trigger OAK restart or service restart.
 
 - [ ] Backlash compensation
   - measurement pre-step + compensator strategy (pulse/dead-zone inverse/hysteresis)

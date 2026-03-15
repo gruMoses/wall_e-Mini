@@ -189,19 +189,12 @@ class FollowMeController:
             direct_dist = getattr(self._cfg, "direct_pursuit_distance_m", 2.0)
             direct_lat = getattr(self._cfg, "direct_pursuit_lateral_m", 0.3)
 
-            # Hysteresis: use different thresholds for entering vs exiting
-            # trail mode to avoid flip-flopping when person oscillates near
-            # the threshold boundary.
             if self._last_pursuit_mode == "trail":
-                # Currently in trail mode — switch to direct only when
-                # person is clearly close AND centered (tighter thresholds).
                 use_direct = (
                     target.z_m < direct_dist
                     and abs(target.x_m) < direct_lat
                 )
             else:
-                # Currently in direct mode — switch to trail only when
-                # person is clearly far OR off-center (wider thresholds).
                 use_direct = not (
                     target.z_m > direct_dist * 1.3
                     or abs(target.x_m) > direct_lat * 1.5

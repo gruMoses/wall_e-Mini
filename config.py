@@ -140,7 +140,7 @@ class FollowMeConfig:
     trail_max_step_m: float = 1.2             # reject impossible breadcrumb jumps
     trail_max_speed_mps: float = 2.5          # reject implausible point-to-point speed
     pursuit_lookahead_base_m: float = 1.0
-    pursuit_lookahead_speed_scale: float = 0.0015
+    pursuit_lookahead_speed_scale: float = 0.019   # speed-adaptive: ~2.5m at full speed (reaches curve), ~1.1m when slow (tight corners)
     pursuit_wheelbase_m: float = 0.7              # increase trail-mode turn authority (latest run under-steered)
     direct_pursuit_distance_m: float = 2.0        # switch to trail mode sooner (safer around turns/obstacles)
     direct_pursuit_lateral_m: float = 0.7         # switch to trail sooner on lateral moves (less immediate cut-in turning)
