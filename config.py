@@ -139,12 +139,27 @@ class FollowMeConfig:
     trail_consume_radius_m: float = 0.4
     trail_max_step_m: float = 1.2             # reject impossible breadcrumb jumps
     trail_max_speed_mps: float = 2.5          # reject implausible point-to-point speed
-    pursuit_lookahead_base_m: float = 1.0
-    pursuit_lookahead_speed_scale: float = 0.019   # speed-adaptive: ~2.5m at full speed (reaches curve), ~1.1m when slow (tight corners)
-    pursuit_wheelbase_m: float = 0.7              # increase trail-mode turn authority (latest run under-steered)
-    direct_pursuit_distance_m: float = 2.0        # switch to trail mode sooner (safer around turns/obstacles)
-    direct_pursuit_lateral_m: float = 0.7         # switch to trail sooner on lateral moves (less immediate cut-in turning)
+    pursuit_wheelbase_m: float = 0.28             # track width wheel-to-wheel
+    direct_pursuit_distance_m: float = 3.5        # keep direct pursuit active longer for gentle-turn tracking
+    direct_pursuit_lateral_m: float = 1.0         # allow larger lateral offset before switching to trail mode
     min_trail_points_for_pursuit: int = 2
+
+    # Adaptive lookahead: lookahead = clamp(speed_mps * time_s, min_m, max_m)
+    pursuit_lookahead_time_s: float = 0.8
+    pursuit_lookahead_min_m: float = 0.5
+    pursuit_lookahead_max_m: float = 2.5
+
+    # Trail path smoothing (Savitzky-Golay)
+    trail_smoothing_enabled: bool = True
+    trail_smoothing_window: int = 5               # must be odd, >= 3
+    trail_smoothing_poly_order: int = 2           # must be < window
+
+    # Curvature-based velocity scaling
+    pursuit_curvature_scaling_enabled: bool = True
+    pursuit_curvature_alpha: float = 5.0          # higher = more deceleration in turns
+    pursuit_min_speed_byte: float = 15.0          # floor speed in tight turns
+    pursuit_lookahead_curvature_points: int = 5   # look ahead for pre-deceleration
+    pursuit_max_accel_byte_per_s: float = 50.0    # smooth speed transitions
 
 
 @dataclass(frozen=True)
