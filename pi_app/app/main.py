@@ -657,6 +657,8 @@ def run() -> None:
                             "odom_x": telem.get("odom_x"),
                             "odom_y": telem.get("odom_y"),
                             "odom_theta_deg": telem.get("odom_theta_deg"),
+                            "odom_source": telem.get("odom_source"),
+                            "gps_speed_mps": telem.get("gps_speed_mps"),
                             "confidence": telem.get("follow_me_target_confidence"),
                             "num_detections": telem.get("follow_me_num_detections"),
                         }),

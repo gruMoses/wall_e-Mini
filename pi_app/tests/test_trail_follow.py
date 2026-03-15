@@ -174,7 +174,7 @@ class TestTrailManager(unittest.TestCase):
         self.assertNotIn(-0.2, xs)
 
     def test_trail_distance(self):
-        cfg = TrailConfig(min_spacing_m=0.01)
+        cfg = TrailConfig(min_spacing_m=0.01, max_step_m=10.0, max_speed_mps=20.0)
         mgr = TrailManager(cfg)
         mgr.add_point(0.0, 0.0, 0.0)
         mgr.add_point(3.0, 0.0, 1.0)

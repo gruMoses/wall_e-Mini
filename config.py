@@ -116,9 +116,9 @@ class FollowMeConfig:
     follow_distance_m: float = 1.5
     min_distance_m: float = 0.5
     max_distance_m: float = 6.0
-    max_speed_error_m: float = 2.5   # distance error at which max speed is reached (decoupled from detection range)
+    max_speed_error_m: float = 1.5   # distance error at which max speed is reached — tighter = more aggressive closing
     max_follow_speed_byte: int = 115
-    steering_gain: float = 0.35
+    steering_gain: float = 0.50
     steering_derivative_gain: float = 0.06  # calibrated from Phase 2 plant model
     steering_ema_alpha: float = 0.3        # smooths x_m before derivative (0=heavy, 1=none)
     detection_confidence: float = 0.5
@@ -126,9 +126,9 @@ class FollowMeConfig:
     # Allow continued blind trail pursuit longer than short target-drop timeout.
     # This is the key behavior needed to keep moving around corners after LOS loss.
     lost_target_trail_pursuit_max_s: float = 8.0
-    lost_target_search_steer_pct: float = 0.25  # fraction of max_follow_speed_byte for search turn
+    lost_target_search_steer_pct: float = 0.40  # fraction of max_follow_speed_byte for search turn
     max_steer_delta_per_s: float = 35.0          # steering differential slew limit (bytes/s)
-    max_steer_offset_byte: float = 15.0          # ~22 deg/s max turn — handles direction changes
+    max_steer_offset_byte: float = 25.0          # increased from 15 — lets robot turn harder to keep person in FOV
 
     # Trail-following Pure Pursuit (breadcrumb path instead of direct pursuit)
     trail_follow_enabled: bool = True
@@ -137,10 +137,10 @@ class FollowMeConfig:
     trail_min_spacing_m: float = 0.3
     trail_max_age_s: float = 30.0
     trail_consume_radius_m: float = 0.4
-    trail_max_step_m: float = 1.2             # reject impossible breadcrumb jumps
-    trail_max_speed_mps: float = 2.5          # reject implausible point-to-point speed
+    trail_max_step_m: float = 3.0             # reject impossible breadcrumb jumps (robot+person both moving)
+    trail_max_speed_mps: float = 30.0         # effectively disabled — GPS 1Hz jumps cause false rejections; max_step_m=3.0 catches real outliers
     pursuit_wheelbase_m: float = 0.28             # track width wheel-to-wheel
-    direct_pursuit_distance_m: float = 3.5        # keep direct pursuit active longer for gentle-turn tracking
+    direct_pursuit_distance_m: float = 2.5        # switch to trail pursuit sooner for better path tracking
     direct_pursuit_lateral_m: float = 1.0         # allow larger lateral offset before switching to trail mode
     min_trail_points_for_pursuit: int = 2
 
@@ -160,6 +160,16 @@ class FollowMeConfig:
     pursuit_min_speed_byte: float = 15.0          # floor speed in tight turns
     pursuit_lookahead_curvature_points: int = 5   # look ahead for pre-deceleration
     pursuit_max_accel_byte_per_s: float = 50.0    # smooth speed transitions
+
+    # Trail/direct steering blend: when person is off-center in trail mode,
+    # blend in direct pursuit steering so robot reacts to WHERE the person IS.
+    trail_direct_blend_start_m: float = 0.3  # start blending at this |x| offset
+    trail_direct_blend_full_m: float = 1.5   # 100% direct steering at this |x| offset
+
+    # GPS-based trail odometry (preferred over dead reckoning when RTK fix available)
+    gps_cog_min_speed_mps: float = 0.5        # min speed for GPS COG heading to be trusted
+    gps_heading_alpha: float = 0.85            # complementary filter: higher = trust gyro more
+    gps_cog_min_delta_m: float = 0.05          # min position change to compute COG
 
 
 @dataclass(frozen=True)

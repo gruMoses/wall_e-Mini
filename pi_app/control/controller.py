@@ -386,6 +386,14 @@ class Controller:
             self._follow_me.update_pose(
                 heading, self._slew_last_left, self._slew_last_right, mono_now
             )
+            # Feed GPS position for GPS-based trail odometry
+            if self._gps_reading is not None:
+                self._follow_me.update_gps(
+                    self._gps_reading.latitude,
+                    self._gps_reading.longitude,
+                    self._gps_reading.fix_quality,
+                    self._gps_reading.timestamp,
+                )
             detections = self._person_detections or []
             left, right = self._follow_me.compute(detections)
             steering_input = self._bytes_to_steering_input(left, right)
