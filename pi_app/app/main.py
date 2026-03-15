@@ -671,16 +671,16 @@ def run() -> None:
                              "bbox": [round(b, 3) for b in d.bbox]}
                             for d in oak_persons
                         ] if oak_persons else None,
-                        "gps": round1({
-                            "lat": gps_reading.latitude if gps_reading else None,
-                            "lon": gps_reading.longitude if gps_reading else None,
-                            "alt_m": gps_reading.altitude_m if gps_reading else None,
+                        "gps": {
+                            "lat": round(gps_reading.latitude, 8) if gps_reading else None,
+                            "lon": round(gps_reading.longitude, 8) if gps_reading else None,
+                            "alt_m": round(gps_reading.altitude_m, 1) if gps_reading else None,
                             "fix": gps_reading.fix_quality if gps_reading else None,
                             "sats": gps_reading.satellites_used if gps_reading else None,
-                            "hdop": gps_reading.hdop if gps_reading else None,
-                            "diff_age_s": gps_reading.diff_age_s if gps_reading else None,
+                            "hdop": round(gps_reading.hdop, 2) if gps_reading else None,
+                            "diff_age_s": round(gps_reading.diff_age_s, 1) if gps_reading else None,
                             "station_id": gps_reading.station_id if gps_reading else None,
-                        }),
+                        },
                         "waypoint_nav": round1({
                             "wp_index": telem.get("wp_index"),
                             "wp_total": telem.get("wp_total"),
