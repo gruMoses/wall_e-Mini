@@ -12,6 +12,10 @@ Usage (from repo root):
     python3 tools/replay_follow_me_log.py logs/latest.log --no-gps
 
 Requires: a log produced by app/main.py with mode, imu, motor, follow_me, gps.
+
+Simulation / correctness: `pi_app.tests.test_replay_follow_me_log` includes a round-trip
+test that forward-runs `FollowMeController`, records pseudo-log frames, and asserts
+`replay_run` reproduces the same motor bytes — that validates the harness as a simulator.
 """
 
 from __future__ import annotations
