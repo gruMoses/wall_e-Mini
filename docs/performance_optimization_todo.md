@@ -40,8 +40,8 @@ Scope: Single source of truth for active engineering work and prioritized enhanc
 
 - [ ] **Trail-following steering: heading-noise contaminates breadcrumbs**
   - Root cause: `camera_to_world` projects `(x_cam, z_cam)` through the instantaneous IMU heading. At 3 m range, ±5° of heading noise creates ±0.26 m lateral scatter in crumb world-y positions. A 20° heading drift manufactures a ~1 m phantom curve in the trail that pure pursuit follows instead of the person's actual path.
-  - **Option 1 — Log-replay simulator (do first).**
-    Build an offline replay harness that reads a real `.log` file and feeds recorded `heading_deg`, `target_z_m`, `target_x_m`, and motor bytes through `FollowMeController` tick-by-tick. Dump computed trail crumbs, lookahead point, and steer per cycle. Enables rapid parameter / algorithm iteration without the robot. Would have caught the sign bug in minutes.
+  - [x] **Option 1 — Log-replay simulator**
+    Implemented: `tools/replay_follow_me_log.py`. Reads structured JSON logs, replays each FOLLOW_ME segment through `FollowMeController` with `time.monotonic` mapped to log timestamps, optional GPS replay, and compares replayed `speed_offset` / `steer_offset` to logged values. Use `--list-runs`, `--run N`, `--csv`, `--no-gps`. Large logs can take tens of seconds to scan.
   - **Option 2 — 2D physics simulator.**
     Add differential-drive kinematics (motor bytes → heading rate + forward velocity). Define synthetic person trajectories (straight + left turn, right turn, U-turn, walk around obstacle). Inject configurable IMU noise. Generate synthetic camera detections from known person position. Run `FollowMeController` in the loop, plot robot vs person path, and score tracking accuracy. Enables parameter sweeps and regression tests on scenarios we haven't physically run.
   - **Option 3 — Noise-immune trail crumbs (the algorithmic fix).**
