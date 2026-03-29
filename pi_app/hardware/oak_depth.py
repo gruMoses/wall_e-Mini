@@ -173,6 +173,7 @@ class OakDepthReader:
         self._depth_stats_decimation = 3
         self._depth_stats_counter = 0
         self._rgb_poll_enabled = False
+        self._rgb_always_poll = False  # set True for YOLO (passthrough monitoring)
         self._imu_poll_interval_s = 1.0 / max(1.0, float(imu_poll_hz))
         mode = str(imu_packet_mode or "latest").strip().lower()
         self._imu_packet_mode = mode if mode in ("latest", "bounded") else "latest"
@@ -504,9 +505,10 @@ class OakDepthReader:
                 dp.setAnchors([])      # anchor-free (YOLOv8)
                 dp.setAnchorMasks({})  # anchor-free (YOLOv8)
                 dp.setIouThreshold(_det_cfg.nms_threshold)
-                cam_rgb.requestOutput(
+                _yolo_cam_out = cam_rgb.requestOutput(
                     (_det_cfg.input_size, _det_cfg.input_size), dai.ImgFrame.Type.BGR888p
-                ).link(spatial_nn.input)
+                )
+                _yolo_cam_out.link(spatial_nn.input)
                 stereo.depth.link(spatial_nn.inputDepth)
                 logger.info(
                     "OAK-D: using YOLOv8n (detectionParser: classes=80 coordSize=4 iou=%.2f, %s, conf=%.2f, input=%dpx)",
@@ -585,9 +587,17 @@ class OakDepthReader:
 
             # Preview feed -- when hand tracking is active the preview queue
             # comes from _build_hand_tracking_nodes (shared camera output).
+            # For YOLO, bind to spatial_nn.passthrough instead of a raw camera
+            # output: passthrough only emits when the NN has processed a frame,
+            # so rgb_stale becomes a live indicator that camera→NN delivery works.
             if not gesture_enabled:
-                rgb_preview_out = cam_rgb.requestOutput((640, 480))
-                rgb_preview_q = rgb_preview_out.createOutputQueue(maxSize=1, blocking=False)
+                if _use_yolo:
+                    rgb_preview_q = spatial_nn.passthrough.createOutputQueue(maxSize=1, blocking=False)
+                    with self._lock:
+                        self._rgb_always_poll = True
+                else:
+                    rgb_preview_out = cam_rgb.requestOutput((640, 480))
+                    rgb_preview_q = rgb_preview_out.createOutputQueue(maxSize=1, blocking=False)
             else:
                 rgb_preview_q = None  # set below after hand pipeline build
 
@@ -666,7 +676,7 @@ class OakDepthReader:
                 if hand_queues is not None:
                     self._poll_hand(hand_queues)
                 with self._lock:
-                    rgb_enabled = self._rgb_poll_enabled
+                    rgb_enabled = self._rgb_poll_enabled or self._rgb_always_poll
                 if rgb_enabled and rgb_preview_q is not None:
                     self._poll_rgb(rgb_preview_q)
                 # IMU polling can run at a different cadence than depth polling.
