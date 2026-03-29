@@ -431,6 +431,8 @@ class OakDepthReader:
                 # Extended disparity halves the minimum detectable range (0.35 m vs 0.7 m)
                 # which helps catch close-range obstacles and improves near-field Follow Me.
                 stereo.setExtendedDisparity(True)
+                # Align depth map to RGB camera so bounding-box spatial positions are correct.
+                stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
             mono_left.requestOutput((640, 400)).link(stereo.left)
             mono_right.requestOutput((640, 400)).link(stereo.right)
 
