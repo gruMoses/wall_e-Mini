@@ -505,8 +505,12 @@ class OakDepthReader:
                 dp.setAnchors([])      # anchor-free (YOLOv8)
                 dp.setAnchorMasks({})  # anchor-free (YOLOv8)
                 dp.setIouThreshold(_det_cfg.nms_threshold)
+                # Do NOT specify a frame type: requesting explicit BGR888p at
+                # 416x416 causes the ISP to silently produce no frames on some
+                # depthai v3 builds, starving the NN.  Let the ISP use its
+                # default format; the Myriad X NN runtime handles conversion.
                 _yolo_cam_out = cam_rgb.requestOutput(
-                    (_det_cfg.input_size, _det_cfg.input_size), dai.ImgFrame.Type.BGR888p
+                    (_det_cfg.input_size, _det_cfg.input_size)
                 )
                 _yolo_cam_out.link(spatial_nn.input)
                 stereo.depth.link(spatial_nn.inputDepth)
