@@ -467,23 +467,52 @@ class OakDepthReader:
 
             if _use_yolo:
                 _blob = _det_cfg.model_path
-                model_desc = (
-                    dai.NNModelDescription(modelPath=str(_blob), platform="RVC2")
-                    if _blob
-                    else dai.NNModelDescription(model="yolov8n", platform="RVC2")
-                )
-                logger.info(
-                    "OAK-D: using YOLOv8n (%s, conf=%.2f, nms=%.2f, input=%dpx)",
-                    _blob or "model-hub", _det_cfg.confidence_threshold,
-                    _det_cfg.nms_threshold, _det_cfg.input_size,
-                )
+                # Luxonis Hub slug for YOLOv8n (Myriad X / RVC2 compatible)
+                _hub_slug = "yolov8n_coco_640x352"
+                try:
+                    model_desc = (
+                        dai.NNModelDescription(modelPath=str(_blob), platform="RVC2")
+                        if _blob
+                        else dai.NNModelDescription(model=_hub_slug, platform="RVC2")
+                    )
+                    logger.info(
+                        "OAK-D: using YOLOv8n (%s, conf=%.2f, nms=%.2f, input=%dpx)",
+                        _blob or _hub_slug, _det_cfg.confidence_threshold,
+                        _det_cfg.nms_threshold, _det_cfg.input_size,
+                    )
+                except Exception:
+                    logger.warning(
+                        "YOLOv8n model load failed (%s); falling back to MobileNet-SSD",
+                        _blob or _hub_slug, exc_info=True,
+                    )
+                    _use_yolo = False
+                    with self._lock:
+                        self._person_label = PERSON_LABEL
+                    model_desc = dai.NNModelDescription(model="mobilenet-ssd", platform="RVC2")
+                    logger.info("OAK-D: falling back to MobileNet-SSD")
             else:
                 model_desc = dai.NNModelDescription(model="mobilenet-ssd", platform="RVC2")
                 logger.info("OAK-D: using MobileNet-SSD (legacy)")
 
-            spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork).build(
-                cam_rgb, stereo, model_desc,
-            )
+            try:
+                spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork).build(
+                    cam_rgb, stereo, model_desc,
+                )
+            except Exception:
+                if _use_yolo:
+                    logger.warning(
+                        "YOLOv8n SpatialDetectionNetwork build failed; falling back to MobileNet-SSD",
+                        exc_info=True,
+                    )
+                    _use_yolo = False
+                    with self._lock:
+                        self._person_label = PERSON_LABEL
+                    model_desc = dai.NNModelDescription(model="mobilenet-ssd", platform="RVC2")
+                    spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork).build(
+                        cam_rgb, stereo, model_desc,
+                    )
+                else:
+                    raise
             if _use_yolo:
                 spatial_nn.setConfidenceThreshold(_det_cfg.confidence_threshold)
                 # NMS threshold setter name varies across depthai releases
