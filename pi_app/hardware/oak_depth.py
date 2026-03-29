@@ -493,23 +493,25 @@ class OakDepthReader:
                         self._person_label = PERSON_LABEL
 
             if _use_yolo:
-                # YoloSpatialDetectionNetwork correctly decodes YOLOv8 anchor-free
-                # output [1, 84, 8400]. SpatialDetectionNetwork is SSD-only and
-                # produces zero detections with YOLO blobs.
-                spatial_nn = pipeline.create(dai.node.YoloSpatialDetectionNetwork)
+                # depthai v3: SpatialDetectionNetwork.detectionParser defaults to
+                # NNFamily=YOLO but leaves NumClasses=0/CoordinateSize=0/IouThreshold=0.0
+                # which silently produces zero detections. Must configure the parser.
+                spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork)
                 spatial_nn.setBlobPath(str(_blob_abs))
-                spatial_nn.setNumClasses(80)
-                spatial_nn.setCoordinateSize(4)
-                spatial_nn.setAnchors([])      # anchor-free (YOLOv8)
-                spatial_nn.setAnchorMasks({})  # anchor-free (YOLOv8)
+                dp = spatial_nn.detectionParser
+                dp.setNumClasses(80)
+                dp.setCoordinateSize(4)
+                dp.setAnchors([])      # anchor-free (YOLOv8)
+                dp.setAnchorMasks({})  # anchor-free (YOLOv8)
+                dp.setIouThreshold(_det_cfg.nms_threshold)
                 cam_rgb.requestOutput(
                     (_det_cfg.input_size, _det_cfg.input_size), dai.ImgFrame.Type.BGR888p
                 ).link(spatial_nn.input)
                 stereo.depth.link(spatial_nn.inputDepth)
                 logger.info(
-                    "OAK-D: using YOLOv8n via YoloSpatialDetectionNetwork (%s, conf=%.2f, nms=%.2f, input=%dpx)",
-                    _blob_abs, _det_cfg.confidence_threshold,
-                    _det_cfg.nms_threshold, _det_cfg.input_size,
+                    "OAK-D: using YOLOv8n (detectionParser: classes=80 coordSize=4 iou=%.2f, %s, conf=%.2f, input=%dpx)",
+                    _det_cfg.nms_threshold, _blob_abs,
+                    _det_cfg.confidence_threshold, _det_cfg.input_size,
                 )
             else:
                 model_desc = dai.NNModelDescription(
