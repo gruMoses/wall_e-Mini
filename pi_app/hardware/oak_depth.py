@@ -25,13 +25,14 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from config import ObstacleAvoidanceConfig, FollowMeConfig, GestureConfig, OakRecordingConfig
+from config import ObstacleAvoidanceConfig, FollowMeConfig, GestureConfig, OakRecordingConfig, OakDetectionConfig
 from pi_app.control.follow_me import PersonDetection
 from pi_app.control.gesture_control import HandData
 
 logger = logging.getLogger(__name__)
 
-PERSON_LABEL = 15  # MobileNet-SSD label index for "person"
+PERSON_LABEL = 15       # MobileNet-SSD VOC label index for "person"
+YOLO_PERSON_LABEL = 0   # YOLOv8 COCO label index for "person"
 
 _HAND_MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "hand"
 _HAND_SCRIPT_TEMPLATE = _HAND_MODELS_DIR / "hand_tracker_script.py"
@@ -109,6 +110,24 @@ class _ImuMetrics:
     warning_emits: int = 0
 
 
+@dataclass
+class ObjectDetection:
+    """Single detection from YOLOv8 (or MobileNet) with spatial coordinates."""
+    label: int
+    label_name: str
+    confidence: float
+    x_m: float        # lateral offset in metres (positive = right of robot)
+    z_m: float        # forward distance in metres
+    bbox: tuple       # (xmin, ymin, xmax, ymax) normalised 0-1
+    safety_tier: str  # "stop", "slow", or "log"
+
+
+@dataclass
+class _AllDetsState:
+    detections: list  # list[ObjectDetection]
+    timestamp: float = 0.0
+
+
 class OakDepthReader:
     """Background OAK-D Lite reader following the ArduinoRCReader thread pattern."""
 
@@ -121,19 +140,25 @@ class OakDepthReader:
         imu_poll_hz: float = 60.0,
         imu_packet_mode: str = "latest",
         imu_max_packets_per_poll: int = 4,
+        detection_config: OakDetectionConfig | None = None,
     ) -> None:
         self._obs_cfg = obstacle_config
         self._fm_cfg = follow_me_config
         self._rec_cfg = recording_config
         self._gesture_cfg = gesture_config
+        self._det_cfg = detection_config
 
         self._depth_state = _DepthState()
         self._det_state = _DetectionState(persons=[])
+        self._all_dets_state = _AllDetsState(detections=[])
         self._rgb_state = _RgbState()
         self._hand_state = _HandState()
         self._lm_net = None  # lazy-loaded OpenCV DNN for host-side LM
         self._imu_state = _ImuState()
         self._imu_metrics = _ImuMetrics()
+        # Person label index depends on the active model
+        _model_type = detection_config.model_type if detection_config is not None else "mobilenet-ssd"
+        self._person_label: int = YOLO_PERSON_LABEL if _model_type == "yolov8n" else PERSON_LABEL
         self._imu_prev_consumed_ts = 0.0
         self._imu_last_warn_ts = 0.0
         self._lock = threading.Lock()
@@ -225,6 +250,16 @@ class OakDepthReader:
         """Return latest hand landmark data or None. Thread-safe."""
         with self._lock:
             return self._hand_state.hand_data
+
+    def get_all_detections(self) -> list:
+        """Return all latest object detections (all classes) as list[ObjectDetection].
+
+        Each entry includes a safety_tier field ("stop", "slow", "log") based on
+        OakDetectionConfig.stop_class_ids / slow_class_ids.  Useful for detection-based
+        obstacle awareness beyond the depth-ROI approach.  Thread-safe.
+        """
+        with self._lock:
+            return list(self._all_dets_state.detections)
 
     def set_rgb_poll_enabled(self, enabled: bool) -> None:
         """Enable/disable host RGB preview polling to reduce host copy load."""
@@ -378,6 +413,12 @@ class OakDepthReader:
         try:
             pipeline = dai.Pipeline()
 
+            # Determine model type early — affects stereo and NN config.
+            _det_cfg = self._det_cfg
+            _use_yolo = (
+                _det_cfg is not None and _det_cfg.model_type == "yolov8n"
+            )
+
             cam_rgb = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
             mono_left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
             mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
@@ -386,6 +427,10 @@ class OakDepthReader:
             stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.DENSITY)
             stereo.setLeftRightCheck(True)
             stereo.setOutputSize(640, 400)
+            if _use_yolo:
+                # Extended disparity halves the minimum detectable range (0.35 m vs 0.7 m)
+                # which helps catch close-range obstacles and improves near-field Follow Me.
+                stereo.setExtendedDisparity(True)
             mono_left.requestOutput((640, 400)).link(stereo.left)
             mono_right.requestOutput((640, 400)).link(stereo.right)
 
@@ -420,14 +465,38 @@ class OakDepthReader:
             spatial_calc.initialConfig.addROI(spatial_med_cfg)
             stereo.depth.link(spatial_calc.inputDepth)
 
-            model_desc = dai.NNModelDescription(model="mobilenet-ssd", platform="RVC2")
+            if _use_yolo:
+                _blob = _det_cfg.model_path
+                model_desc = (
+                    dai.NNModelDescription(modelPath=str(_blob), platform="RVC2")
+                    if _blob
+                    else dai.NNModelDescription(model="yolov8n", platform="RVC2")
+                )
+                logger.info(
+                    "OAK-D: using YOLOv8n (%s, conf=%.2f, nms=%.2f, input=%dpx)",
+                    _blob or "model-hub", _det_cfg.confidence_threshold,
+                    _det_cfg.nms_threshold, _det_cfg.input_size,
+                )
+            else:
+                model_desc = dai.NNModelDescription(model="mobilenet-ssd", platform="RVC2")
+                logger.info("OAK-D: using MobileNet-SSD (legacy)")
+
             spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork).build(
                 cam_rgb, stereo, model_desc,
             )
-            spatial_nn.setConfidenceThreshold(self._fm_cfg.detection_confidence)
+            if _use_yolo:
+                spatial_nn.setConfidenceThreshold(_det_cfg.confidence_threshold)
+                # NMS threshold setter name varies across depthai releases
+                for _nms_setter in ("setNMSThreshold", "setNmsThreshold", "setIouThreshold"):
+                    if hasattr(spatial_nn, _nms_setter):
+                        getattr(spatial_nn, _nms_setter)(_det_cfg.nms_threshold)
+                        break
+            else:
+                spatial_nn.setConfidenceThreshold(self._fm_cfg.detection_confidence)
             spatial_nn.setNumInferenceThreads(1)
             spatial_nn.setNumShavesPerInferenceThread(4)
             spatial_nn.input.setBlocking(False)
+            # Scale factor 0.5-0.7 avoids background depth contamination on bounding box edges
             spatial_nn.setBoundingBoxScaleFactor(0.5)
             spatial_nn.setDepthLowerThreshold(int(self._fm_cfg.min_distance_m * 1000))
             spatial_nn.setDepthUpperThreshold(int(self._fm_cfg.max_distance_m * 1000))
@@ -452,7 +521,7 @@ class OakDepthReader:
             else:
                 try:
                     object_tracker = pipeline.create(dai.node.ObjectTracker)
-                    object_tracker.setDetectionLabelsToTrack([PERSON_LABEL])
+                    object_tracker.setDetectionLabelsToTrack([self._person_label])
                     object_tracker.setTrackerType(dai.TrackerType.SHORT_TERM_IMAGELESS)
                     object_tracker.setTrackerIdAssignmentPolicy(dai.TrackerIdAssignmentPolicy.SMALLEST_ID)
 
@@ -821,8 +890,38 @@ class OakDepthReader:
                 self._last_depth_error_msg = self._format_err("poll_depth", e)
             logger.debug("Depth poll error", exc_info=True)
 
+    def _get_label_name(self, label: int) -> str:
+        """Map a detection label index to a human-readable name."""
+        det_cfg = self._det_cfg
+        if det_cfg is not None and det_cfg.model_type == "yolov8n":
+            names = det_cfg.coco_classes
+            if 0 <= label < len(names):
+                return names[label]
+        return str(label)
+
+    def _get_safety_tier(self, label: int) -> str:
+        """Return 'stop', 'slow', or 'log' for a detection label."""
+        det_cfg = self._det_cfg
+        if det_cfg is None or det_cfg.model_type != "yolov8n":
+            return "log"
+        if label in det_cfg.stop_class_ids:
+            return "stop"
+        if label in det_cfg.slow_class_ids:
+            return "slow"
+        return "log"
+
     def _poll_detections(self, det_q) -> None:
-        """Extract person detections with spatial coordinates."""
+        """Extract person detections with spatial coordinates.
+
+        For YOLOv8 (80 COCO classes):
+          - Builds PersonDetection list for Follow Me from class-0 detections that
+            meet the Follow Me confidence threshold.
+          - Builds ObjectDetection list for all classes to power safety-tier obstacle
+            awareness (get_all_detections()).
+
+        For MobileNet-SSD (backward-compat):
+          - Behaviour is identical to the original implementation.
+        """
         try:
             in_det = det_q.tryGet()
             if in_det is None:
@@ -832,21 +931,27 @@ class OakDepthReader:
                 if newer is None:
                     break
                 in_det = newer
+
+            person_label = self._person_label
+            fm_conf = self._fm_cfg.detection_confidence
             persons: list[PersonDetection] = []
+            all_dets: list[ObjectDetection] = []
+
             tracklets = getattr(in_det, "tracklets", None)
             if tracklets is not None:
+                # ObjectTracker output: tracklets already filtered to person_label
                 for trk in tracklets:
                     src = getattr(trk, "srcImgDetection", None)
                     if src is None:
                         continue
                     is_person = (
-                        getattr(src, "label", None) == PERSON_LABEL
+                        getattr(src, "label", None) == person_label
                         or getattr(src, "labelName", "") == "person"
                     )
                     if not is_person:
                         continue
                     conf = float(getattr(src, "confidence", 0.0))
-                    if conf < self._fm_cfg.detection_confidence:
+                    if conf < fm_conf:
                         continue
                     st = getattr(trk, "status", None)
                     st_name = getattr(st, "name", str(st)).upper() if st is not None else ""
@@ -864,39 +969,65 @@ class OakDepthReader:
                             track_id = tid if tid >= 0 else None
                         except Exception:
                             track_id = None
-                    persons.append(
-                        PersonDetection(
-                            x_m=float(getattr(spatial, "x", 0.0)) / 1000.0,
-                            z_m=float(getattr(spatial, "z", 0.0)) / 1000.0,
-                            confidence=conf,
-                            bbox=(
-                                float(getattr(src, "xmin", 0.0)),
-                                float(getattr(src, "ymin", 0.0)),
-                                float(getattr(src, "xmax", 0.0)),
-                                float(getattr(src, "ymax", 0.0)),
-                            ),
-                            track_id=track_id,
-                        )
+                    x_m = float(getattr(spatial, "x", 0.0)) / 1000.0
+                    z_m = float(getattr(spatial, "z", 0.0)) / 1000.0
+                    bbox = (
+                        float(getattr(src, "xmin", 0.0)),
+                        float(getattr(src, "ymin", 0.0)),
+                        float(getattr(src, "xmax", 0.0)),
+                        float(getattr(src, "ymax", 0.0)),
                     )
+                    persons.append(PersonDetection(
+                        x_m=x_m, z_m=z_m, confidence=conf, bbox=bbox, track_id=track_id,
+                    ))
+                    all_dets.append(ObjectDetection(
+                        label=person_label,
+                        label_name="person",
+                        confidence=conf,
+                        x_m=x_m,
+                        z_m=z_m,
+                        bbox=bbox,
+                        safety_tier=self._get_safety_tier(person_label),
+                    ))
             else:
+                # Raw SpatialDetectionNetwork output (all classes for YOLO, person-only for MobileNet)
                 for det in getattr(in_det, "detections", []):
-                    is_person = (det.label == PERSON_LABEL or
-                                 getattr(det, "labelName", "") == "person")
-                    if not is_person:
+                    label = int(getattr(det, "label", -1))
+                    label_name = getattr(det, "labelName", None) or self._get_label_name(label)
+                    conf = float(getattr(det, "confidence", 0.0))
+                    spatial = getattr(det, "spatialCoordinates", None)
+                    if spatial is None:
                         continue
-                    if det.confidence < self._fm_cfg.detection_confidence:
-                        continue
-                    persons.append(
-                        PersonDetection(
-                            x_m=det.spatialCoordinates.x / 1000.0,
-                            z_m=det.spatialCoordinates.z / 1000.0,
-                            confidence=det.confidence,
-                            bbox=(det.xmin, det.ymin, det.xmax, det.ymax),
-                        )
+                    x_m = float(getattr(spatial, "x", 0.0)) / 1000.0
+                    z_m = float(getattr(spatial, "z", 0.0)) / 1000.0
+                    bbox = (
+                        float(getattr(det, "xmin", 0.0)),
+                        float(getattr(det, "ymin", 0.0)),
+                        float(getattr(det, "xmax", 0.0)),
+                        float(getattr(det, "ymax", 0.0)),
                     )
+                    tier = self._get_safety_tier(label)
+                    all_dets.append(ObjectDetection(
+                        label=label, label_name=label_name, confidence=conf,
+                        x_m=x_m, z_m=z_m, bbox=bbox, safety_tier=tier,
+                    ))
+                    # Person filter: Follow Me only cares about the person class
+                    is_person = label == person_label or label_name == "person"
+                    if is_person and conf >= fm_conf:
+                        persons.append(PersonDetection(
+                            x_m=x_m, z_m=z_m, confidence=conf, bbox=bbox,
+                        ))
+                    elif tier in ("stop", "slow") and label != person_label:
+                        logger.debug(
+                            "Safety-tier detection: %s (label=%d conf=%.2f z=%.1fm tier=%s)",
+                            label_name, label, conf, z_m, tier,
+                        )
+
             with self._lock:
                 self._det_state.persons = persons
                 self._det_state.timestamp = time.monotonic()
+                self._all_dets_state.detections = all_dets
+                self._all_dets_state.timestamp = self._det_state.timestamp
                 self._last_detection_poll_ts = self._det_state.timestamp
                 self._last_detection_error_msg = ""
         except Exception as e:

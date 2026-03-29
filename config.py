@@ -283,6 +283,49 @@ class PropertyMapConfig:
     trail_max_points: int = 500
 
 
+# COCO 80-class names, indexed by YOLOv8 label ID
+_COCO_CLASS_NAMES: tuple = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
+    "toothbrush",
+)
+
+
+@dataclass(frozen=True)
+class OakDetectionConfig:
+    """Configuration for OAK-D object detection model.
+
+    Supports YOLOv8n (80 COCO classes, anchor-free, ~28 FPS on OAK-D Lite)
+    and MobileNet-SSD v2 (21 VOC classes) as a fallback.
+    """
+    # "yolov8n" for 80-class COCO detection; "mobilenet-ssd" for legacy VOC detection
+    model_type: str = "yolov8n"
+    # Local .blob path — empty string pulls from Luxonis model hub (uses model_type as name)
+    model_path: str = ""
+    # Network-level confidence threshold. Lower than Follow Me threshold so safety tiers
+    # see all detections; Follow Me applies its own post-filter (FollowMeConfig.detection_confidence).
+    confidence_threshold: float = 0.3
+    nms_threshold: float = 0.45
+    # Input resolution; 416x416 is the OAK-D Lite sweet spot (~28 FPS, good accuracy)
+    input_size: int = 416
+    # COCO class names indexed by YOLOv8 label ID (80 classes)
+    coco_classes: tuple = _COCO_CLASS_NAMES
+    # Detection-based obstacle safety tiers (YOLO COCO class IDs).
+    # STOP: people and large animals — halt immediately
+    stop_class_ids: tuple = (0, 15, 16, 17, 18, 19)   # person, cat, dog, horse, sheep, cow
+    # SLOW: smaller moving objects — reduce speed
+    slow_class_ids: tuple = (29, 32, 36, 37)           # frisbee, sports ball, skateboard, surfboard
+
+
 @dataclass(frozen=True)
 class Config:
     """Main configuration class."""
@@ -332,6 +375,9 @@ class Config:
     # Whether to use the magnetometer for yaw/heading fusion
     imu_use_magnetometer: bool = False
     
+    # OAK-D detection model (YOLOv8n by default, MobileNet-SSD fallback)
+    oak_detection: OakDetectionConfig = OakDetectionConfig()
+
     # Property map overlay
     property_map: PropertyMapConfig = PropertyMapConfig()
 

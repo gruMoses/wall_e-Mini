@@ -138,6 +138,7 @@ def run() -> None:
                     imu_poll_hz=float(getattr(config.imu_steering, "oak_imu_poll_hz", 60.0)),
                     imu_packet_mode=str(getattr(config.imu_steering, "oak_imu_packet_mode", "latest")),
                     imu_max_packets_per_poll=int(getattr(config.imu_steering, "oak_imu_max_packets_per_poll", 4)),
+                    detection_config=getattr(config, "oak_detection", None),
                 )
                 oak_reader.start()
                 print("OAK-D Lite detected and started")
