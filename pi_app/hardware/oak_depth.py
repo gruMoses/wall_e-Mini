@@ -601,9 +601,10 @@ class OakDepthReader:
             # the conflict and still verifies the camera ISP is alive.
             if not gesture_enabled:
                 if _use_yolo:
-                    _yolo_rgb_diag = cam_rgb.requestOutput(
-                        (_det_cfg.input_size, _det_cfg.input_size)
-                    )
+                    # Use a different resolution than the NN input so depthai v3
+                    # does not de-duplicate the requestOutput() call and hand us
+                    # back the same on-device-only output that feeds the NN.
+                    _yolo_rgb_diag = cam_rgb.requestOutput((640, 480))
                     rgb_preview_q = _yolo_rgb_diag.createOutputQueue(maxSize=1, blocking=False)
                     with self._lock:
                         self._rgb_always_poll = True
