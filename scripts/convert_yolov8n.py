@@ -78,6 +78,7 @@ def main() -> None:
         model=str(onnx_path),
         data_type="FP16",
         shaves=args.shaves,
+        reverse_input_channels=True,  # OAK-D sends BGR888p; blob expects RGB input
     )
     print(f"      Blob downloaded to: {blob_path}")
 
