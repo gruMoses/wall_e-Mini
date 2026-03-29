@@ -484,7 +484,7 @@ class OakDepthReader:
                     )
                     logger.info("OAK-D: using MobileNet-SSD (yolov8n blob not available)")
                 else:
-                    model_desc = dai.NNModelDescription(modelPath=str(_blob), platform="RVC2")
+                    model_desc = dai.NNModelDescription(model=str(_blob), platform="RVC2")
                     logger.info(
                         "OAK-D: using YOLOv8n (%s, conf=%.2f, nms=%.2f, input=%dpx)",
                         _blob, _det_cfg.confidence_threshold,
