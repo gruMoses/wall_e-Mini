@@ -493,15 +493,21 @@ class OakDepthReader:
                         self._person_label = PERSON_LABEL
 
             if _use_yolo:
-                # Local blob: setBlobPath + manual camera/depth wiring
-                spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork)
+                # YoloSpatialDetectionNetwork correctly decodes YOLOv8 anchor-free
+                # output [1, 84, 8400]. SpatialDetectionNetwork is SSD-only and
+                # produces zero detections with YOLO blobs.
+                spatial_nn = pipeline.create(dai.node.YoloSpatialDetectionNetwork)
                 spatial_nn.setBlobPath(str(_blob_abs))
+                spatial_nn.setNumClasses(80)
+                spatial_nn.setCoordinateSize(4)
+                spatial_nn.setAnchors([])      # anchor-free (YOLOv8)
+                spatial_nn.setAnchorMasks({})  # anchor-free (YOLOv8)
                 cam_rgb.requestOutput(
                     (_det_cfg.input_size, _det_cfg.input_size), dai.ImgFrame.Type.BGR888p
                 ).link(spatial_nn.input)
                 stereo.depth.link(spatial_nn.inputDepth)
                 logger.info(
-                    "OAK-D: using YOLOv8n (%s, conf=%.2f, nms=%.2f, input=%dpx)",
+                    "OAK-D: using YOLOv8n via YoloSpatialDetectionNetwork (%s, conf=%.2f, nms=%.2f, input=%dpx)",
                     _blob_abs, _det_cfg.confidence_threshold,
                     _det_cfg.nms_threshold, _det_cfg.input_size,
                 )
