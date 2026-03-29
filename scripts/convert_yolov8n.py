@@ -56,29 +56,26 @@ def main() -> None:
     out_path: Path = args.out
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Export YOLOv8n to OpenVINO IR (FP16)
-    ov_dir = Path("yolov8n_openvino_model")
-    print(f"[1/3] Exporting YOLOv8n to OpenVINO IR (imgsz={args.imgsz}) ...")
+    # Step 1: Export YOLOv8n to ONNX (opset 11 — required for blobconverter/OpenVINO 2022.1 compat)
+    # Note: from_openvino path fails because ultralytics 8.4+ exports opset14 IR which the
+    # Luxonis compile server (OpenVINO 2022.1) rejects. Exporting to ONNX with opset=11 and
+    # letting blobconverter.from_onnx handle the IR conversion server-side is the workaround.
+    onnx_path = Path("yolov8n.onnx")
+    print(f"[1/3] Exporting YOLOv8n to ONNX (imgsz={args.imgsz}, opset=11) ...")
     model = YOLO("yolov8n.pt")
-    model.export(format="openvino", imgsz=args.imgsz, half=True, opset=11)
-    print(f"      OpenVINO IR written to {ov_dir}/")
-
-    xml_path = ov_dir / "yolov8n.xml"
-    bin_path = ov_dir / "yolov8n.bin"
-    if not xml_path.exists() or not bin_path.exists():
-        # Ultralytics may name the output differently
-        candidates = list(ov_dir.glob("*.xml"))
+    model.export(format="onnx", imgsz=args.imgsz, opset=11)
+    if not onnx_path.exists():
+        candidates = list(Path(".").glob("yolov8n*.onnx"))
         if not candidates:
-            print(f"ERROR: could not find .xml in {ov_dir}/")
+            print("ERROR: could not find exported yolov8n.onnx")
             sys.exit(1)
-        xml_path = candidates[0]
-        bin_path = xml_path.with_suffix(".bin")
+        onnx_path = candidates[0]
+    print(f"      ONNX written to {onnx_path}")
 
-    # Step 2: Convert OpenVINO IR → .blob via blobconverter
+    # Step 2: Convert ONNX → .blob via blobconverter (server converts ONNX→IR→blob)
     print(f"[2/3] Converting to .blob (shaves={args.shaves}) ...")
-    blob_path = blobconverter.from_openvino(
-        xml=str(xml_path),
-        bin=str(bin_path),
+    blob_path = blobconverter.from_onnx(
+        model=str(onnx_path),
         data_type="FP16",
         shaves=args.shaves,
     )
