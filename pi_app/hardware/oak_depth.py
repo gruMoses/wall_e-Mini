@@ -505,12 +505,13 @@ class OakDepthReader:
                 dp.setAnchors([])      # anchor-free (YOLOv8)
                 dp.setAnchorMasks({})  # anchor-free (YOLOv8)
                 dp.setIouThreshold(_det_cfg.nms_threshold)
-                # Do NOT specify a frame type: requesting explicit BGR888p at
-                # 416x416 causes the ISP to silently produce no frames on some
-                # depthai v3 builds, starving the NN.  Let the ISP use its
-                # default format; the Myriad X NN runtime handles conversion.
+                # BGR888p gives 3×W×H = 519168 bytes for 416×416, matching the
+                # tensor's expected size.  The default format (NV12) only gives
+                # 1.5×W×H bytes and triggers "exceeds available data range" on
+                # the Myriad X, causing inference to be skipped every frame.
                 _yolo_cam_out = cam_rgb.requestOutput(
-                    (_det_cfg.input_size, _det_cfg.input_size)
+                    (_det_cfg.input_size, _det_cfg.input_size),
+                    dai.ImgFrame.Type.BGR888p,
                 )
                 _yolo_cam_out.link(spatial_nn.input)
                 stereo.depth.link(spatial_nn.inputDepth)
@@ -591,12 +592,19 @@ class OakDepthReader:
 
             # Preview feed -- when hand tracking is active the preview queue
             # comes from _build_hand_tracking_nodes (shared camera output).
-            # For YOLO, bind to spatial_nn.passthrough instead of a raw camera
-            # output: passthrough only emits when the NN has processed a frame,
-            # so rgb_stale becomes a live indicator that camera→NN delivery works.
+            # For YOLO, use a dedicated small camera preview for rgb_stale
+            # tracking.  We cannot reuse spatial_nn.passthrough because it
+            # already has two on-device consumers (ObjectTracker inputTrackerFrame
+            # and inputDetectionFrame); adding a host queue as a third consumer
+            # causes the passthrough fan-out to stop delivering to the host in
+            # depthai v3.  A separate ISP output at the same resolution avoids
+            # the conflict and still verifies the camera ISP is alive.
             if not gesture_enabled:
                 if _use_yolo:
-                    rgb_preview_q = spatial_nn.passthrough.createOutputQueue(maxSize=1, blocking=False)
+                    _yolo_rgb_diag = cam_rgb.requestOutput(
+                        (_det_cfg.input_size, _det_cfg.input_size)
+                    )
+                    rgb_preview_q = _yolo_rgb_diag.createOutputQueue(maxSize=1, blocking=False)
                     with self._lock:
                         self._rgb_always_poll = True
                 else:
