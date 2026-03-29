@@ -308,9 +308,9 @@ class OakDetectionConfig:
     and MobileNet-SSD v2 (21 VOC classes) as a fallback.
     """
     # "yolov8n" for 80-class COCO detection; "mobilenet-ssd" for legacy VOC detection
-    model_type: str = "mobilenet-ssd"
+    model_type: str = "yolov8n"
     # Local .blob path — empty string pulls from Luxonis model hub (uses model_type as name)
-    model_path: str = ""
+    model_path: str = "models/yolov8n_416.blob"
     # Network-level confidence threshold. Lower than Follow Me threshold so safety tiers
     # see all detections; Follow Me applies its own post-filter (FollowMeConfig.detection_confidence).
     confidence_threshold: float = 0.3

@@ -60,7 +60,7 @@ def main() -> None:
     ov_dir = Path("yolov8n_openvino_model")
     print(f"[1/3] Exporting YOLOv8n to OpenVINO IR (imgsz={args.imgsz}) ...")
     model = YOLO("yolov8n.pt")
-    model.export(format="openvino", imgsz=args.imgsz, half=True)
+    model.export(format="openvino", imgsz=args.imgsz, half=True, opset=11)
     print(f"      OpenVINO IR written to {ov_dir}/")
 
     xml_path = ov_dir / "yolov8n.xml"
