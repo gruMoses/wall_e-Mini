@@ -467,10 +467,20 @@ class OakDepthReader:
 
             if _use_yolo:
                 _blob = _det_cfg.model_path
-                if not _blob:
-                    # No local blob provided — hub download is not supported for YOLOv8n.
-                    # Run scripts/convert_yolov8n.py on the Pi to generate a blob, then
-                    # set oak_detection.model_path in Config to the resulting .blob path.
+                if _blob:
+                    # NNModelDescription.model is Hub-slug only; resolve to absolute path for
+                    # local blobs and use setBlobPath() + manual input wiring instead.
+                    _blob_abs = (Path(__file__).resolve().parents[2] / _blob).resolve()
+                    if not _blob_abs.exists():
+                        logger.error(
+                            "YOLOv8n blob not found at %s — falling back to MobileNet-SSD. "
+                            "Run scripts/convert_yolov8n.py on the Pi to generate it.",
+                            _blob_abs,
+                        )
+                        _use_yolo = False
+                        with self._lock:
+                            self._person_label = PERSON_LABEL
+                else:
                     logger.warning(
                         "YOLOv8n requested but model_path is empty; "
                         "falling back to MobileNet-SSD. "
@@ -479,44 +489,33 @@ class OakDepthReader:
                     _use_yolo = False
                     with self._lock:
                         self._person_label = PERSON_LABEL
-                    model_desc = dai.NNModelDescription(
-                        model="luxonis/mobilenet-ssd:300x300", platform="RVC2"
-                    )
-                    logger.info("OAK-D: using MobileNet-SSD (yolov8n blob not available)")
-                else:
-                    model_desc = dai.NNModelDescription(model=str(_blob), platform="RVC2")
-                    logger.info(
-                        "OAK-D: using YOLOv8n (%s, conf=%.2f, nms=%.2f, input=%dpx)",
-                        _blob, _det_cfg.confidence_threshold,
-                        _det_cfg.nms_threshold, _det_cfg.input_size,
-                    )
+
+            if _use_yolo:
+                # Local blob: setBlobPath + manual camera/depth wiring
+                spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork)
+                spatial_nn.setBlobPath(str(_blob_abs))
+                cam_rgb.requestOutput(
+                    (_det_cfg.input_size, _det_cfg.input_size), dai.ImgFrame.Type.BGR888p
+                ).link(spatial_nn.input)
+                stereo.depth.link(spatial_nn.inputDepth)
+                logger.info(
+                    "OAK-D: using YOLOv8n (%s, conf=%.2f, nms=%.2f, input=%dpx)",
+                    _blob_abs, _det_cfg.confidence_threshold,
+                    _det_cfg.nms_threshold, _det_cfg.input_size,
+                )
             else:
                 model_desc = dai.NNModelDescription(
                     model="luxonis/mobilenet-ssd:300x300", platform="RVC2"
                 )
-                logger.info("OAK-D: using MobileNet-SSD (legacy)")
-
-            try:
+                logger.info(
+                    "OAK-D: using MobileNet-SSD (%s)",
+                    "yolov8n blob unavailable"
+                    if _det_cfg is not None and _det_cfg.model_type == "yolov8n"
+                    else "legacy",
+                )
                 spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork).build(
                     cam_rgb, stereo, model_desc,
                 )
-            except Exception:
-                if _use_yolo:
-                    logger.warning(
-                        "YOLOv8n SpatialDetectionNetwork build failed; falling back to MobileNet-SSD",
-                        exc_info=True,
-                    )
-                    _use_yolo = False
-                    with self._lock:
-                        self._person_label = PERSON_LABEL
-                    model_desc = dai.NNModelDescription(
-                        model="luxonis/mobilenet-ssd:300x300", platform="RVC2"
-                    )
-                    spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork).build(
-                        cam_rgb, stereo, model_desc,
-                    )
-                else:
-                    raise
             if _use_yolo:
                 spatial_nn.setConfidenceThreshold(_det_cfg.confidence_threshold)
                 # NMS threshold setter name varies across depthai releases
