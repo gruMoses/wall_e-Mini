@@ -117,7 +117,7 @@ class FollowMeConfig:
     min_distance_m: float = 0.5
     max_distance_m: float = 6.0
     max_speed_error_m: float = 1.5   # distance error at which max speed is reached — tighter = more aggressive closing
-    max_follow_speed_byte: int = 115
+    max_follow_speed_byte: int = 80
     steering_gain: float = 0.50
     steering_derivative_gain: float = 0.06  # calibrated from Phase 2 plant model
     steering_ema_alpha: float = 0.3        # smooths x_m before derivative (0=heavy, 1=none)
@@ -132,7 +132,7 @@ class FollowMeConfig:
 
     # Trail-following Pure Pursuit (breadcrumb path instead of direct pursuit)
     trail_follow_enabled: bool = True
-    trail_speed_scale_mps_per_byte: float = 0.0016  # calibrated from 10s VESC runs (~26.5 in @170, ~35 in @180)
+    trail_speed_scale_mps_per_byte: float = 0.0075  # calibrated on gravel via RTK GPS: 0.0075 at offsets 67–123 (2026-03-28)
     trail_max_points: int = 100
     trail_min_spacing_m: float = 0.3
     trail_max_age_s: float = 30.0
@@ -158,13 +158,13 @@ class FollowMeConfig:
     pursuit_curvature_scaling_enabled: bool = True
     pursuit_curvature_alpha: float = 5.0          # higher = more deceleration in turns
     pursuit_min_speed_byte: float = 15.0          # floor speed in tight turns
-    pursuit_lookahead_curvature_points: int = 5   # look ahead for pre-deceleration
+    pursuit_lookahead_curvature_points: int = 10  # look ahead for pre-deceleration (increased for gravel speed)
     pursuit_max_accel_byte_per_s: float = 50.0    # smooth speed transitions
 
     # Trail/direct steering blend: when person is off-center in trail mode,
     # blend in direct pursuit steering so robot reacts to WHERE the person IS.
-    trail_direct_blend_start_m: float = 0.3  # start blending at this |x| offset
-    trail_direct_blend_full_m: float = 1.5   # 100% direct steering at this |x| offset
+    trail_direct_blend_start_m: float = 5.0  # effectively disabled — was causing corner cutting
+    trail_direct_blend_full_m: float = 10.0  # effectively disabled — was causing corner cutting
 
     # GPS-based trail odometry (preferred over dead reckoning when RTK fix available)
     gps_cog_min_speed_mps: float = 0.5        # min speed for GPS COG heading to be trusted
