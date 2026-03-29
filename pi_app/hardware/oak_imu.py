@@ -174,8 +174,11 @@ class OakImuReader:
         ax_n = ax_g / a_norm_raw
         ay_n = ay_g / a_norm_raw
         az_n = az_g / a_norm_raw
-        roll_acc = math.atan2(ay_n, az_n)
-        pitch_acc = math.atan2(-ax_n, math.sqrt(ay_n * ay_n + az_n * az_n))
+        # OAK-D Lite BMI270 uses camera image frame: X=right, Y=down, Z=forward.
+        # When flat: ay ≈ -g (Y points down, gravity is -Y), ax ≈ 0, az ≈ 0.
+        # Remap to standard body frame (Z=up): roll=atan2(ax,-ay), pitch=atan2(az,-ay).
+        roll_acc = math.atan2(ax_n, -ay_n)
+        pitch_acc = math.atan2(az_n, -ay_n)
 
         gx = math.radians(gx_dps)
         gy = math.radians(gy_dps)
@@ -191,8 +194,9 @@ class OakImuReader:
             self._initialized = True
             yaw_rate_world_dps = 0.0
         else:
-            self.roll_rad = self.alpha_rp * (self.roll_rad + gx * dt) + (1.0 - self.alpha_rp) * roll_acc
-            self.pitch_rad = self.alpha_rp * (self.pitch_rad + gy * dt) + (1.0 - self.alpha_rp) * pitch_acc
+            # gz = rotation around Z (forward = roll axis); gx = rotation around X (right = pitch axis).
+            self.roll_rad = self.alpha_rp * (self.roll_rad + gz * dt) + (1.0 - self.alpha_rp) * roll_acc
+            self.pitch_rad = self.alpha_rp * (self.pitch_rad + gx * dt) + (1.0 - self.alpha_rp) * pitch_acc
 
             yaw_rate_rads = self._compute_yaw_rate_rads(
                 gx, gy, gz, sx, sy, sz, self._use_gravity_projected_yaw_rate
