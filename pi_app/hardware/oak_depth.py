@@ -606,13 +606,19 @@ class OakDepthReader:
                     # back the same on-device-only output that feeds the NN.
                     _yolo_rgb_diag = cam_rgb.requestOutput((640, 480))
                     rgb_preview_q = _yolo_rgb_diag.createOutputQueue(maxSize=1, blocking=False)
-                    with self._lock:
-                        self._rgb_always_poll = True
                 else:
                     rgb_preview_out = cam_rgb.requestOutput((640, 480))
                     rgb_preview_q = rgb_preview_out.createOutputQueue(maxSize=1, blocking=False)
             else:
                 rgb_preview_q = None  # set below after hand pipeline build
+
+            # Always poll RGB when YOLO is active so rgb_stale reflects camera
+            # liveness regardless of whether gesture mode is also enabled.
+            # When gesture_enabled=True, rgb_preview_q is reassigned to
+            # hand_rgb_q below; _rgb_always_poll ensures _poll_rgb is called.
+            if _use_yolo:
+                with self._lock:
+                    self._rgb_always_poll = True
 
             # IMU node (BMI270: accel + gyro at 100 Hz)
             imu_node = pipeline.create(dai.node.IMU)
