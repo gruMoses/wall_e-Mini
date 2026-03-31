@@ -504,11 +504,12 @@ class OakDepthReader:
                 dp.setCoordinateSize(4)
                 dp.setAnchors([])      # anchor-free (YOLOv8)
                 dp.setAnchorMasks({})  # anchor-free (YOLOv8)
+                dp.setSubtype("yolov8")
                 dp.setIouThreshold(_det_cfg.nms_threshold)
-                # BGR888p gives 3×W×H bytes matching the tensor's expected size.
-                # The default format (NV12) only gives 1.5×W×H bytes and triggers
-                # "exceeds available data range" on the Myriad X, causing inference
-                # to be skipped every frame.
+                # BGR888p: OAK-D native format — no on-device colour conversion overhead.
+                # The blob is compiled with --reverse_input_channels + --scale_values=[255,255,255]
+                # baked in (see scripts/convert_yolov8n.py), so the MyriadX performs the
+                # BGR→RGB swap and [0,255]→[0,1] normalisation internally before inference.
                 _yolo_cam_out = cam_rgb.requestOutput(
                     (_det_cfg.input_width, _det_cfg.input_height),
                     dai.ImgFrame.Type.BGR888p,

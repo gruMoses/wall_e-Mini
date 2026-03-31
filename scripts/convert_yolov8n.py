@@ -40,7 +40,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Convert YOLOv8n to OAK-D .blob")
     parser.add_argument("--width", type=int, default=640, help="Input width (default 640, must be divisible by 32)")
     parser.add_argument("--height", type=int, default=352, help="Input height (default 352, must be divisible by 32)")
-    parser.add_argument("--shaves", type=int, default=6, help="MyriadX shaves (default 6)")
+    parser.add_argument("--shaves", type=int, default=5, help="MyriadX shaves (default 5)")
     parser.add_argument(
         "--out",
         type=Path,
@@ -61,6 +61,17 @@ def main() -> None:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Clear blobconverter cache to prevent stale cached blobs (blobconverter caches by param
+    # hash, so old blobs without normalization flags would be returned if cache is not cleared).
+    _bc_cache_dirs = [
+        Path.home() / ".cache" / "blobconverter",
+        Path("/tmp/blobconverter"),
+    ]
+    for _d in _bc_cache_dirs:
+        if _d.exists():
+            shutil.rmtree(_d, ignore_errors=True)
+            print(f"Cleared blobconverter cache: {_d}")
+
     # Step 1: Export YOLOv8n to ONNX (opset 11 — required for blobconverter/OpenVINO 2022.1 compat)
     # Note: from_openvino path fails because ultralytics 8.4+ exports opset14 IR which the
     # Luxonis compile server (OpenVINO 2022.1) rejects. Exporting to ONNX with opset=11 and
@@ -79,12 +90,24 @@ def main() -> None:
     print(f"      ONNX written to {onnx_path}")
 
     # Step 2: Convert ONNX → .blob via blobconverter (server converts ONNX→IR→blob)
+    # Bake input normalisation into the blob so the camera can feed raw [0,255] uint8 BGR pixels:
+    #   --scale_values      divides each channel by 255, mapping [0,255] → [0,1] as YOLO expects
+    #   --mean_values       zero mean (no shift needed for YOLO; explicit to avoid server defaults)
+    #   --reverse_input_channels  converts BGR (OAK-D native) to RGB (YOLO training convention)
+    #   --layout=NCHW       matches the ONNX export layout so OpenVINO parses shapes correctly
+    # Without these, the model receives raw uint8 values; all sigmoid activations saturate and
+    # produce zero real detections regardless of threshold.
     print(f"[2/3] Converting to .blob (shaves={args.shaves}) ...")
     blob_path = blobconverter.from_onnx(
         model=str(onnx_path),
         data_type="FP16",
         shaves=args.shaves,
-        optimizer_params=["--reverse_input_channels"],  # OAK-D sends BGR888p; blob expects RGB input
+        optimizer_params=[
+            "--scale_values=[255,255,255]",
+            "--reverse_input_channels",
+            "--mean_values=[0,0,0]",
+            "--layout=NCHW",
+        ],
     )
     print(f"      Blob downloaded to: {blob_path}")
 
