@@ -63,7 +63,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .stream-card { background: #1a1d27; border-radius: 8px; overflow: hidden; }
   .stream-card h2 { font-size: 13px; padding: 8px 12px; background: #22252f;
                      color: #aaa; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
-  .stream-card img { width: 100%; display: block; background: #111; min-height: 200px; }
+  .stream-card img { width: 100%; display: block; background: #111; aspect-ratio: 640/352; }
   .stream-card .stream-status { font-size: 10px; padding: 2px 8px; color: #555; text-align: right; }
   .telemetry { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
                gap: 8px; margin-bottom: 16px; }
@@ -445,9 +445,9 @@ def _placeholder_jpeg() -> bytes:
     try:
         import cv2
         import numpy as np
-        img = np.zeros((300, 300, 3), dtype=np.uint8)
-        cv2.putText(img, "Waiting for camera...", (30, 155),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1, cv2.LINE_AA)
+        img = np.zeros((352, 640, 3), dtype=np.uint8)
+        cv2.putText(img, "Waiting for camera...", (200, 185),
+                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 100), 1, cv2.LINE_AA)
         _, buf = cv2.imencode(".jpg", img)
         return buf.tobytes()
     except Exception:

@@ -101,7 +101,7 @@ class ObstacleAvoidanceConfig:
     roi_vertical_offset_pct: float = -0.20  # negative = shift ROI upward
     camera_height_m: float = 0.497
     robot_width_m: float = 0.820
-    camera_hfov_deg: float = 73.0
+    camera_hfov_deg: float = 81.0
     min_depth_mm: int = 600            # reject stereo readings below this (OAK-D Lite noise floor)
     min_valid_pct: float = 8.0         # ignore corridor if fewer than this % of pixels are valid
     update_rate_hz: float = 15.0
@@ -310,13 +310,14 @@ class OakDetectionConfig:
     # "yolov8n" for 80-class COCO detection; "mobilenet-ssd" for legacy VOC detection
     model_type: str = "yolov8n"
     # Local .blob path — empty string pulls from Luxonis model hub (uses model_type as name)
-    model_path: str = "models/yolov8n_416.blob"
+    model_path: str = "models/yolov8n_640x352.blob"
     # Network-level confidence threshold. Lower than Follow Me threshold so safety tiers
     # see all detections; Follow Me applies its own post-filter (FollowMeConfig.detection_confidence).
     confidence_threshold: float = 0.3
     nms_threshold: float = 0.45
-    # Input resolution; 416x416 is the OAK-D Lite sweet spot (~28 FPS, good accuracy)
-    input_size: int = 416
+    # Input resolution — 640x352 (≈16:9) uses the full OAK-D Lite horizontal FOV
+    input_width: int = 640
+    input_height: int = 352
     # COCO class names indexed by YOLOv8 label ID (80 classes)
     coco_classes: tuple = _COCO_CLASS_NAMES
     # Detection-based obstacle safety tiers (YOLO COCO class IDs).

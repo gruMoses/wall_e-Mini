@@ -505,20 +505,20 @@ class OakDepthReader:
                 dp.setAnchors([])      # anchor-free (YOLOv8)
                 dp.setAnchorMasks({})  # anchor-free (YOLOv8)
                 dp.setIouThreshold(_det_cfg.nms_threshold)
-                # BGR888p gives 3×W×H = 519168 bytes for 416×416, matching the
-                # tensor's expected size.  The default format (NV12) only gives
-                # 1.5×W×H bytes and triggers "exceeds available data range" on
-                # the Myriad X, causing inference to be skipped every frame.
+                # BGR888p gives 3×W×H bytes matching the tensor's expected size.
+                # The default format (NV12) only gives 1.5×W×H bytes and triggers
+                # "exceeds available data range" on the Myriad X, causing inference
+                # to be skipped every frame.
                 _yolo_cam_out = cam_rgb.requestOutput(
-                    (_det_cfg.input_size, _det_cfg.input_size),
+                    (_det_cfg.input_width, _det_cfg.input_height),
                     dai.ImgFrame.Type.BGR888p,
                 )
                 _yolo_cam_out.link(spatial_nn.input)
                 stereo.depth.link(spatial_nn.inputDepth)
                 logger.info(
-                    "OAK-D: using YOLOv8n (detectionParser: classes=80 coordSize=4 iou=%.2f, %s, conf=%.2f, input=%dpx)",
+                    "OAK-D: using YOLOv8n (detectionParser: classes=80 coordSize=4 iou=%.2f, %s, conf=%.2f, input=%dx%d)",
                     _det_cfg.nms_threshold, _blob_abs,
-                    _det_cfg.confidence_threshold, _det_cfg.input_size,
+                    _det_cfg.confidence_threshold, _det_cfg.input_width, _det_cfg.input_height,
                 )
             else:
                 model_desc = dai.NNModelDescription(
