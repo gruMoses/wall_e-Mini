@@ -90,13 +90,16 @@ def _build_pipeline(det_cfg, obs_cfg, fm_cfg, blob_path: Path, use_yolo: bool, s
         dp.setCoordinateSize(4)
         dp.setAnchors([])        # anchor-free model
         dp.setAnchorMasks({})    # anchor-free model
+        dp.setSubtype("yolov8")  # YOLOv8 output is [1,84,4620] not [1,4620,85]; without this the parser misreads the tensor and yields 0 detections
         dp.setIouThreshold(det_cfg.nms_threshold)
 
-        # RGB888p — YOLOv8 was exported expecting RGB input. BGR888p produces
-        # ~800 garbage detections at 100% confidence (channel mismatch).
+        # BGR888p — OAK-D native format. The blob is compiled with
+        # --reverse_input_channels + --scale_values=[255,255,255] baked in
+        # (see scripts/convert_yolov8n.py), so the MyriadX performs BGR→RGB
+        # and [0,255]→[0,1] normalisation internally before inference.
         cam_nn_out = cam_rgb.requestOutput(
             (det_cfg.input_width, det_cfg.input_height),
-            dai.ImgFrame.Type.RGB888p,
+            dai.ImgFrame.Type.BGR888p,
         )
         cam_nn_out.link(spatial_nn.input)
         stereo.depth.link(spatial_nn.inputDepth)
