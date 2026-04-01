@@ -1,6 +1,6 @@
 # WALL-E Mini TODO
 
-Last updated: 2026-04-01
+Last updated: 2026-04-01 (BMS + charger inhibit complete)
 Scope: Bug fixes and features tracked here; see `wall_e-Mini/docs/performance_optimization_todo.md` for the full engineering roadmap.
 
 ---
@@ -16,10 +16,10 @@ Scope: Bug fixes and features tracked here; see `wall_e-Mini/docs/performance_op
 
 ## Safety
 
-- [ ] **Inhibit motion when charger is connected**
-  - If the charger is connected, the robot must refuse all drive commands.
-  - Prevents driving while tethered, which could damage the cable or charger and create a hazard.
-  - Detect charger state (GPIO, VESC telemetry, or BMS flag) and gate motion commands at the controller level before they reach the motors.
+- [x] **Inhibit motion when charger is connected**
+  - Implemented via Daly BMS Bluetooth: `BmsService.is_charging()` (charge FET on + positive current) feeds `controller.set_charger_inhibit()` each main-loop tick.
+  - Fail-open: if BMS is unreachable for >30 s the inhibit clears automatically, so a dropped BLE link never bricks the robot.
+  - See `pi_app/hardware/bms.py` and `pi_app/control/controller.py`.
 
 ---
 
@@ -38,10 +38,12 @@ Scope: Bug fixes and features tracked here; see `wall_e-Mini/docs/performance_op
 
 ### P2 (Medium Priority)
 
-- [ ] **Daly BMS Bluetooth communication**
-  - Add direct BMS communication over the Pi 5's built-in Bluetooth (the Pi at 192.168.86.54 running Wally).
-  - Expose real-time cell voltages, state of charge (SOC), pack temperature, and other BMS telemetry to the web dashboard.
-  - Use the standard Daly BMS serial-over-Bluetooth protocol; surface data via the existing telemetry/dashboard pipeline.
+- [x] **Daly BMS Bluetooth communication**
+  - `pi_app/hardware/bms.py`: threaded `BmsService` connects to Daly SPIM08HP over BLE (bleak), polls SOC / cell voltages / temperature / MOSFET status / errors every 8 s.
+  - Auto-reconnect with exponential backoff (5 s → 60 s cap). BLE failures never block the main control loop.
+  - `BmsConfig` in `config.py`: `bms_mac_address`, `bms_poll_interval_s`, `bms_timeout_s`, `charger_inhibit_enabled`.
+  - BMS state surfaced in the structured JSON telemetry log each loop tick.
+  - Set `config.bms.enabled = True` and `bms_mac_address` to your BMS MAC to activate.
 
 - [x] **Segment log files by arm/disarm cycle** *(done in 7d39655)*
   - Start a new log file each time WALL-E is armed or disarmed, instead of one continuous log.

@@ -137,6 +137,10 @@ class Controller:
         self._person_detections: list[PersonDetection] = []
         self._hand_data: HandData | None = None
 
+        # Charger inhibit: set True when BMS reports charging; blocks motor output.
+        # Fail-open by design — cleared externally if BMS becomes unreachable.
+        self._charger_inhibit: bool = False
+
         # Calibration mode: when True, process() outputs neutral and skips logic
         self._calibration_mode = False
 
@@ -171,6 +175,14 @@ class Controller:
     def set_gps_reading(self, reading: GpsReading | None) -> None:
         """Feed latest reading from RtkGpsReader."""
         self._gps_reading = reading
+
+    def set_charger_inhibit(self, inhibit: bool) -> None:
+        """Set or clear the charger inhibit flag.
+
+        When True, process() will output neutral and stop the motors regardless
+        of RC/BT commands.  Call with False when the BMS is unreachable (fail-open).
+        """
+        self._charger_inhibit = inhibit
 
     def activate_follow_me(self) -> bool:
         """Enter FOLLOW_ME mode from web UI. Returns True if activated."""
@@ -573,6 +585,16 @@ class Controller:
             left = right = CENTER_OUTPUT_VALUE
             self._motor.stop()
             self._reset_slew_state(mono_now)
+            telemetry["slew_out_left"] = left
+            telemetry["slew_out_right"] = right
+            telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
+            telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
+        elif self._charger_inhibit:
+            # Charger connected: refuse all drive commands regardless of RC input.
+            left = right = CENTER_OUTPUT_VALUE
+            self._motor.stop()
+            self._reset_slew_state(mono_now)
+            telemetry["charger_inhibit"] = True
             telemetry["slew_out_left"] = left
             telemetry["slew_out_right"] = right
             telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
