@@ -113,7 +113,7 @@ class ObstacleAvoidanceConfig:
 class FollowMeConfig:
     """Configuration for autonomous person-following mode."""
     enabled: bool = True
-    follow_distance_m: float = 1.0        # desired following distance in metres
+    follow_distance_m: float = 1.5        # desired following distance in metres
     min_distance_m: float = 0.5
     max_distance_m: float = 6.0
     max_speed_error_m: float = 1.5   # distance error at which max speed is reached — tighter = more aggressive closing
@@ -129,14 +129,14 @@ class FollowMeConfig:
     min_bbox_area: float = 0.0015        # minimum bbox area (fraction of frame); rejects tiny far detections
 
     # ── Layer 2: Target tracker ───────────────────────────────────────────────
-    target_ema_alpha: float = 0.35       # EMA smoothing on normalized horizontal offset (0=heavy, 1=none)
+    target_ema_alpha: float = 0.3        # EMA smoothing on normalized horizontal offset (0=heavy, 1=none)
     target_persistence_s: float = 2.0   # hold last known position this long before declaring target lost
 
     # ── Layer 3: Lateral PID steering ────────────────────────────────────────
     # Error = normalized horizontal offset (-1.0 to +1.0); output scales to ±max_steer_offset_byte.
-    pid_lateral_kp: float = 1.8
-    pid_lateral_ki: float = 0.2
-    pid_lateral_kd: float = 0.7
+    pid_lateral_kp: float = 0.8
+    pid_lateral_ki: float = 0.0
+    pid_lateral_kd: float = 0.3
     pid_lateral_integral_limit: float = 0.5  # anti-windup clamp (normalised units)
 
     # ── Layer 4: Speed (depth-based) ─────────────────────────────────────────
