@@ -113,16 +113,37 @@ class ObstacleAvoidanceConfig:
 class FollowMeConfig:
     """Configuration for autonomous person-following mode."""
     enabled: bool = True
-    follow_distance_m: float = 1.5
+    follow_distance_m: float = 1.0        # desired following distance in metres
     min_distance_m: float = 0.5
     max_distance_m: float = 6.0
     max_speed_error_m: float = 1.5   # distance error at which max speed is reached — tighter = more aggressive closing
     max_follow_speed_byte: int = 80
+    # Legacy direct-pursuit PD gains (preserved; not used by new PID steering path)
     steering_gain: float = 0.50
     steering_derivative_gain: float = 0.06  # calibrated from Phase 2 plant model
     steering_ema_alpha: float = 0.3        # smooths x_m before derivative (0=heavy, 1=none)
-    detection_confidence: float = 0.5
+    detection_confidence: float = 0.45    # minimum YOLO confidence to accept a detection
     lost_target_timeout_s: float = 3.5  # tolerate medium turn/occlusion dropouts without full stop
+
+    # ── Layer 1: Detection filter ─────────────────────────────────────────────
+    min_bbox_area: float = 0.0015        # minimum bbox area (fraction of frame); rejects tiny far detections
+
+    # ── Layer 2: Target tracker ───────────────────────────────────────────────
+    target_ema_alpha: float = 0.35       # EMA smoothing on normalized horizontal offset (0=heavy, 1=none)
+    target_persistence_s: float = 2.0   # hold last known position this long before declaring target lost
+
+    # ── Layer 3: Lateral PID steering ────────────────────────────────────────
+    # Error = normalized horizontal offset (-1.0 to +1.0); output scales to ±max_steer_offset_byte.
+    pid_lateral_kp: float = 1.8
+    pid_lateral_ki: float = 0.2
+    pid_lateral_kd: float = 0.7
+    pid_lateral_integral_limit: float = 0.5  # anti-windup clamp (normalised units)
+
+    # ── Layer 4: Speed (depth-based) ─────────────────────────────────────────
+    speed_dead_zone_m: float = 0.2       # ±dead_zone around follow_distance_m → speed = 0 (no oscillation)
+
+    # ── Motor output rate ─────────────────────────────────────────────────────
+    follow_output_rate_hz: float = 15.0  # motor commands at this Hz, decoupled from 30 fps vision
     # Allow continued blind trail pursuit longer than short target-drop timeout.
     # This is the key behavior needed to keep moving around corners after LOS loss.
     lost_target_trail_pursuit_max_s: float = 8.0
