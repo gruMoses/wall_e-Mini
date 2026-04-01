@@ -95,9 +95,9 @@ class VescConfig:
 
     # Low-voltage shutdown: trigger graceful OS shutdown when pack voltage stays
     # below threshold for voltage_shutdown_delay_s consecutive seconds.
-    # 42.0 V = 14S Li-ion at 3.0 V/cell (safe cutoff; BMS hardware also cuts at ~2.9 V/cell).
-    # Measured pack voltage ~55 V at ~74% SOC (14 × 3.93 V/cell) — confirmed 14S.
-    voltage_shutdown_threshold_v: float = 42.0
+    # 39.0 V = 13S Li-ion at 3.0 V/cell (safe cutoff; BMS hardware also cuts at ~2.9 V/cell).
+    # BMS reports 13 cells — confirmed 13S (stale 14S comment corrected 2026-04-01).
+    voltage_shutdown_threshold_v: float = 39.0
     voltage_shutdown_delay_s: float = 10.0
 
     # Wheel geometry for eRPM → wheel speed (m/s) conversion.
@@ -333,8 +333,8 @@ class GestureConfig:
 @dataclass(frozen=True)
 class BmsConfig:
     """Configuration for Daly BMS Bluetooth communication (SPIM08HP)."""
-    enabled: bool = False                  # disabled until bms_mac_address is set
-    bms_mac_address: str = ""              # BLE MAC, e.g. "AA:BB:CC:DD:EE:FF"
+    enabled: bool = True                   # enabled -- BMS MAC confirmed 2026-04-01
+    bms_mac_address: str = "50:19:05:01:09:4E"  # JHB-50190501094E discovered 2026-04-01
     bms_poll_interval_s: float = 8.0       # seconds between full polls
     bms_timeout_s: float = 30.0            # BLE connect timeout; also fail-open threshold
     charger_inhibit_enabled: bool = True   # refuse drive commands when charging
