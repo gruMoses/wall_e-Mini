@@ -1,13 +1,13 @@
 # WALL-E Mini TODO
 
-Last updated: 2026-03-30
+Last updated: 2026-04-01
 Scope: Bug fixes and features tracked here; see `wall_e-Mini/docs/performance_optimization_todo.md` for the full engineering roadmap.
 
 ---
 
 ## Bug Fixes
 
-- [ ] **Reverse obstacle avoidance is wrong**
+- [x] **Reverse obstacle avoidance is wrong** *(fixed in 2002092)*
   - The camera faces forward, so forward-facing obstacle detections must NOT inhibit reverse motion — only forward motion should be gated by camera-detected obstacles.
   - Current behavior: reverse direction is blocked when a front-camera obstacle is detected, which is nonsensical since the camera cannot see behind the robot.
   - Fix: remove any obstacle-based restriction on reverse commands; limit camera obstacle gating strictly to the forward direction.
@@ -39,6 +39,6 @@ Scope: Bug fixes and features tracked here; see `wall_e-Mini/docs/performance_op
   - Expose real-time cell voltages, state of charge (SOC), pack temperature, and other BMS telemetry to the web dashboard.
   - Use the standard Daly BMS serial-over-Bluetooth protocol; surface data via the existing telemetry/dashboard pipeline.
 
-- [ ] **Segment log files by arm/disarm cycle**
+- [x] **Segment log files by arm/disarm cycle** *(done in 7d39655)*
   - Start a new log file each time WALL-E is armed or disarmed, instead of one continuous log.
   - Makes it much easier to analyze individual sessions.
