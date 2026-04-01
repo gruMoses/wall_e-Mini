@@ -541,15 +541,18 @@ class Controller:
                 pass
         telemetry["imu_correction_applied"] = corr_applied
 
-        # Obstacle avoidance throttle scaling
+        # Obstacle avoidance throttle scaling — front camera only gates forward motion.
+        # Reverse commands must not be blocked by front camera detections.
         obstacle_scale = 1.0
+        is_forward_motion = left > CENTER_OUTPUT_VALUE or right > CENTER_OUTPUT_VALUE
         if self._obstacle_avoidance is not None and self._obstacle_distance_m is not None:
             obstacle_scale = self._obstacle_avoidance.compute_throttle_scale(
                 self._obstacle_distance_m,
                 self._obstacle_age_s if self._obstacle_age_s is not None else 999.0,
             )
-            left = self._scale_toward_neutral(left, obstacle_scale)
-            right = self._scale_toward_neutral(right, obstacle_scale)
+            if is_forward_motion:
+                left = self._scale_toward_neutral(left, obstacle_scale)
+                right = self._scale_toward_neutral(right, obstacle_scale)
             oa_status = self._obstacle_avoidance.get_status()
             telemetry.update(oa_status)
         telemetry["obstacle_throttle_scale"] = obstacle_scale
@@ -583,7 +586,7 @@ class Controller:
             hard_stop_threshold = float(getattr(slewc, "hard_stop_scale_threshold", 0.0))
             hard_stop_active = bool(self._safety_state.emergency_active) or any(
                 e is SafetyEvent.EMERGENCY_TRIGGERED for e in events
-            ) or obstacle_scale <= hard_stop_threshold
+            ) or (is_forward_motion and obstacle_scale <= hard_stop_threshold)
             slew_bypassed = False
 
             if slewc_enabled:

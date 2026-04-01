@@ -39,6 +39,8 @@ ARMED_RC = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1
                      last_update_epoch_s=0.0)
 FWD_RC = RCInputs(ch1_us=2000, ch2_us=2000, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                    last_update_epoch_s=0.0)
+REV_RC = RCInputs(ch1_us=1000, ch2_us=1000, ch3_us=1900, ch4_us=1000, ch5_us=1000,
+                   last_update_epoch_s=0.0)
 
 
 class TestScaleTowardNeutral(unittest.TestCase):
@@ -120,6 +122,22 @@ class TestControllerObstacleAvoidance(unittest.TestCase):
         ctrl.process(ARMED_RC, now_epoch_s=0.5)
         cmd, events, telem = ctrl.process(FWD_RC, now_epoch_s=1.0)
         self.assertAlmostEqual(telem["obstacle_throttle_scale"], 1.0)
+
+    def test_reverse_unaffected_by_front_obstacle(self):
+        cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5)
+        ctrl, motor = self._make_controller(oa_config=cfg)
+
+        ctrl.process(ARMED_RC, now_epoch_s=0.5)
+
+        # Close obstacle detected by front camera
+        ctrl.set_obstacle_data(distance_m=0.4, age_s=0.0)
+
+        # Reverse command must pass through unscaled
+        cmd, events, telem = ctrl.process(REV_RC, now_epoch_s=1.0)
+        self.assertLess(cmd.left_byte, 126)
+        self.assertLess(cmd.right_byte, 126)
+        # Scale is still reported (computed) but not applied to reverse
+        self.assertAlmostEqual(telem["obstacle_throttle_scale"], 0.0)
 
     def test_hard_stop_obstacle_bypasses_slew_limiter(self):
         oa_cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5)
