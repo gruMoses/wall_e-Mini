@@ -53,9 +53,94 @@ def _camera_present() -> bool:
 # Pipeline construction
 # ---------------------------------------------------------------------------
 
-def _build_pipeline(det_cfg, obs_cfg, fm_cfg, blob_path: Path, use_yolo: bool, save_frames: bool):
-    """Build and return (pipeline, det_q, rgb_q).
+def _parse_yolo_tensor(tensor, conf_thresh: float, nms_thresh: float,
+                       input_w: int, input_h: int) -> list:
+    """Parse YOLOv8 NNData raw tensor to list of dicts with detection info.
 
+    The ultralytics ONNX export produces output0 shape (1, 84, N):
+      rows 0-3: cx, cy, w, h in PIXEL coordinates for the NN input image
+      rows 4-83: 80 COCO class scores (post-sigmoid)
+    Returns list of dicts: {label, confidence, xmin, ymin, xmax, ymax} (normalised).
+    """
+    import cv2
+    import numpy as np
+
+    arr = np.array(tensor)
+    if arr.ndim == 3:
+        arr = arr[0]
+    arr = arr.T  # (N, 84)
+
+    scores = arr[:, 4:]
+    max_scores = scores.max(axis=1)
+    mask = max_scores >= conf_thresh
+    arr_f = arr[mask]
+    if arr_f.shape[0] == 0:
+        return []
+
+    cls_ids = scores[mask].argmax(axis=1)
+    cls_scores = scores[mask].max(axis=1)
+    cx = arr_f[:, 0]; cy = arr_f[:, 1]
+    bw = arr_f[:, 2]; bh = arr_f[:, 3]
+    x1 = cx - bw / 2.0; y1 = cy - bh / 2.0
+    x2 = cx + bw / 2.0; y2 = cy + bh / 2.0
+
+    results = []
+    for c in np.unique(cls_ids):
+        idxs = np.where(cls_ids == c)[0]
+        boxes_px = [
+            [float(x1[i]), float(y1[i]), float(x2[i] - x1[i]), float(y2[i] - y1[i])]
+            for i in idxs
+        ]
+        confs = [float(cls_scores[i]) for i in idxs]
+        keep = cv2.dnn.NMSBoxes(boxes_px, confs, conf_thresh, nms_thresh)
+        if keep is None:
+            continue
+        keep = keep.flatten() if hasattr(keep, "flatten") else list(keep)
+        for ki in keep:
+            i = idxs[int(ki)]
+            results.append({
+                "label": int(c),
+                "confidence": float(cls_scores[i]),
+                "xmin": max(0.0, float(x1[i]) / input_w),
+                "ymin": max(0.0, float(y1[i]) / input_h),
+                "xmax": min(1.0, float(x2[i]) / input_w),
+                "ymax": min(1.0, float(y2[i]) / input_h),
+            })
+    return results
+
+
+def _sample_depth_for_bbox(depth_frame, x1n, y1n, x2n, y2n,
+                           min_mm: int, max_mm: int) -> tuple:
+    """Sample stereo depth at a normalised bbox centre. Returns (x_m, z_m)."""
+    import math
+    import numpy as np
+
+    if depth_frame is None:
+        return 0.0, 0.0
+    dh, dw = depth_frame.shape
+    cx_d = int(((x1n + x2n) / 2.0) * dw)
+    cy_d = int(((y1n + y2n) / 2.0) * dh)
+    bw_half = max(1, int((x2n - x1n) * 0.5 * dw / 2))
+    bh_half = max(1, int((y2n - y1n) * 0.5 * dh / 2))
+    x0d = max(0, cx_d - bw_half); x1d = min(dw, cx_d + bw_half)
+    y0d = max(0, cy_d - bh_half); y1d = min(dh, cy_d + bh_half)
+    roi = depth_frame[y0d:y1d, x0d:x1d]
+    valid = roi[(roi > min_mm) & (roi < max_mm)]
+    if valid.size == 0:
+        return 0.0, 0.0
+    z_m = float(np.median(valid)) / 1000.0
+    hfov = 73.0  # OAK-D Lite HFoV degrees
+    fx = (dw / 2.0) / math.tan(math.radians(hfov / 2.0))
+    x_m = ((cx_d - dw / 2.0) / fx) * z_m
+    return x_m, z_m
+
+
+def _build_pipeline(det_cfg, obs_cfg, fm_cfg, blob_path: Path, use_yolo: bool, save_frames: bool):
+    """Build and return (pipeline, det_q, depth_q, rgb_q).
+
+    For YOLO: det_q yields NNData (raw tensor); depth_q yields depth frames for
+    spatial coordinate computation.  For MobileNet: det_q yields ImgDetections
+    with spatialCoordinates baked in; depth_q is None.
     rgb_q is None if save_frames is False or OpenCV is unavailable.
     """
     import depthai as dai
@@ -78,31 +163,23 @@ def _build_pipeline(det_cfg, obs_cfg, fm_cfg, blob_path: Path, use_yolo: bool, s
     mono_left.requestOutput((640, 400)).link(stereo.left)
     mono_right.requestOutput((640, 400)).link(stereo.right)
 
+    depth_q = None
     if use_yolo:
-        spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork)
-        spatial_nn.setBlobPath(str(blob_path))
-
-        # depthai v3: detectionParser defaults leave NumClasses=0 / CoordinateSize=0 /
-        # IouThreshold=0.0, which silently produces zero detections for YOLOv8.
-        # These three lines are mandatory.
-        dp = spatial_nn.detectionParser
-        dp.setNumClasses(80)
-        dp.setCoordinateSize(4)
-        dp.setAnchors([])        # anchor-free model
-        dp.setAnchorMasks({})    # anchor-free model
-        dp.setSubtype("yolov8")  # YOLOv8 output is [1,84,4620] not [1,4620,85]; without this the parser misreads the tensor and yields 0 detections
-        dp.setIouThreshold(det_cfg.nms_threshold)
-
-        # BGR888p — OAK-D native format. The blob is compiled with
-        # --reverse_input_channels + --scale_values=[255,255,255] baked in
-        # (see scripts/convert_yolov8n.py), so the MyriadX performs BGR→RGB
-        # and [0,255]→[0,1] normalisation internally before inference.
+        # Use plain NeuralNetwork — the ultralytics ONNX export outputs pixel-space
+        # (cx, cy, w, h) in output0.  DetectionParser expects normalised [0,1]
+        # coords and silently drops all boxes.  Parse on the host instead.
+        yolo_nn = pipeline.create(dai.node.NeuralNetwork)
+        yolo_nn.setBlobPath(str(blob_path))
+        yolo_nn.setNumInferenceThreads(2)
+        yolo_nn.setNumShavesPerInferenceThread(4)
+        yolo_nn.input.setBlocking(False)
         cam_nn_out = cam_rgb.requestOutput(
             (det_cfg.input_width, det_cfg.input_height),
             dai.ImgFrame.Type.BGR888p,
         )
-        cam_nn_out.link(spatial_nn.input)
-        stereo.depth.link(spatial_nn.inputDepth)
+        cam_nn_out.link(yolo_nn.input)
+        det_q = yolo_nn.out.createOutputQueue(maxSize=4, blocking=False)
+        depth_q = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
     else:
         model_desc = dai.NNModelDescription(
             model="luxonis/mobilenet-ssd:300x300", platform="RVC2"
@@ -110,20 +187,18 @@ def _build_pipeline(det_cfg, obs_cfg, fm_cfg, blob_path: Path, use_yolo: bool, s
         spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork).build(
             cam_rgb, stereo, model_desc,
         )
-
-    spatial_nn.setConfidenceThreshold(det_cfg.confidence_threshold)
-    for _setter in ("setNMSThreshold", "setNmsThreshold", "setIouThreshold"):
-        if hasattr(spatial_nn, _setter):
-            getattr(spatial_nn, _setter)(det_cfg.nms_threshold)
-            break
-    spatial_nn.setNumInferenceThreads(1)
-    spatial_nn.setNumShavesPerInferenceThread(4)
-    spatial_nn.input.setBlocking(False)
-    spatial_nn.setBoundingBoxScaleFactor(0.5)
-    spatial_nn.setDepthLowerThreshold(int(fm_cfg.min_distance_m * 1000))
-    spatial_nn.setDepthUpperThreshold(int(fm_cfg.max_distance_m * 1000))
-
-    det_q = spatial_nn.out.createOutputQueue(maxSize=4, blocking=False)
+        spatial_nn.setConfidenceThreshold(det_cfg.confidence_threshold)
+        for _setter in ("setNMSThreshold", "setNmsThreshold", "setIouThreshold"):
+            if hasattr(spatial_nn, _setter):
+                getattr(spatial_nn, _setter)(det_cfg.nms_threshold)
+                break
+        spatial_nn.setNumInferenceThreads(1)
+        spatial_nn.setNumShavesPerInferenceThread(4)
+        spatial_nn.input.setBlocking(False)
+        spatial_nn.setBoundingBoxScaleFactor(0.5)
+        spatial_nn.setDepthLowerThreshold(int(fm_cfg.min_distance_m * 1000))
+        spatial_nn.setDepthUpperThreshold(int(fm_cfg.max_distance_m * 1000))
+        det_q = spatial_nn.out.createOutputQueue(maxSize=4, blocking=False)
 
     # Optional RGB preview for annotated frame saving (separate from NN input)
     rgb_q = None
@@ -139,7 +214,7 @@ def _build_pipeline(det_cfg, obs_cfg, fm_cfg, blob_path: Path, use_yolo: bool, s
         except Exception as e:
             print(f"WARNING: Could not create RGB preview queue: {e}")
 
-    return pipeline, det_q, rgb_q
+    return pipeline, det_q, depth_q, rgb_q
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +257,7 @@ def run_detection_test(duration_s: float, save_frames: bool, output_dir: Path) -
     print(f"Building pipeline — {model_label}...")
 
     try:
-        pipeline, det_q, rgb_q = _build_pipeline(
+        pipeline, det_q, depth_q, rgb_q = _build_pipeline(
             det_cfg, obs_cfg, fm_cfg, blob_path, use_yolo, save_frames
         )
     except Exception as e:
@@ -213,7 +288,16 @@ def run_detection_test(duration_s: float, save_frames: bool, output_dir: Path) -
 
     end_time = time.monotonic() + duration_s
 
+    latest_depth_frame = None
+
     while time.monotonic() < end_time:
+        # Drain depth queue when running YOLO (needed for spatial coords)
+        if depth_q is not None:
+            df = depth_q.tryGet()
+            while df is not None:
+                latest_depth_frame = df.getFrame()
+                df = depth_q.tryGet()
+
         msg = det_q.tryGet()
         if msg is None:
             time.sleep(0.02)
@@ -229,19 +313,45 @@ def run_detection_test(duration_s: float, save_frames: bool, output_dir: Path) -
         total_frames += 1
         frame_dets: list[tuple[str, float, float, float, tuple]] = []
 
-        for det in getattr(msg, "detections", []):
-            label_name = _resolve_label(det, use_yolo, det_cfg)
-            conf = float(getattr(det, "confidence", 0.0))
-            spatial = getattr(det, "spatialCoordinates", None)
-            x_m = float(getattr(spatial, "x", 0.0)) / 1000.0 if spatial else 0.0
-            z_m = float(getattr(spatial, "z", 0.0)) / 1000.0 if spatial else 0.0
-            bbox = (
-                float(getattr(det, "xmin", 0.0)),
-                float(getattr(det, "ymin", 0.0)),
-                float(getattr(det, "xmax", 0.0)),
-                float(getattr(det, "ymax", 0.0)),
-            )
-            frame_dets.append((label_name, conf, x_m, z_m, bbox))
+        if use_yolo and hasattr(msg, "getAllLayerNames"):
+            # NeuralNetwork path: raw tensor, parse on host
+            try:
+                raw = msg.getTensor("output0")
+            except Exception:
+                layer_names = msg.getAllLayerNames()
+                raw = msg.getTensor(layer_names[0]) if layer_names else None
+            parsed = _parse_yolo_tensor(
+                raw,
+                det_cfg.confidence_threshold,
+                det_cfg.nms_threshold,
+                det_cfg.input_width,
+                det_cfg.input_height,
+            ) if raw is not None else []
+            min_mm = int(fm_cfg.min_distance_m * 1000)
+            max_mm = int(fm_cfg.max_distance_m * 1000)
+            for d in parsed:
+                label_name = det_cfg.coco_classes[d["label"]] if 0 <= d["label"] < len(det_cfg.coco_classes) else str(d["label"])
+                x_m, z_m = _sample_depth_for_bbox(
+                    latest_depth_frame,
+                    d["xmin"], d["ymin"], d["xmax"], d["ymax"],
+                    min_mm, max_mm,
+                )
+                bbox = (d["xmin"], d["ymin"], d["xmax"], d["ymax"])
+                frame_dets.append((label_name, d["confidence"], x_m, z_m, bbox))
+        else:
+            for det in getattr(msg, "detections", []):
+                label_name = _resolve_label(det, use_yolo, det_cfg)
+                conf = float(getattr(det, "confidence", 0.0))
+                spatial = getattr(det, "spatialCoordinates", None)
+                x_m = float(getattr(spatial, "x", 0.0)) / 1000.0 if spatial else 0.0
+                z_m = float(getattr(spatial, "z", 0.0)) / 1000.0 if spatial else 0.0
+                bbox = (
+                    float(getattr(det, "xmin", 0.0)),
+                    float(getattr(det, "ymin", 0.0)),
+                    float(getattr(det, "xmax", 0.0)),
+                    float(getattr(det, "ymax", 0.0)),
+                )
+                frame_dets.append((label_name, conf, x_m, z_m, bbox))
             all_dets.append((label_name, conf, x_m, z_m, bbox))
 
         if frame_dets:

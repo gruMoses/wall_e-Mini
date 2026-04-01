@@ -493,33 +493,39 @@ class OakDepthReader:
                     with self._lock:
                         self._person_label = PERSON_LABEL
 
+            # Check if hand tracking will be enabled (before NN setup).
+            gesture_enabled = (
+                self._gesture_cfg is not None
+                and self._gesture_cfg.enabled
+                and _HAND_MODELS_DIR.is_dir()
+            )
+
+            det_q = None
+            tracker_enabled = False
             if _use_yolo:
-                # depthai v3: SpatialDetectionNetwork.detectionParser defaults to
-                # NNFamily=YOLO but leaves NumClasses=0/CoordinateSize=0/IouThreshold=0.0
-                # which silently produces zero detections. Must configure the parser.
-                spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork)
-                spatial_nn.setBlobPath(str(_blob_abs))
-                dp = spatial_nn.detectionParser
-                dp.setNumClasses(80)
-                dp.setCoordinateSize(4)
-                dp.setAnchors([])      # anchor-free (YOLOv8)
-                dp.setAnchorMasks({})  # anchor-free (YOLOv8)
-                dp.setSubtype("yolov8")
-                dp.setIouThreshold(_det_cfg.nms_threshold)
-                # BGR888p: OAK-D native format — no on-device colour conversion overhead.
-                # The blob is compiled with --reverse_input_channels + --scale_values=[255,255,255]
-                # baked in (see scripts/convert_yolov8n.py), so the MyriadX performs the
-                # BGR→RGB swap and [0,255]→[0,1] normalisation internally before inference.
+                # Use plain NeuralNetwork — the ultralytics ONNX export produces
+                # pixel-space (cx, cy, w, h) in output0 (values 0..input_w/h).
+                # DetectionParser / SpatialDetectionNetwork expect normalised [0,1]
+                # coords and silently reject every box, yielding zero detections.
+                # Parse the raw NNData tensor on the host and compute spatial
+                # coordinates from the stereo depth frame instead.
+                yolo_nn = pipeline.create(dai.node.NeuralNetwork)
+                yolo_nn.setBlobPath(str(_blob_abs))
+                yolo_nn.setNumInferenceThreads(2)
+                yolo_nn.setNumShavesPerInferenceThread(4)
+                yolo_nn.input.setBlocking(False)
                 _yolo_cam_out = cam_rgb.requestOutput(
                     (_det_cfg.input_width, _det_cfg.input_height),
                     dai.ImgFrame.Type.BGR888p,
                 )
-                _yolo_cam_out.link(spatial_nn.input)
-                stereo.depth.link(spatial_nn.inputDepth)
+                _yolo_cam_out.link(yolo_nn.input)
+                det_q = yolo_nn.out.createOutputQueue(maxSize=1, blocking=False)
+                # NeuralNetwork has no passthroughDepth; tap stereo.depth directly.
+                depth_q = stereo.depth.createOutputQueue(maxSize=1, blocking=False)
                 logger.info(
-                    "OAK-D: using YOLOv8n (detectionParser: classes=80 coordSize=4 iou=%.2f, %s, conf=%.2f, input=%dx%d)",
-                    _det_cfg.nms_threshold, _blob_abs,
-                    _det_cfg.confidence_threshold, _det_cfg.input_width, _det_cfg.input_height,
+                    "OAK-D: using YOLOv8n (NeuralNetwork+host-NMS: conf=%.2f nms=%.2f, %s, input=%dx%d)",
+                    _det_cfg.confidence_threshold, _det_cfg.nms_threshold, _blob_abs,
+                    _det_cfg.input_width, _det_cfg.input_height,
                 )
             else:
                 model_desc = dai.NNModelDescription(
@@ -534,72 +540,51 @@ class OakDepthReader:
                 spatial_nn = pipeline.create(dai.node.SpatialDetectionNetwork).build(
                     cam_rgb, stereo, model_desc,
                 )
-            if _use_yolo:
-                spatial_nn.setConfidenceThreshold(_det_cfg.confidence_threshold)
-                # NMS threshold setter name varies across depthai releases
-                for _nms_setter in ("setNMSThreshold", "setNmsThreshold", "setIouThreshold"):
-                    if hasattr(spatial_nn, _nms_setter):
-                        getattr(spatial_nn, _nms_setter)(_det_cfg.nms_threshold)
-                        break
-            else:
                 spatial_nn.setConfidenceThreshold(self._fm_cfg.detection_confidence)
-            spatial_nn.setNumInferenceThreads(1)
-            spatial_nn.setNumShavesPerInferenceThread(4)
-            spatial_nn.input.setBlocking(False)
-            # Scale factor 0.5-0.7 avoids background depth contamination on bounding box edges
-            spatial_nn.setBoundingBoxScaleFactor(0.5)
-            spatial_nn.setDepthLowerThreshold(int(self._fm_cfg.min_distance_m * 1000))
-            spatial_nn.setDepthUpperThreshold(int(self._fm_cfg.max_distance_m * 1000))
+                spatial_nn.setNumInferenceThreads(1)
+                spatial_nn.setNumShavesPerInferenceThread(4)
+                spatial_nn.input.setBlocking(False)
+                spatial_nn.setBoundingBoxScaleFactor(0.5)
+                spatial_nn.setDepthLowerThreshold(int(self._fm_cfg.min_distance_m * 1000))
+                spatial_nn.setDepthUpperThreshold(int(self._fm_cfg.max_distance_m * 1000))
 
-            # Check if hand tracking will be enabled (before tracker setup).
-            gesture_enabled = (
-                self._gesture_cfg is not None
-                and self._gesture_cfg.enabled
-                and _HAND_MODELS_DIR.is_dir()
-            )
-
-            det_q = None
-            tracker_enabled = False
-            if gesture_enabled:
-                # ObjectTracker's passthrough fan-out stalls the pipeline when
-                # PD is also consuming camera frames.  Fall back to raw
-                # detections so both person-following and hand gestures work.
-                det_q = spatial_nn.out.createOutputQueue(maxSize=1, blocking=False)
-                logger.warning(
-                    "ObjectTracker skipped (hand-tracking active); using raw detections",
-                )
-            else:
-                try:
-                    object_tracker = pipeline.create(dai.node.ObjectTracker)
-                    object_tracker.setDetectionLabelsToTrack([self._person_label])
-                    object_tracker.setTrackerType(dai.TrackerType.SHORT_TERM_IMAGELESS)
-                    object_tracker.setTrackerIdAssignmentPolicy(dai.TrackerIdAssignmentPolicy.SMALLEST_ID)
-
-                    spatial_nn.out.link(object_tracker.inputDetections)
-                    spatial_nn.passthrough.link(object_tracker.inputTrackerFrame)
-                    spatial_nn.passthrough.link(object_tracker.inputDetectionFrame)
-                    det_q = object_tracker.out.createOutputQueue(maxSize=1, blocking=False)
-                    tracker_enabled = True
-                except Exception:
-                    logger.warning(
-                        "ObjectTracker init failed; falling back to raw detections",
-                        exc_info=True,
-                    )
+                if gesture_enabled:
+                    # ObjectTracker's passthrough fan-out stalls the pipeline when
+                    # PD is also consuming camera frames.  Fall back to raw
+                    # detections so both person-following and hand gestures work.
                     det_q = spatial_nn.out.createOutputQueue(maxSize=1, blocking=False)
+                    logger.warning(
+                        "ObjectTracker skipped (hand-tracking active); using raw detections",
+                    )
+                else:
+                    try:
+                        object_tracker = pipeline.create(dai.node.ObjectTracker)
+                        object_tracker.setDetectionLabelsToTrack([self._person_label])
+                        object_tracker.setTrackerType(dai.TrackerType.SHORT_TERM_IMAGELESS)
+                        object_tracker.setTrackerIdAssignmentPolicy(dai.TrackerIdAssignmentPolicy.SMALLEST_ID)
 
-            depth_q = spatial_nn.passthroughDepth.createOutputQueue(maxSize=1, blocking=False)
+                        spatial_nn.out.link(object_tracker.inputDetections)
+                        spatial_nn.passthrough.link(object_tracker.inputTrackerFrame)
+                        spatial_nn.passthrough.link(object_tracker.inputDetectionFrame)
+                        det_q = object_tracker.out.createOutputQueue(maxSize=1, blocking=False)
+                        tracker_enabled = True
+                    except Exception:
+                        logger.warning(
+                            "ObjectTracker init failed; falling back to raw detections",
+                            exc_info=True,
+                        )
+                        det_q = spatial_nn.out.createOutputQueue(maxSize=1, blocking=False)
+
+                depth_q = spatial_nn.passthroughDepth.createOutputQueue(maxSize=1, blocking=False)
+
             # Spatial ROI depth is also control-critical, so prefer newest sample.
             spatial_depth_q = spatial_calc.out.createOutputQueue(maxSize=1, blocking=False)
 
             # Preview feed -- when hand tracking is active the preview queue
             # comes from _build_hand_tracking_nodes (shared camera output).
-            # For YOLO, use a dedicated small camera preview for rgb_stale
-            # tracking.  We cannot reuse spatial_nn.passthrough because it
-            # already has two on-device consumers (ObjectTracker inputTrackerFrame
-            # and inputDetectionFrame); adding a host queue as a third consumer
-            # causes the passthrough fan-out to stop delivering to the host in
-            # depthai v3.  A separate ISP output at the same resolution avoids
-            # the conflict and still verifies the camera ISP is alive.
+            # For YOLO (NeuralNetwork), request a separate camera output at a
+            # different resolution so depthai v3 does not de-duplicate the
+            # requestOutput() call and return the NN-only internal output.
             if not gesture_enabled:
                 if _use_yolo:
                     # Use a different resolution than the NN input so depthai v3
@@ -982,14 +967,117 @@ class OakDepthReader:
             return "slow"
         return "log"
 
+    @staticmethod
+    def _parse_yolo_tensor(
+        tensor,
+        conf_thresh: float,
+        nms_thresh: float,
+        input_w: int,
+        input_h: int,
+    ) -> list:
+        """Parse a YOLOv8 NNData raw tensor to detected boxes.
+
+        The ultralytics ONNX export produces output0 shape (1, 84, N):
+          rows 0-3: cx, cy, w, h in PIXEL coordinates for the NN input image
+          rows 4-83: 80 COCO class scores (post-sigmoid)
+
+        Returns list of (label_int, conf, xmin_norm, ymin_norm, xmax_norm, ymax_norm).
+        """
+        import cv2
+        import numpy as np
+
+        arr = np.array(tensor)
+        if arr.ndim == 3:
+            arr = arr[0]   # (84, N)
+        arr = arr.T        # (N, 84)
+
+        scores = arr[:, 4:]               # (N, 80)
+        max_scores = scores.max(axis=1)   # (N,)
+        mask = max_scores >= conf_thresh
+        arr_f = arr[mask]
+        if arr_f.shape[0] == 0:
+            return []
+
+        cls_ids = scores[mask].argmax(axis=1)   # (M,)
+        cls_scores = scores[mask].max(axis=1)   # (M,)
+
+        cx = arr_f[:, 0]; cy = arr_f[:, 1]
+        bw = arr_f[:, 2]; bh = arr_f[:, 3]
+        x1 = cx - bw / 2.0; y1 = cy - bh / 2.0
+        x2 = cx + bw / 2.0; y2 = cy + bh / 2.0
+
+        results = []
+        for c in np.unique(cls_ids):
+            idxs = np.where(cls_ids == c)[0]
+            boxes_px = [
+                [float(x1[i]), float(y1[i]),
+                 float(x2[i] - x1[i]), float(y2[i] - y1[i])]
+                for i in idxs
+            ]
+            confs = [float(cls_scores[i]) for i in idxs]
+            keep = cv2.dnn.NMSBoxes(boxes_px, confs, conf_thresh, nms_thresh)
+            if keep is None:
+                continue
+            keep = keep.flatten() if hasattr(keep, "flatten") else list(keep)
+            for ki in keep:
+                i = idxs[int(ki)]
+                x1n = max(0.0, float(x1[i]) / input_w)
+                y1n = max(0.0, float(y1[i]) / input_h)
+                x2n = min(1.0, float(x2[i]) / input_w)
+                y2n = min(1.0, float(y2[i]) / input_h)
+                results.append((int(c), float(cls_scores[i]), x1n, y1n, x2n, y2n))
+        return results
+
+    def _compute_spatial_from_depth(
+        self,
+        x1_n: float,
+        y1_n: float,
+        x2_n: float,
+        y2_n: float,
+        depth_frame,
+    ) -> tuple:
+        """Sample the stereo depth frame at a bbox to get (x_m, z_m).
+
+        Uses the inner 50% of the bounding box to avoid background contamination,
+        then derives lateral x_m via pinhole projection with the camera's HFoV.
+        Returns (0.0, 0.0) when no valid depth pixels are found.
+        """
+        import math
+        import numpy as np
+
+        if depth_frame is None:
+            return 0.0, 0.0
+
+        dh, dw = depth_frame.shape
+        min_depth_mm = int(self._fm_cfg.min_distance_m * 1000)
+        max_depth_mm = int(self._fm_cfg.max_distance_m * 1000)
+
+        cx_d = int(((x1_n + x2_n) / 2.0) * dw)
+        cy_d = int(((y1_n + y2_n) / 2.0) * dh)
+        bw_half = max(1, int((x2_n - x1_n) * 0.5 * dw / 2))
+        bh_half = max(1, int((y2_n - y1_n) * 0.5 * dh / 2))
+        x0d = max(0, cx_d - bw_half); x1d = min(dw, cx_d + bw_half)
+        y0d = max(0, cy_d - bh_half); y1d = min(dh, cy_d + bh_half)
+
+        roi = depth_frame[y0d:y1d, x0d:x1d]
+        valid = roi[(roi > min_depth_mm) & (roi < max_depth_mm)]
+        if valid.size == 0:
+            return 0.0, 0.0
+
+        z_m = float(np.median(valid)) / 1000.0
+        hfov = getattr(self._obs_cfg, "camera_hfov_deg", 73.0)
+        fx = (dw / 2.0) / math.tan(math.radians(hfov / 2.0))
+        x_m = ((cx_d - dw / 2.0) / fx) * z_m
+        return x_m, z_m
+
     def _poll_detections(self, det_q) -> None:
         """Extract person detections with spatial coordinates.
 
         For YOLOv8 (80 COCO classes):
-          - Builds PersonDetection list for Follow Me from class-0 detections that
-            meet the Follow Me confidence threshold.
-          - Builds ObjectDetection list for all classes to power safety-tier obstacle
-            awareness (get_all_detections()).
+          - Parses raw NNData tensor on the host (NeuralNetwork node).
+          - Applies host-side NMS; computes spatial coords from depth frame.
+          - Builds PersonDetection list for Follow Me from class-0 detections.
+          - Builds ObjectDetection list for all classes for safety-tier awareness.
 
         For MobileNet-SSD (backward-compat):
           - Behaviour is identical to the original implementation.
@@ -1008,6 +1096,49 @@ class OakDepthReader:
             fm_conf = self._fm_cfg.detection_confidence
             persons: list[PersonDetection] = []
             all_dets: list[ObjectDetection] = []
+
+            # --- YOLOv8 NeuralNetwork path: raw tensor output ---
+            if hasattr(in_det, "getAllLayerNames"):
+                det_cfg = self._det_cfg
+                conf_thresh = det_cfg.confidence_threshold if det_cfg else 0.45
+                nms_thresh = det_cfg.nms_threshold if det_cfg else 0.5
+                input_w = det_cfg.input_width if det_cfg else 640
+                input_h = det_cfg.input_height if det_cfg else 352
+
+                try:
+                    raw = in_det.getTensor("output0")
+                except Exception:
+                    layer_names = in_det.getAllLayerNames()
+                    raw = in_det.getTensor(layer_names[0]) if layer_names else None
+                if raw is None:
+                    return
+
+                parsed = self._parse_yolo_tensor(raw, conf_thresh, nms_thresh, input_w, input_h)
+                with self._lock:
+                    depth_frame = self._depth_state.raw_frame
+
+                for (cls_id, conf, x1n, y1n, x2n, y2n) in parsed:
+                    x_m, z_m = self._compute_spatial_from_depth(x1n, y1n, x2n, y2n, depth_frame)
+                    label_name = self._get_label_name(cls_id)
+                    bbox = (x1n, y1n, x2n, y2n)
+                    tier = self._get_safety_tier(cls_id)
+                    all_dets.append(ObjectDetection(
+                        label=cls_id, label_name=label_name, confidence=conf,
+                        x_m=x_m, z_m=z_m, bbox=bbox, safety_tier=tier,
+                    ))
+                    if cls_id == person_label and conf >= fm_conf and z_m > 0.0:
+                        persons.append(PersonDetection(
+                            x_m=x_m, z_m=z_m, confidence=conf, bbox=bbox,
+                        ))
+
+                with self._lock:
+                    self._det_state.persons = persons
+                    self._det_state.timestamp = time.monotonic()
+                    self._all_dets_state.detections = all_dets
+                    self._all_dets_state.timestamp = self._det_state.timestamp
+                    self._last_detection_poll_ts = self._det_state.timestamp
+                    self._last_detection_error_msg = ""
+                return
 
             tracklets = getattr(in_det, "tracklets", None)
             if tracklets is not None:
