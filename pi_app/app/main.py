@@ -25,6 +25,7 @@ try:
     from pi_app.hardware.rtk_gps import RtkGpsReader
     from pi_app.web.oak_viewer import OakWebViewer
     from pi_app.control.controller import Controller, RCInputs
+    from pi_app.control.safety import SafetyEvent
     from pi_app.control.imu_steering import ImuSteeringCompensator
     from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
     from pi_app.control.follow_me import FollowMeController
@@ -44,6 +45,7 @@ except ModuleNotFoundError:
     from pi_app.hardware.rtk_gps import RtkGpsReader  # type: ignore
     from pi_app.web.oak_viewer import OakWebViewer  # type: ignore
     from pi_app.control.controller import Controller, RCInputs  # type: ignore
+    from pi_app.control.safety import SafetyEvent  # type: ignore
     from pi_app.control.imu_steering import ImuSteeringCompensator  # type: ignore
     from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController  # type: ignore
     from pi_app.control.follow_me import FollowMeController  # type: ignore
@@ -72,6 +74,61 @@ def round1(val):
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         return round(float(val), 1)
     return val
+
+
+_PID_CSV_COLS = (
+    "t_ms,heading_deg,target_deg,error_deg,yaw_rate_dps,"
+    "roll_deg,pitch_deg,p_term,i_term,d_term,"
+    "correction_raw,correction_applied,integral_accum,"
+    "steering_input,correction_blend,motor_l,motor_r,"
+    "ch1_us,ch2_us,armed,straight_intent,loop_dt_ms,"
+    "mode,fm_tracking,fm_target_z_m,fm_target_x_m,"
+    "fm_dist_err_m,fm_speed_offset,fm_steer_offset,"
+    "fm_num_det,fm_confidence,obstacle_dist_m,obstacle_scale"
+)
+
+
+def _open_log_file(logs_dir: Path, prefix: str):
+    """Open a new structured JSON log file and update the latest.log symlink.
+    Returns (file_handle, path) or (None, None) on failure."""
+    dt = datetime.now()
+    path = logs_dir / f"{prefix}_{dt.strftime('%Y%m%d_%H%M%S')}.log"
+    fh = None
+    try:
+        fh = open(path, "a", encoding="utf-8", buffering=1)
+        try:
+            latest_link = logs_dir / "latest.log"
+            if latest_link.exists() or latest_link.is_symlink():
+                latest_link.unlink(missing_ok=True)
+            os.symlink(path.name, latest_link)
+        except Exception:
+            pass
+    except Exception:
+        fh = None
+        path = None
+    return fh, path
+
+
+def _open_pid_csv(logs_dir: Path):
+    """Open a new PID CSV file and update the pid_latest.csv symlink.
+    Returns (file_handle, path) or (None, None) on failure."""
+    dt = datetime.now()
+    path = logs_dir / f"pid_{dt.strftime('%Y%m%d_%H%M%S')}.csv"
+    fh = None
+    try:
+        fh = open(path, "w", encoding="utf-8", buffering=1)
+        fh.write(_PID_CSV_COLS + "\n")
+        try:
+            pid_latest = logs_dir / "pid_latest.csv"
+            if pid_latest.exists() or pid_latest.is_symlink():
+                pid_latest.unlink(missing_ok=True)
+            os.symlink(path.name, pid_latest)
+        except Exception:
+            pass
+    except Exception:
+        fh = None
+        path = None
+    return fh, path
 
 
 def _cleanup_old_logs(log_dir: Path, days: int = 7) -> None:
@@ -314,50 +371,12 @@ def run() -> None:
     _cleanup_old_logs(logs_dir, days=7)
 
     # Open a per-run structured log file (e.g., run_20250821_132230.log)
-    run_dt = datetime.now()
-    log_filename = f"run_{run_dt.strftime('%Y%m%d_%H%M%S')}.log"
-    log_path = logs_dir / log_filename
-    log_fh = None
-    try:
-        log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
-        # Update handy latest.log symlink
-        try:
-            latest_link = logs_dir / "latest.log"
-            if latest_link.exists() or latest_link.is_symlink():
-                latest_link.unlink(missing_ok=True)
-            os.symlink(log_path.name, latest_link)
-        except Exception:
-            pass
-    except Exception:
-        # If file cannot be opened, continue without file logging
-        log_fh = None
+    log_fh, log_path = _open_log_file(logs_dir, "run")
 
     # High-rate PID tuning CSV (optional; every loop tick, full precision)
     pid_csv_fh = None
     if pid_csv_enabled:
-        _PID_CSV_COLS = (
-            "t_ms,heading_deg,target_deg,error_deg,yaw_rate_dps,"
-            "roll_deg,pitch_deg,p_term,i_term,d_term,"
-            "correction_raw,correction_applied,integral_accum,"
-            "steering_input,correction_blend,motor_l,motor_r,"
-            "ch1_us,ch2_us,armed,straight_intent,loop_dt_ms,"
-            "mode,fm_tracking,fm_target_z_m,fm_target_x_m,"
-            "fm_dist_err_m,fm_speed_offset,fm_steer_offset,"
-            "fm_num_det,fm_confidence,obstacle_dist_m,obstacle_scale"
-        )
-        pid_csv_path = logs_dir / f"pid_{run_dt.strftime('%Y%m%d_%H%M%S')}.csv"
-        try:
-            pid_csv_fh = open(pid_csv_path, "w", encoding="utf-8", buffering=1)
-            pid_csv_fh.write(_PID_CSV_COLS + "\n")
-            try:
-                pid_latest = logs_dir / "pid_latest.csv"
-                if pid_latest.exists() or pid_latest.is_symlink():
-                    pid_latest.unlink(missing_ok=True)
-                os.symlink(pid_csv_path.name, pid_latest)
-            except Exception:
-                pass
-        except Exception:
-            pid_csv_fh = None
+        pid_csv_fh, _ = _open_pid_csv(logs_dir)
     pid_csv_t0 = None
 
     try:
@@ -443,6 +462,24 @@ def run() -> None:
                 gps_reading = gps_reader.get_reading()
                 controller.set_gps_reading(gps_reading)
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
+
+            # Start a new log file on each arm event for per-session analysis
+            if any(e is SafetyEvent.ARMED for e in events):
+                try:
+                    if log_fh is not None:
+                        log_fh.flush()
+                        log_fh.close()
+                except Exception:
+                    pass
+                log_fh, log_path = _open_log_file(logs_dir, "arm")
+                if pid_csv_enabled and pid_csv_fh is not None:
+                    try:
+                        pid_csv_fh.flush()
+                        pid_csv_fh.close()
+                    except Exception:
+                        pass
+                    pid_csv_fh, _ = _open_pid_csv(logs_dir)
+                    pid_csv_t0 = None  # Reset elapsed-time offset for new segment
 
             # Feed recorder (activity-triggered)
             if oak_recorder is not None:
