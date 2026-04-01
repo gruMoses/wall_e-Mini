@@ -405,7 +405,7 @@ class FollowMeController:
         # ── Layer 2: Target tracker ──────────────────────────────────────────
         self._tracker = TargetTracker(
             ema_alpha=getattr(config, "target_ema_alpha", 0.35),
-            persistence_s=getattr(config, "target_persistence_s", 2.0),
+            persistence_s=getattr(config, "target_persistence_s", 1.0),
         )
 
         # ── Layer 3: Steering (PID) ──────────────────────────────────────────
@@ -447,6 +447,8 @@ class FollowMeController:
         self._cached_left: int = NEUTRAL
         self._cached_right: int = NEUTRAL
         self._prev_target_present: bool = False  # for transition detection
+        self._prev_fresh_detection: bool = False  # True only when persons visible this frame
+        self._reacq_time: float = 0.0             # monotonic() of last lost→tracking transition
 
         # ── Telemetry state ──────────────────────────────────────────────────
         self._tracking: bool = False
@@ -598,15 +600,38 @@ class FollowMeController:
             1.0 / max(1.0, float(getattr(self._cfg, "follow_output_rate_hz", 15.0)))
         )
 
+        # True only when there is a live detection this frame (not stale persistence data).
+        fresh_detection = bool(filtered)
+
         if not target_present:
+            self._prev_fresh_detection = False
             left, right = self._handle_lost_target(now)
         else:
             # Layer 4: Speed
             speed = self._speed.compute(target.depth_m)
             self._last_distance_error = target.depth_m - self._cfg.follow_distance_m
 
-            # Layer 3: Steering (PID or trail override)
-            steer = self._compute_steering(target, speed, dt, now)
+            # Layer 3: Steering — only when there is a FRESH detection this frame.
+            # When the tracker is coasting on stale data (persistence window, persons=0)
+            # use steer=0 so the robot coasts straight instead of holding the last
+            # turn command and overshooting into empty space.
+            if not fresh_detection:
+                steer = 0.0
+            else:
+                if not self._prev_fresh_detection:
+                    self._reacq_time = now  # mark reacquisition start
+                steer = self._compute_steering(target, speed, dt, now)
+                # Ramp steer 0 → full over reacq_slew_window_s after a dropout to
+                # prevent the spike on the first frames after reacquisition.
+                reacq_window = max(
+                    float(getattr(self._cfg, "reacq_slew_window_s", 0.5)), 0.05
+                )
+                if self._reacq_time > 0.0:
+                    reacq_elapsed = now - self._reacq_time
+                    if reacq_elapsed < reacq_window:
+                        steer *= reacq_elapsed / reacq_window
+
+            self._prev_fresh_detection = fresh_detection
 
             # Layer 5: Safety
             speed, steer = self._safety.apply(speed, steer, now)
@@ -729,7 +754,16 @@ class FollowMeController:
             self._steering.reset()
         self._pursuit_mode = "direct"
         self._last_pursuit_mode = "direct"
-        return self._steering.compute(target.normalized_x, dt)
+        steer = self._steering.compute(target.normalized_x, dt)
+        # Cap direct-mode steering lower than the global max; close-range detections
+        # are noisier and a full-gain correction causes overshoot.  Also scale back
+        # proportionally when confidence is below 0.6 to prevent spikes on uncertain
+        # detections (common when the person nearly fills the frame).
+        direct_max = float(getattr(self._cfg, "direct_mode_max_steer_byte", 18.0))
+        steer = max(-direct_max, min(direct_max, steer))
+        if target.confidence < 0.6:
+            steer *= target.confidence / 0.6
+        return steer
 
     def _handle_lost_target(self, now: float) -> tuple[int, int]:
         """Handle absence of detections: trail pursuit → search → stop."""
@@ -843,6 +877,8 @@ class FollowMeController:
         self._last_target_track_id = None
         self._cached_left = NEUTRAL
         self._cached_right = NEUTRAL
+        self._prev_fresh_detection = False
+        self._reacq_time = 0.0
         self._pursuit_mode = "direct"
         self._last_pursuit_mode = "direct"
         self._tracker.reset()
