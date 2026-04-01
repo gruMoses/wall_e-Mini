@@ -99,6 +99,15 @@ class VescConfig:
     voltage_shutdown_threshold_v: float = 22.4
     voltage_shutdown_delay_s: float = 10.0
 
+    # Wheel geometry for eRPM → wheel speed (m/s) conversion.
+    # wheel_radius_m: centre of hub to contact patch.
+    # motor_poles: total magnetic poles; pole_pairs = motor_poles // 2.
+    wheel_radius_m: float = 0.085
+    motor_poles: int = 14
+
+    # Set False to disable all closed-loop telemetry features (pure open-loop fallback).
+    vesc_telemetry_enabled: bool = True
+
 
 @dataclass(frozen=True)
 class ObstacleAvoidanceConfig:
@@ -149,8 +158,24 @@ class FollowMeConfig:
     pid_lateral_kd: float = 0.3
     pid_lateral_integral_limit: float = 0.5  # anti-windup clamp (normalised units)
 
-    # ── Layer 4: Speed (depth-based) ─────────────────────────────────────────
+    # ── Layer 4: Speed (depth-based, closed-loop when VESC telemetry available) ─
     speed_dead_zone_m: float = 0.2       # ±dead_zone around follow_distance_m → speed = 0 (no oscillation)
+
+    # Velocity PID — closes the speed loop using measured wheel RPM.
+    # Error = target_speed_mps (derived from depth) − actual_speed_mps.
+    # Output (m/s) is converted to a byte correction via trail_speed_scale_mps_per_byte.
+    # Disabled automatically when VESC telemetry is unavailable (open-loop fallback).
+    speed_kp: float = 0.8
+    speed_ki: float = 0.2
+    speed_kd: float = 0.05
+    speed_integral_limit: float = 50.0   # anti-windup clamp (m/s accumulated)
+
+    # ── Slip detection & compensation ─────────────────────────────────────────
+    # When |left_rpm − right_rpm| exceeds threshold while commanded straight,
+    # throttle is reduced and a small steer feed-forward is injected.
+    slip_threshold_rpm: float = 200.0       # eRPM differential to declare slip
+    slip_throttle_reduction: float = 0.15   # throttle scale-back fraction (0–1)
+    slip_feedforward_gain: float = 0.02     # steer correction per eRPM differential (bytes/RPM)
 
     # ── Motor output rate ─────────────────────────────────────────────────────
     follow_output_rate_hz: float = 15.0  # motor commands at this Hz, decoupled from 30 fps vision

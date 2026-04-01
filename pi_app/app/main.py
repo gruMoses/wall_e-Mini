@@ -163,10 +163,16 @@ def run() -> None:
         action="store_true",
         help="Disable OAK recording pipeline for profiling/debug",
     )
+    parser.add_argument(
+        "--vesc-telemetry-debug",
+        action="store_true",
+        help="Print VESC RPM vs commanded speed every second",
+    )
     args, _ = parser.parse_known_args()
     pid_debug = args.pid_debug or config.imu_steering.log_steering_corrections
     pid_csv_enabled = bool(args.pid_csv)
     disable_recording = bool(args.disable_recording)
+    vesc_telem_debug = bool(args.vesc_telemetry_debug)
 
     rc_reader = ArduinoRCReader()
     port = rc_reader.start()
@@ -407,6 +413,7 @@ def run() -> None:
         last_log_ts = 0.0
         log_interval = 0.1  # 10 Hz logging
         prev_loop_ts = time.monotonic()
+        _vesc_debug_last_t = 0.0
         prev_imu_ts = getattr(controller, "_last_imu_update", None)
         bt_shared_path = Path("/tmp/wall_e_bt_latest.json")
         bt_cached_data = None
@@ -654,6 +661,21 @@ def run() -> None:
                 print(pid_line)
             else:
                 print(line_cli, end="\r", flush=True)
+
+            if vesc_telem_debug and (loop_now - _vesc_debug_last_t) >= 1.0:
+                _vesc_debug_last_t = loop_now
+                _vt = controller.get_vesc_telemetry()
+                _l_rpm = _vt.get("left_rpm")
+                _r_rpm = _vt.get("right_rpm")
+                _spd = _vt.get("actual_speed_mps")
+                _spd_str = f"{_spd:.3f} m/s" if _spd is not None else "n/a"
+                _slip = telem.get("follow_me_slip_active", False)
+                print(
+                    f"\n[VESC] L={_l_rpm} RPM  R={_r_rpm} RPM  "
+                    f"speed={_spd_str}  "
+                    f"cmd_L={telem.get('motor_left_byte')} cmd_R={telem.get('motor_right_byte')}"
+                    f"{'  SLIP!' if _slip else ''}"
+                )
 
             # Structured JSON log for analysis (one line per tick)
             try:

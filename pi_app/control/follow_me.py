@@ -288,38 +288,70 @@ class SteeringLayer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SpeedLayer:
-    """Layer 4 — depth-based proportional speed control.
+    """Layer 4 — depth-based speed control, optionally closed-loop via velocity PID.
 
     When the robot is within ±dead_zone_m of the desired following distance,
     output is zero so the robot holds position without oscillating.
-    Outside the dead zone, speed is proportional to the distance error,
-    clamped to [0, max_speed_byte].
+    Outside the dead zone, open-loop speed is proportional to the distance error.
+
+    If a velocity_pid and speed_scale_mps_per_byte are supplied, and
+    actual_speed_mps is passed to compute(), the layer closes the speed loop:
+      velocity_error = target_speed_mps − actual_speed_mps
+      correction_byte = PID(velocity_error) / speed_scale_mps_per_byte
+    Falls back gracefully to open-loop when actual_speed_mps is None.
     """
 
     def __init__(
         self,
         target_dist_m: float,
         dead_zone_m: float,
-        speed_gain: float,      # bytes per metre of distance error
+        speed_gain: float,          # bytes per metre of distance error
         min_dist_m: float,
         max_speed_byte: float,
+        velocity_pid: PIDController | None = None,
+        speed_scale_mps_per_byte: float = 0.0075,
     ) -> None:
         self._target = target_dist_m
         self._dead_zone = dead_zone_m
         self._gain = speed_gain
         self._min_dist = min_dist_m
         self._max_speed = max_speed_byte
+        self._velocity_pid = velocity_pid
+        self._speed_scale = max(speed_scale_mps_per_byte, 1e-9)
 
-    def compute(self, depth_m: float) -> float:
-        """Return forward speed offset in motor bytes (0 = hold/stop)."""
+    def compute(
+        self,
+        depth_m: float,
+        actual_speed_mps: float | None = None,
+        dt: float = 0.05,
+    ) -> float:
+        """Return forward speed offset in motor bytes (0 = hold/stop).
+
+        When actual_speed_mps is provided and a velocity_pid is configured,
+        a closed-loop correction is applied on top of the open-loop output.
+        Otherwise (or when actual speed is None) behaves as pure open-loop.
+        """
         if depth_m <= self._min_dist:
+            if self._velocity_pid is not None:
+                self._velocity_pid.reset()
             return 0.0
         error = depth_m - self._target
         if abs(error) <= self._dead_zone:
+            if self._velocity_pid is not None:
+                self._velocity_pid.reset()
             return 0.0
         if error <= 0.0:
             return 0.0  # too close — stop (backing up not implemented here)
-        return min(self._max_speed, error * self._gain)
+        open_loop = min(self._max_speed, error * self._gain)
+
+        # Closed-loop velocity correction when telemetry is available
+        if self._velocity_pid is not None and actual_speed_mps is not None:
+            target_speed_mps = open_loop * self._speed_scale
+            velocity_error = target_speed_mps - actual_speed_mps
+            correction_mps = self._velocity_pid.compute(velocity_error, dt)
+            correction_byte = correction_mps / self._speed_scale
+            return max(0.0, min(self._max_speed, open_loop + correction_byte))
+        return open_loop
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -421,15 +453,24 @@ class FollowMeController:
             max_steer_byte=max_steer,
         )
 
-        # ── Layer 4: Speed ───────────────────────────────────────────────────
+        # ── Layer 4: Speed (depth-based, closed-loop when telemetry available) ──
         max_speed = float(config.max_follow_speed_byte)
         max_speed_err = float(getattr(config, "max_speed_error_m", 2.5))
+        _speed_scale = float(getattr(config, "trail_speed_scale_mps_per_byte", 0.0075))
+        _velocity_pid = PIDController(
+            kp=float(getattr(config, "speed_kp", 0.8)),
+            ki=float(getattr(config, "speed_ki", 0.2)),
+            kd=float(getattr(config, "speed_kd", 0.05)),
+            integral_limit=float(getattr(config, "speed_integral_limit", 50.0)),
+        )
         self._speed = SpeedLayer(
             target_dist_m=config.follow_distance_m,
             dead_zone_m=float(getattr(config, "speed_dead_zone_m", 0.2)),
             speed_gain=max_speed / max(max_speed_err, 0.1),
             min_dist_m=config.min_distance_m,
             max_speed_byte=max_speed,
+            velocity_pid=_velocity_pid,
+            speed_scale_mps_per_byte=_speed_scale,
         )
 
         # ── Layer 5: Safety ──────────────────────────────────────────────────
@@ -462,6 +503,12 @@ class FollowMeController:
         self._last_target_track_id: int | None = None
         self._last_valid_time: float = 0.0
         self._pursuit_mode: str = "direct"
+
+        # ── VESC telemetry (for closed-loop speed and slip detection) ────────
+        self._actual_left_rpm: int | None = None
+        self._actual_right_rpm: int | None = None
+        self._actual_speed_mps: float | None = None
+        self._last_slip_active: bool = False
 
         # ── Trail-following subsystems (Pure Pursuit — preserved) ────────────
         self._trail_enabled = bool(getattr(config, "trail_follow_enabled", False))
@@ -550,6 +597,21 @@ class FollowMeController:
         if self._gps_odom is not None:
             self._gps_odom.update_gps(lat, lon, fix_quality, timestamp)
 
+    def update_telemetry(
+        self,
+        left_rpm: int | None,
+        right_rpm: int | None,
+        actual_speed_mps: float | None,
+    ) -> None:
+        """Feed VESC telemetry for closed-loop speed control and slip detection.
+
+        Called by controller.py in FOLLOW_ME mode before each compute() call.
+        Passing all-None gracefully disables closed-loop / slip features.
+        """
+        self._actual_left_rpm = left_rpm
+        self._actual_right_rpm = right_rpm
+        self._actual_speed_mps = actual_speed_mps
+
     # ── Public API: main compute ─────────────────────────────────────────────
 
     def compute(self, detections: list[PersonDetection]) -> tuple[int, int]:
@@ -607,8 +669,12 @@ class FollowMeController:
             self._prev_fresh_detection = False
             left, right = self._handle_lost_target(now)
         else:
-            # Layer 4: Speed
-            speed = self._speed.compute(target.depth_m)
+            # Layer 4: Speed (closed-loop when VESC telemetry is available)
+            speed = self._speed.compute(
+                target.depth_m,
+                actual_speed_mps=self._actual_speed_mps,
+                dt=dt,
+            )
             self._last_distance_error = target.depth_m - self._cfg.follow_distance_m
 
             # Layer 3: Steering — only when there is a FRESH detection this frame.
@@ -632,6 +698,9 @@ class FollowMeController:
                         steer *= reacq_elapsed / reacq_window
 
             self._prev_fresh_detection = fresh_detection
+
+            # Slip detection & compensation (when VESC RPM telemetry available)
+            speed, steer = self._apply_slip_compensation(speed, steer)
 
             # Layer 5: Safety
             speed, steer = self._safety.apply(speed, steer, now)
@@ -764,6 +833,43 @@ class FollowMeController:
         if target.confidence < 0.6:
             steer *= target.confidence / 0.6
         return steer
+
+    def _apply_slip_compensation(
+        self,
+        speed: float,
+        steer: float,
+    ) -> tuple[float, float]:
+        """Detect wheel slip and compensate.
+
+        When |left_rpm − right_rpm| exceeds the configured threshold while the
+        robot is commanded straight, throttle is reduced and a small steer
+        feed-forward is injected to counteract the drift direction.
+
+        No-op when RPM telemetry is unavailable.
+        """
+        left_rpm = self._actual_left_rpm
+        right_rpm = self._actual_right_rpm
+        if left_rpm is None or right_rpm is None:
+            self._last_slip_active = False
+            return speed, steer
+
+        threshold = float(getattr(self._cfg, "slip_threshold_rpm", 200.0))
+        is_straight = abs(steer) < 5.0 and speed > 0.0
+        rpm_diff = abs(left_rpm - right_rpm)
+
+        if rpm_diff > threshold and is_straight:
+            reduction = float(getattr(self._cfg, "slip_throttle_reduction", 0.15))
+            speed = speed * (1.0 - reduction)
+            # Positive diff (left > right) means left wheel is spinning faster →
+            # robot drifting right → inject a small right-turn correction (positive steer)
+            ff_gain = float(getattr(self._cfg, "slip_feedforward_gain", 0.02))
+            steer_correction = (left_rpm - right_rpm) * ff_gain
+            max_s = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
+            steer = max(-max_s, min(max_s, steer + steer_correction))
+            self._last_slip_active = True
+        else:
+            self._last_slip_active = False
+        return speed, steer
 
     def _handle_lost_target(self, now: float) -> tuple[int, int]:
         """Handle absence of detections: trail pursuit → search → stop."""
@@ -912,6 +1018,8 @@ class FollowMeController:
             "follow_me_target_confidence": self._last_target_confidence,
             "follow_me_target_track_id": self._last_target_track_id,
             "follow_me_pursuit_mode": self._pursuit_mode,
+            "follow_me_slip_active": self._last_slip_active,
+            "follow_me_actual_speed_mps": self._actual_speed_mps,
         }
         if self._trail_enabled:
             status["trail_length"] = self._trail_length

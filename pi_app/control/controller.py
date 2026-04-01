@@ -1,9 +1,13 @@
 from dataclasses import dataclass
 from typing import Protocol, Tuple, List, Optional
+import logging
+import math
 import time
 import threading
 import sys
 from pathlib import Path
+
+_logger = logging.getLogger(__name__)
 
 # Add parent directory to path for config import
 sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -38,6 +42,7 @@ class RCInputs:
 class MotorDriver(Protocol):
     def set_tracks(self, left_byte: int, right_byte: int) -> None: ...
     def stop(self) -> None: ...
+    def get_telemetry(self): ...  # Returns VescTelemetry | None
 
 
 class ArmRelay(Protocol):
@@ -54,6 +59,9 @@ class NoopMotorDriver:
 
     def stop(self) -> None:
         pass
+
+    def get_telemetry(self):
+        return None
 
 
 class NoopArmRelay:
@@ -150,6 +158,14 @@ class Controller:
         self._slew_last_update = time.monotonic()
         self._slew_initialized = False
         self._slew_seen_non_neutral = False
+
+        # VESC telemetry state — polled every 50 ms in process().
+        self._telem_last_poll: float = 0.0
+        self._telem_last_valid: float = 0.0
+        self._telem_stale_warned: bool = False
+        self._actual_left_rpm: Optional[int] = None
+        self._actual_right_rpm: Optional[int] = None
+        self._actual_speed_mps: Optional[float] = None
 
     def _reset_imu_timestamp(self, now: float) -> None:
         """Reset the monotonic timestamp used to throttle IMU updates.
@@ -285,6 +301,42 @@ class Controller:
         epoch_now = now_epoch_s if now_epoch_s is not None else time.time()
         mono_now = time.monotonic()
 
+        # ── Poll VESC telemetry every 50 ms ──────────────────────────────────
+        _vesc_cfg = getattr(config, "vesc", None)
+        _telem_enabled = bool(getattr(_vesc_cfg, "vesc_telemetry_enabled", True))
+        if _telem_enabled and (mono_now - self._telem_last_poll >= 0.05):
+            try:
+                _telem = self._motor.get_telemetry()
+            except Exception:
+                _telem = None
+            self._telem_last_poll = mono_now
+            if _telem is not None:
+                self._telem_stale_warned = False
+                self._telem_last_valid = mono_now
+                self._actual_left_rpm = _telem.left_rpm
+                self._actual_right_rpm = _telem.right_rpm
+                # Convert average eRPM to wheel speed (m/s)
+                _lr, _rr = _telem.left_rpm, _telem.right_rpm
+                _valid_rpms = [abs(r) for r in (_lr, _rr) if r is not None]
+                if _valid_rpms:
+                    _avg_erpm = sum(_valid_rpms) / len(_valid_rpms)
+                    _poles = int(getattr(_vesc_cfg, "motor_poles", 14))
+                    _radius = float(getattr(_vesc_cfg, "wheel_radius_m", 0.085))
+                    _mech_rpm = _avg_erpm / max(_poles // 2, 1)
+                    self._actual_speed_mps = (_mech_rpm / 60.0) * 2.0 * math.pi * _radius
+                else:
+                    self._actual_speed_mps = None
+            elif (self._telem_last_valid > 0.0
+                  and (mono_now - self._telem_last_valid) > 0.5
+                  and not self._telem_stale_warned):
+                _logger.warning(
+                    "VESC telemetry stale for >500 ms — falling back to open-loop"
+                )
+                self._telem_stale_warned = True
+                self._actual_left_rpm = None
+                self._actual_right_rpm = None
+                self._actual_speed_mps = None
+
         if self._calibration_mode:
             cmd = DriveCommand(
                 left_byte=CENTER_OUTPUT_VALUE,
@@ -406,6 +458,12 @@ class Controller:
                     self._gps_reading.fix_quality,
                     self._gps_reading.timestamp,
                 )
+            # Feed VESC telemetry for closed-loop speed and slip detection
+            self._follow_me.update_telemetry(
+                left_rpm=self._actual_left_rpm,
+                right_rpm=self._actual_right_rpm,
+                actual_speed_mps=self._actual_speed_mps,
+            )
             detections = self._person_detections or []
             left, right = self._follow_me.compute(detections)
             steering_input = self._bytes_to_steering_input(left, right)
@@ -692,6 +750,9 @@ class Controller:
         telemetry["rc_equal_tol_us"] = tol
         telemetry["rc_equal_rel_pct"] = rel_pct
         telemetry["straight_latched"] = self._straight_latched
+        telemetry["vesc_left_rpm"] = self._actual_left_rpm
+        telemetry["vesc_right_rpm"] = self._actual_right_rpm
+        telemetry["vesc_actual_speed_mps"] = self._actual_speed_mps
         return cmd, events, telemetry
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:
@@ -728,6 +789,14 @@ class Controller:
         corrected = base_byte + int(round(correction))
         return max(MIN_OUTPUT, min(MAX_OUTPUT, corrected))
 
+
+    def get_vesc_telemetry(self) -> dict:
+        """Return current VESC telemetry values for external consumers (e.g. debug CLI)."""
+        return {
+            "left_rpm": self._actual_left_rpm,
+            "right_rpm": self._actual_right_rpm,
+            "actual_speed_mps": self._actual_speed_mps,
+        }
 
     def get_imu_status(self) -> Optional[dict]:
         """Get IMU status information for monitoring."""

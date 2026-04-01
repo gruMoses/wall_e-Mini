@@ -65,6 +65,23 @@ class _MotorTelemetry:
     last_status5_s: float = 0.0
 
 
+@dataclass
+class VescTelemetry:
+    """Combined telemetry snapshot returned to the control loop.
+
+    Constructed by VescCanDriver.get_telemetry() and consumed by Controller
+    for closed-loop speed control and slip detection.
+    """
+    left_rpm: Optional[int] = None
+    right_rpm: Optional[int] = None
+    left_current_a: Optional[float] = None
+    right_current_a: Optional[float] = None
+    left_temp_c: Optional[float] = None
+    right_temp_c: Optional[float] = None
+    voltage_v: Optional[float] = None
+    timestamp: float = 0.0
+
+
 class VescCanDriver:
     def __init__(
         self,
@@ -153,6 +170,33 @@ class VescCanDriver:
         """Return MOSFET temperature (°C) for 'left' or 'right', or None."""
         with self._telem_lock:
             return self._telem_for(motor).temp_fet_c
+
+    def get_telemetry(self) -> Optional[VescTelemetry]:
+        """Return a combined telemetry snapshot for the control loop.
+
+        Returns None if no STATUS frames have been received yet (RPM is the
+        primary signal; until at least one motor reports RPM the snapshot is
+        not useful for closed-loop control).
+        """
+        with self._telem_lock:
+            l = self._left_telem
+            r = self._right_telem
+            if l.rpm is None and r.rpm is None:
+                return None
+            lv = l.voltage_v
+            rv = r.voltage_v
+            readings = [v for v in (lv, rv) if v is not None]
+            voltage = max(readings) if readings else None
+            return VescTelemetry(
+                left_rpm=l.rpm,
+                right_rpm=r.rpm,
+                left_current_a=l.current_a,
+                right_current_a=r.current_a,
+                left_temp_c=l.temp_fet_c,
+                right_temp_c=r.temp_fet_c,
+                voltage_v=voltage,
+                timestamp=max(l.last_status_s, r.last_status_s),
+            )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Background CAN RX loop
