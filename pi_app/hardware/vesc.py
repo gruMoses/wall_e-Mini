@@ -25,8 +25,10 @@ VESC CAN status frame layout (all big-endian, extended IDs):
 
   CAN_PACKET_STATUS_5 (27):
     [0:4]  int32   tachometer (not used)
-    [4:8]  int32   tachometer_abs (not used)
-    [8:10] int16   input_voltage × 10 → V
+    [4:6]  int16   input_voltage × 10 → V
+    [6:8]  int16   (reserved / SOC — not used)
+
+  Note: observed firmware sends 8-byte frames; voltage is at [4:6].
 """
 
 from __future__ import annotations
@@ -278,10 +280,13 @@ class VescCanDriver:
             t.last_status4_s = now
 
     def _parse_status5(self, motor: str, data: bytes, now: float) -> None:
-        """CAN_PACKET_STATUS_5 (27): tachometer (ignored), input voltage."""
-        if len(data) < 10:
+        """CAN_PACKET_STATUS_5 (27): tachometer (ignored), input voltage.
+
+        Observed VESC firmware sends 8-byte frames with voltage at bytes [4:6].
+        """
+        if len(data) < 6:
             return
-        voltage_raw = struct.unpack_from(">h", data, 8)[0]
+        voltage_raw = struct.unpack_from(">h", data, 4)[0]
         with self._telem_lock:
             t = self._telem_for(motor)
             t.voltage_v = voltage_raw / 10.0

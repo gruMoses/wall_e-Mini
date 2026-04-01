@@ -95,8 +95,9 @@ class VescConfig:
 
     # Low-voltage shutdown: trigger graceful OS shutdown when pack voltage stays
     # below threshold for voltage_shutdown_delay_s consecutive seconds.
-    # 22.4 V = 5-cell LiPo at ~3.73 V/cell (safe cutoff with margin above BMS cutoff).
-    voltage_shutdown_threshold_v: float = 22.4
+    # 42.0 V = 14S Li-ion at 3.0 V/cell (safe cutoff; BMS hardware also cuts at ~2.9 V/cell).
+    # Measured pack voltage ~55 V at ~74% SOC (14 × 3.93 V/cell) — confirmed 14S.
+    voltage_shutdown_threshold_v: float = 42.0
     voltage_shutdown_delay_s: float = 10.0
 
     # Wheel geometry for eRPM → wheel speed (m/s) conversion.
