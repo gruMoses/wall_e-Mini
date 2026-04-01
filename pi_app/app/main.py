@@ -23,6 +23,7 @@ try:
     from pi_app.hardware.oak_depth import OakDepthReader
     from pi_app.hardware.oak_recorder import OakRecorder, RecordingTelemetry
     from pi_app.hardware.rtk_gps import RtkGpsReader
+    from pi_app.hardware.bms import BmsService
     from pi_app.web.oak_viewer import OakWebViewer
     from pi_app.control.controller import Controller, RCInputs
     from pi_app.control.safety import SafetyEvent
@@ -43,6 +44,7 @@ except ModuleNotFoundError:
     from pi_app.hardware.oak_depth import OakDepthReader  # type: ignore
     from pi_app.hardware.oak_recorder import OakRecorder, RecordingTelemetry  # type: ignore
     from pi_app.hardware.rtk_gps import RtkGpsReader  # type: ignore
+    from pi_app.hardware.bms import BmsService  # type: ignore
     from pi_app.web.oak_viewer import OakWebViewer  # type: ignore
     from pi_app.control.controller import Controller, RCInputs  # type: ignore
     from pi_app.control.safety import SafetyEvent  # type: ignore
@@ -326,10 +328,32 @@ def run() -> None:
             print(f"RTK GPS initialization failed: {e}")
             print("  Continuing without GPS")
 
+    # Initialize Daly BMS Bluetooth service
+    bms_service = None
+    bms_cfg = getattr(config, "bms", None)
+    if bms_cfg is not None and bms_cfg.enabled:
+        try:
+            bms_service = BmsService(bms_cfg)
+            bms_service.start()
+            print(f"Daly BMS service started (MAC: {bms_cfg.bms_mac_address})")
+        except Exception as e:
+            print(f"BMS service init failed: {e} — continuing without BMS")
+            bms_service = None
+    else:
+        print("Daly BMS disabled (set config.bms.enabled=True and bms_mac_address to enable)")
+
     motor_driver = None
     if VescCanDriver.detect():
         print("VESC over CAN detected; using VESC driver")
-        motor_driver = VescCanDriver(left_id=2, right_id=1, max_rpm=getattr(config, 'vesc', None).max_erpm if hasattr(config, 'vesc') else 15000)
+        vesc_cfg = config.vesc
+        motor_driver = VescCanDriver(
+            left_id=vesc_cfg.left_can_id,
+            right_id=vesc_cfg.right_can_id,
+            max_rpm=vesc_cfg.max_erpm,
+            vesc_cfg=vesc_cfg,
+        )
+        motor_driver.start()
+        print(f"  VESC CAN telemetry RX started (voltage shutdown at {vesc_cfg.voltage_shutdown_threshold_v}V)")
     else:
         print("VESC not detected; using Arduino Model X motor driver (stub)")
         motor_driver = ArduinoModelXDriver(rc_reader=rc_reader)
@@ -461,6 +485,9 @@ def run() -> None:
             if gps_reader is not None:
                 gps_reading = gps_reader.get_reading()
                 controller.set_gps_reading(gps_reading)
+            # Update charger inhibit from BMS (fail-open: False when BMS unreachable)
+            if bms_service is not None:
+                controller.set_charger_inhibit(bms_service.is_charging())
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
 
             # Start a new log file on each arm event for per-session analysis
@@ -728,6 +755,21 @@ def run() -> None:
                             "wp_completed": telem.get("wp_completed"),
                         }),
                         "recording_state": oak_recorder.recording_state if oak_recorder is not None else None,
+                        "bms": (lambda s: {
+                            "voltage_v": s.pack_voltage_v,
+                            "current_a": s.pack_current_a,
+                            "soc_pct": s.soc_pct,
+                            "cell_min_mv": s.cell_min_mv,
+                            "cell_max_mv": s.cell_max_mv,
+                            "cell_delta_mv": s.cell_delta_mv,
+                            "temp_max_c": s.temp_max_c,
+                            "charge_fet_on": s.charge_fet_on,
+                            "discharge_fet_on": s.discharge_fet_on,
+                            "cycle_count": s.cycle_count,
+                            "error_flags": s.error_flags,
+                            "connected": s.connected,
+                            "charging": bms_service.is_charging(),
+                        })(bms_service.get_state()) if bms_service is not None else None,
                         "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
                         "loop_dt_ms": loop_dt_ms,
@@ -818,6 +860,11 @@ def run() -> None:
         try:
             if gps_reader is not None:
                 gps_reader.stop()
+        except Exception:
+            pass
+        try:
+            if bms_service is not None:
+                bms_service.stop()
         except Exception:
             pass
         try:

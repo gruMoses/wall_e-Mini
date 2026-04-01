@@ -89,6 +89,16 @@ class VescConfig:
     # VESC expects electrical RPM (eRPM)
     max_erpm: int = 15000
 
+    # CAN IDs for each motor
+    left_can_id: int = 2
+    right_can_id: int = 1
+
+    # Low-voltage shutdown: trigger graceful OS shutdown when pack voltage stays
+    # below threshold for voltage_shutdown_delay_s consecutive seconds.
+    # 22.4 V = 5-cell LiPo at ~3.73 V/cell (safe cutoff with margin above BMS cutoff).
+    voltage_shutdown_threshold_v: float = 22.4
+    voltage_shutdown_delay_s: float = 10.0
+
 
 @dataclass(frozen=True)
 class ObstacleAvoidanceConfig:
@@ -295,6 +305,16 @@ class GestureConfig:
 
 
 @dataclass(frozen=True)
+class BmsConfig:
+    """Configuration for Daly BMS Bluetooth communication (SPIM08HP)."""
+    enabled: bool = False                  # disabled until bms_mac_address is set
+    bms_mac_address: str = ""              # BLE MAC, e.g. "AA:BB:CC:DD:EE:FF"
+    bms_poll_interval_s: float = 8.0       # seconds between full polls
+    bms_timeout_s: float = 30.0            # BLE connect timeout; also fail-open threshold
+    charger_inhibit_enabled: bool = True   # refuse drive commands when charging
+
+
+@dataclass(frozen=True)
 class PropertyMapConfig:
     """Configuration for the property map feature."""
     enabled: bool = True
@@ -402,6 +422,9 @@ class Config:
 
     # Property map overlay
     property_map: PropertyMapConfig = PropertyMapConfig()
+
+    # Daly BMS Bluetooth communication
+    bms: BmsConfig = BmsConfig()
 
     # Debug settings
     log_imu_data: bool = False

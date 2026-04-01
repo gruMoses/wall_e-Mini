@@ -27,10 +27,14 @@ Scope: Bug fixes and features tracked here; see `wall_e-Mini/docs/performance_op
 
 ### P1 (High Priority)
 
-- [ ] **Graceful shutdown on low battery (VESC voltage)**
-  - Monitor VESC voltage readings and trigger a safe Pi shutdown sequence before the battery cuts out.
-  - Use VESC telemetry rather than BMS data — the Daly BMS tends to go to sleep after a while, making it unreliable as a shutdown trigger.
-  - Define a low-voltage threshold (with hysteresis) and initiate a clean OS shutdown so the Pi doesn't lose state abruptly.
+- [x] **Graceful shutdown on low battery (VESC voltage)**
+  - VESC broadcasts STATUS_5 frames (CAN_PACKET_STATUS_5, packet id 27) containing pack input voltage.
+  - Background CAN RX thread in VescCanDriver parses STATUS / STATUS_4 / STATUS_5 frames from both motors.
+  - Configurable threshold (default 22.4 V) with a 10 s sustained-low-voltage delay before triggering.
+  - Hysteresis: voltage must stay below threshold for the full delay; recovery resets the timer. Once triggered, the latch never clears.
+  - On trigger: motors stopped, stop-event set, then `sudo shutdown -h now` via a separate thread (avoids RX-thread deadlock).
+  - Config: `VescConfig.voltage_shutdown_threshold_v`, `voltage_shutdown_delay_s`, `left_can_id`, `right_can_id`.
+  - Tests: `pi_app/tests/test_vesc_telemetry.py` covers frame parsing, threshold/delay/hysteresis/latch, and RX thread integration.
 
 ### P2 (Medium Priority)
 
