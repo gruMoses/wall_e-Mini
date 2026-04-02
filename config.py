@@ -118,7 +118,7 @@ class ObstacleAvoidanceConfig:
     stop_distance_m: float = 0.4
     roi_width_pct: float = 0.80
     roi_height_pct: float = 0.5
-    roi_vertical_offset_pct: float = -0.20  # negative = shift ROI upward
+    roi_vertical_offset_pct: float = 0.0  # 0.0 for next test run (was -0.20; shifted up causing sky/horizon hits)
     camera_height_m: float = 0.497
     robot_width_m: float = 0.820
     camera_hfov_deg: float = 81.0
@@ -217,6 +217,9 @@ class FollowMeConfig:
     pursuit_min_speed_byte: float = 15.0          # floor speed in tight turns
     pursuit_lookahead_curvature_points: int = 10  # look ahead for pre-deceleration (increased for gravel speed)
     pursuit_max_accel_byte_per_s: float = 50.0    # smooth speed transitions
+
+    # ── Steer hold/decay during detection dropout ─────────────────────────
+    steer_hold_decay_s: float = 1.5  # seconds to decay held steer to 0 after losing fresh detection
 
     # Trail/direct steering blend: when person is off-center in trail mode,
     # blend in direct pursuit steering so robot reacts to WHERE the person IS.

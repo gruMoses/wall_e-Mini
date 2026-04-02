@@ -497,6 +497,15 @@ def run() -> None:
                 controller.set_charger_inhibit(bms_service.is_charging())
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
 
+            # P3: Warn when BMS discharge FET is off but motor commands are flowing.
+            # This is normal at startup (~14 s until first BMS poll); Option B = warn only.
+            if (bms_service is not None
+                    and telem.get("mode") == "FOLLOW_ME"
+                    and cmd.is_armed):
+                _bms_st = bms_service.get_state()
+                if _bms_st is not None and _bms_st.discharge_fet_on is False:
+                    print("WARNING: BMS discharge_fet_on=False — pack may not supply current (normal <14s after arm)")
+
             # Start a new log file on each arm event for per-session analysis
             if any(e is SafetyEvent.ARMED for e in events):
                 try:
@@ -735,6 +744,7 @@ def run() -> None:
                             "distance_error_m": telem.get("follow_me_distance_error_m"),
                             "speed_offset": telem.get("follow_me_speed_offset"),
                             "steer_offset": telem.get("follow_me_steer_offset"),
+                            "actual_speed_mps": telem.get("follow_me_actual_speed_mps"),
                             "pursuit_mode": telem.get("follow_me_pursuit_mode"),
                             "trail_length": telem.get("trail_length"),
                             "trail_distance_m": telem.get("trail_distance_m"),
@@ -792,6 +802,12 @@ def run() -> None:
                             "connected": s.connected,
                             "charging": bms_service.is_charging(),
                         })(bms_service.get_state()) if bms_service is not None else None,
+                        "vesc": {
+                            "left_rpm": telem.get("vesc_left_rpm"),
+                            "right_rpm": telem.get("vesc_right_rpm"),
+                            "speed_mps": round(telem.get("vesc_actual_speed_mps"), 3)
+                                         if telem.get("vesc_actual_speed_mps") is not None else None,
+                        },
                         "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
                         "loop_dt_ms": loop_dt_ms,

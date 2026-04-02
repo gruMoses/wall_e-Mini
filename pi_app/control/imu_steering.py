@@ -336,6 +336,26 @@ class ImuSteeringCompensator:
                 error_count=self.state.error_count
             )
     
+    def get_heading_deg(self) -> float:
+        """Read IMU and return current heading without running PID.
+
+        For use in FOLLOW_ME mode where heading is needed for dead-reckoning
+        odometry but the PID should not run (robot intentionally changes heading
+        to track a person).  Zeroes _last_pid so telemetry shows 0 in FM mode.
+        """
+        if self.imu_reader is not None and self.state.is_available:
+            try:
+                data = self.imu_reader.read()
+                with self.lock:
+                    self.state.heading_deg = data['heading_deg']
+                    self.state.yaw_rate_dps = data['gz_dps']
+                    self.state.last_update_time = time.monotonic()
+            except Exception:
+                self.state.error_count += 1
+        # Zero PID debug fields so FM-mode telemetry doesn't show stale corrections
+        self._last_pid = {k: 0.0 for k in self._last_pid}
+        return self.state.heading_deg
+
     def reset_target_heading(self) -> None:
         """Reset target heading to current heading."""
         with self.lock:

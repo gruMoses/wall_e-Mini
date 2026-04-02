@@ -490,6 +490,8 @@ class FollowMeController:
         self._prev_target_present: bool = False  # for transition detection
         self._prev_fresh_detection: bool = False  # True only when persons visible this frame
         self._reacq_time: float = 0.0             # monotonic() of last lost→tracking transition
+        self._last_fresh_steer: float = 0.0       # steer from last frame with fresh detection
+        self._last_fresh_steer_time: float = 0.0  # monotonic() of that frame
 
         # ── Telemetry state ──────────────────────────────────────────────────
         self._tracking: bool = False
@@ -679,10 +681,13 @@ class FollowMeController:
 
             # Layer 3: Steering — only when there is a FRESH detection this frame.
             # When the tracker is coasting on stale data (persistence window, persons=0)
-            # use steer=0 so the robot coasts straight instead of holding the last
-            # turn command and overshooting into empty space.
+            # hold the last fresh steer and decay it linearly to 0 over steer_hold_decay_s
+            # so the robot continues turning during brief occlusions instead of driving straight.
             if not fresh_detection:
-                steer = 0.0
+                elapsed_since_fresh = now - self._last_fresh_steer_time
+                hold_decay_s = float(getattr(self._cfg, "steer_hold_decay_s", 1.5))
+                decay = max(0.0, 1.0 - elapsed_since_fresh / hold_decay_s) if hold_decay_s > 0.0 else 0.0
+                steer = self._last_fresh_steer * decay
             else:
                 if not self._prev_fresh_detection:
                     self._reacq_time = now  # mark reacquisition start
@@ -696,6 +701,8 @@ class FollowMeController:
                     reacq_elapsed = now - self._reacq_time
                     if reacq_elapsed < reacq_window:
                         steer *= reacq_elapsed / reacq_window
+                self._last_fresh_steer = steer
+                self._last_fresh_steer_time = now
 
             self._prev_fresh_detection = fresh_detection
 
@@ -954,6 +961,8 @@ class FollowMeController:
                             max_s = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
                             steer = max(-max_s, min(max_s, steer + steer_bias))
 
+                        self._last_steer_offset = steer
+                        self._last_speed_offset = fwd
                         return _mix_commands(fwd, steer)
 
             # ── Gentle search rotation ────────────────────────────────────────
@@ -967,6 +976,8 @@ class FollowMeController:
                     else 0.0
                 )
                 fwd = float(self._MIN_LOST_TARGET_SPEED)
+                self._last_steer_offset = steer
+                self._last_speed_offset = fwd
                 return _mix_commands(fwd, steer)
 
         # ── Full timeout — stop and reset everything ──────────────────────────
