@@ -228,17 +228,26 @@ class TestControllerFollowMe(unittest.TestCase):
         self.assertIn(SafetyEvent.FOLLOW_ME_EXITED, events)
 
     def test_follow_me_uses_detections_not_rc(self):
-        ctrl, motor = self._make_controller()
-        t = self._enter_follow_me(ctrl, 10.0)
+        # Mock time.monotonic so the slew limiter sees ≥1 s between the
+        # mode-entry call (neutral) and the first detection call (full speed).
+        # Two init calls + one per process() call: [init×2, arm, fm_entry, detect].
+        # Call sequence: init×2, arm_process×1, fm_process×2 (ctrl+follow_me),
+        # detect_process×2 (ctrl+follow_me). Ctrl mono_now for detect is call 6
+        # (index 5). Setting it to 1.0 gives slew dt=1 s → 200 bytes/s accel,
+        # enough to ramp from neutral to full speed in one step.
+        with patch("pi_app.control.controller.time.monotonic",
+                   side_effect=[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]):
+            ctrl, motor = self._make_controller()
+            t = self._enter_follow_me(ctrl, 10.0)
 
-        ctrl.set_person_detections([
-            PersonDetection(x_m=0.0, z_m=3.0, confidence=0.9,
-                            bbox=(0.45, 0.3, 0.55, 0.8))
-        ])
+            ctrl.set_person_detections([
+                PersonDetection(x_m=0.0, z_m=3.0, confidence=0.9,
+                                bbox=(0.45, 0.3, 0.55, 0.8))
+            ])
 
-        armed_fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900,
-                                ch4_us=1900, ch5_us=1000, last_update_epoch_s=0.0)
-        cmd, _, telem = ctrl.process(armed_fm_rc, now_epoch_s=t)
+            armed_fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900,
+                                    ch4_us=1900, ch5_us=1000, last_update_epoch_s=0.0)
+            cmd, _, telem = ctrl.process(armed_fm_rc, now_epoch_s=t)
         self.assertEqual(telem["mode"], "FOLLOW_ME")
         self.assertGreater(cmd.left_byte, 126)
         self.assertGreater(cmd.right_byte, 126)

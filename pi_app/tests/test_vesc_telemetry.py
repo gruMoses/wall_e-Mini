@@ -96,10 +96,10 @@ def _status4_frame(vesc_id: int, temp_fet: float, temp_motor: float, current_in:
 
 
 def _status5_frame(vesc_id: int, voltage_v: float) -> _FakeMessage:
+    # Layout per observed firmware: [0:4] tachometer, [4:6] input_voltage × 10
     tach = struct.pack(">i", 0)
-    tach_abs = struct.pack(">i", 0)
     volt = struct.pack(">h", int(voltage_v * 10))
-    return _make_frame(_CAN_PACKET_STATUS_5, vesc_id, tach + tach_abs + volt)
+    return _make_frame(_CAN_PACKET_STATUS_5, vesc_id, tach + volt)
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ class TestFrameParsing(unittest.TestCase):
 
     def test_status5_short_frame_ignored(self):
         d = self._driver()
-        d._parse_status5("left", b"\x00" * 9, time.monotonic())  # needs 10 bytes
+        d._parse_status5("left", b"\x00" * 5, time.monotonic())  # needs 6 bytes
         self.assertIsNone(d.get_voltage())
 
     def test_negative_rpm(self):
