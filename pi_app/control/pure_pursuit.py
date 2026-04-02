@@ -53,6 +53,17 @@ class PurePursuitController:
         self._last_speed_byte = 0.0
         self._last_compute_time = 0.0
 
+    @property
+    def last_closest_idx(self) -> int:
+        """Last closest-point index for observability."""
+        return self._last_closest_idx
+
+    def adjust_for_prune(self, num_removed: int) -> None:
+        """Shift _last_closest_idx down after num_removed points pruned from trail front."""
+        if num_removed <= 0:
+            return
+        self._last_closest_idx = max(0, self._last_closest_idx - num_removed)
+
     def compute(
         self,
         pose: RobotPose,

@@ -87,29 +87,31 @@ class TrailManager:
         robot_y: float,
         robot_theta: float,
         now: float,
-    ) -> None:
+    ) -> int:
+        """Remove stale/consumed trail points from the front. Returns count removed.
+
+        O(k) popleft loop instead of O(n) list rebuild: old and consumed points
+        are always at the front of the chronologically-ordered deque.
+        """
         heading_x = math.cos(robot_theta)
         heading_y = math.sin(robot_theta)
         max_age = now - self._config.max_age_s
         consume_r = self._config.consume_radius_m
 
-        def keep(p: TrailPoint) -> bool:
+        def should_remove(p: TrailPoint) -> bool:
             if p.timestamp < max_age:
-                return False
+                return True
             dx = p.x - robot_x
             dy = p.y - robot_y
             dot = dx * heading_x + dy * heading_y
-            behind = dot < 0
-            dist = math.hypot(dx, dy)
-            within = dist <= consume_r
-            if behind and within:
-                return False
-            return True
+            if dot < 0 and math.hypot(dx, dy) <= consume_r:
+                return True
+            return False
 
-        kept = [p for p in self._trail if keep(p)]
-        self._trail.clear()
-        for p in kept:
-            self._trail.append(p)
+        old_len = len(self._trail)
+        while self._trail and should_remove(self._trail[0]):
+            self._trail.popleft()
+        return old_len - len(self._trail)
 
     def get_trail(self) -> list[TrailPoint]:
         return list(self._trail)
@@ -169,6 +171,83 @@ class TrailManager:
             if denom > 1e-10:
                 curvatures[i] = 2.0 * cross / denom
         return curvatures
+
+    def get_tangent_direction(self) -> tuple[float, float]:
+        """Return unit tangent (dx, dy) from the last 2-3 trail points.
+
+        Returns (0.0, 0.0) when the trail has fewer than 2 points or the last
+        points are coincident.
+        """
+        trail = list(self._trail)
+        if len(trail) < 2:
+            return 0.0, 0.0
+        ref_idx = max(0, len(trail) - 3)
+        last = trail[-1]
+        ref = trail[ref_idx]
+        dx = last.x - ref.x
+        dy = last.y - ref.y
+        dist = math.hypot(dx, dy)
+        if dist < 1e-6:
+            return 0.0, 0.0
+        return dx / dist, dy / dist
+
+    def extrapolate(self, num_points: int, max_dist: float) -> int:
+        """Append extra points along the last trail tangent.
+
+        Thin wrapper around extrapolate_trail() with caller-specified
+        num_points and max_dist; uses current monotonic time.
+        Returns the number of points added.
+        """
+        import time as _time
+        return self.extrapolate_trail(
+            now=_time.monotonic(),
+            max_dist_m=max_dist,
+            num_points=num_points,
+        )
+
+    def extrapolate_trail(
+        self,
+        now: float,
+        max_dist_m: float = 1.5,
+        num_points: int = 3,
+    ) -> int:
+        """Append extra points along the last trail tangent.
+
+        Called once when the target is first lost so the robot can follow
+        Kevin's last known heading a bit further before entering search mode.
+        Returns the number of points added.
+        """
+        trail = list(self._trail)
+        if len(trail) < 2:
+            return 0
+
+        # Stable tangent from last 2–3 points
+        ref_idx = max(0, len(trail) - 3)
+        last = trail[-1]
+        ref = trail[ref_idx]
+        dx = last.x - ref.x
+        dy = last.y - ref.y
+        dist = math.hypot(dx, dy)
+        if dist < 1e-6:
+            return 0
+        tx, ty = dx / dist, dy / dist
+
+        # Average speed_hint from recent points
+        recent = trail[-3:]
+        avg_speed = sum(p.speed_hint for p in recent) / len(recent)
+
+        spacing = max(self._config.min_spacing_m, 0.3)
+        added = 0
+        for i in range(1, num_points + 1):
+            step = spacing * i
+            if step > max_dist_m:
+                break
+            ex = last.x + tx * step
+            ey = last.y + ty * step
+            # Small timestamp offset prevents immediate age-pruning
+            self._trail.append(TrailPoint(ex, ey, now + i * 0.1, avg_speed))
+            added += 1
+        return added
 
     def clear(self) -> None:
         self._trail.clear()

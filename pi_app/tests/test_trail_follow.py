@@ -163,11 +163,14 @@ class TestTrailManager(unittest.TestCase):
         self.assertEqual(mgr.length, 0)
 
     def test_prune_behind_robot(self):
+        # Oldest breadcrumb (-0.2, 0) is at the front (added first); robot at origin
+        # facing +x. prune() uses a while/popleft loop so consumed points must be
+        # at the front of the deque — they are the oldest breadcrumbs already passed.
         cfg = TrailConfig(consume_radius_m=0.5)
         mgr = TrailManager(cfg)
-        mgr.add_point(0.0, 0.0, 0.0)
-        mgr.add_point(1.0, 0.0, 1.0)
-        mgr.add_point(-0.2, 0.0, 2.0)
+        mgr.add_point(-0.2, 0.0, 0.0)  # oldest — behind robot
+        mgr.add_point(0.5, 0.0, 1.0)   # ahead of robot
+        mgr.add_point(1.0, 0.0, 2.0)   # further ahead
         mgr.prune(0.0, 0.0, 0.0, now=5.0)
         trail = mgr.get_trail()
         xs = [p.x for p in trail]

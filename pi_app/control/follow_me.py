@@ -21,6 +21,7 @@ Motor output is rate-limited to ~15 Hz (configurable), decoupled from the
 
 from __future__ import annotations
 
+import logging
 import math
 import sys
 import time
@@ -37,6 +38,8 @@ from pi_app.control.pure_pursuit import PurePursuitController, PursuitConfig
 from pi_app.control.trail import TrailConfig, TrailManager
 
 NEUTRAL = CENTER_OUTPUT_VALUE
+
+_log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -535,6 +538,9 @@ class FollowMeController:
         self._speed_limited: bool = False
         self._odom_source: str = "none"
         self._last_mode_switch_time: float = 0.0
+        # Trail exhaustion hysteresis (Fix 5) and one-shot extrapolation flag (Fix 4)
+        self._trail_exhausted_count: int = 0
+        self._trail_extrapolated: bool = False
 
         if self._trail_enabled:
             self._odometry = DeadReckonOdometry(
@@ -657,7 +663,14 @@ class FollowMeController:
                 self._last_target_world_y = wy
                 self._trail.add_point(wx, wy, now, speed_hint=self._last_speed_offset)
                 pose = odom.pose
-                self._trail.prune(pose.x, pose.y, pose.theta, now)
+                _prune_old = self._trail.length
+                _prune_delta = self._trail.prune(pose.x, pose.y, pose.theta, now)
+                if _prune_delta > 0 and self._pursuit is not None:
+                    self._pursuit.adjust_for_prune(_prune_delta)
+                    _log.debug(
+                        "trail prune (active): -%d pts, idx adj -%d -> %d",
+                        _prune_delta, _prune_delta, self._pursuit._last_closest_idx,
+                    )
                 self._trail_distance_m = self._trail.trail_distance()
                 self._trail_rejected_jump_count = self._trail.rejected_jump_count
                 self._trail_rejected_speed_count = self._trail.rejected_speed_count
@@ -917,12 +930,39 @@ class FollowMeController:
                 and self._trail is not None
                 and elapsed < trail_max_s
             ):
+                # Fix 4: extrapolate trail once on first lost-target call
+                if not self._trail_extrapolated:
+                    n_added = self._trail.extrapolate_trail(now)
+                    if n_added > 0:
+                        _log.debug(
+                            "trail extrapolated +%d pts on target loss (elapsed=%.2fs)",
+                            n_added, elapsed,
+                        )
+                    self._trail_extrapolated = True
+
                 trail_pts = self._trail.get_smoothed_trail()
                 self._trail_length = len(trail_pts)
                 self._trail_distance_m = self._trail.trail_distance()
                 self._trail_rejected_jump_count = self._trail.rejected_jump_count
                 self._trail_rejected_speed_count = self._trail.rejected_speed_count
                 min_pts = int(getattr(self._cfg, "min_trail_points_for_pursuit", 2))
+
+                if len(trail_pts) >= min_pts:
+                    pose = odom.pose
+
+                    # Fix 2: prune trail + adjust index before compute
+                    _lt_prune_delta = self._trail.prune(pose.x, pose.y, pose.theta, now)
+                    if _lt_prune_delta > 0:
+                        self._pursuit.adjust_for_prune(_lt_prune_delta)
+                        _log.debug(
+                            "trail prune (lost): -%d pts, idx -> %d, rejected j=%d s=%d",
+                            _lt_prune_delta, self._pursuit._last_closest_idx,
+                            self._trail_rejected_jump_count,
+                            self._trail_rejected_speed_count,
+                        )
+                    # Re-fetch smoothed trail after prune
+                    trail_pts = self._trail.get_smoothed_trail()
+                    self._trail_length = len(trail_pts)
 
                 if len(trail_pts) >= min_pts:
                     pose = odom.pose
@@ -951,15 +991,27 @@ class FollowMeController:
                         fwd_x = math.cos(pose.theta)
                         fwd_y = math.sin(pose.theta)
                         lookahead_behind = (dx_lk * fwd_x + dy_lk * fwd_y) < 0
+                        if cmd.trail_remaining <= 5:
+                            _log.debug(
+                                "trail_remaining=%d (pose=(%.2f,%.2f))",
+                                cmd.trail_remaining, pose.x, pose.y,
+                            )
                     else:
                         lookahead_behind = False
 
-                    trail_exhausted = (
+                    # Fix 5: hysteresis — require 3 consecutive frames before exhausted
+                    _raw_exhausted = (
                         near_trail_end
                         or lookahead_behind
                         or (cmd is not None
                             and cmd.trail_remaining <= trail_exhausted_threshold)
                     )
+                    if _raw_exhausted:
+                        self._trail_exhausted_count += 1
+                    else:
+                        self._trail_exhausted_count = 0
+                    trail_exhausted = self._trail_exhausted_count >= 3
+
                     trail_ok = cmd is not None and (
                         elapsed < search_delay_s or not trail_exhausted
                     )
@@ -988,10 +1040,32 @@ class FollowMeController:
             if elapsed < trail_max_s:
                 self._pursuit_mode = "search"
                 search_steer = float(getattr(self._cfg, "search_steer_cap_byte", 30.0))
-                last_x = self._last_target_x or 0.0
+
+                # Fix 3: derive search direction from trail tangent (Kevin's actual
+                # direction of travel) rather than last observed lateral offset.
+                steer_sign = 0.0
+                if self._trail is not None and odom is not None:
+                    _trail_raw = self._trail.get_trail()
+                    if len(_trail_raw) >= 2:
+                        _ref_idx = max(0, len(_trail_raw) - 3)
+                        _tdx = _trail_raw[-1].x - _trail_raw[_ref_idx].x
+                        _tdy = _trail_raw[-1].y - _trail_raw[_ref_idx].y
+                        _tdist = math.hypot(_tdx, _tdy)
+                        if _tdist > 1e-6:
+                            _p = odom.pose
+                            _s = math.sin(_p.theta)
+                            _c = math.cos(_p.theta)
+                            # local_y > 0 → tangent going robot-left → search left → steer < 0
+                            _local_y = -_tdx * _s + _tdy * _c
+                            steer_sign = -_local_y / _tdist
+
+                # Fall back to last known lateral position when no tangent
+                if abs(steer_sign) < 0.05:
+                    steer_sign = self._last_target_x or 0.0
+
                 steer = (
-                    math.copysign(search_steer, last_x)
-                    if abs(last_x) > 0.05
+                    math.copysign(search_steer, steer_sign)
+                    if abs(steer_sign) > 0.05
                     else 0.0
                 )
                 fwd = float(self._MIN_LOST_TARGET_SPEED)
@@ -1032,6 +1106,8 @@ class FollowMeController:
         self._trail_rejected_speed_count = 0
         self._last_target_world_x = None
         self._last_target_world_y = None
+        self._trail_exhausted_count = 0
+        self._trail_extrapolated = False
         if self._odometry is not None:
             self._odometry.reset()
         if self._gps_odom is not None:
@@ -1070,6 +1146,9 @@ class FollowMeController:
             status["follow_me_target_world_x"] = self._last_target_world_x
             status["follow_me_target_world_y"] = self._last_target_world_y
             status["odom_source"] = self._odom_source
+            status["trail_exhausted_count"] = self._trail_exhausted_count
+            if self._pursuit is not None:
+                status["trail_last_closest_idx"] = self._pursuit._last_closest_idx
             odom = self._pick_odometry()
             if odom is not None:
                 pose = odom.pose
