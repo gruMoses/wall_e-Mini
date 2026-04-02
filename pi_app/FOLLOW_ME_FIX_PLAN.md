@@ -290,7 +290,7 @@ Status:        All STATUS (9), STATUS_4 (16), STATUS_5 (27) frames arriving at ~
 
 ---
 
-## Grok Safety Review — Addressed (2026-04-01)
+## Grok Safety Review — Addressed (2026-04-01, commit 34bb4a0)
 
 All five Grok review items implemented in follow-up commit on master:
 
