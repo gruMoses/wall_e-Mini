@@ -342,6 +342,10 @@ class ImuSteeringCompensator:
         For use in FOLLOW_ME mode where heading is needed for dead-reckoning
         odometry but the PID should not run (robot intentionally changes heading
         to track a person).  Zeroes _last_pid so telemetry shows 0 in FM mode.
+
+        All state fields (heading, yaw_rate, roll, pitch, timestamp, error_count)
+        are updated on every call so the AHRS library receives its normal cadence
+        of read() calls and heading quality does not degrade over time.
         """
         if self.imu_reader is not None and self.state.is_available:
             try:
@@ -349,7 +353,11 @@ class ImuSteeringCompensator:
                 with self.lock:
                     self.state.heading_deg = data['heading_deg']
                     self.state.yaw_rate_dps = data['gz_dps']
+                    # Also update roll/pitch so full state stays in sync with update()
+                    self.state.roll_deg = data.get('roll_deg', self.state.roll_deg)
+                    self.state.pitch_deg = data.get('pitch_deg', self.state.pitch_deg)
                     self.state.last_update_time = time.monotonic()
+                    self.state.error_count = 0
             except Exception:
                 self.state.error_count += 1
         # Zero PID debug fields so FM-mode telemetry doesn't show stale corrections

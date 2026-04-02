@@ -17,34 +17,35 @@ from pi_app.control.gesture_control import (
 # ---------------------------------------------------------------------------
 
 def _make_fist_landmarks() -> list:
-    """All fingers curled: all tips below their MCP joints."""
+    """All fingers curled: V-shaped joints so angle_pip < 90° → detector returns 0 (curled).
+    MCP sits high (low y), PIP extends down (high y), DIP/TIP curl back up — acute angle at PIP."""
     lm = [[0.5, 0.5, 0.0]] * 21
-    # Thumb: angles sum < 460 → closed
+    # Thumb: angles sum < 460 → closed (unchanged)
     lm[0] = [0.3, 0.8, 0]   # WRIST
     lm[1] = [0.35, 0.7, 0]  # THUMB_CMC
     lm[2] = [0.38, 0.6, 0]  # THUMB_MCP
     lm[3] = [0.39, 0.55, 0] # THUMB_IP
     lm[4] = [0.38, 0.58, 0] # THUMB_TIP (curled back)
-    # Index: tip(8) below MCP(5) → closed
-    lm[5] = [0.4, 0.45, 0]  # INDEX_MCP
-    lm[6] = [0.42, 0.5, 0]
-    lm[7] = [0.43, 0.55, 0]
-    lm[8] = [0.42, 0.6, 0]  # INDEX_TIP (below MCP)
-    # Middle
-    lm[9] = [0.45, 0.44, 0]
-    lm[10] = [0.46, 0.5, 0]
-    lm[11] = [0.47, 0.55, 0]
-    lm[12] = [0.46, 0.6, 0]
-    # Ring
-    lm[13] = [0.5, 0.44, 0]
-    lm[14] = [0.51, 0.5, 0]
-    lm[15] = [0.52, 0.55, 0]
-    lm[16] = [0.51, 0.6, 0]
-    # Pinky
-    lm[17] = [0.55, 0.45, 0]
-    lm[18] = [0.56, 0.5, 0]
-    lm[19] = [0.57, 0.55, 0]
-    lm[20] = [0.56, 0.6, 0]
+    # Index — V-shape: PIP extends down then DIP/TIP curl back up
+    lm[5] = [0.40, 0.40, 0]  # INDEX_MCP
+    lm[6] = [0.40, 0.65, 0]  # INDEX_PIP (extends down)
+    lm[7] = [0.40, 0.55, 0]  # INDEX_DIP (curls back up → angle_pip ≈ 0°)
+    lm[8] = [0.40, 0.46, 0]  # INDEX_TIP (near MCP level)
+    # Middle — V-shape
+    lm[9]  = [0.45, 0.39, 0]  # MIDDLE_MCP
+    lm[10] = [0.45, 0.63, 0]  # MIDDLE_PIP
+    lm[11] = [0.45, 0.53, 0]  # MIDDLE_DIP
+    lm[12] = [0.45, 0.45, 0]  # MIDDLE_TIP
+    # Ring — V-shape
+    lm[13] = [0.50, 0.40, 0]  # RING_MCP
+    lm[14] = [0.50, 0.63, 0]  # RING_PIP
+    lm[15] = [0.50, 0.53, 0]  # RING_DIP
+    lm[16] = [0.50, 0.46, 0]  # RING_TIP
+    # Pinky — V-shape
+    lm[17] = [0.55, 0.41, 0]  # PINKY_MCP
+    lm[18] = [0.55, 0.62, 0]  # PINKY_PIP
+    lm[19] = [0.55, 0.53, 0]  # PINKY_DIP
+    lm[20] = [0.55, 0.47, 0]  # PINKY_TIP
     return lm
 
 
@@ -76,17 +77,18 @@ def _make_open_hand_landmarks() -> list:
 
 
 def _make_three_fingers_landmarks() -> list:
-    """Thumb + index + middle extended (THREE gesture)."""
+    """Thumb + index + middle extended (THREE gesture); ring + pinky curled with V-shape."""
     lm = _make_open_hand_landmarks()
-    # Close ring and pinky (tip below MCP)
-    lm[13] = [0.5, 0.4, 0]   # RING_MCP
-    lm[14] = [0.51, 0.45, 0]
-    lm[15] = [0.52, 0.5, 0]
-    lm[16] = [0.51, 0.55, 0] # RING_TIP below MCP
-    lm[17] = [0.6, 0.42, 0]  # PINKY_MCP
-    lm[18] = [0.61, 0.47, 0]
-    lm[19] = [0.62, 0.52, 0]
-    lm[20] = [0.61, 0.57, 0] # PINKY_TIP below MCP
+    # Curl ring — V-shape (PIP extends down, DIP/TIP curl back up → angle_pip < 90°)
+    lm[13] = [0.50, 0.40, 0]  # RING_MCP
+    lm[14] = [0.50, 0.63, 0]  # RING_PIP (extends down)
+    lm[15] = [0.50, 0.53, 0]  # RING_DIP (curls back up)
+    lm[16] = [0.50, 0.46, 0]  # RING_TIP (near MCP)
+    # Curl pinky — V-shape
+    lm[17] = [0.55, 0.41, 0]  # PINKY_MCP
+    lm[18] = [0.55, 0.62, 0]  # PINKY_PIP
+    lm[19] = [0.55, 0.53, 0]  # PINKY_DIP
+    lm[20] = [0.55, 0.47, 0]  # PINKY_TIP
     return lm
 
 

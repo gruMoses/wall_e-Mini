@@ -287,3 +287,17 @@ Status:        All STATUS (9), STATUS_4 (16), STATUS_5 (27) frames arriving at ~
 | `pi_app/control/controller.py` | Issues 3, 4: BMS discharge check; use `get_heading_deg()` in FM mode |
 | `pi_app/control/imu_steering.py` | Issue 4: Add `get_heading_deg()` method |
 | `config.py` | Issues 1, 5: Add `steer_hold_decay_s`; tune `roi_vertical_offset_pct` |
+
+---
+
+## Grok Safety Review — Addressed (2026-04-01)
+
+All five Grok review items implemented in follow-up commit on master:
+
+| # | Item | Resolution |
+|---|------|-----------|
+| 1 | BMS FET warning spams every tick | Rate-limited to once/5s; `BmsConfig.bms_fet_grace_period_s=20` + `bms_fet_safety_timeout_s=2` added. After grace period, FET-off >2s triggers `charger_inhibit` → force neutral. Arm/disarm events reset all tracking. |
+| 2 | Steer hold decay fixed at 1.5s | Default lowered to 1.0s; made speed-aware: `effective_decay = decay_s * max(0.3, 1.0 - speed_factor)`. At max speed → 0.3s; at zero speed → 1.0s. |
+| 2b | No turn-rate clamp during blind decay | Held steer clamped to 70% of `max_steer_offset_byte` during decay window. |
+| 3 | No decay/detection observability in logs | `steer_decay_factor`, `fresh_detection`, `steer_hold_active` added to `get_status()` and `log_obj.follow_me`. |
+| 4 | `get_heading_deg()` may skip roll/pitch/error state | Now updates all state fields (roll, pitch, error_count reset on success) so AHRS read cadence is preserved identically to `update()`. |

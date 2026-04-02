@@ -409,6 +409,15 @@ def run() -> None:
         pid_csv_fh, _ = _open_pid_csv(logs_dir)
     pid_csv_t0 = None
 
+    # BMS FET safety tracking (Grok review item 1)
+    _bms_cfg = getattr(config, "bms", None)
+    _bms_fet_grace_s = float(getattr(_bms_cfg, "bms_fet_grace_period_s", 20.0)) if _bms_cfg else 20.0
+    _bms_fet_safety_s = float(getattr(_bms_cfg, "bms_fet_safety_timeout_s", 2.0)) if _bms_cfg else 2.0
+    _arm_time = None            # monotonic() when last ARMED event fired
+    _bms_fet_false_since = None # monotonic() when discharge_fet_on first went False (post-startup)
+    _bms_fet_warn_last_t = 0.0  # monotonic() of last rate-limited warning print
+    _bms_safety_stopped = False # True after safety timeout fires; cleared on DISARMED
+
     try:
         last_log_ts = 0.0
         log_interval = 0.1  # 10 Hz logging
@@ -492,19 +501,47 @@ def run() -> None:
             if gps_reader is not None:
                 gps_reading = gps_reader.get_reading()
                 controller.set_gps_reading(gps_reading)
-            # Update charger inhibit from BMS (fail-open: False when BMS unreachable)
+            # Update charger inhibit from BMS (fail-open: False when BMS unreachable).
+            # Also force inhibit when the discharge FET safety timeout has fired.
             if bms_service is not None:
-                controller.set_charger_inhibit(bms_service.is_charging())
+                controller.set_charger_inhibit(bms_service.is_charging() or _bms_safety_stopped)
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
 
-            # P3: Warn when BMS discharge FET is off but motor commands are flowing.
-            # This is normal at startup (~14 s until first BMS poll); Option B = warn only.
-            if (bms_service is not None
-                    and telem.get("mode") == "FOLLOW_ME"
-                    and cmd.is_armed):
+            # P3: BMS discharge FET safety — rate-limited warning + post-grace safety timeout.
+            if bms_service is not None and cmd.is_armed and telem.get("mode") == "FOLLOW_ME":
                 _bms_st = bms_service.get_state()
-                if _bms_st is not None and _bms_st.discharge_fet_on is False:
-                    print("WARNING: BMS discharge_fet_on=False — pack may not supply current (normal <14s after arm)")
+                _fet_on = _bms_st.discharge_fet_on if _bms_st is not None else None
+                if _fet_on is False:
+                    if loop_now - _bms_fet_warn_last_t >= 5.0:
+                        _bms_fet_warn_last_t = loop_now
+                        print("\nWARNING: BMS discharge_fet_on=False — pack may not supply current (normal <14s after arm)")
+                    if _bms_fet_false_since is None:
+                        _bms_fet_false_since = loop_now
+                    in_grace = (_arm_time is not None and (loop_now - _arm_time) < _bms_fet_grace_s)
+                    if not in_grace and not _bms_safety_stopped:
+                        if (loop_now - _bms_fet_false_since) > _bms_fet_safety_s:
+                            _bms_safety_stopped = True
+                            print(f"\nCRITICAL: BMS discharge FET off >{_bms_fet_safety_s:.0f}s post-grace — forcing neutral")
+                else:
+                    _bms_fet_false_since = None
+                    if _bms_safety_stopped:
+                        _bms_safety_stopped = False
+                        print("\nINFO: BMS discharge FET restored — resuming")
+            elif not cmd.is_armed:
+                # Clear FET tracking on disarm
+                _bms_fet_false_since = None
+                _bms_safety_stopped = False
+
+            # Track arm/disarm times for BMS FET grace period
+            for _ev in events:
+                if _ev is SafetyEvent.ARMED:
+                    _arm_time = loop_now
+                    _bms_fet_false_since = None
+                    _bms_safety_stopped = False
+                elif _ev is SafetyEvent.DISARMED:
+                    _arm_time = None
+                    _bms_fet_false_since = None
+                    _bms_safety_stopped = False
 
             # Start a new log file on each arm event for per-session analysis
             if any(e is SafetyEvent.ARMED for e in events):
@@ -761,6 +798,9 @@ def run() -> None:
                             "gps_speed_mps": telem.get("gps_speed_mps"),
                             "confidence": telem.get("follow_me_target_confidence"),
                             "num_detections": telem.get("follow_me_num_detections"),
+                            "steer_decay_factor": telem.get("follow_me_steer_decay_factor"),
+                            "fresh_detection": telem.get("follow_me_fresh_detection"),
+                            "steer_hold_active": telem.get("follow_me_steer_hold_active"),
                         }),
                         "detections": [
                             {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),

@@ -219,7 +219,7 @@ class FollowMeConfig:
     pursuit_max_accel_byte_per_s: float = 50.0    # smooth speed transitions
 
     # ── Steer hold/decay during detection dropout ─────────────────────────
-    steer_hold_decay_s: float = 1.5  # seconds to decay held steer to 0 after losing fresh detection
+    steer_hold_decay_s: float = 1.0  # seconds to decay held steer to 0 after losing fresh detection (speed-aware: shrinks at high speed)
 
     # Trail/direct steering blend: when person is off-center in trail mode,
     # blend in direct pursuit steering so robot reacts to WHERE the person IS.
@@ -341,6 +341,10 @@ class BmsConfig:
     bms_poll_interval_s: float = 8.0       # seconds between full polls
     bms_timeout_s: float = 30.0            # BLE connect timeout; also fail-open threshold
     charger_inhibit_enabled: bool = True   # refuse drive commands when charging
+    # Discharge FET safety: after arm, ignore FET=False for this long (normal BLE startup delay ~14s)
+    bms_fet_grace_period_s: float = 20.0
+    # After grace period, if discharge_fet_on stays False for this many seconds, force neutral
+    bms_fet_safety_timeout_s: float = 2.0
 
 
 @dataclass(frozen=True)

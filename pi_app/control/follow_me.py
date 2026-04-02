@@ -492,6 +492,10 @@ class FollowMeController:
         self._reacq_time: float = 0.0             # monotonic() of last lost→tracking transition
         self._last_fresh_steer: float = 0.0       # steer from last frame with fresh detection
         self._last_fresh_steer_time: float = 0.0  # monotonic() of that frame
+        # Decay telemetry (Items 2 + 3 from Grok review)
+        self._steer_decay_factor: float = 1.0     # 1.0=fresh, 0.0=fully decayed
+        self._steer_hold_active: bool = False     # True while coasting on held steer
+        self._last_fresh_detection: bool = False  # whether current frame had a fresh detection
 
         # ── Telemetry state ──────────────────────────────────────────────────
         self._tracking: bool = False
@@ -685,19 +689,34 @@ class FollowMeController:
             # so the robot continues turning during brief occlusions instead of driving straight.
             if not fresh_detection:
                 elapsed_since_fresh = now - self._last_fresh_steer_time
-                hold_decay_s = float(getattr(self._cfg, "steer_hold_decay_s", 1.5))
-                decay = max(0.0, 1.0 - elapsed_since_fresh / hold_decay_s) if hold_decay_s > 0.0 else 0.0
-                steer = self._last_fresh_steer * decay
+                hold_decay_s = float(getattr(self._cfg, "steer_hold_decay_s", 1.0))
+                # Speed-aware: at higher commanded speed decay faster (more dangerous to drive blind fast).
+                # effective_decay = decay_s * max(0.3, 1.0 - speed_factor) where speed_factor ∈ [0, 1].
+                max_speed = float(self._cfg.max_follow_speed_byte)
+                speed_factor = speed / max_speed if max_speed > 0.0 else 0.0
+                effective_decay_s = hold_decay_s * max(0.3, 1.0 - speed_factor)
+                decay = max(0.0, 1.0 - elapsed_since_fresh / effective_decay_s) if effective_decay_s > 0.0 else 0.0
+                # Clamp held steer to 70% of max during decay — prevents full-lock blind turns.
+                max_s = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
+                clamped_last_steer = max(-0.7 * max_s, min(0.7 * max_s, self._last_fresh_steer))
+                steer = clamped_last_steer * decay
+                self._steer_decay_factor = decay
+                self._steer_hold_active = decay > 0.0
+                self._last_fresh_detection = False
             else:
+                self._steer_decay_factor = 1.0
+                self._steer_hold_active = False
+                self._last_fresh_detection = True
                 if not self._prev_fresh_detection:
                     self._reacq_time = now  # mark reacquisition start
                 steer = self._compute_steering(target, speed, dt, now)
                 # Ramp steer 0 → full over reacq_slew_window_s after a dropout to
                 # prevent the spike on the first frames after reacquisition.
+                # Skip the ramp on first-ever detection (no prior steer to spike from).
                 reacq_window = max(
                     float(getattr(self._cfg, "reacq_slew_window_s", 0.5)), 0.05
                 )
-                if self._reacq_time > 0.0:
+                if self._reacq_time > 0.0 and self._last_fresh_steer_time > 0.0:
                     reacq_elapsed = now - self._reacq_time
                     if reacq_elapsed < reacq_window:
                         steer *= reacq_elapsed / reacq_window
@@ -996,6 +1015,9 @@ class FollowMeController:
         self._cached_right = NEUTRAL
         self._prev_fresh_detection = False
         self._reacq_time = 0.0
+        self._steer_decay_factor = 1.0
+        self._steer_hold_active = False
+        self._last_fresh_detection = False
         self._pursuit_mode = "direct"
         self._last_pursuit_mode = "direct"
         self._tracker.reset()
@@ -1031,6 +1053,10 @@ class FollowMeController:
             "follow_me_pursuit_mode": self._pursuit_mode,
             "follow_me_slip_active": self._last_slip_active,
             "follow_me_actual_speed_mps": self._actual_speed_mps,
+            # Decay telemetry (Grok review items 2+3)
+            "follow_me_steer_decay_factor": round(self._steer_decay_factor, 3),
+            "follow_me_fresh_detection": self._last_fresh_detection,
+            "follow_me_steer_hold_active": self._steer_hold_active,
         }
         if self._trail_enabled:
             status["trail_length"] = self._trail_length
