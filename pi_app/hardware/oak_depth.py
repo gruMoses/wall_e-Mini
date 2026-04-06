@@ -179,6 +179,7 @@ class OakDepthReader:
         self._imu_packet_mode = mode if mode in ("latest", "bounded") else "latest"
         self._imu_max_packets_per_poll = max(1, int(imu_max_packets_per_poll))
         self._pipeline_running = False
+        self._pipeline_dead = False  # True when pipeline has crashed and not yet recovered
         self._last_pipeline_loop_ts = 0.0
         self._last_depth_poll_ts = 0.0
         self._last_depth_recv_ts = 0.0
@@ -366,6 +367,7 @@ class OakDepthReader:
             "depth_stale": depth_stale,
             "detections_stale": det_stale,
             "rgb_stale": rgb_stale,
+            "pipeline_dead": self._pipeline_dead,
             "is_stale": loop_stale or depth_stale or det_stale or rgb_stale,
             "last_pipeline_error": pipe_err or None,
             "last_depth_error": depth_err or None,
@@ -373,6 +375,15 @@ class OakDepthReader:
             "last_rgb_error": rgb_err or None,
             "last_imu_error": imu_err or None,
         }
+
+    @property
+    def pipeline_dead(self) -> bool:
+        """True when the OAK-D pipeline has crashed and is attempting recovery.
+
+        Obstacle avoidance should treat depth as unavailable when this is True.
+        """
+        with self._lock:
+            return self._pipeline_dead
 
     @staticmethod
     def _format_err(prefix: str, exc: Exception) -> str:
@@ -408,8 +419,28 @@ class OakDepthReader:
             import depthai as dai
             import numpy as np
         except ImportError:
-            logger.error("depthai or numpy not installed — OAK-D reader cannot start")
+            logger.error("depthai or numpy not installed -- OAK-D reader cannot start")
             return
+
+        backoff_s = 1.0
+        max_backoff_s = 30.0
+        while not self._stop_event.is_set():
+            try:
+                self._run_pipeline_once(dai, np)
+            except Exception:
+                logger.exception("OAK-D pipeline crashed -- will retry in %.1fs", backoff_s)
+            if self._stop_event.is_set():
+                break
+            with self._lock:
+                self._pipeline_dead = True
+                self._pipeline_running = False
+            logger.warning("OAK-D pipeline recovery: waiting %.1fs before retry", backoff_s)
+            self._stop_event.wait(timeout=backoff_s)
+            backoff_s = min(backoff_s * 2.0, max_backoff_s)
+        with self._lock:
+            self._pipeline_dead = False
+
+    def _run_pipeline_once(self, dai, np) -> None:
 
         try:
             pipeline = dai.Pipeline()
@@ -654,6 +685,8 @@ class OakDepthReader:
 
             pipeline.start()
             logger.info("OAK-D pipeline started (depthai v3)")
+            with self._lock:
+                self._pipeline_dead = False
             if tracker_enabled:
                 logger.info("OAK ObjectTracker enabled for person detections")
             if hand_queues is not None:
@@ -852,6 +885,24 @@ class OakDepthReader:
             y1 = int(h * (cy_norm + rh / 2))
             band = frame[y0:y1, :]
 
+            # Mask out detected person bounding boxes so the depth corridor
+            # measures obstacles AROUND/BEHIND the followed person, not the
+            # person themselves.  Uses previous-frame detections (one-frame lag
+            # is acceptable — bbox won't have moved significantly).
+            with self._lock:
+                person_bboxes = [p.bbox for p in self._det_state.persons if p.bbox]
+            if person_bboxes:
+                band = band.copy()  # avoid mutating the shared raw_frame
+                band_h = band.shape[0]
+                for bbox in person_bboxes:
+                    bx1, by1, bx2, by2 = bbox
+                    px1 = max(0, int(bx1 * w))
+                    px2 = min(w, int(bx2 * w))
+                    py1 = max(0, int(by1 * h) - y0)
+                    py2 = min(band_h, int(by2 * h) - y0)
+                    if py1 < py2 and px1 < px2:
+                        band[py1:py2, px1:px2] = 0  # zeroed pixels fail > min_depth_mm
+
             robot_half_mm = getattr(self._obs_cfg, "robot_width_m", 0.0) * 500.0
             min_depth_mm = int(getattr(self._obs_cfg, "min_depth_mm", 600))
             min_valid_pct = float(getattr(self._obs_cfg, "min_valid_pct", 8.0))
@@ -889,19 +940,46 @@ class OakDepthReader:
                 except Exception:
                     pass
 
+            # Corridor distance — may be inf when person bbox fills the ROI.
+            corridor_p5_mm = float("inf")
+            corridor_rejected = False
             if valid_depths.size == 0:
+                corridor_rejected = True
+            else:
+                total_corridor_pixels = band.shape[0] * band.shape[1]
+                corridor_valid_pct = (valid_depths.size / total_corridor_pixels) * 100.0 if total_corridor_pixels > 0 else 0.0
+                if corridor_valid_pct < min_valid_pct:
+                    corridor_rejected = True
+                else:
+                    corridor_p5_mm = float(np.percentile(valid_depths, 5))
+
+            # Safety-tier override: YOLO "stop" class detections (persons,
+            # animals) force the effective obstacle distance down regardless
+            # of what the depth corridor reports.
+            safety_stop_radius = float(getattr(self._obs_cfg, "safety_stop_radius_m", 0.8))
+            effective_min_mm = corridor_p5_mm
+            with self._lock:
+                all_dets = list(self._all_dets_state.detections)
+            for det in all_dets:
+                if det.safety_tier == "stop" and det.z_m > 0:
+                    det_mm = det.z_m * 1000.0
+                    if det.z_m < safety_stop_radius:
+                        effective_min_mm = 0.0
+                        logger.info(
+                            "Safety STOP: %s at %.2fm (< %.1fm radius)",
+                            det.label_name, det.z_m, safety_stop_radius,
+                        )
+                        break
+                    elif det_mm < effective_min_mm:
+                        effective_min_mm = det_mm
+
+            if effective_min_mm == float("inf"):
+                # No corridor obstacle AND no safety-tier trigger
                 with self._lock:
                     self._depth_quality_reject_count += 1
                 return
 
-            total_corridor_pixels = band.shape[0] * band.shape[1]
-            corridor_valid_pct = (valid_depths.size / total_corridor_pixels) * 100.0 if total_corridor_pixels > 0 else 0.0
-            if corridor_valid_pct < min_valid_pct:
-                with self._lock:
-                    self._depth_quality_reject_count += 1
-                return
-
-            p5 = float(np.percentile(valid_depths, 5))
+            p5 = effective_min_mm if corridor_rejected else corridor_p5_mm
 
             self._depth_stats_counter += 1
             if self._depth_stats_counter >= self._depth_stats_decimation:
@@ -929,15 +1007,16 @@ class OakDepthReader:
                 p50 = prev_stats.p50_mm if prev_stats.p50_mm > 0 else p5
             if valid_pct is None:
                 valid_pct = prev_stats.valid_pixel_pct
+            effective_min_m = effective_min_mm / 1000.0
             stats = DepthStats(
-                min_distance_m=p5 / 1000.0,
+                min_distance_m=effective_min_m,
                 p5_mm=p5,
                 p50_mm=p50,
                 valid_pixel_pct=round(valid_pct, 1),
                 timestamp=now,
             )
             with self._lock:
-                self._depth_state.min_distance_m = p5 / 1000.0
+                self._depth_state.min_distance_m = effective_min_m
                 self._depth_state.timestamp = now
                 self._depth_state.stats = stats
                 self._last_depth_poll_ts = now

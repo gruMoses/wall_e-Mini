@@ -122,11 +122,12 @@ class ObstacleAvoidanceConfig:
     camera_height_m: float = 0.497
     robot_width_m: float = 0.820
     camera_hfov_deg: float = 81.0
-    min_depth_mm: int = 600            # reject stereo readings below this (OAK-D Lite noise floor)
+    min_depth_mm: int = 350            # OAK-D Lite extended disparity minimum (~0.35m)
     min_valid_pct: float = 8.0         # ignore corridor if fewer than this % of pixels are valid
     update_rate_hz: float = 15.0
     stale_timeout_s: float = 0.5
-    stale_policy: str = "clear"  # "stop" or "clear" when depth data is stale
+    stale_policy: str = "stop"   # fail-safe: stop when depth data is stale
+    safety_stop_radius_m: float = 0.8  # YOLO "stop" tier detections within this radius force scale=0
 
 
 @dataclass(frozen=True)
@@ -220,6 +221,18 @@ class FollowMeConfig:
 
     # ── Steer hold/decay during detection dropout ─────────────────────────
     steer_hold_decay_s: float = 1.0  # seconds to decay held steer to 0 after losing fresh detection (speed-aware: shrinks at high speed)
+
+    # ── SafetyLayer acceleration cap ─────────────────────────────────────────
+    max_speed_accel_byte_per_s: float = 150.0  # max speed ramp-up rate (bytes/s) inside Follow Me SafetyLayer
+
+    # ── Direct pursuit steering cap ──────────────────────────────────────────
+    direct_mode_max_steer_byte: float = 18.0   # max steer in direct pursuit (lower than trail to limit close-range overshoot)
+
+    # ── Re-acquisition / search / mode-switch timing ─────────────────────────
+    reacq_slew_window_s: float = 0.5           # ramp steer from 0 → full over this window after a detection dropout
+    search_mode_delay_s: float = 1.5           # wait this long after trail exhaustion before entering search mode
+    trail_exhausted_remaining: int = 3         # trail point count below which trail is considered exhausted
+    mode_switch_dwell_s: float = 0.5           # minimum dwell time before switching between trail/direct pursuit modes
 
     # Trail/direct steering blend: when person is off-center in trail mode,
     # blend in direct pursuit steering so robot reacts to WHERE the person IS.
