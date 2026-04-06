@@ -618,7 +618,8 @@ class OakRecorder:
                 telemetry,
                 obs_cfg=self._obs_cfg,
             )
-            _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            annotated = cv2.resize(annotated, (320, 240), interpolation=cv2.INTER_AREA)
+            _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 50])
             jpeg_bytes = jpeg.tobytes()
             with self._preview_lock:
                 self._latest_annotated_jpeg = jpeg_bytes
@@ -637,7 +638,8 @@ class OakRecorder:
             colorized = _colorize_depth(self._latest_depth_frame)
             if colorized is None:
                 return
-            _, jpeg = cv2.imencode(".jpg", colorized, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            colorized = cv2.resize(colorized, (320, 240), interpolation=cv2.INTER_AREA)
+            _, jpeg = cv2.imencode(".jpg", colorized, [cv2.IMWRITE_JPEG_QUALITY, 50])
             with self._preview_lock:
                 self._latest_depth_jpeg = jpeg.tobytes()
         except Exception:

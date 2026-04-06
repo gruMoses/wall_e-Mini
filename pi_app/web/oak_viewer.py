@@ -458,7 +458,7 @@ def _placeholder_jpeg() -> bytes:
 # Flask app factory
 # ---------------------------------------------------------------------------
 
-def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader=None) -> Flask:
+def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader=None) -> Flask:  # recorder may be None
     """Create the Flask app wired to the given OakRecorder and Controller instances."""
     if Flask is None:
         raise ImportError("Flask is required for the web viewer: pip install flask")
@@ -482,7 +482,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
     def _mjpeg_generator(get_jpeg_fn, fps: float = 10.0, stream_name: str | None = None):
         interval = 1.0 / fps
         try:
-            if stream_name is not None and hasattr(recorder, "set_stream_client_connected"):
+            if recorder is not None and stream_name is not None and hasattr(recorder, "set_stream_client_connected"):
                 recorder.set_stream_client_connected(stream_name, True)
             while True:
                 jpeg = get_jpeg_fn()
@@ -493,11 +493,13 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                 )
                 time.sleep(interval)
         finally:
-            if stream_name is not None and hasattr(recorder, "set_stream_client_connected"):
+            if recorder is not None and stream_name is not None and hasattr(recorder, "set_stream_client_connected"):
                 recorder.set_stream_client_connected(stream_name, False)
 
     @app.route("/stream/rgb")
     def stream_rgb():
+        if recorder is None:
+            return Response(placeholder, mimetype="image/jpeg")
         return Response(
             _mjpeg_generator(
                 recorder.get_latest_annotated_jpeg,
@@ -509,6 +511,8 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
 
     @app.route("/stream/depth")
     def stream_depth():
+        if recorder is None:
+            return Response(placeholder, mimetype="image/jpeg")
         return Response(
             _mjpeg_generator(
                 recorder.get_latest_depth_jpeg,
@@ -531,7 +535,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
 
     def _sse_generator():
         while True:
-            t = recorder.get_latest_telemetry()
+            t = recorder.get_latest_telemetry() if recorder is not None else None
             if t is not None:
                 obj = {
                     "mode": t.mode,
@@ -541,7 +545,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "motor_right": t.motor_right,
                     "is_armed": t.is_armed,
                     "num_persons": len(t.person_detections),
-                    "recording_state": recorder.recording_state,
+                    "recording_state": recorder.recording_state if recorder is not None else "disabled",
                     "follow_tracking": t.follow_tracking,
                     "follow_target_x_m": round(t.follow_target_x_m, 2) if t.follow_target_x_m is not None else None,
                     "follow_target_z_m": round(t.follow_target_z_m, 2) if t.follow_target_z_m is not None else None,
@@ -582,7 +586,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         if controller is None:
             return Response(json.dumps({"error": "no controller"}), status=503,
                             content_type="application/json")
-        t = recorder.get_latest_telemetry()
+        t = recorder.get_latest_telemetry() if recorder is not None else None
         mode = t.mode if t else "MANUAL"
         if mode == "FOLLOW_ME":
             controller.deactivate_follow_me()
@@ -604,7 +608,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         now = time.monotonic()
         with rec_cache_lock:
             if now - rec_cache_ts >= rec_cache_ttl_s:
-                rec_dir = recorder.recordings_dir
+                rec_dir = recorder.recordings_dir if recorder is not None else Path("/nonexistent")
                 sessions = []
                 if rec_dir.exists():
                     for d in sorted(rec_dir.iterdir(), reverse=True):
@@ -620,7 +624,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
 
     @app.route("/recordings/<session>/<filename>")
     def serve_recording(session: str, filename: str):
-        rec_dir = recorder.recordings_dir / session
+        rec_dir = (recorder.recordings_dir if recorder is not None else Path("/nonexistent")) / session
         if not rec_dir.exists():
             abort(404)
         fpath = rec_dir / filename
