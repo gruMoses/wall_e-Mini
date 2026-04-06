@@ -374,9 +374,9 @@ def run() -> None:
     )
     bt_server = None  # Set to None to indicate external SPP service is used
 
-    # Start web viewer (needs recorder + controller)
+    # Start web viewer (only needs OAK-D camera; recorder is optional)
     oak_web_viewer = None
-    if config.oak_web_viewer.enabled and oak_recorder is not None:
+    if config.oak_web_viewer.enabled and oak_reader is not None:
         try:
             oak_web_viewer = OakWebViewer(
                 config.oak_web_viewer, oak_recorder,
@@ -508,7 +508,7 @@ def run() -> None:
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
 
             # P3: BMS discharge FET safety — rate-limited warning + post-grace safety timeout.
-            if bms_service is not None and cmd.is_armed and telem.get("mode") == "FOLLOW_ME":
+            if bms_service is not None and cmd.is_armed:
                 _bms_st = bms_service.get_state()
                 _fet_on = _bms_st.discharge_fet_on if _bms_st is not None else None
                 if _fet_on is False:

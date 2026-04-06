@@ -395,11 +395,13 @@ class Controller:
             if gesture_event is GestureEvent.ACTIVATE:
                 if self._follow_me is not None and self._safety_state.is_armed:
                     self._mode = "FOLLOW_ME"
+                    self._safety_state.set_follow_me_active(True)
                 else:
                     gesture_event = None  # cannot activate
             elif gesture_event is GestureEvent.DEACTIVATE:
                 if self._mode == "FOLLOW_ME":
                     self._mode = "MANUAL"
+                    self._safety_state.set_follow_me_active(False)
 
         # Emergency triggered: stop motors, disarm, schedule shutdown
         if any(e is SafetyEvent.EMERGENCY_TRIGGERED for e in events):

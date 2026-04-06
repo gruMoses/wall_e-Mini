@@ -82,6 +82,8 @@ class VescTelemetry:
     right_temp_c: Optional[float] = None
     voltage_v: Optional[float] = None
     timestamp: float = 0.0
+    can_send_alert: bool = False
+    can_send_fail_count: int = 0
 
 
 class VescCanDriver:
@@ -112,6 +114,17 @@ class VescCanDriver:
         # Low-voltage shutdown tracking (accessed only from the RX thread)
         self._low_voltage_since: Optional[float] = None
         self._shutdown_triggered = False
+
+        # CAN send failure tracking (thread-safe via _telem_lock)
+        self._send_fail_count: int = 0
+        self._send_fail_consecutive: int = 0
+        self._send_fail_first_ts: float = 0.0
+        self._send_fail_last_ts: float = 0.0
+        self._send_fail_alert: bool = False  # True when N consecutive failures within T seconds
+        _SEND_FAIL_THRESHOLD = 5        # consecutive failures to trigger alert
+        _SEND_FAIL_WINDOW_S = 2.0       # time window for consecutive failure detection
+        self._SEND_FAIL_THRESHOLD = _SEND_FAIL_THRESHOLD
+        self._SEND_FAIL_WINDOW_S = _SEND_FAIL_WINDOW_S
 
     # ──────────────────────────────────────────────────────────────────────────
     # Lifecycle
@@ -189,7 +202,7 @@ class VescCanDriver:
             rv = r.voltage_v
             readings = [v for v in (lv, rv) if v is not None]
             voltage = max(readings) if readings else None
-            return VescTelemetry(
+            telem = VescTelemetry(
                 left_rpm=l.rpm,
                 right_rpm=r.rpm,
                 left_current_a=l.current_a,
@@ -199,6 +212,9 @@ class VescCanDriver:
                 voltage_v=voltage,
                 timestamp=max(l.last_status_s, r.last_status_s),
             )
+            telem.can_send_alert = self._send_fail_alert
+            telem.can_send_fail_count = self._send_fail_count
+            return telem
 
     # ──────────────────────────────────────────────────────────────────────────
     # Background CAN RX loop
@@ -397,9 +413,29 @@ class VescCanDriver:
         try:
             assert self._bus is not None
             self._bus.send(msg)
-        except Exception:
-            # Ignore send errors; higher layers handle faults
-            pass
+            with self._telem_lock:
+                self._send_fail_consecutive = 0
+                if self._send_fail_alert:
+                    logger.info('VESC CAN send recovered after %d failures', self._send_fail_count)
+                    self._send_fail_alert = False
+        except Exception as exc:
+            now = time.monotonic()
+            with self._telem_lock:
+                self._send_fail_count += 1
+                self._send_fail_consecutive += 1
+                if self._send_fail_first_ts == 0.0:
+                    self._send_fail_first_ts = now
+                self._send_fail_last_ts = now
+                if (self._send_fail_consecutive >= self._SEND_FAIL_THRESHOLD
+                        and (now - self._send_fail_first_ts) <= self._SEND_FAIL_WINDOW_S):
+                    if not self._send_fail_alert:
+                        self._send_fail_alert = True
+                        logger.warning(
+                            'VESC CAN send alert: %d consecutive failures in %.1fs - %s',
+                            self._send_fail_consecutive,
+                            now - self._send_fail_first_ts,
+                            exc,
+                        )
 
     @staticmethod
     def _byte_to_rpm(byte_value: int, max_rpm: Optional[int] = None) -> int:
