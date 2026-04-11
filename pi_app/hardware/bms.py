@@ -34,14 +34,33 @@ _DALY_CMD = {
     "temp_range":        bytes([0xA5, 0x40, 0x92, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7F]),
     "mosfet_status":     bytes([0xA5, 0x40, 0x93, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80]),
     "status":            bytes([0xA5, 0x40, 0x94, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x81]),
-    "errors":            bytes([0xA5, 0x40, 0x97, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x84]),
+    "errors":            bytes([0xA5, 0x40, 0x98, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x85]),
 }
 
-_DALY_ERROR_NAMES: List[str] = [
-    "Cell OVP", "Cell UVP", "Pack OVP", "Pack UVP",
-    "Charge OTP", "Charge UTP", "Discharge OTP", "Discharge UTP",
-    "Charge OCP", "Discharge OCP", "Short Circuit", "IC Error",
-    "FET Lock",
+# Daly 0x98 alarm bit layout: (byte_index, bit_number, label)
+# L2 = Trip (protection active), L1 = Warning
+_DALY_0x98_ALARM_BITS: List[Tuple[int, int, str]] = [
+    # Byte 0 — Voltage
+    (0, 7, "Cell OVP Trip"),    (0, 6, "Cell OVP Warning"),
+    (0, 5, "Cell UVP Trip"),    (0, 4, "Cell UVP Warning"),
+    (0, 3, "Pack OVP Trip"),    (0, 2, "Pack OVP Warning"),
+    (0, 1, "Pack UVP Trip"),    (0, 0, "Pack UVP Warning"),
+    # Byte 1 — Temperature
+    (1, 7, "Charge OTP Trip"),  (1, 6, "Charge OTP Warning"),
+    (1, 5, "Charge UTP Trip"),  (1, 4, "Charge UTP Warning"),
+    (1, 3, "Discharge OTP Trip"), (1, 2, "Discharge OTP Warning"),
+    (1, 1, "Discharge UTP Trip"), (1, 0, "Discharge UTP Warning"),
+    # Byte 2 — Current
+    (2, 7, "Charge OCP Trip"),  (2, 6, "Charge OCP Warning"),
+    (2, 5, "Discharge OCP Trip"), (2, 4, "Discharge OCP Warning"),
+    # Byte 3 — SOC
+    (3, 1, "SOC Low Trip"),     (3, 0, "SOC Low Warning"),
+    # Byte 4 — Short circuit
+    (4, 1, "Short Circuit Trip"), (4, 0, "Short Circuit Warning"),
+    # Byte 5 — IC error
+    (5, 1, "IC Error Trip"),    (5, 0, "IC Error Warning"),
+    # Byte 6 — FET lock
+    (6, 1, "FET Lock Trip"),    (6, 0, "FET Lock Warning"),
 ]
 
 
@@ -312,9 +331,8 @@ class BmsService:
         resp = await send_recv(_DALY_CMD["mosfet_status"])
         if len(resp) >= 13 and resp[2] == 0x93:
             p = resp[4:12]
-            status_byte = p[0]
-            new.charge_fet_on = bool(status_byte & 0x01)
-            new.discharge_fet_on = bool(status_byte & 0x02)
+            new.charge_fet_on = bool(p[1])
+            new.discharge_fet_on = bool(p[2])
 
         # --- Pack status: cell count, cycle count ---
         resp = await send_recv(_DALY_CMD["status"])
@@ -325,13 +343,12 @@ class BmsService:
 
         # --- Active protection / error flags ---
         resp = await send_recv(_DALY_CMD["errors"])
-        if len(resp) >= 13 and resp[2] == 0x97:
+        if len(resp) >= 13 and resp[2] == 0x98:
             p = resp[4:12]
-            flags_word = struct.unpack(">H", p[0:2])[0]
             new.error_flags = [
-                name
-                for i, name in enumerate(_DALY_ERROR_NAMES)
-                if flags_word & (1 << i)
+                label
+                for byte_idx, bit, label in _DALY_0x98_ALARM_BITS
+                if byte_idx < len(p) and p[byte_idx] & (1 << bit)
             ]
 
         new.last_update_epoch_s = time.time()
