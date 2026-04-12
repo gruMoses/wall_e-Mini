@@ -380,20 +380,30 @@ class BmsService:
 
     @staticmethod
     def _find_daly_chars(client) -> Tuple[Optional[str], Optional[str]]:
-        """Return (tx_uuid, rx_uuid) for the Daly 0xFFF0 BLE service."""
+        """Return (tx_uuid, rx_uuid) for the Daly 0xFFF0 BLE service.
+
+        Explicitly prefers fff2 for TX — the Daly BMS exposes both fff2 and
+        fff3 as writable, but only responds to commands sent on fff2.
+        """
         tx_char: Optional[str] = None
         rx_char: Optional[str] = None
         for service in client.services:
             if _DALY_SERVICE_UUID_FRAGMENT not in service.uuid.lower():
                 continue
+            write_chars = []
             for char in service.characteristics:
                 props = char.properties
-                if tx_char is None and (
-                    "write" in props or "write-without-response" in props
-                ):
-                    tx_char = char.uuid
+                if "write" in props or "write-without-response" in props:
+                    write_chars.append(char.uuid)
                 if rx_char is None and "notify" in props:
                     rx_char = char.uuid
+            # Prefer fff2 (command TX); fff3 is writable but BMS ignores it
+            for uuid in write_chars:
+                if "fff2" in uuid.lower():
+                    tx_char = uuid
+                    break
+            if tx_char is None and write_chars:
+                tx_char = write_chars[0]
             if tx_char and rx_char:
                 break
         return tx_char, rx_char
