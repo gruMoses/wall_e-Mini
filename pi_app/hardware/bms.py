@@ -38,29 +38,32 @@ _DALY_CMD = {
 }
 
 # Daly 0x98 alarm bit layout: (byte_index, bit_number, label)
-# L2 = Trip (protection active), L1 = Warning
+# Standard Daly Smart BMS protocol (verified against maland16/daly-bms-uart,
+# python-daly-bms, and raw 0x98 response cross-checked against live BMS state).
+# Pattern: even bit = Warning (L1), odd bit = Trip/Protection (L2)
 _DALY_0x98_ALARM_BITS: List[Tuple[int, int, str]] = [
-    # Byte 0 — Voltage
-    (0, 7, "Cell OVP Trip"),    (0, 6, "Cell OVP Warning"),
-    (0, 5, "Cell UVP Trip"),    (0, 4, "Cell UVP Warning"),
-    (0, 3, "Pack OVP Trip"),    (0, 2, "Pack OVP Warning"),
-    (0, 1, "Pack UVP Trip"),    (0, 0, "Pack UVP Warning"),
-    # Byte 1 — Temperature
-    (1, 7, "Charge OTP Trip"),  (1, 6, "Charge OTP Warning"),
-    (1, 5, "Charge UTP Trip"),  (1, 4, "Charge UTP Warning"),
-    (1, 3, "Discharge OTP Trip"), (1, 2, "Discharge OTP Warning"),
-    (1, 1, "Discharge UTP Trip"), (1, 0, "Discharge UTP Warning"),
-    # Byte 2 — Current
-    (2, 7, "Charge OCP Trip"),  (2, 6, "Charge OCP Warning"),
-    (2, 5, "Discharge OCP Trip"), (2, 4, "Discharge OCP Warning"),
-    # Byte 3 — SOC
-    (3, 1, "SOC Low Trip"),     (3, 0, "SOC Low Warning"),
-    # Byte 4 — Short circuit
-    (4, 1, "Short Circuit Trip"), (4, 0, "Short Circuit Warning"),
-    # Byte 5 — IC error
-    (5, 1, "IC Error Trip"),    (5, 0, "IC Error Warning"),
-    # Byte 6 — FET lock
-    (6, 1, "FET Lock Trip"),    (6, 0, "FET Lock Warning"),
+    # Byte 0 — Voltage (bits 0-3: cell; bits 4-7: pack)
+    (0, 0, "Cell OVP Warning"),    (0, 1, "Cell OVP Trip"),
+    (0, 2, "Cell UVP Warning"),    (0, 3, "Cell UVP Trip"),
+    (0, 4, "Pack OVP Warning"),    (0, 5, "Pack OVP Trip"),
+    (0, 6, "Pack UVP Warning"),    (0, 7, "Pack UVP Trip"),
+    # Byte 1 — Temperature (bits 0-3: charge; bits 4-7: discharge)
+    (1, 0, "Charge OTP Warning"),  (1, 1, "Charge OTP Trip"),
+    (1, 2, "Charge UTP Warning"),  (1, 3, "Charge UTP Trip"),
+    (1, 4, "Discharge OTP Warning"), (1, 5, "Discharge OTP Trip"),
+    (1, 6, "Discharge UTP Warning"), (1, 7, "Discharge UTP Trip"),
+    # Byte 2 — Current (bits 0-3: OCP) + SOC (bits 4-7)
+    (2, 0, "Charge OCP Warning"),  (2, 1, "Charge OCP Trip"),
+    (2, 2, "Discharge OCP Warning"), (2, 3, "Discharge OCP Trip"),
+    (2, 4, "SOC High Warning"),    (2, 5, "SOC High Trip"),
+    (2, 6, "SOC Low Warning"),     (2, 7, "SOC Low Trip"),
+    # Byte 3 — Differential alarms
+    (3, 0, "Cell Voltage Diff Warning"), (3, 1, "Cell Voltage Diff Trip"),
+    (3, 2, "Temp Sensor Diff Warning"),  (3, 3, "Temp Sensor Diff Trip"),
+    # Byte 4 — Hardware / FET
+    (4, 0, "Charge FET Failure"),
+    (4, 1, "Discharge FET Failure"),
+    (4, 2, "Cell Mismatch"),
 ]
 
 
