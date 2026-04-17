@@ -604,6 +604,20 @@ def run() -> None:
                         gps_hdop=gps_reading.hdop if gps_reading else None,
                         gps_diff_age_s=gps_reading.diff_age_s if gps_reading else None,
                         gps_station_id=gps_reading.station_id if gps_reading else None,
+                        # Follow-Me visualization (Items 2 + 4)
+                        follow_mode=telem.get("follow_mode"),
+                        trail_points_xy=telem.get("trail_points_xy"),
+                        lookahead_point_xy=telem.get("lookahead_point_xy"),
+                        robot_pose_x=(telem.get("robot_pose") or {}).get("x"),
+                        robot_pose_y=(telem.get("robot_pose") or {}).get("y"),
+                        robot_pose_theta=(telem.get("robot_pose") or {}).get("theta"),
+                        hysteresis_count=telem.get("hysteresis_count", 0),
+                        hysteresis_max=telem.get("hysteresis_max", 3),
+                        extrapolation_active=telem.get("extrapolation_active", False),
+                        extrapolation_count=telem.get("extrapolation_count", 0),
+                        consume_radius_m=telem.get("consume_radius_m", 0.4),
+                        target_confidence=telem.get("target_confidence"),
+                        target_lateral_offset=telem.get("target_lateral_offset"),
                     )
                     depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
                     rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None

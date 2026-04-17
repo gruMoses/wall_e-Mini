@@ -12,6 +12,7 @@ captures the moment *before* the trigger, not just after.
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 import threading
 import time
@@ -95,6 +96,20 @@ class RecordingTelemetry:
     gps_diff_age_s: float | None = None
     gps_station_id: int | None = None
     imu_heading_deg: float | None = None
+    # ── Follow-Me visualization fields (Items 2 + 4) ─────────────────
+    follow_mode: str | None = None
+    trail_points_xy: list | None = None       # [[x,y], ...] last 20
+    lookahead_point_xy: list | None = None     # [x, y] or None
+    robot_pose_x: float | None = None
+    robot_pose_y: float | None = None
+    robot_pose_theta: float | None = None
+    hysteresis_count: int = 0
+    hysteresis_max: int = 3
+    extrapolation_active: bool = False
+    extrapolation_count: int = 0
+    consume_radius_m: float = 0.4
+    target_confidence: float | None = None
+    target_lateral_offset: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -161,13 +176,41 @@ _COLOR_ROI = (255, 200, 0)      # cyan-ish
 _COLOR_TEXT_BG = (0, 0, 0)
 
 
+def _world_to_pixel(
+    wx, wy, robot_x, robot_y, robot_theta,
+    img_w, img_h,
+    camera_height_m=0.497, hfov_deg=81.0,
+):
+    """Project a world-coordinate ground point to image pixel coords.
+
+    Returns (px, py) or None if behind camera / off-screen.
+    """
+    dx = wx - robot_x
+    dy = wy - robot_y
+    cos_t = math.cos(robot_theta)
+    sin_t = math.sin(robot_theta)
+    z_cam = dx * cos_t + dy * sin_t      # forward distance
+    x_cam = dx * sin_t - dy * cos_t      # rightward offset
+    if z_cam < 0.15:
+        return None
+    hfov_rad = math.radians(hfov_deg)
+    fx = (img_w / 2.0) / math.tan(hfov_rad / 2.0)
+    vfov_rad = 2.0 * math.atan(img_h / img_w * math.tan(hfov_rad / 2.0))
+    fy = (img_h / 2.0) / math.tan(vfov_rad / 2.0)
+    px = int(img_w / 2.0 + fx * x_cam / z_cam)
+    py = int(img_h / 2.0 + fy * camera_height_m / z_cam)
+    if 0 <= px < img_w and 0 <= py < img_h:
+        return (px, py)
+    return None
+
+
 def _annotate_rgb(
     frame: np.ndarray,
     detections: list[PersonDetection],
     telemetry: RecordingTelemetry,
     obs_cfg: ObstacleAvoidanceConfig | None = None,
 ) -> np.ndarray:
-    """Draw bounding boxes, ground-plane trapezoid ROI, and status text."""
+    """Draw bounding boxes, trail overlay, and enhanced status text."""
     if cv2 is None or np is None:
         return frame
     img = frame.copy()
@@ -189,16 +232,12 @@ def _annotate_rgb(
     if robot_w > 0 and cam_h > 0:
         cx_img = int(w / 2.0)
         cy_horizon = int(h / 2.0)
-
-        # Ground-plane corridor triangle (cyan)
         pts = np.array([
             [0, h - 1],
             [w - 1, h - 1],
             [cx_img, cy_horizon],
         ], np.int32)
         cv2.polylines(img, [pts], isClosed=True, color=_COLOR_ROI, thickness=1)
-
-        # Depth ROI band (yellow dashed horizontal lines)
         roi_color = (0, 200, 255)
         dash_len = 12
         for y_line in (y0, y1):
@@ -208,11 +247,11 @@ def _annotate_rgb(
         cv2.putText(img, "ROI", (4, y0 + 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, roi_color, 1, cv2.LINE_AA)
     else:
-        x0 = int(w * (0.5 - rw / 2))
-        x1 = int(w * (0.5 + rw / 2))
-        cv2.rectangle(img, (x0, y0), (x1, y1), _COLOR_ROI, 1)
+        x0r = int(w * (0.5 - rw / 2))
+        x1r = int(w * (0.5 + rw / 2))
+        cv2.rectangle(img, (x0r, y0), (x1r, y1), _COLOR_ROI, 1)
 
-    # Pick the best detection (highest z_m closeness + center closeness)
+    # Detection bounding boxes
     best_idx = -1
     if detections:
         best_score = -1.0
@@ -235,18 +274,177 @@ def _annotate_rgb(
         cv2.putText(img, label, (bx0, max(by0 - 4, 10)),
                      cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
 
-    # Status overlay
-    dist_str = f"{telemetry.obstacle_distance_m:.2f}m" if telemetry.obstacle_distance_m else "?"
-    lines = [
-        f"[{telemetry.mode}] scl={telemetry.throttle_scale:.2f} dist={dist_str}",
-        f"M L={telemetry.motor_left} R={telemetry.motor_right} {'ARMED' if telemetry.is_armed else 'DISARMED'}",
-    ]
-    for li, text in enumerate(lines):
-        y_pos = h - 8 - (len(lines) - 1 - li) * 14
-        cv2.putText(img, text, (4, y_pos),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.32, (255, 255, 255), 1, cv2.LINE_AA)
+    # ── Item 2: Trail visualization on RGB feed ──────────────────────────
+    try:
+        _draw_trail_overlay(img, telemetry, cam_h)
+    except Exception:
+        pass  # never crash the video stream for overlay bugs
+
+    # ── Item 4: Enhanced status text ─────────────────────────────────────
+    try:
+        _draw_status_overlay(img, telemetry)
+    except Exception:
+        _draw_basic_status(img, telemetry)
 
     return img
+
+
+def _draw_trail_overlay(img, telemetry, camera_height_m):
+    """Item 2: Draw trail points, lookahead carrot, and consume radius."""
+    h, w = img.shape[:2]
+    trail_pts = getattr(telemetry, "trail_points_xy", None)
+    robot_x = getattr(telemetry, "robot_pose_x", None)
+    robot_y = getattr(telemetry, "robot_pose_y", None)
+    robot_theta = getattr(telemetry, "robot_pose_theta", None)
+
+    if not trail_pts or robot_x is None or robot_y is None or robot_theta is None:
+        return
+    if camera_height_m <= 0:
+        camera_height_m = 0.497
+
+    n_pts = len(trail_pts)
+    extrap_active = getattr(telemetry, "extrapolation_active", False)
+    extrap_count = getattr(telemetry, "extrapolation_count", 0)
+    extrap_start = max(0, n_pts - extrap_count) if extrap_active else n_pts
+
+    # Project each trail point to image pixels
+    projected = []
+    for idx, pt in enumerate(trail_pts):
+        pix = _world_to_pixel(
+            pt[0], pt[1], robot_x, robot_y, robot_theta, w, h,
+            camera_height_m=camera_height_m,
+        )
+        projected.append(pix)
+        if pix is not None:
+            if extrap_active and idx >= extrap_start:
+                color = (255, 255, 0)   # cyan (BGR)
+            elif idx >= n_pts - 3:
+                color = (0, 255, 0)     # bright green
+            else:
+                color = (0, 180, 0)     # dim green
+            cv2.circle(img, pix, 3, color, -1, cv2.LINE_AA)
+
+    # Polyline connecting valid consecutive points
+    current_seg = []
+    for pix in projected:
+        if pix is not None:
+            current_seg.append(pix)
+        else:
+            if len(current_seg) >= 2:
+                arr = np.array(current_seg, np.int32).reshape((-1, 1, 2))
+                cv2.polylines(img, [arr], False, (0, 180, 0), 1, cv2.LINE_AA)
+            current_seg = []
+    if len(current_seg) >= 2:
+        arr = np.array(current_seg, np.int32).reshape((-1, 1, 2))
+        cv2.polylines(img, [arr], False, (0, 180, 0), 1, cv2.LINE_AA)
+
+    # Lookahead carrot (orange circle with label)
+    la_pt = getattr(telemetry, "lookahead_point_xy", None)
+    if la_pt is not None:
+        la_pix = _world_to_pixel(
+            la_pt[0], la_pt[1], robot_x, robot_y, robot_theta, w, h,
+            camera_height_m=camera_height_m,
+        )
+        if la_pix is not None:
+            cv2.circle(img, la_pix, 6, (0, 140, 255), 2, cv2.LINE_AA)
+            la_dist = math.hypot(la_pt[0] - robot_x, la_pt[1] - robot_y)
+            cv2.putText(img, f"LA {la_dist:.1f}m",
+                        (la_pix[0] + 8, la_pix[1] - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.30,
+                        (0, 140, 255), 1, cv2.LINE_AA)
+
+    # Consume radius (faint red arc at bottom of frame)
+    consume_r = getattr(telemetry, "consume_radius_m", 0.4)
+    if consume_r > 0:
+        hfov_rad = math.radians(81.0)
+        fx = (w / 2.0) / math.tan(hfov_rad / 2.0)
+        radius_px = max(3, int(fx * consume_r / 1.0))
+        cx = w // 2
+        cy = h - 10
+        cv2.ellipse(img, (cx, cy), (radius_px, max(2, radius_px // 3)),
+                    0, 180, 360, (0, 0, 160), 1, cv2.LINE_AA)
+
+
+def _draw_status_overlay(img, telemetry):
+    """Item 4: Enhanced status text with color-coded mode and trail info."""
+    h, w = img.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    lines = []  # (text, color_bgr, scale)
+
+    # Mode line — bigger and color-coded
+    follow_mode = getattr(telemetry, "follow_mode", None) or telemetry.mode
+    _mode_colors = {
+        "DIRECT_PID":       (0, 220, 0),      # green
+        "TRAIL_PURSUIT":    (255, 180, 0),     # blue-ish
+        "LOST_BLIND_TRAIL": (0, 165, 255),     # orange
+        "SEARCH_ROTATE":    (0, 255, 255),     # yellow
+        "TRAIL_EXHAUSTED":  (0, 0, 255),       # red
+        "FOLLOW_ME":        (0, 220, 0),
+        "MANUAL":           (200, 200, 200),
+        "IDLE":             (140, 140, 140),
+    }
+    mode_color = _mode_colors.get(follow_mode, (200, 200, 200))
+    mode_display = follow_mode.replace("_", " ")
+    lines.append((mode_display, mode_color, 0.40))
+
+    # Basic info
+    dist_str = (f"{telemetry.obstacle_distance_m:.2f}m"
+                if telemetry.obstacle_distance_m else "?")
+    arm_str = "ARM" if telemetry.is_armed else "DISARM"
+    lines.append((
+        f"scl={telemetry.throttle_scale:.2f} dist={dist_str}  "
+        f"M L={telemetry.motor_left} R={telemetry.motor_right} {arm_str}",
+        (255, 255, 255), 0.28))
+
+    # Trail info (only when trail active)
+    trail_len = getattr(telemetry, "trail_length", None)
+    trail_dist = getattr(telemetry, "trail_distance_m", None)
+    extrap_active = getattr(telemetry, "extrapolation_active", False)
+    extrap_count = getattr(telemetry, "extrapolation_count", 0)
+    if trail_len is not None and trail_len > 0:
+        trail_text = f"TRAIL: {trail_len}pts"
+        if trail_dist is not None:
+            trail_text += f" {trail_dist:.1f}m"
+        if extrap_active and extrap_count > 0:
+            trail_text += f" +{extrap_count}ext"
+        lines.append((trail_text, (0, 220, 0), 0.30))
+
+    # Hysteresis (only when count > 0)
+    hyst_count = getattr(telemetry, "hysteresis_count", 0)
+    hyst_max = getattr(telemetry, "hysteresis_max", 3)
+    if hyst_count > 0:
+        hyst_text = f"HYST: {hyst_count}/{hyst_max}"
+        if hyst_count >= hyst_max:
+            hyst_color = (0, 0, 255)       # red
+        elif hyst_count >= hyst_max - 1:
+            hyst_color = (0, 100, 255)     # orange
+        else:
+            hyst_color = (0, 200, 255)     # yellow
+        lines.append((hyst_text, hyst_color, 0.30))
+
+    # Draw lines bottom-up
+    y_pos = h - 6
+    for text, color, scale in reversed(lines):
+        cv2.putText(img, text, (4, y_pos), font, scale, color, 1, cv2.LINE_AA)
+        y_pos -= int(16 * (scale / 0.32))
+
+
+def _draw_basic_status(img, telemetry):
+    """Fallback basic status (original behavior)."""
+    h, w = img.shape[:2]
+    dist_str = (f"{telemetry.obstacle_distance_m:.2f}m"
+                if telemetry.obstacle_distance_m else "?")
+    text_lines = [
+        f"[{telemetry.mode}] scl={telemetry.throttle_scale:.2f} dist={dist_str}",
+        f"M L={telemetry.motor_left} R={telemetry.motor_right} "
+        f"{'ARMED' if telemetry.is_armed else 'DISARMED'}",
+    ]
+    for li, text in enumerate(text_lines):
+        y_pos = h - 8 - (len(text_lines) - 1 - li) * 14
+        cv2.putText(img, text, (4, y_pos),
+                     cv2.FONT_HERSHEY_SIMPLEX, 0.32,
+                     (255, 255, 255), 1, cv2.LINE_AA)
+
 
 
 def _colorize_depth(depth_frame: np.ndarray) -> np.ndarray | None:

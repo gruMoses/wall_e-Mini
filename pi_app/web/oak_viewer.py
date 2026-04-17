@@ -113,8 +113,38 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .tracking-radar canvas { display: block; }
   .tracking-stats { font-size: 13px; color: #aaa; line-height: 1.8; font-variant-numeric: tabular-nums; }
   .tracking-stats .stat-val { color: #e0e0e0; font-weight: 600; }
+  /* ── Follow-Me Status Panel ─────────────────────────────────────── */
+  .fm-panel { background: #1a1d27; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .fm-panel h2 { font-size: 14px; color: #ccc; margin-bottom: 12px; display: flex;
+                  align-items: center; gap: 10px; }
+  .fm-badge { display: inline-block; padding: 4px 14px; border-radius: 12px; font-size: 12px;
+              font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+              background: #2a2d37; color: #888; transition: all 0.3s; }
+  .fm-badge-green { background: #4ecdc4; color: #111; }
+  .fm-badge-blue { background: #4a9eff; color: #fff; }
+  .fm-badge-orange { background: #e6a239; color: #111; }
+  .fm-badge-yellow { background: #f0e68c; color: #111; }
+  .fm-badge-red { background: #e63946; color: #fff; }
+  .fm-body { display: grid; grid-template-columns: 258px 1fr; gap: 16px; margin-top: 12px; }
+  .fm-trail-wrap { background: #1a1a2e; border-radius: 6px; padding: 4px; }
+  .fm-trail-wrap canvas { display: block; }
+  .fm-section { margin-bottom: 8px; }
+  .fm-section-title { font-size: 11px; color: #666; text-transform: uppercase;
+                      letter-spacing: 0.5px; margin-bottom: 4px; }
+  .fm-trail-health { font-size: 13px; color: #aaa; margin: 4px 0; font-variant-numeric: tabular-nums; }
+  .fm-trouble-grid { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 13px;
+                     font-variant-numeric: tabular-nums; }
+  .fm-tl { color: #888; }
+  .fm-tv { color: #e0e0e0; font-weight: 600; }
+  .fm-target-info { font-size: 13px; color: #aaa; margin: 4px 0; font-variant-numeric: tabular-nums; }
+  .fm-confirmation { padding: 12px 16px; border-radius: 6px; font-size: 15px; font-weight: 600;
+                     text-align: center; margin-top: 12px; background: transparent; transition: all 0.3s; }
+  .fm-reset-btn { background: none; border: 1px solid #444; color: #888; font-size: 10px;
+                  padding: 1px 6px; border-radius: 4px; cursor: pointer; margin-left: 6px; }
+  .fm-reset-btn:hover { border-color: #888; color: #ccc; }
   @media (max-width: 700px) { .streams { grid-template-columns: 1fr; }
-    .tracking-details { flex-direction: column; } }
+    .tracking-details { flex-direction: column; }
+    .fm-body { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -122,6 +152,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <h1>WALL-E Mini — OAK-D Live</h1>
   <div class="hdr-right">
     <a href="/map" class="nav-link">Map</a>
+    <a href="/navigate" class="nav-link">Navigate</a>
     <a href="/calibrate" class="nav-link">Calibrate</a>
     <span id="rec-badge" class="rec-badge rec-idle">IDLE</span>
   </div>
@@ -200,6 +231,40 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="label">Depth Age</div>
       <div class="value" id="t-cam-depth-age">—</div>
     </div>
+  </div>
+  <div id="fm-panel" class="fm-panel">
+    <h2>Follow-Me Status <span id="fm-mode-badge" class="fm-badge">&mdash;</span></h2>
+    <div class="fm-section">
+      <div class="fm-section-title">Trail Health</div>
+      <div id="fm-trail-health" class="fm-trail-health">&mdash;</div>
+    </div>
+    <div class="fm-body">
+      <div class="fm-trail-wrap">
+        <canvas id="trail-canvas" width="250" height="250"></canvas>
+      </div>
+      <div class="fm-info">
+        <div class="fm-section">
+          <div class="fm-section-title">Troubleshooting</div>
+          <div class="fm-trouble-grid">
+            <span class="fm-tl">Rejected jumps:</span>
+            <span class="fm-tv"><span id="fm-rejected-jumps">&mdash;</span><button class="fm-reset-btn" onclick="resetCounter('jumps')">reset</button></span>
+            <span class="fm-tl">Rejected speeds:</span>
+            <span class="fm-tv"><span id="fm-rejected-speeds">&mdash;</span><button class="fm-reset-btn" onclick="resetCounter('speeds')">reset</button></span>
+            <span class="fm-tl">Hysteresis:</span>
+            <span class="fm-tv" id="fm-hysteresis">&mdash;</span>
+            <span class="fm-tl">Extrapolation:</span>
+            <span class="fm-tv" id="fm-extrapolation">&mdash;</span>
+            <span class="fm-tl">Curvature &#127919;:</span>
+            <span class="fm-tv" id="fm-curvature">&mdash;</span>
+          </div>
+        </div>
+        <div class="fm-section">
+          <div class="fm-section-title">Target</div>
+          <div id="fm-target-info" class="fm-target-info">&mdash;</div>
+        </div>
+      </div>
+    </div>
+    <div id="fm-confirmation" class="fm-confirmation">&mdash;</div>
   </div>
   <div id="tracking-panel" class="tracking-panel tracking-off">
     <div class="follow-btn-row">
@@ -372,6 +437,8 @@ sse.onmessage = function(e) {
   if (isFollowMode) statsHtml += '<br>Motors: <span class="stat-val">L=' + d.motor_left + ' R=' + d.motor_right + '</span>';
   stats.innerHTML = statsHtml;
   drawRadar(d.detections, d.follow_target_x_m, d.follow_target_z_m, tracking, d.mode);
+  try { updateFollowPanel(d); } catch(e) {}
+  try { drawTrailCanvas(d); } catch(e) {}
   const btn = document.getElementById('follow-btn');
   const hint = document.getElementById('follow-hint');
   if (isFollowMode) {
@@ -432,6 +499,175 @@ function keepAlive(imgId, statusId, url) {
 }
 keepAlive('rgb-stream', 'rgb-status', '/stream/rgb');
 keepAlive('depth-stream', 'depth-status', '/stream/depth');
+
+/* ── Follow-Me Status Panel + Trail Canvas ───────────────────────── */
+var trailCanvas = document.getElementById('trail-canvas');
+var trailCtx = trailCanvas ? trailCanvas.getContext('2d') : null;
+
+function updateFollowPanel(d) {
+  try {
+    var fm = d.follow_mode || '';
+    var tracking = d.follow_tracking;
+    var badge = document.getElementById('fm-mode-badge');
+    var modeText = '\u2014', badgeCls = '';
+    if (fm === 'DIRECT_PID') { modeText = 'DIRECT PID'; badgeCls = 'fm-badge-green'; }
+    else if (fm === 'TRAIL_PURSUIT') { modeText = 'TRAIL PURSUIT'; badgeCls = 'fm-badge-blue'; }
+    else if (fm === 'LOST_BLIND_TRAIL') { modeText = 'LOST \u2014 BLIND TRAIL'; badgeCls = 'fm-badge-orange'; }
+    else if (fm === 'SEARCH_ROTATE') { modeText = 'SEARCH ROTATE'; badgeCls = 'fm-badge-yellow'; }
+    else if (fm === 'TRAIL_EXHAUSTED') { modeText = 'TRAIL EXHAUSTED'; badgeCls = 'fm-badge-red'; }
+    else if (fm === 'IDLE') { modeText = 'IDLE'; }
+    else if (fm) { modeText = fm.replace(/_/g, ' '); }
+    badge.textContent = modeText;
+    badge.className = 'fm-badge ' + badgeCls;
+
+    /* trail health */
+    var ptCount = d.trail_length != null ? d.trail_length : '\u2014';
+    var remaining = d.trail_distance_m != null ? d.trail_distance_m.toFixed(1) : '\u2014';
+    var laM = '\u2014';
+    var la = d.lookahead_point_xy;
+    var rx = d.robot_pose_x, ry = d.robot_pose_y;
+    if (la && rx != null) {
+      var dx = la[0] - rx, dy = la[1] - (ry || 0);
+      laM = Math.sqrt(dx * dx + dy * dy).toFixed(2);
+    }
+    document.getElementById('fm-trail-health').textContent =
+      ptCount + ' pts \u2022 ' + remaining + ' m remaining \u2022 lookahead ' + laM + ' m';
+
+    /* troubleshooting */
+    document.getElementById('fm-rejected-jumps').textContent =
+      d.trail_rejected_jump_count != null ? d.trail_rejected_jump_count : '\u2014';
+    document.getElementById('fm-rejected-speeds').textContent =
+      d.trail_rejected_speed_count != null ? d.trail_rejected_speed_count : '\u2014';
+    var hc = d.hysteresis_count || 0, hm = d.hysteresis_max || 3;
+    var hystEl = document.getElementById('fm-hysteresis');
+    hystEl.textContent = hc + '/' + hm;
+    hystEl.style.color = hc >= hm ? '#e63946' : '#e0e0e0';
+    var ea = d.extrapolation_active, ec = d.extrapolation_count || 0;
+    document.getElementById('fm-extrapolation').textContent =
+      ea ? '\u2713 +' + ec + ' virtual points' : '\u2717';
+    document.getElementById('fm-curvature').textContent =
+      d.trail_curvature_at_lookahead != null ? d.trail_curvature_at_lookahead.toFixed(4) : '\u2014';
+
+    /* target info */
+    var dist = d.follow_target_z_m, off = d.target_lateral_offset;
+    var conf = d.target_confidence, tid = d.target_track_id;
+    document.getElementById('fm-target-info').textContent =
+      'Distance: ' + (dist != null ? dist.toFixed(2) + 'm' : '\u2014') + ' | ' +
+      'Offset: ' + (off != null ? off.toFixed(2) : '\u2014') + ' | ' +
+      'Confidence: ' + (conf != null ? (conf * 100).toFixed(0) + '%' : '\u2014') + ' | ' +
+      'Track: ' + (tid != null ? '#' + tid : '\u2014');
+
+    /* confirmation indicator */
+    var confEl = document.getElementById('fm-confirmation');
+    if (fm === 'DIRECT_PID' && tracking) {
+      confEl.innerHTML = '<span style="color:#4ecdc4;">\u2705 TRACKING + TRAIL ACTIVE</span>';
+      confEl.style.background = 'rgba(78,205,196,0.1)';
+    } else if (fm === 'TRAIL_PURSUIT' || fm === 'LOST_BLIND_TRAIL' || fm === 'SEARCH_ROTATE') {
+      confEl.innerHTML = '<span style="color:#e6a239;">\u26a0\ufe0f Target lost \u2014 following trail</span>';
+      confEl.style.background = 'rgba(230,162,57,0.1)';
+    } else if (fm === 'TRAIL_EXHAUSTED') {
+      confEl.innerHTML = '<span style="color:#e63946;">\u274c Trail exhausted \u2014 stopping</span>';
+      confEl.style.background = 'rgba(230,57,70,0.1)';
+    } else if (d.mode === 'FOLLOW_ME' && tracking) {
+      confEl.innerHTML = '<span style="color:#4ecdc4;">\u2705 TRACKING</span>';
+      confEl.style.background = 'rgba(78,205,196,0.1)';
+    } else {
+      confEl.innerHTML = '<span style="color:#555;">\u2014 Follow Me inactive</span>';
+      confEl.style.background = 'transparent';
+    }
+  } catch(e) {}
+}
+
+function drawTrailCanvas(d) {
+  if (!trailCtx) return;
+  try {
+    var W = trailCanvas.width, H = trailCanvas.height;
+    trailCtx.fillStyle = '#1a1a2e'; trailCtx.fillRect(0, 0, W, H);
+    var pts = d.trail_points_xy || [];
+    var ox = d.robot_pose_x, oy = d.robot_pose_y, otheta = d.robot_pose_theta;
+    if (ox == null || oy == null) {
+      trailCtx.fillStyle = '#555'; trailCtx.font = '12px sans-serif';
+      trailCtx.textAlign = 'center'; trailCtx.fillText('No odometry', W / 2, H / 2);
+      trailCtx.textAlign = 'start'; return;
+    }
+    var allX = [ox], allY = [oy];
+    for (var i = 0; i < pts.length; i++) { allX.push(pts[i][0]); allY.push(pts[i][1]); }
+    var la = d.lookahead_point_xy;
+    if (la) { allX.push(la[0]); allY.push(la[1]); }
+    var minX = Math.min.apply(null, allX), maxX = Math.max.apply(null, allX);
+    var minY = Math.min.apply(null, allY), maxY = Math.max.apply(null, allY);
+    var pad = 0.8; minX -= pad; maxX += pad; minY -= pad; maxY += pad;
+    var rX = maxX - minX || 1, rY = maxY - minY || 1;
+    var sc = Math.min(W / rX, H / rY);
+    var oXpx = (W - rX * sc) / 2, oYpx = (H - rY * sc) / 2;
+    function tx(x) { return (x - minX) * sc + oXpx; }
+    function ty(y) { return H - ((y - minY) * sc + oYpx); }
+
+    /* grid */
+    trailCtx.strokeStyle = '#252547'; trailCtx.lineWidth = 0.5;
+    var gs = (rX > 10 || rY > 10) ? 2.0 : 1.0;
+    for (var gx = Math.ceil(minX / gs) * gs; gx <= maxX; gx += gs) {
+      var px = tx(gx);
+      trailCtx.beginPath(); trailCtx.moveTo(px, 0); trailCtx.lineTo(px, H); trailCtx.stroke();
+    }
+    for (var gy = Math.ceil(minY / gs) * gs; gy <= maxY; gy += gs) {
+      var py = ty(gy);
+      trailCtx.beginPath(); trailCtx.moveTo(0, py); trailCtx.lineTo(W, py); trailCtx.stroke();
+    }
+
+    /* consume radius */
+    var cr = d.consume_radius_m;
+    if (cr) {
+      trailCtx.beginPath();
+      trailCtx.arc(tx(ox), ty(oy), cr * sc, 0, Math.PI * 2);
+      trailCtx.strokeStyle = 'rgba(230,57,70,0.3)'; trailCtx.lineWidth = 1; trailCtx.stroke();
+    }
+
+    /* trail line + dots */
+    if (pts.length > 1) {
+      trailCtx.beginPath();
+      trailCtx.moveTo(tx(pts[0][0]), ty(pts[0][1]));
+      for (var i = 1; i < pts.length; i++) trailCtx.lineTo(tx(pts[i][0]), ty(pts[i][1]));
+      trailCtx.strokeStyle = '#4ecdc4'; trailCtx.lineWidth = 2; trailCtx.stroke();
+    }
+    for (var i = 0; i < pts.length; i++) {
+      trailCtx.beginPath();
+      trailCtx.arc(tx(pts[i][0]), ty(pts[i][1]), 3, 0, Math.PI * 2);
+      trailCtx.fillStyle = '#4ecdc4'; trailCtx.fill();
+    }
+
+    /* lookahead carrot */
+    if (la) {
+      trailCtx.beginPath();
+      trailCtx.arc(tx(la[0]), ty(la[1]), 6, 0, Math.PI * 2);
+      trailCtx.fillStyle = '#e6a239'; trailCtx.fill();
+      trailCtx.strokeStyle = '#fff'; trailCtx.lineWidth = 1.5; trailCtx.stroke();
+    }
+
+    /* robot arrow */
+    var rpx = tx(ox), rpy = ty(oy);
+    var theta = otheta != null ? -otheta : 0;
+    trailCtx.save(); trailCtx.translate(rpx, rpy);
+    trailCtx.rotate(theta - Math.PI / 2);
+    trailCtx.beginPath();
+    trailCtx.moveTo(0, -10); trailCtx.lineTo(-6, 6); trailCtx.lineTo(6, 6);
+    trailCtx.closePath(); trailCtx.fillStyle = '#fff'; trailCtx.fill();
+    trailCtx.restore();
+
+    /* scale bar */
+    trailCtx.fillStyle = '#555'; trailCtx.font = '10px monospace';
+    var scaleM = Math.min(rX, rY) * 0.25;
+    var barPx = scaleM * sc;
+    trailCtx.fillRect(10, H - 16, barPx, 2);
+    trailCtx.fillText(scaleM.toFixed(1) + 'm', 10, H - 20);
+  } catch(e) {}
+}
+
+function resetCounter(type) {
+  fetch('/api/follow_me/reset_counter', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type: type})}).catch(function(){});
+}
 </script>
 </body>
 </html>"""
@@ -564,6 +800,32 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "gps_station_id": t.gps_station_id,
                     "imu_heading_deg": round(t.imu_heading_deg, 1) if t.imu_heading_deg is not None else None,
                 }
+                # Follow-Me visualization fields
+                obj["follow_mode"] = getattr(t, "follow_mode", None)
+                obj["pursuit_mode"] = getattr(t, "pursuit_mode", None)
+                obj["trail_length"] = getattr(t, "trail_length", None)
+                obj["trail_distance_m"] = _finite_or_none(getattr(t, "trail_distance_m", None), 2)
+                obj["trail_rejected_jump_count"] = getattr(t, "trail_rejected_jump_count", None)
+                obj["trail_rejected_speed_count"] = getattr(t, "trail_rejected_speed_count", None)
+                obj["trail_curvature_at_lookahead"] = _finite_or_none(getattr(t, "trail_curvature_at_lookahead", None), 4)
+                obj["target_confidence"] = _finite_or_none(getattr(t, "target_confidence", None), 2)
+                obj["target_lateral_offset"] = _finite_or_none(getattr(t, "target_lateral_offset", None), 3)
+                obj["target_track_id"] = getattr(t, "target_track_id", None)
+                obj["hysteresis_count"] = getattr(t, "hysteresis_count", 0)
+                obj["hysteresis_max"] = getattr(t, "hysteresis_max", 3)
+                obj["extrapolation_active"] = getattr(t, "extrapolation_active", False)
+                obj["extrapolation_count"] = getattr(t, "extrapolation_count", 0)
+                obj["trail_points_xy"] = getattr(t, "trail_points_xy", None)
+                obj["lookahead_point_xy"] = getattr(t, "lookahead_point_xy", None)
+                obj["robot_pose_x"] = _finite_or_none(getattr(t, "robot_pose_x", None), 3)
+                obj["robot_pose_y"] = _finite_or_none(getattr(t, "robot_pose_y", None), 3)
+                obj["robot_pose_theta"] = _finite_or_none(getattr(t, "robot_pose_theta", None), 4)
+                obj["consume_radius_m"] = _finite_or_none(getattr(t, "consume_radius_m", None), 3)
+                obj["odom_x"] = _finite_or_none(getattr(t, "odom_x", None), 3)
+                obj["odom_y"] = _finite_or_none(getattr(t, "odom_y", None), 3)
+                obj["odom_theta_deg"] = _finite_or_none(getattr(t, "odom_theta_deg", None), 1)
+                obj["speed_offset"] = _finite_or_none(getattr(t, "speed_offset", None), 1)
+                obj["steer_offset"] = _finite_or_none(getattr(t, "steer_offset", None), 1)
                 if oak_reader is not None:
                     try:
                         get_health = getattr(oak_reader, "get_health", None)
@@ -599,6 +861,20 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                                 content_type="application/json")
             return Response(json.dumps({"error": "must be armed", "mode": mode}),
                             status=400, content_type="application/json")
+
+    @app.route("/api/follow_me/reset_counter", methods=["POST"])
+    def api_follow_me_reset_counter():
+        if controller is None:
+            return Response(json.dumps({"error": "no controller"}), status=503,
+                            content_type="application/json")
+        try:
+            fm = getattr(controller, "_follow_me", None)
+            if fm is not None and hasattr(fm, "reset_debug_counters"):
+                fm.reset_debug_counters()
+            return Response(json.dumps({"ok": True}), content_type="application/json")
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500,
+                            content_type="application/json")
 
     # -- Recordings API ------------------------------------------------------
 
@@ -696,6 +972,16 @@ class OakWebViewer:
                 logger.info("Property map registered at /map")
             except Exception:
                 logger.exception("Property map failed to load — skipping")
+
+            try:
+                from pi_app.web.waypoint_nav_ui import create_nav_blueprint
+                nav_bp = create_nav_blueprint(
+                    controller=self._controller,
+                )
+                app.register_blueprint(nav_bp)
+                logger.info("Waypoint nav UI registered at /navigate")
+            except Exception:
+                logger.exception("Waypoint nav UI failed to load — skipping")
 
             app.run(
                 host=self._config.host,
