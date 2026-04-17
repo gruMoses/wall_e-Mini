@@ -200,10 +200,11 @@ _NAV_HTML = r"""<!DOCTYPE html>
     50% { box-shadow: 0 0 0 10px rgba(255,158,100,0); } }
 
   /* ── Robot Marker ── */
-  .robot-icon { width: 0; height: 0; }
-  .robot-arrow { width: 28px; height: 28px; position: absolute;
-    left: -14px; top: -14px; transition: transform 0.25s linear; }
-  .robot-arrow svg { width: 28px; height: 28px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
+  .robot-icon { background: transparent; border: none; }
+  .robot-arrow { width: 28px; height: 28px; transition: transform 0.25s linear;
+    transform-origin: 50% 50%; }
+  .robot-arrow svg { width: 28px; height: 28px; display: block;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
 
   /* ── Distance Labels ── */
   .dist-label { background: none !important; border: none !important;
@@ -410,21 +411,28 @@ async function initMap() {
 }
 
 function setupLeaflet(imageUrl) {
+  // CRS.Simple: bounds are [[SW lat, SW lng], [NE lat, NE lng]] = [[0,0], [height, width]]
   const bounds = [[0, 0], [imgH, imgW]];
 
+  // minZoom must be negative enough for fitBounds() to shrink a 9512x15530
+  // image into a phone viewport — at minZoom=-3 (scale 1/8) the image stays
+  // 1189x1941, which on a 400x700 screen shows only a center crop (and the
+  // robot marker at ~21% up from the bottom falls outside that crop, making
+  // it appear both "rotated" and "missing").
   map = L.map('map', {
     crs: L.CRS.Simple,
-    minZoom: -3,
+    minZoom: -6,
     maxZoom: 3,
-    zoomSnap: 0.25,
+    zoomSnap: 0.1,
     zoomDelta: 0.5,
+    maxBounds: bounds,
+    maxBoundsViscosity: 0.7,
     attributionControl: false,
     zoomControl: false,
-    // Disable double-tap zoom everywhere via CSS touch-action
   });
 
   imageOverlay = L.imageOverlay(imageUrl, bounds).addTo(map);
-  map.fitBounds(bounds);
+  map.fitBounds(bounds, {padding: [10, 10]});
 
   // Polyline connecting waypoints
   polyline = L.polyline([], {color: '#7aa2f7', weight: 2, opacity: 0.7}).addTo(map);
@@ -451,13 +459,9 @@ function setupLeaflet(imageUrl) {
 function createRobotMarker() {
   const icon = L.divIcon({
     className: 'robot-icon',
-    html: `<div class="robot-arrow" id="robotArrow">
-      <svg viewBox="0 0 28 28">
-        <polygon points="14,2 24,24 14,18 4,24" fill="#7aa2f7" stroke="#c0caf5" stroke-width="1.5"/>
-      </svg>
-    </div>`,
-    iconSize: [0, 0],
-    iconAnchor: [0, 0],
+    html: `<div class="robot-arrow" id="robotArrow"><svg viewBox="0 0 28 28"><polygon points="14,2 24,24 14,18 4,24" fill="#7aa2f7" stroke="#c0caf5" stroke-width="1.5"/></svg></div>`,
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
   });
   robotMarker = L.marker([imgH/2, imgW/2], {icon, interactive: false, zIndexOffset: 5000}).addTo(map);
 }
