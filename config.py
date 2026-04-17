@@ -139,7 +139,7 @@ class FollowMeConfig:
     min_distance_m: float = 0.5
     max_distance_m: float = 6.0
     max_speed_error_m: float = 1.5   # distance error at which max speed is reached — tighter = more aggressive closing
-    max_follow_speed_byte: int = 80
+    max_follow_speed_byte: int = 110
     # Legacy direct-pursuit PD gains (preserved; not used by new PID steering path)
     steering_gain: float = 0.50
     steering_derivative_gain: float = 0.06  # calibrated from Phase 2 plant model
@@ -160,6 +160,10 @@ class FollowMeConfig:
     pid_lateral_ki: float = 0.0
     pid_lateral_kd: float = 0.3
     pid_lateral_integral_limit: float = 0.5  # anti-windup clamp (normalised units)
+
+    # ── Depth EMA filter (stabilises stereo depth at long range) ────────────────
+    depth_ema_alpha: float = 0.35          # EMA smoothing on raw depth (0=heavy, 1=none)
+    depth_max_velocity_mps: float = 5.0    # reject readings implying > this speed (m/s)
 
     # ── Layer 4: Speed (depth-based, closed-loop when VESC telemetry available) ─
     speed_dead_zone_m: float = 0.2       # ±dead_zone around follow_distance_m → speed = 0 (no oscillation)
@@ -199,7 +203,7 @@ class FollowMeConfig:
     trail_max_step_m: float = 3.0             # reject impossible breadcrumb jumps (robot+person both moving)
     trail_max_speed_mps: float = 30.0         # effectively disabled — GPS 1Hz jumps cause false rejections; max_step_m=3.0 catches real outliers
     pursuit_wheelbase_m: float = 0.28             # track width wheel-to-wheel
-    direct_pursuit_distance_m: float = 2.5        # switch to trail pursuit sooner for better path tracking
+    direct_pursuit_distance_m: float = 4.0        # switch to trail pursuit sooner for better path tracking
     direct_pursuit_lateral_m: float = 1.0         # allow larger lateral offset before switching to trail mode
     min_trail_points_for_pursuit: int = 2
 
@@ -239,6 +243,11 @@ class FollowMeConfig:
     # blend in direct pursuit steering so robot reacts to WHERE the person IS.
     trail_direct_blend_start_m: float = 5.0  # effectively disabled — was causing corner cutting
     trail_direct_blend_full_m: float = 10.0  # effectively disabled — was causing corner cutting
+
+    # Person-position bias: blend live detection into trail pursuit steering
+    # so robot reacts to where the person IS, not just the historical path.
+    # 0.0 = pure trail, 1.0 = pure direct PID. 0.35 = 35% toward live person.
+    trail_person_bias_weight: float = 0.35
 
     # GPS-based trail odometry (preferred over dead reckoning when RTK fix available)
     gps_cog_min_speed_mps: float = 0.5        # min speed for GPS COG heading to be trusted

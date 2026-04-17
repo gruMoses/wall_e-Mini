@@ -117,6 +117,58 @@ class DetectionFilter:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Depth EMA filter — stabilises stereo depth at long range
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DepthFilter:
+    """Exponential-moving-average filter with physical-plausibility gating.
+
+    Before updating the EMA, the implied velocity (|raw − filtered| / dt) is
+    checked against *max_velocity_mps*.  Readings that exceed the threshold are
+    rejected and the previous filtered value is returned unchanged.
+    """
+
+    def __init__(self, alpha: float = 0.35, max_velocity_mps: float = 5.0) -> None:
+        self._alpha = alpha
+        self._max_vel = max_velocity_mps
+        self._filtered: float | None = None
+        self._last_time: float | None = None
+
+    def update(self, raw_z: float, now: float) -> float:
+        """Return filtered depth in metres."""
+        if self._filtered is None:
+            # First reading — seed the filter
+            self._filtered = raw_z
+            self._last_time = now
+            return self._filtered
+
+        dt = now - self._last_time
+        if dt <= 0.0:
+            return self._filtered
+
+        # Reject physically implausible jumps
+        implied_vel = abs(raw_z - self._filtered) / dt
+        if implied_vel > self._max_vel:
+            # Bad reading — keep previous estimate, but advance timestamp
+            self._last_time = now
+            return self._filtered
+
+        # Standard EMA update
+        self._filtered = self._alpha * raw_z + (1.0 - self._alpha) * self._filtered
+        self._last_time = now
+        return self._filtered
+
+    def reset(self) -> None:
+        """Clear state — call when follow-me is engaged/disengaged."""
+        self._filtered = None
+        self._last_time = None
+
+    @property
+    def value(self) -> float | None:
+        return self._filtered
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Layer 2: Target Tracker
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -437,6 +489,12 @@ class FollowMeController:
             min_bbox_area=getattr(config, "min_bbox_area", 0.0015),
         )
 
+        # ── Depth EMA filter (between raw depth and speed/mode logic) ────
+        self._depth_filter = DepthFilter(
+            alpha=float(getattr(config, 'depth_ema_alpha', 0.35)),
+            max_velocity_mps=float(getattr(config, 'depth_max_velocity_mps', 5.0)),
+        )
+
         # ── Layer 2: Target tracker ──────────────────────────────────────────
         self._tracker = TargetTracker(
             ema_alpha=getattr(config, "target_ema_alpha", 0.35),
@@ -541,6 +599,8 @@ class FollowMeController:
         # Trail exhaustion hysteresis (Fix 5) and one-shot extrapolation flag (Fix 4)
         self._trail_exhausted_count: int = 0
         self._trail_extrapolated: bool = False
+        self._trail_extrapolation_count: int = 0
+        self._trail_total_points_added: int = 0
 
         if self._trail_enabled:
             self._odometry = DeadReckonOdometry(
@@ -644,7 +704,10 @@ class FollowMeController:
         # Telemetry: always update from tracker result
         target_present = target is not None
         if target_present:
-            self._last_target_z = target.depth_m
+            # ── Apply depth EMA filter before any distance-based decisions ───
+            filtered_depth = self._depth_filter.update(target.depth_m, now)
+            target.depth_m = filtered_depth
+            self._last_target_z = filtered_depth
             self._last_target_x = target.x_m    # metres, used by trail bias
             self._last_target_track_id = target.track_id
             self._last_target_confidence = target.confidence
@@ -662,6 +725,7 @@ class FollowMeController:
                 self._last_target_world_x = wx
                 self._last_target_world_y = wy
                 self._trail.add_point(wx, wy, now, speed_hint=self._last_speed_offset)
+                self._trail_total_points_added += 1
                 pose = odom.pose
                 _prune_old = self._trail.length
                 _prune_delta = self._trail.prune(pose.x, pose.y, pose.theta, now)
@@ -842,16 +906,13 @@ class FollowMeController:
                     self._speed_limited = cmd.speed_limited
                     steer = cmd.steer_byte
 
-                    # Blend in direct PID steering when person is far off-centre.
-                    # (blend thresholds are effectively disabled by large defaults.)
-                    blend_start = float(getattr(self._cfg, "trail_direct_blend_start_m", 1.0))
-                    blend_full = float(getattr(self._cfg, "trail_direct_blend_full_m", 3.0))
-                    abs_x = abs(target.normalized_x)
-                    if abs_x > blend_start:
+                    # Person-position bias: blend live detection position into
+                    # trail pursuit steering so the robot doesn't ignore where
+                    # the person actually is when they drift laterally.
+                    bias_w = float(getattr(self._cfg, "trail_person_bias_weight", 0.35))
+                    if bias_w > 0.0:
                         direct_steer = self._steering.compute(target.normalized_x, dt)
-                        blend = min(1.0, (abs_x - blend_start)
-                                    / max(blend_full - blend_start, 0.1))
-                        steer = steer * (1.0 - blend) + direct_steer * blend
+                        steer = steer * (1.0 - bias_w) + direct_steer * bias_w
                         clamp_s = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
                         steer = max(-clamp_s, min(clamp_s, steer))
                     return steer
@@ -938,6 +999,7 @@ class FollowMeController:
                             "trail extrapolated +%d pts on target loss (elapsed=%.2fs)",
                             n_added, elapsed,
                         )
+                    self._trail_extrapolation_count = n_added
                     self._trail_extrapolated = True
 
                 trail_pts = self._trail.get_smoothed_trail()
@@ -1094,6 +1156,7 @@ class FollowMeController:
         self._last_fresh_detection = False
         self._pursuit_mode = "direct"
         self._last_pursuit_mode = "direct"
+        self._depth_filter.reset()
         self._tracker.reset()
         self._steering.reset()
         self._safety.reset()
@@ -1108,6 +1171,8 @@ class FollowMeController:
         self._last_target_world_y = None
         self._trail_exhausted_count = 0
         self._trail_extrapolated = False
+        self._trail_extrapolation_count = 0
+        self._trail_total_points_added = 0
         if self._odometry is not None:
             self._odometry.reset()
         if self._gps_odom is not None:
@@ -1115,7 +1180,43 @@ class FollowMeController:
 
     # ── Status / telemetry ───────────────────────────────────────────────────
 
+    def reset_debug_counters(self):
+        """Reset visualization debug counters (rejected jumps/speeds, hysteresis)."""
+        self._trail_rejected_jump_count = 0
+        self._trail_rejected_speed_count = 0
+        self._trail_exhausted_count = 0
+        if self._trail is not None:
+            self._trail._rejected_jump_count = 0
+            self._trail._rejected_speed_count = 0
+
     def get_status(self) -> dict:
+        """Return telemetry dict for web viewer / SSE / logging."""
+        # Determine human-readable follow mode
+        now = time.monotonic()
+        if self._tracking:
+            follow_mode = "TRAIL_PURSUIT" if self._pursuit_mode == "trail" else "DIRECT_PID"
+        elif self._pursuit_mode == "search":
+            follow_mode = "SEARCH_ROTATE"
+        elif self._trail_exhausted_count >= 3:
+            follow_mode = "TRAIL_EXHAUSTED"
+        elif (self._last_valid_time > 0.0
+              and (now - self._last_valid_time)
+              < float(getattr(self._cfg, "lost_target_trail_pursuit_max_s", 8.0))):
+            follow_mode = "LOST_BLIND_TRAIL"
+        else:
+            follow_mode = "IDLE"
+
+        # Lookahead distance from robot
+        lookahead_dist_m = 0.0
+        odom = self._pick_odometry()
+        if odom is not None and (self._pursuit_lookahead_x != 0.0
+                                  or self._pursuit_lookahead_y != 0.0):
+            pose = odom.pose
+            lookahead_dist_m = math.hypot(
+                self._pursuit_lookahead_x - pose.x,
+                self._pursuit_lookahead_y - pose.y,
+            )
+
         status: dict = {
             "follow_me_tracking": self._tracking,
             "follow_me_target_z_m": self._last_target_z,
@@ -1133,6 +1234,21 @@ class FollowMeController:
             "follow_me_steer_decay_factor": round(self._steer_decay_factor, 3),
             "follow_me_fresh_detection": self._last_fresh_detection,
             "follow_me_steer_hold_active": self._steer_hold_active,
+            "follow_me_depth_filtered_m": self._depth_filter.value,
+            # ── Visualization / troubleshooting (Items 2 + 4) ────────────
+            "follow_mode": follow_mode,
+            "target_distance_m": self._last_target_z,
+            "target_lateral_offset": round(
+                self._tracker._state.normalized_x, 3
+            ) if self._tracker._state is not None else None,
+            "target_confidence": round(self._last_target_confidence, 3),
+            "target_track_id": self._last_target_track_id,
+            "hysteresis_count": self._trail_exhausted_count,
+            "hysteresis_max": 3,
+            "extrapolation_active": self._trail_extrapolated,
+            "extrapolation_count": self._trail_extrapolation_count,
+            "consume_radius_m": float(getattr(
+                self._cfg, "trail_consume_radius_m", 0.4)),
         }
         if self._trail_enabled:
             status["trail_length"] = self._trail_length
@@ -1141,7 +1257,8 @@ class FollowMeController:
             status["trail_rejected_speed_count"] = self._trail_rejected_speed_count
             status["trail_lookahead_x"] = self._pursuit_lookahead_x
             status["trail_lookahead_y"] = self._pursuit_lookahead_y
-            status["trail_curvature_at_lookahead"] = round(self._curvature_at_lookahead, 4)
+            status["trail_curvature_at_lookahead"] = round(
+                self._curvature_at_lookahead, 4)
             status["trail_speed_limited"] = self._speed_limited
             status["follow_me_target_world_x"] = self._last_target_world_x
             status["follow_me_target_world_y"] = self._last_target_world_y
@@ -1149,12 +1266,54 @@ class FollowMeController:
             status["trail_exhausted_count"] = self._trail_exhausted_count
             if self._pursuit is not None:
                 status["trail_last_closest_idx"] = self._pursuit._last_closest_idx
+            # ── Trail visualization fields ───────────────────────────────
+            status["trail_point_count"] = self._trail_length
+            status["trail_total_points"] = self._trail_total_points_added
+            status["trail_remaining_m"] = round(self._trail_distance_m, 2)
+            status["trail_lookahead_m"] = round(lookahead_dist_m, 2)
+            status["trail_curvature"] = round(self._curvature_at_lookahead, 4)
+            status["rejected_jumps"] = self._trail_rejected_jump_count
+            status["rejected_speeds"] = self._trail_rejected_speed_count
+            # Trail points for 2D canvas (last 20)
+            if self._trail is not None:
+                trail_pts = self._trail.get_smoothed_trail()
+                viz_pts = trail_pts[-20:]
+                status["trail_points_xy"] = [
+                    [round(p.x, 3), round(p.y, 3)] for p in viz_pts
+                ]
+            else:
+                status["trail_points_xy"] = []
+            status["lookahead_point_xy"] = (
+                [round(self._pursuit_lookahead_x, 3),
+                 round(self._pursuit_lookahead_y, 3)]
+                if (self._pursuit_lookahead_x != 0.0
+                    or self._pursuit_lookahead_y != 0.0)
+                else None
+            )
             odom = self._pick_odometry()
             if odom is not None:
                 pose = odom.pose
                 status["odom_x"] = round(pose.x, 3)
                 status["odom_y"] = round(pose.y, 3)
                 status["odom_theta_deg"] = round(math.degrees(pose.theta), 1)
+                status["robot_pose"] = {
+                    "x": round(pose.x, 3),
+                    "y": round(pose.y, 3),
+                    "theta": round(pose.theta, 4),
+                }
+            else:
+                status["robot_pose"] = None
             if self._gps_odom is not None:
                 status["gps_speed_mps"] = round(self._gps_odom.speed_mps, 2)
+        else:
+            status["trail_points_xy"] = []
+            status["lookahead_point_xy"] = None
+            status["robot_pose"] = None
+            status["trail_point_count"] = 0
+            status["trail_total_points"] = 0
+            status["trail_remaining_m"] = 0.0
+            status["trail_lookahead_m"] = 0.0
+            status["trail_curvature"] = 0.0
+            status["rejected_jumps"] = 0
+            status["rejected_speeds"] = 0
         return status
