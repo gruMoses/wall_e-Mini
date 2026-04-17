@@ -40,7 +40,7 @@ class ObstacleAvoidanceController:
                     return
         self._safety_force_stop = False
 
-    def compute_throttle_scale(self, distance_m: float, age_s: float) -> float:
+    def compute_throttle_scale(self, distance_m: float, age_s: float, is_manual: bool = False) -> float:
         """Return a throttle multiplier between 0.0 (full stop) and 1.0 (no limit).
 
         When depth data is stale (age > stale_timeout_s), behaviour depends on
@@ -56,7 +56,11 @@ class ObstacleAvoidanceController:
             return 0.0
 
         if age_s > self._cfg.stale_timeout_s:
-            self._last_scale = 0.0 if self._cfg.stale_policy == "stop" else 1.0
+            if self._cfg.stale_policy == "stop":
+                stale_floor = self._cfg.manual_stale_throttle_scale if is_manual else 0.0
+            else:
+                stale_floor = 1.0
+            self._last_scale = stale_floor
             return self._last_scale
 
         self._last_distance_m = distance_m

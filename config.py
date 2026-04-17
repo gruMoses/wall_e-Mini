@@ -127,6 +127,7 @@ class ObstacleAvoidanceConfig:
     update_rate_hz: float = 15.0
     stale_timeout_s: float = 0.5
     stale_policy: str = "stop"   # fail-safe: stop when depth data is stale
+    manual_stale_throttle_scale: float = 0.10  # MANUAL mode: slow (not stop) when depth is stale
     safety_stop_radius_m: float = 0.8  # YOLO "stop" tier detections within this radius force scale=0
 
 

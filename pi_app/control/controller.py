@@ -619,6 +619,7 @@ class Controller:
             obstacle_scale = self._obstacle_avoidance.compute_throttle_scale(
                 self._obstacle_distance_m,
                 self._obstacle_age_s if self._obstacle_age_s is not None else 999.0,
+                is_manual=(self._mode == "MANUAL"),
             )
             if is_forward_motion:
                 left = self._scale_toward_neutral(left, obstacle_scale)
