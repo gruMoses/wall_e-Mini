@@ -356,6 +356,14 @@ function gpsToPixel(lat, lon) {
   };
 }
 
+// Convert image-file pixel (px, py) — py=0 at top — to Leaflet CRS.Simple
+// latlng [lat, lng]. With bounds [[0,0],[imgH,imgW]], the image is drawn
+// with its top-left pixel at NW = (lat=imgH, lng=0) and bottom-right at
+// SE = (lat=0, lng=imgW), so lat = imgH - py, lng = px.
+function pxToLatLng(px, py) { return [imgH - py, px]; }
+// Inverse: Leaflet latlng → image-file pixel (px, py) with py=0 at top.
+function latLngToPx(lat, lng) { return {px: lng, py: imgH - lat}; }
+
 // Haversine distance in metres
 function haversineM(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -463,7 +471,7 @@ function createRobotMarker() {
     iconSize: [28, 28],
     iconAnchor: [14, 14],
   });
-  robotMarker = L.marker([imgH/2, imgW/2], {icon, interactive: false, zIndexOffset: 5000}).addTo(map);
+  robotMarker = L.marker(pxToLatLng(imgW/2, imgH/2), {icon, interactive: false, zIndexOffset: 5000}).addTo(map);
 }
 
 function updateRobotPosition(lat, lon, heading) {
@@ -485,7 +493,7 @@ function animateRobot() {
   robotPxY += (targetPxY - robotPxY) * alpha;
 
   if (robotMarker) {
-    robotMarker.setLatLng([robotPxY, robotPxX]); // CRS.Simple: [y, x]
+    robotMarker.setLatLng(pxToLatLng(robotPxX, robotPxY));
     const arrow = document.getElementById('robotArrow');
     if (arrow) arrow.style.transform = `rotate(${robotHeading}deg)`;
   }
@@ -493,7 +501,7 @@ function animateRobot() {
   // Update progress line
   if (isNavigating && navWpIndex < waypoints.length) {
     const wp = waypoints[navWpIndex];
-    progressLine.setLatLngs([[robotPxY, robotPxX], [wp.py, wp.px]]);
+    progressLine.setLatLngs([pxToLatLng(robotPxX, robotPxY), pxToLatLng(wp.px, wp.py)]);
   } else {
     progressLine.setLatLngs([]);
   }
@@ -508,11 +516,16 @@ function animateRobot() {
 // ════════════════════════════════════════════════════════════════════════════
 // SSE Telemetry
 // ════════════════════════════════════════════════════════════════════════════
+let sseMsgCount = 0;
 function connectSSE() {
+  if (window.__sse) { try { window.__sse.close(); } catch(_) {} }
   const evtSrc = new EventSource('/api/telemetry');
+  window.__sse = evtSrc;
+  evtSrc.onopen = function() { console.log('[nav] SSE open'); };
   evtSrc.onmessage = function(e) {
     try {
       const d = JSON.parse(e.data);
+      if (sseMsgCount++ === 0) console.log('[nav] first SSE msg', d);
       const lat = d.gps_lat || 0;
       const lon = d.gps_lon || 0;
       const heading = d.imu_heading_deg || 0;
@@ -530,11 +543,12 @@ function connectSSE() {
 
       updateGpsBadge();
       updateNavUI();
-    } catch(err) {}
+    } catch(err) { console.warn('[nav] SSE parse err', err); }
   };
   evtSrc.onerror = function() {
+    console.warn('[nav] SSE error, reconnecting in 3s');
+    try { evtSrc.close(); } catch(_) {}
     setTimeout(connectSSE, 3000);
-    evtSrc.close();
   };
 }
 
@@ -590,10 +604,12 @@ function setMode(m) {
 // Map Click → Place Waypoint / Draw Vertex
 // ════════════════════════════════════════════════════════════════════════════
 function onMapClick(e) {
+  // Leaflet latlng -> image-file pixel (px, py) with py=0 at top
+  const p = latLngToPx(e.latlng.lat, e.latlng.lng);
   if (mode === 'waypoint') {
-    addWaypoint(e.latlng.lng, e.latlng.lat);  // CRS.Simple: lng=x, lat=y
+    addWaypoint(p.px, p.py);
   } else if (mode === 'draw') {
-    addDrawVertex(e.latlng.lng, e.latlng.lat);
+    addDrawVertex(p.px, p.py);
   }
 }
 
@@ -612,7 +628,7 @@ function addWaypoint(px, py) {
     iconAnchor: [24, 24],
   });
 
-  const marker = L.marker([py, px], {icon, draggable: mode === 'edit', zIndexOffset: 2000}).addTo(map);
+  const marker = L.marker(pxToLatLng(px, py), {icon, draggable: mode === 'edit', zIndexOffset: 2000}).addTo(map);
 
   marker.on('dragstart', function() {
     const el = marker.getElement();
@@ -622,9 +638,10 @@ function addWaypoint(px, py) {
     const el = marker.getElement();
     if (el) el.querySelector('.wp-marker').classList.remove('dragging');
     const pos = ev.target.getLatLng();
+    const p = latLngToPx(pos.lat, pos.lng);
     const wp = waypoints[idx];
-    wp.px = pos.lng;  // CRS.Simple
-    wp.py = pos.lat;
+    wp.px = p.px;
+    wp.py = p.py;
     const g = pixelToGps(wp.px, wp.py);
     wp.lat = g.lat;
     wp.lon = g.lon;
@@ -664,8 +681,9 @@ function rebindDragEvents() {
       const el = wp.marker.getElement();
       if (el) el.querySelector('.wp-marker').classList.remove('dragging');
       const pos = ev.target.getLatLng();
-      wp.px = pos.lng;
-      wp.py = pos.lat;
+      const p = latLngToPx(pos.lat, pos.lng);
+      wp.px = p.px;
+      wp.py = p.py;
       const g = pixelToGps(wp.px, wp.py);
       wp.lat = g.lat;
       wp.lon = g.lon;
@@ -685,7 +703,7 @@ function clearAll() {
 }
 
 function updatePolyline() {
-  const pts = waypoints.map(wp => [wp.py, wp.px]);
+  const pts = waypoints.map(wp => pxToLatLng(wp.px, wp.py));
   polyline.setLatLngs(pts);
   // Distance labels
   distLabels.forEach(l => map.removeLayer(l));
@@ -693,9 +711,9 @@ function updatePolyline() {
   for (let i = 0; i < waypoints.length - 1; i++) {
     const a = waypoints[i], b = waypoints[i+1];
     const d = haversineM(a.lat, a.lon, b.lat, b.lon);
-    const midY = (a.py + b.py) / 2;
-    const midX = (a.px + b.px) / 2;
-    const label = L.marker([midY, midX], {
+    const midPy = (a.py + b.py) / 2;
+    const midPx = (a.px + b.px) / 2;
+    const label = L.marker(pxToLatLng(midPx, midPy), {
       icon: L.divIcon({className: 'dist-label', html: fmtDist(d), iconSize: [60, 16], iconAnchor: [30, 8]}),
       interactive: false,
     }).addTo(map);
@@ -717,10 +735,10 @@ function addDrawVertex(px, py) {
   if (!drawPolyline) {
     drawPolyline = L.polyline([], {color: '#bb9af7', weight: 3, dashArray: '6 4'}).addTo(map);
   }
-  drawPolyline.addLatLng([py, px]);
+  drawPolyline.addLatLng(pxToLatLng(px, py));
 
   // Place temporary circle marker at vertex
-  const circ = L.circleMarker([py, px], {radius: 5, color: '#bb9af7', fillColor: '#bb9af7',
+  const circ = L.circleMarker(pxToLatLng(px, py), {radius: 5, color: '#bb9af7', fillColor: '#bb9af7',
     fillOpacity: 1, weight: 0}).addTo(map);
   drawVertices[drawVertices.length - 1].circle = circ;
 
@@ -1053,7 +1071,7 @@ async function loadRoute() {
 
       // Zoom to fit
       if (waypoints.length > 0) {
-        const pts = waypoints.map(wp => [wp.py, wp.px]);
+        const pts = waypoints.map(wp => pxToLatLng(wp.px, wp.py));
         map.fitBounds(pts, {padding: [60, 60]});
       }
     } else {
