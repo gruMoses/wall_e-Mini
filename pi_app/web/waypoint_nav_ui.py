@@ -872,9 +872,9 @@ function updateGoButton() {
   document.getElementById('btnStop').style.display = 'none';
   document.getElementById('btnSkip').style.display = 'none';
 
-  if (waypoints.length < 3) {
+  if (waypoints.length < 1) {
     btn.disabled = true;
-    btn.innerHTML = '<span class="go-fill" id="goFill"></span>MIN 3 WAYPOINTS';
+    btn.innerHTML = '<span class="go-fill" id="goFill"></span>TAP TO ADD WAYPOINT';
     return;
   }
   if (!isArmed) {
@@ -1213,13 +1213,17 @@ def create_nav_blueprint(controller=None) -> Blueprint:
         cruise_speed = data.get("cruise_speed", 40)
         arrival_radius = data.get("arrival_radius", 0.5)
 
-        if len(wp_list) < 3:
-            return _json_resp({"ok": False, "error": "need at least 3 waypoints"}, 400)
+        if len(wp_list) < 1:
+            return _json_resp({"ok": False, "error": "need at least 1 waypoint"}, 400)
 
-        # Load calibration for pixel→GPS conversion
-        cal = load_calibration(cal_path)
-        if cal is None:
-            return _json_resp({"ok": False, "error": "map not calibrated"}, 400)
+        # Calibration is only required if any waypoint is missing lat/lon
+        # (i.e. must be re-derived from pixel coords). The UI normally sends lat/lon.
+        cal = None
+        needs_cal = any(wp.get("lat") is None or wp.get("lon") is None for wp in wp_list)
+        if needs_cal:
+            cal = load_calibration(cal_path)
+            if cal is None:
+                return _json_resp({"ok": False, "error": "map not calibrated"}, 400)
 
         # Build Waypoint list — use GPS coords (from client or re-derive from pixel)
         gps_waypoints = []
@@ -1227,7 +1231,6 @@ def create_nav_blueprint(controller=None) -> Blueprint:
             lat = wp.get("lat")
             lon = wp.get("lon")
             if lat is None or lon is None:
-                # Fallback: convert pixel→GPS
                 lat, lon = pixel_to_gps_pt(cal.pixel_to_gps, wp["px"], wp["py"])
             gps_waypoints.append(Waypoint(lat=lat, lon=lon, name=f"WP{i+1}"))
 

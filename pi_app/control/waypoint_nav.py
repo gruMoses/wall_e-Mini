@@ -84,6 +84,8 @@ class WaypointNavController:
         self._waypoints = waypoints or []
         self._index = 0
         self._completed = False
+        self._last_bearing_deg = 0.0
+        self._last_distance_m = 0.0
 
     @property
     def waypoints(self) -> list[Waypoint]:
@@ -131,12 +133,16 @@ class WaypointNavController:
             self._index += 1
             if self._index >= len(self._waypoints):
                 self._completed = True
+                self._last_bearing_deg = brg
+                self._last_distance_m = dist
                 return brg, 0
             wp = self._waypoints[self._index]
             dist = haversine_m(lat, lon, wp.lat, wp.lon)
             brg = bearing_deg(lat, lon, wp.lat, wp.lon)
 
         speed = self._speed_for_distance(dist)
+        self._last_bearing_deg = brg
+        self._last_distance_m = dist
         return brg, speed
 
     def _speed_for_distance(self, dist_m: float) -> int:
@@ -160,5 +166,7 @@ class WaypointNavController:
             waypoint_index=self._index,
             waypoint_total=len(self._waypoints),
             waypoint_name=wp.name if wp else "",
+            bearing_deg=self._last_bearing_deg,
+            distance_m=self._last_distance_m,
             completed=self._completed,
         )

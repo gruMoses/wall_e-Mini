@@ -799,6 +799,12 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "gps_diff_age_s": round(t.gps_diff_age_s, 2) if t.gps_diff_age_s is not None else None,
                     "gps_station_id": t.gps_station_id,
                     "imu_heading_deg": round(t.imu_heading_deg, 1) if t.imu_heading_deg is not None else None,
+                    "wp_index": getattr(t, "wp_index", None),
+                    "wp_total": getattr(t, "wp_total", None),
+                    "wp_name": getattr(t, "wp_name", None),
+                    "wp_bearing_deg": _finite_or_none(getattr(t, "wp_bearing_deg", None), 1),
+                    "wp_distance_m": _finite_or_none(getattr(t, "wp_distance_m", None), 2),
+                    "wp_completed": getattr(t, "wp_completed", None),
                 }
                 # Follow-Me visualization fields
                 obj["follow_mode"] = getattr(t, "follow_mode", None)

@@ -618,6 +618,12 @@ def run() -> None:
                         consume_radius_m=telem.get("consume_radius_m", 0.4),
                         target_confidence=telem.get("target_confidence"),
                         target_lateral_offset=telem.get("target_lateral_offset"),
+                        wp_index=telem.get("wp_index"),
+                        wp_total=telem.get("wp_total"),
+                        wp_name=telem.get("wp_name"),
+                        wp_bearing_deg=telem.get("wp_bearing_deg"),
+                        wp_distance_m=telem.get("wp_distance_m"),
+                        wp_completed=telem.get("wp_completed"),
                     )
                     depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
                     rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None

@@ -110,6 +110,13 @@ class RecordingTelemetry:
     consume_radius_m: float = 0.4
     target_confidence: float | None = None
     target_lateral_offset: float | None = None
+    # ── Waypoint-nav progress ─────────────────────────────────────────
+    wp_index: int | None = None
+    wp_total: int | None = None
+    wp_name: str | None = None
+    wp_bearing_deg: float | None = None
+    wp_distance_m: float | None = None
+    wp_completed: bool | None = None
 
 
 # ---------------------------------------------------------------------------
