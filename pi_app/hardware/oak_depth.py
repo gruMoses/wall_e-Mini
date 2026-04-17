@@ -946,8 +946,11 @@ class OakDepthReader:
             if valid_depths.size == 0:
                 corridor_rejected = True
             else:
-                total_corridor_pixels = band.shape[0] * band.shape[1]
-                corridor_valid_pct = (valid_depths.size / total_corridor_pixels) * 100.0 if total_corridor_pixels > 0 else 0.0
+                corridor_pixel_count = int(in_corridor.sum())
+                if corridor_pixel_count > 0:
+                    corridor_valid_pct = (valid_depths.size / corridor_pixel_count) * 100.0
+                else:
+                    corridor_valid_pct = 0.0
                 if corridor_valid_pct < min_valid_pct:
                     corridor_rejected = True
                 else:
