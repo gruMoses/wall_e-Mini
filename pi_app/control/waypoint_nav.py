@@ -306,9 +306,9 @@ class WaypointNavController:
                 (raw_imu_heading_deg + new_offset) % 360.0,
                 (raw_imu_heading_deg + self._heading_offset_deg) % 360.0,
             )
-            self._heading_offset_deg = (self._heading_offset_deg + cfg.gps_align_alpha * delta) % 360.0
-            if self._heading_offset_deg > 180.0:
-                self._heading_offset_deg -= 360.0
+            updated = self._heading_offset_deg + cfg.gps_align_alpha * delta
+            # Normalize to (-180, 180].
+            self._heading_offset_deg = ((updated + 180.0) % 360.0) - 180.0
 
     def _emit(self, state: NavState, v_cmd: float, yaw_cmd: float) -> tuple[float, float, NavState]:
         self._state = state

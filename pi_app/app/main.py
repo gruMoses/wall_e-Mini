@@ -633,6 +633,8 @@ def run() -> None:
                         wp_bearing_deg=telem.get("wp_bearing_deg"),
                         wp_distance_m=telem.get("wp_distance_m"),
                         wp_completed=telem.get("wp_completed"),
+                        wp_heading_offset_deg=telem.get("wp_heading_offset_deg"),
+                        wp_heading_offset_locked=telem.get("wp_heading_offset_locked"),
                     )
                     depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
                     rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None
@@ -859,6 +861,8 @@ def run() -> None:
                             "wp_v_cmd": telem.get("wp_v_cmd"),
                             "wp_yaw_cmd": telem.get("wp_yaw_cmd"),
                             "wp_in_align": telem.get("wp_in_align"),
+                            "wp_heading_offset_deg": telem.get("wp_heading_offset_deg"),
+                            "wp_heading_offset_locked": telem.get("wp_heading_offset_locked"),
                         }),
                         "recording_state": oak_recorder.recording_state if oak_recorder is not None else None,
                         "bms": (lambda s: {
