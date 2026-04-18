@@ -34,6 +34,7 @@ try:
     from pi_app.control.waypoint_nav import (
         WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
     )
+    from pi_app.control.gps_heading_align import GpsHeadingAligner
     from config import config
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -55,6 +56,7 @@ except ModuleNotFoundError:
     from pi_app.control.waypoint_nav import (  # type: ignore
         WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
     )
+    from pi_app.control.gps_heading_align import GpsHeadingAligner  # type: ignore
     from config import config  # type: ignore
 
 
@@ -319,11 +321,6 @@ def run() -> None:
                         recovery_threshold_deg=config.waypoint_nav.recovery_threshold_deg,
                         pivot_yaw_cmd=config.waypoint_nav.pivot_yaw_cmd,
                         motor_deadband_byte=config.waypoint_nav.motor_deadband_byte,
-                        gps_align_enabled=config.waypoint_nav.gps_align_enabled,
-                        gps_align_min_distance_m=config.waypoint_nav.gps_align_min_distance_m,
-                        gps_align_min_speed_mps=config.waypoint_nav.gps_align_min_speed_mps,
-                        gps_align_alpha=config.waypoint_nav.gps_align_alpha,
-                        gps_align_history_seconds=config.waypoint_nav.gps_align_history_seconds,
                     )
                     wp_file = Path(__file__).resolve().parents[2] / config.waypoint_nav.waypoint_file
                     wps = []
@@ -373,6 +370,7 @@ def run() -> None:
         print("VESC not detected; using Arduino Model X motor driver (stub)")
         motor_driver = ArduinoModelXDriver(rc_reader=rc_reader)
 
+    gps_heading_aligner = GpsHeadingAligner(config.gps_heading_align)
     controller = Controller(
         motor_driver=motor_driver,
         imu_compensator=imu_compensator,
@@ -380,6 +378,7 @@ def run() -> None:
         follow_me=follow_me_ctrl,
         waypoint_nav=waypoint_nav_ctrl,
         gesture_controller=gesture_ctrl,
+        gps_heading_aligner=gps_heading_aligner,
     )
     bt_server = None  # Set to None to indicate external SPP service is used
 
@@ -633,8 +632,8 @@ def run() -> None:
                         wp_bearing_deg=telem.get("wp_bearing_deg"),
                         wp_distance_m=telem.get("wp_distance_m"),
                         wp_completed=telem.get("wp_completed"),
-                        wp_heading_offset_deg=telem.get("wp_heading_offset_deg"),
-                        wp_heading_offset_locked=telem.get("wp_heading_offset_locked"),
+                        heading_offset_deg=telem.get("heading_offset_deg"),
+                        heading_offset_locked=telem.get("heading_offset_locked"),
                     )
                     depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
                     rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None
@@ -861,9 +860,9 @@ def run() -> None:
                             "wp_v_cmd": telem.get("wp_v_cmd"),
                             "wp_yaw_cmd": telem.get("wp_yaw_cmd"),
                             "wp_in_align": telem.get("wp_in_align"),
-                            "wp_heading_offset_deg": telem.get("wp_heading_offset_deg"),
-                            "wp_heading_offset_locked": telem.get("wp_heading_offset_locked"),
                         }),
+                        "heading_offset_deg": round1(telem.get("heading_offset_deg")),
+                        "heading_offset_locked": telem.get("heading_offset_locked"),
                         "recording_state": oak_recorder.recording_state if oak_recorder is not None else None,
                         "bms": (lambda s: {
                             "voltage_v": s.pack_voltage_v,

@@ -805,8 +805,8 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "wp_bearing_deg": _finite_or_none(getattr(t, "wp_bearing_deg", None), 1),
                     "wp_distance_m": _finite_or_none(getattr(t, "wp_distance_m", None), 2),
                     "wp_completed": getattr(t, "wp_completed", None),
-                    "wp_heading_offset_deg": _finite_or_none(getattr(t, "wp_heading_offset_deg", None), 1),
-                    "wp_heading_offset_locked": getattr(t, "wp_heading_offset_locked", None),
+                    "heading_offset_deg": _finite_or_none(getattr(t, "heading_offset_deg", None), 1),
+                    "heading_offset_locked": getattr(t, "heading_offset_locked", None),
                 }
                 # Follow-Me visualization fields
                 obj["follow_mode"] = getattr(t, "follow_mode", None)

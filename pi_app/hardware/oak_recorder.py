@@ -117,8 +117,8 @@ class RecordingTelemetry:
     wp_bearing_deg: float | None = None
     wp_distance_m: float | None = None
     wp_completed: bool | None = None
-    wp_heading_offset_deg: float | None = None
-    wp_heading_offset_locked: bool | None = None
+    heading_offset_deg: float | None = None
+    heading_offset_locked: bool | None = None
 
 
 # ---------------------------------------------------------------------------

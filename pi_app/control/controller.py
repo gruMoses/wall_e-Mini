@@ -23,6 +23,7 @@ from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
 from pi_app.control.follow_me import FollowMeController, PersonDetection
 from pi_app.control.gesture_control import GestureStateMachine, GestureEvent, HandData
 from pi_app.control.waypoint_nav import WaypointNavController, NavState, mix_to_bytes
+from pi_app.control.gps_heading_align import GpsHeadingAligner
 from pi_app.hardware.rtk_gps import GpsReading
 from config import config
 
@@ -105,6 +106,7 @@ class Controller:
         follow_me: Optional[FollowMeController] = None,
         waypoint_nav: Optional[WaypointNavController] = None,
         gesture_controller: Optional[GestureStateMachine] = None,
+        gps_heading_aligner: Optional[GpsHeadingAligner] = None,
     ) -> None:
         self._motor = motor_driver or NoopMotorDriver()
         self._relay = arm_relay or NoopArmRelay()
@@ -138,6 +140,9 @@ class Controller:
         self._follow_me = follow_me
         self._waypoint_nav = waypoint_nav
         self._gesture = gesture_controller
+        # GPS→IMU heading aligner runs every tick regardless of mode so
+        # any consumer can ask for a true-north-referenced heading.
+        self._gps_heading_aligner = gps_heading_aligner
         self._mode = "MANUAL"  # "MANUAL", "FOLLOW_ME", or "WAYPOINT_NAV"
         self._obstacle_distance_m: float | None = None
         self._obstacle_age_s: float | None = None
@@ -337,6 +342,28 @@ class Controller:
                 self._actual_right_rpm = None
                 self._actual_speed_mps = None
 
+        # ── GPS heading aligner: runs every tick in every mode ──────────────
+        # The aligner self-gates on fix quality, displacement, and speed, so
+        # it's safe to call unconditionally. Consumers read the corrected
+        # heading via self._get_corrected_heading() or the aligner directly.
+        if (
+            self._gps_heading_aligner is not None
+            and self._gps_reading is not None
+            and self._imu_compensator is not None
+        ):
+            try:
+                raw_heading = self._imu_compensator.get_heading_deg()
+            except Exception:
+                raw_heading = None
+            if raw_heading is not None:
+                self._gps_heading_aligner.update(
+                    self._gps_reading.latitude,
+                    self._gps_reading.longitude,
+                    raw_heading,
+                    self._gps_reading.fix_quality,
+                    mono_now,
+                )
+
         if self._calibration_mode:
             cmd = DriveCommand(
                 left_byte=CENTER_OUTPUT_VALUE,
@@ -423,24 +450,33 @@ class Controller:
             nav_state = NavState.IDLE
             if gps is not None:
                 gps_age = time.monotonic() - gps.timestamp
-                current_heading = None
+                raw_heading = None
                 if self._imu_compensator is not None:
                     try:
-                        current_heading = self._imu_compensator.get_heading_deg()
+                        raw_heading = self._imu_compensator.get_heading_deg()
                     except Exception:
-                        current_heading = None
+                        raw_heading = None
+                # Feed waypoint_nav heading in true-north frame when the aligner
+                # can correct; otherwise fall back to raw IMU heading.
+                if raw_heading is not None and self._gps_heading_aligner is not None:
+                    corrected_heading = self._gps_heading_aligner.correct(raw_heading)
+                else:
+                    corrected_heading = raw_heading
                 v_cmd, yaw_cmd, nav_state = self._waypoint_nav.compute(
                     gps.latitude, gps.longitude, gps.fix_quality, gps_age,
-                    current_heading_deg=current_heading,
+                    current_heading_deg=corrected_heading,
                 )
                 # Keep the IMU compensator's target heading up-to-date so the
                 # DRIVE-state PID is ready when we transition out of ALIGN.
-                # PID consumes raw IMU heading; waypoint_nav learns an offset
-                # between raw IMU and true north from GPS, so feed the PID a
-                # target in its own frame via imu_target_heading_deg.
+                # PID consumes raw IMU heading; aligner converts the true-frame
+                # bearing into raw-IMU frame.
                 if self._imu_compensator is not None and not self._waypoint_nav.completed:
                     nav_st = self._waypoint_nav.get_status()
-                    self._imu_compensator.set_target_heading(nav_st.imu_target_heading_deg)
+                    if self._gps_heading_aligner is not None:
+                        imu_target = self._gps_heading_aligner.imu_target_heading(nav_st.bearing_deg)
+                    else:
+                        imu_target = nav_st.bearing_deg
+                    self._imu_compensator.set_target_heading(imu_target)
                 deadband = int(getattr(config.waypoint_nav, "motor_deadband_byte", 12))
                 left, right = mix_to_bytes(v_cmd, yaw_cmd, deadband_byte=deadband,
                                            neutral=CENTER_OUTPUT_VALUE, half_range=127)
@@ -461,8 +497,6 @@ class Controller:
             telemetry["nav_state"] = nav_st.state
             telemetry["wp_v_cmd"] = nav_st.v_cmd
             telemetry["wp_yaw_cmd"] = nav_st.yaw_cmd
-            telemetry["wp_heading_offset_deg"] = nav_st.heading_offset_deg
-            telemetry["wp_heading_offset_locked"] = nav_st.heading_offset_locked
             if nav_st.completed:
                 self._mode = "MANUAL"
         elif self._mode == "FOLLOW_ME" and self._follow_me is not None:
@@ -799,6 +833,12 @@ class Controller:
         telemetry["vesc_left_rpm"] = self._actual_left_rpm
         telemetry["vesc_right_rpm"] = self._actual_right_rpm
         telemetry["vesc_actual_speed_mps"] = self._actual_speed_mps
+        if self._gps_heading_aligner is not None:
+            telemetry["heading_offset_deg"] = self._gps_heading_aligner.offset_deg
+            telemetry["heading_offset_locked"] = self._gps_heading_aligner.locked
+        else:
+            telemetry["heading_offset_deg"] = 0.0
+            telemetry["heading_offset_locked"] = False
         return cmd, events, telemetry
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:
