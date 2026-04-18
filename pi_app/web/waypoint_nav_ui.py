@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from pathlib import Path
 
@@ -1307,4 +1308,158 @@ def create_nav_blueprint(controller=None) -> Blueprint:
             _log.exception("Failed to skip waypoint")
             return _json_resp({"ok": False, "error": str(exc)}, 500)
 
+    # ── Current GPS position ──
+
+    @bp.route("/api/gps")
+    def get_gps():
+        """Return the robot's latest GPS fix.
+
+        Response fields:
+          lat, lon          – WGS-84 decimal degrees (0.0 when no fix)
+          fix_quality       – 0=none 1=GPS 2=DGPS 4=RTK-fix 5=RTK-float
+          satellites        – satellites used
+          altitude_m        – altitude in metres
+          hdop              – horizontal dilution of precision
+          diff_age_s        – seconds since last RTK correction (null if N/A)
+          ok                – false only when controller is unavailable
+        """
+        if controller is None:
+            return _json_resp({"ok": False, "error": "no controller"}, 503)
+        r = controller._gps_reading
+        if r is None:
+            return _json_resp({
+                "ok": True,
+                "lat": 0.0,
+                "lon": 0.0,
+                "fix_quality": 0,
+                "satellites": 0,
+                "altitude_m": 0.0,
+                "hdop": 99.9,
+                "diff_age_s": None,
+            })
+        return _json_resp({
+            "ok": True,
+            "lat": r.latitude,
+            "lon": r.longitude,
+            "fix_quality": r.fix_quality,
+            "satellites": r.satellites_used,
+            "altitude_m": r.altitude_m,
+            "hdop": r.hdop,
+            "diff_age_s": r.diff_age_s if r.diff_age_s >= 0 else None,
+        })
+
+    # ── Go to GPS waypoint (absolute or relative) ──
+
+    @bp.route("/api/nav/go", methods=["POST"])
+    def nav_go():
+        """Send the robot to a GPS waypoint without the map UI.
+
+        Accepts JSON with one of two forms:
+
+        Absolute GPS:
+            {"lat": 30.123, "lon": -95.456}
+            {"lat": 30.123, "lon": -95.456, "cruise_speed": 40, "arrival_radius": 0.5}
+
+        Relative offset (uses current GPS position as origin):
+            {"direction": "north", "distance_ft": 10}
+            {"direction": "southwest", "distance_ft": 25}
+            {"bearing_deg": 270, "distance_ft": 15}
+            Any of the above may include optional cruise_speed / arrival_radius.
+
+        Valid direction strings: north, south, east, west,
+            northeast, northwest, southeast, southwest.
+
+        NOTE: the robot must already be armed via the RC transmitter
+        (ch3 / throttle stick high) before it will move. This endpoint
+        queues the waypoint and activates nav mode; motion starts as
+        soon as the arm condition is satisfied.
+
+        Response:
+            {"ok": true, "target_lat": x, "target_lon": y}
+        """
+        if controller is None:
+            return _json_resp({"ok": False, "error": "no controller"}, 503)
+
+        data = request.get_json(force=True) or {}
+        cruise_speed = int(data.get("cruise_speed", 40))
+        arrival_radius = float(data.get("arrival_radius", 0.5))
+
+        _DIRECTION_BEARING = {
+            "north":     0.0,
+            "northeast": 45.0,
+            "east":      90.0,
+            "southeast": 135.0,
+            "south":     180.0,
+            "southwest": 225.0,
+            "west":      270.0,
+            "northwest": 315.0,
+        }
+
+        # ── Resolve target lat/lon ──
+        if "lat" in data and "lon" in data:
+            target_lat = float(data["lat"])
+            target_lon = float(data["lon"])
+        elif "direction" in data or "bearing_deg" in data:
+            r = controller._gps_reading
+            if r is None or r.fix_quality == 0:
+                return _json_resp(
+                    {"ok": False, "error": "no GPS fix — cannot compute relative position"},
+                    400,
+                )
+            distance_ft = data.get("distance_ft")
+            if distance_ft is None:
+                return _json_resp({"ok": False, "error": "distance_ft required for relative mode"}, 400)
+            distance_m = float(distance_ft) * 0.3048
+
+            if "bearing_deg" in data:
+                brng = float(data["bearing_deg"]) % 360.0
+            else:
+                direction = str(data["direction"]).lower().strip()
+                if direction not in _DIRECTION_BEARING:
+                    return _json_resp(
+                        {"ok": False, "error": f"unknown direction '{direction}'; "
+                         f"valid: {', '.join(_DIRECTION_BEARING)}"},
+                        400,
+                    )
+                brng = _DIRECTION_BEARING[direction]
+
+            target_lat, target_lon = _offset_gps(r.latitude, r.longitude, brng, distance_m)
+        else:
+            return _json_resp(
+                {"ok": False,
+                 "error": "provide either {lat, lon} or {direction/bearing_deg, distance_ft}"},
+                400,
+            )
+
+        # ── Activate nav ──
+        try:
+            nav = controller._waypoint_nav
+            if nav is None:
+                return _json_resp({"ok": False, "error": "waypoint nav not initialized"}, 503)
+
+            nav._cfg.cruise_speed_byte = cruise_speed
+            nav._cfg.arrival_radius_m = arrival_radius
+            nav.set_waypoints([Waypoint(lat=target_lat, lon=target_lon, name="GO")])
+            controller.activate_waypoint_nav()
+            _log.info("nav/go: target=(%.7f, %.7f) speed=%d radius=%.1f",
+                      target_lat, target_lon, cruise_speed, arrival_radius)
+            return _json_resp({"ok": True, "target_lat": target_lat, "target_lon": target_lon})
+        except Exception as exc:
+            _log.exception("nav/go failed")
+            return _json_resp({"ok": False, "error": str(exc)}, 500)
+
     return bp
+
+
+def _offset_gps(lat: float, lon: float, bearing_deg: float, distance_m: float):
+    """Return (lat2, lon2) that is distance_m away from (lat, lon) at bearing_deg."""
+    R = 6_371_000.0
+    d = distance_m / R
+    brng = math.radians(bearing_deg)
+    lat1 = math.radians(lat)
+    lon1 = math.radians(lon)
+    lat2 = math.asin(math.sin(lat1) * math.cos(d) +
+                     math.cos(lat1) * math.sin(d) * math.cos(brng))
+    lon2 = lon1 + math.atan2(math.sin(brng) * math.sin(d) * math.cos(lat1),
+                              math.cos(d) - math.sin(lat1) * math.sin(lat2))
+    return math.degrees(lat2), math.degrees(lon2)
