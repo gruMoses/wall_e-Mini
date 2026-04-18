@@ -13,13 +13,13 @@ class ImuSteeringConfig:
     # Enable/disable IMU steering
     enabled: bool = True
     
-    # PID gains for heading control
-    kp: float = 0.7       # Proportional gain (heading error to steering correction)
+    # PID gains for heading control (tuned for WAYPOINT_NAV DRIVE steering)
+    kp: float = 1.2       # Proportional gain (heading error to steering correction)
     ki: float = 0.08      # Integral gain (slow bias removal; high values cause oscillation)
     kd: float = 0.5       # Derivative gain (yaw rate damping)
-    
+
     # Control parameters
-    max_correction: int = 25      # Maximum steering correction in byte units (0-255)
+    max_correction: int = 35      # Maximum steering correction in byte units (0-255)
     deadband_deg: float = 0.9    # Minimum heading error to trigger correction (degrees)
     max_integral: float = 30.0   # Maximum integral term to prevent windup
     invert_output: bool = False   # Invert the sign of IMU steering correction (hardware-specific)
@@ -338,19 +338,17 @@ class WaypointNavConfig:
     """Configuration for autonomous GPS waypoint navigation."""
     enabled: bool = True
     waypoint_file: str = "waypoints.json"
-    arrival_radius_m: float = 0.5
+    arrival_radius_m: float = 1.0
     cruise_speed_byte: int = 40
     approach_speed_byte: int = 20
     slow_radius_m: float = 2.0
     min_rtk_quality: int = 4     # require RTK fixed for autonomous nav
-    # Heading-error speed gating: pivot in place above `pivot_heading_error_deg`,
-    # full speed below `align_heading_error_deg`, linear ramp between.
-    pivot_heading_error_deg: float = 25.0
-    align_heading_error_deg: float = 8.0
-    # Direct pivot motor differential (bytes above/below CENTER=128) when
-    # pivoting in place. Larger than the ±25 IMU correction range so the
-    # robot clears motor deadband and actually rotates cleanly.
-    pivot_speed_byte: int = 60
+    stale_timeout_s: float = 3.0
+    # State-machine thresholds (see WaypointNavController)
+    align_threshold_deg: float = 12.0      # |heading_err| below this -> ALIGN->DRIVE
+    recovery_threshold_deg: float = 25.0   # |heading_err| above this -> DRIVE->ALIGN
+    pivot_yaw_cmd: float = 0.5             # normalized yaw command during ALIGN pivot
+    motor_deadband_byte: int = 12          # minimum byte offset to overcome motor deadband
 
 
 @dataclass(frozen=True)

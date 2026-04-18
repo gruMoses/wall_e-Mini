@@ -370,8 +370,17 @@ class ImuSteeringCompensator:
             self.state.target_heading_deg = self.state.heading_deg
             self.state.integral_error = 0.0
     
-    def set_target_heading(self, heading_deg: float) -> None:
-        """Set a specific target heading."""
+    def set_target_heading(self, heading_deg: float, reset_integral_jump_deg: float = 30.0) -> None:
+        """Set a specific target heading.
+
+        Only resets the integral accumulator when the target shifts by more than
+        ``reset_integral_jump_deg`` (shortest-arc). Small target updates (e.g.
+        every control cycle during waypoint nav) preserve integral state so the
+        PID can still wash out steady-state bias.
+        """
         with self.lock:
+            prev = self.state.target_heading_deg
+            diff = ((heading_deg - prev + 180.0) % 360.0) - 180.0
             self.state.target_heading_deg = heading_deg
-            self.state.integral_error = 0.0
+            if abs(diff) >= reset_integral_jump_deg:
+                self.state.integral_error = 0.0

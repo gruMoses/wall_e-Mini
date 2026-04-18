@@ -1,21 +1,36 @@
 """
 Pure-logic waypoint navigation controller.
 
-Computes bearing and distance to the next waypoint (Haversine / forward
-azimuth), produces a speed byte using a cruise/approach/stop profile, and
-calls ``ImuSteeringCompensator.set_target_heading()`` to steer.
+State machine:
+- IDLE: no active waypoint sequence -> (v=0, yaw=0)
+- ALIGN: heading error too large to drive forward; pivot in place at a fixed
+         normalized yaw command until the error drops below align_threshold_deg
+- DRIVE: drive forward with PID-based steering; fall back to ALIGN if the
+         heading error exceeds recovery_threshold_deg
+- ARRIVE: inside arrival_radius_m of the current target -> (v=0, yaw=0) before
+          advancing to the next waypoint
+
+compute() returns (v_cmd, yaw_cmd, state) as normalized floats in [-1, 1];
+a mixer converts these into left/right motor bytes.
 """
 
 from __future__ import annotations
 
 import json
 import math
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 EARTH_RADIUS_M = 6_371_000.0
+
+
+class NavState(str, Enum):
+    IDLE = "IDLE"
+    ALIGN = "ALIGN"
+    DRIVE = "DRIVE"
+    ARRIVE = "ARRIVE"
 
 
 @dataclass
@@ -33,7 +48,10 @@ class NavStatus:
     waypoint_name: str = ""
     bearing_deg: float = 0.0
     distance_m: float = 0.0
-    speed_byte: int = 0
+    heading_error_deg: float = 0.0
+    state: str = NavState.IDLE.value
+    v_cmd: float = 0.0
+    yaw_cmd: float = 0.0
     fix_quality: int = 0
     gps_stale: bool = False
     completed: bool = False
@@ -66,34 +84,75 @@ def load_waypoints(path: str | Path) -> list[Waypoint]:
     ]
 
 
+def _heading_error_deg(target_bearing_deg: float, current_heading_deg: float) -> float:
+    """Signed shortest-arc heading error in [-180, 180]."""
+    return ((target_bearing_deg - current_heading_deg + 180.0) % 360.0) - 180.0
+
+
 @dataclass
 class WaypointNavConfig:
-    arrival_radius_m: float = 0.5
+    arrival_radius_m: float = 1.0
     cruise_speed_byte: int = 40
     approach_speed_byte: int = 20
     slow_radius_m: float = 2.0
     min_rtk_quality: int = 4
     stale_timeout_s: float = 3.0
-    # Heading-error speed gating. Above `pivot_heading_error_deg` the robot
-    # commands zero forward speed so the IMU compensator counter-rotates the
-    # wheels (pivot in place). Below `align_heading_error_deg` full forward
-    # speed is allowed; between the two, speed ramps linearly. Prevents the
-    # "donut" failure where a large heading error plus forward speed produces
-    # a wide arc that never converges.
-    pivot_heading_error_deg: float = 25.0
-    align_heading_error_deg: float = 8.0
+    align_threshold_deg: float = 12.0
+    recovery_threshold_deg: float = 25.0
+    pivot_yaw_cmd: float = 0.5
+    motor_deadband_byte: int = 12
+
+
+def mix_to_bytes(
+    v_cmd: float,
+    yaw_cmd: float,
+    deadband_byte: int = 12,
+    neutral: int = 126,
+    half_range: int = 127,
+) -> tuple[int, int]:
+    """Convert normalized (v_cmd, yaw_cmd) commands into motor bytes.
+
+    v_cmd: -1 (full reverse) to +1 (full forward), 0 = stop.
+    yaw_cmd: -1 (full left / CCW) to +1 (full right / CW).
+
+    Skid-steer mix:
+      left  = v + yaw   (yaw > 0 turns right: spin left wheel faster)
+      right = v - yaw
+    Output raw is clamped to [-1, 1] per side, then scaled into the byte range.
+    Deadband compensation ensures any non-zero command produces at least
+    ``deadband_byte`` of offset from neutral so motors actually move.
+    """
+    left_raw = max(-1.0, min(1.0, v_cmd + yaw_cmd))
+    right_raw = max(-1.0, min(1.0, v_cmd - yaw_cmd))
+
+    left_byte = int(round(neutral + left_raw * half_range))
+    right_byte = int(round(neutral + right_raw * half_range))
+
+    if left_raw != 0.0 and abs(left_byte - neutral) < deadband_byte:
+        left_byte = neutral + deadband_byte * (1 if left_raw > 0 else -1)
+    if right_raw != 0.0 and abs(right_byte - neutral) < deadband_byte:
+        right_byte = neutral + deadband_byte * (1 if right_raw > 0 else -1)
+
+    return (
+        max(0, min(255, left_byte)),
+        max(0, min(255, right_byte)),
+    )
 
 
 class WaypointNavController:
-    """Compute speed and heading commands toward a waypoint sequence."""
+    """State-machine waypoint navigator producing normalized drive commands."""
 
     def __init__(self, cfg: WaypointNavConfig, waypoints: list[Waypoint] | None = None) -> None:
         self._cfg = cfg
         self._waypoints = waypoints or []
         self._index = 0
         self._completed = False
+        self._state: NavState = NavState.IDLE
         self._last_bearing_deg = 0.0
         self._last_distance_m = 0.0
+        self._last_heading_error_deg = 0.0
+        self._last_v_cmd = 0.0
+        self._last_yaw_cmd = 0.0
 
     @property
     def waypoints(self) -> list[Waypoint]:
@@ -107,10 +166,15 @@ class WaypointNavController:
     def completed(self) -> bool:
         return self._completed
 
+    @property
+    def state(self) -> NavState:
+        return self._state
+
     def set_waypoints(self, wps: list[Waypoint]) -> None:
         self._waypoints = list(wps)
         self._index = 0
         self._completed = False
+        self._state = NavState.IDLE
 
     def compute(
         self,
@@ -119,78 +183,90 @@ class WaypointNavController:
         fix_quality: int,
         gps_age_s: float,
         current_heading_deg: Optional[float] = None,
-    ) -> tuple[float, int]:
-        """Return (target_bearing_deg, speed_byte).
+    ) -> tuple[float, float, NavState]:
+        """Compute (v_cmd, yaw_cmd, state).
 
-        speed_byte is 0 when GPS quality is insufficient, data is stale,
-        all waypoints have been reached, or (when ``current_heading_deg`` is
-        provided) the heading error exceeds ``pivot_heading_error_deg``.
+        v_cmd and yaw_cmd are normalized floats in [-1, 1]. Returns zeros in
+        IDLE/ARRIVE or whenever GPS is unusable.
         """
+        cfg = self._cfg
+
         if self._completed or not self._waypoints:
-            return 0.0, 0
+            return self._emit(NavState.IDLE, 0.0, 0.0)
 
-        if fix_quality < self._cfg.min_rtk_quality:
-            return 0.0, 0
-
-        if gps_age_s > self._cfg.stale_timeout_s:
-            return 0.0, 0
+        if fix_quality < cfg.min_rtk_quality or gps_age_s > cfg.stale_timeout_s:
+            return self._emit(self._state, 0.0, 0.0)
 
         wp = self._waypoints[self._index]
         dist = haversine_m(lat, lon, wp.lat, wp.lon)
         brg = bearing_deg(lat, lon, wp.lat, wp.lon)
+        self._last_bearing_deg = brg
+        self._last_distance_m = dist
 
-        if dist <= self._cfg.arrival_radius_m:
+        if dist <= cfg.arrival_radius_m:
             self._index += 1
             if self._index >= len(self._waypoints):
                 self._completed = True
-                self._last_bearing_deg = brg
-                self._last_distance_m = dist
-                return brg, 0
+                return self._emit(NavState.ARRIVE, 0.0, 0.0)
             wp = self._waypoints[self._index]
             dist = haversine_m(lat, lon, wp.lat, wp.lon)
             brg = bearing_deg(lat, lon, wp.lat, wp.lon)
+            self._last_bearing_deg = brg
+            self._last_distance_m = dist
+            self._state = NavState.ALIGN
 
-        speed = self._speed_for_distance(dist)
-        if current_heading_deg is not None:
-            speed = self._gate_speed_by_heading(speed, brg, current_heading_deg)
-        self._last_bearing_deg = brg
-        self._last_distance_m = dist
-        return brg, speed
+        if current_heading_deg is None:
+            self._last_heading_error_deg = 0.0
+            return self._emit(self._state if self._state != NavState.IDLE else NavState.ALIGN, 0.0, 0.0)
 
-    def _gate_speed_by_heading(
-        self, speed: int, target_bearing_deg: float, current_heading_deg: float
-    ) -> int:
-        """Scale ``speed`` down when heading error is large.
+        err_signed = _heading_error_deg(brg, current_heading_deg)
+        err_abs = abs(err_signed)
+        self._last_heading_error_deg = err_signed
 
-        Returns 0 above ``pivot_heading_error_deg`` so the IMU compensator can
-        counter-rotate the wheels (pivot in place), full speed below
-        ``align_heading_error_deg``, and a linear ramp between.
+        if self._state in (NavState.IDLE, NavState.ARRIVE):
+            self._state = NavState.ALIGN
+
+        if self._state == NavState.ALIGN:
+            if err_abs <= cfg.align_threshold_deg:
+                self._state = NavState.DRIVE
+            else:
+                yaw = cfg.pivot_yaw_cmd if err_signed > 0 else -cfg.pivot_yaw_cmd
+                return self._emit(NavState.ALIGN, 0.0, yaw)
+
+        # DRIVE state
+        if err_abs > cfg.recovery_threshold_deg:
+            self._state = NavState.ALIGN
+            yaw = cfg.pivot_yaw_cmd if err_signed > 0 else -cfg.pivot_yaw_cmd
+            return self._emit(NavState.ALIGN, 0.0, yaw)
+
+        v_cmd = self._forward_v_for_distance(dist)
+        # yaw_cmd for DRIVE is left to the imu compensator (returned as 0 here).
+        return self._emit(NavState.DRIVE, v_cmd, 0.0)
+
+    def _emit(self, state: NavState, v_cmd: float, yaw_cmd: float) -> tuple[float, float, NavState]:
+        self._state = state
+        self._last_v_cmd = v_cmd
+        self._last_yaw_cmd = yaw_cmd
+        return v_cmd, yaw_cmd, state
+
+    def _forward_v_for_distance(self, dist_m: float) -> float:
+        """Distance-based forward speed profile, returned as a normalized float.
+
+        Byte speeds from config are scaled by 127 to get normalized magnitudes.
         """
-        if speed <= 0:
-            return speed
-        err = abs(((target_bearing_deg - current_heading_deg + 180.0) % 360.0) - 180.0)
-        pivot = float(self._cfg.pivot_heading_error_deg)
-        align = float(self._cfg.align_heading_error_deg)
-        if err >= pivot:
-            return 0
-        if err <= align or pivot <= align:
-            return speed
-        frac = (pivot - err) / (pivot - align)
-        return max(0, int(round(speed * frac)))
-
-    def _speed_for_distance(self, dist_m: float) -> int:
-        if dist_m <= self._cfg.arrival_radius_m:
-            return 0
-        if self._cfg.slow_radius_m <= self._cfg.arrival_radius_m:
-            return self._cfg.cruise_speed_byte
-        if dist_m <= self._cfg.slow_radius_m:
-            frac = (dist_m - self._cfg.arrival_radius_m) / (
-                self._cfg.slow_radius_m - self._cfg.arrival_radius_m
+        cfg = self._cfg
+        if dist_m <= cfg.arrival_radius_m:
+            return 0.0
+        hi = cfg.cruise_speed_byte / 127.0
+        lo = cfg.approach_speed_byte / 127.0
+        if cfg.slow_radius_m <= cfg.arrival_radius_m:
+            return hi
+        if dist_m <= cfg.slow_radius_m:
+            frac = (dist_m - cfg.arrival_radius_m) / (
+                cfg.slow_radius_m - cfg.arrival_radius_m
             )
-            lo = self._cfg.approach_speed_byte
-            hi = self._cfg.cruise_speed_byte
-            return max(lo, int(round(lo + (hi - lo) * frac)))
-        return self._cfg.cruise_speed_byte
+            return max(lo, lo + (hi - lo) * frac)
+        return hi
 
     def get_status(self) -> NavStatus:
         wp = self._waypoints[self._index] if self._index < len(self._waypoints) else None
@@ -201,5 +277,9 @@ class WaypointNavController:
             waypoint_name=wp.name if wp else "",
             bearing_deg=self._last_bearing_deg,
             distance_m=self._last_distance_m,
+            heading_error_deg=self._last_heading_error_deg,
+            state=self._state.value,
+            v_cmd=self._last_v_cmd,
+            yaw_cmd=self._last_yaw_cmd,
             completed=self._completed,
         )
