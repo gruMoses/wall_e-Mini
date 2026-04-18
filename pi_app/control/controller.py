@@ -416,17 +416,31 @@ class Controller:
             if gesture_event is not None:
                 telemetry["gesture_event"] = gesture_event.name
 
+        wp_pivot_active = False
         if self._mode == "WAYPOINT_NAV" and self._waypoint_nav is not None:
             gps = self._gps_reading
             if gps is not None:
                 gps_age = time.monotonic() - gps.timestamp
+                current_heading = None
+                if self._imu_compensator is not None:
+                    try:
+                        current_heading = self._imu_compensator.get_heading_deg()
+                    except Exception:
+                        current_heading = None
                 target_brg, speed = self._waypoint_nav.compute(
                     gps.latitude, gps.longitude, gps.fix_quality, gps_age,
+                    current_heading_deg=current_heading,
                 )
-                if speed > 0 and self._imu_compensator is not None:
+                # Always set target heading so the IMU compensator can pivot
+                # the robot in place while forward speed is gated to 0.
+                if self._imu_compensator is not None and not self._waypoint_nav.completed:
                     self._imu_compensator.set_target_heading(target_brg)
                 fwd = min(CENTER_OUTPUT_VALUE + speed, MAX_OUTPUT)
                 left = right = fwd
+                # Pivot-in-place: speed gated to 0 by heading error. Let the
+                # IMU correction drive the wheels counter-rotating below.
+                if speed == 0 and not self._waypoint_nav.completed:
+                    wp_pivot_active = True
             else:
                 left = right = self.NEUTRAL
             steering_input = 0.0
@@ -519,6 +533,10 @@ class Controller:
             left_diff = abs(left - CENTER_OUTPUT_VALUE)
             right_diff = abs(right - CENTER_OUTPUT_VALUE)
             moving_ok = max(left_diff, right_diff) >= 4
+            # Allow IMU correction to pivot the robot when waypoint nav has
+            # gated forward speed to 0 for a large heading error.
+            if wp_pivot_active:
+                moving_ok = True
         elif bt_override_bytes is not None:
             bt_left, bt_right = bt_override_bytes
             bt_left_diff = abs(bt_left - CENTER_OUTPUT_VALUE)

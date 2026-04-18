@@ -343,6 +343,10 @@ class WaypointNavConfig:
     approach_speed_byte: int = 20
     slow_radius_m: float = 2.0
     min_rtk_quality: int = 4     # require RTK fixed for autonomous nav
+    # Heading-error speed gating: pivot in place above `pivot_heading_error_deg`,
+    # full speed below `align_heading_error_deg`, linear ramp between.
+    pivot_heading_error_deg: float = 25.0
+    align_heading_error_deg: float = 8.0
 
 
 @dataclass(frozen=True)

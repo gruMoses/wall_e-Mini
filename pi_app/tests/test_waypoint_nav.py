@@ -125,6 +125,59 @@ class TestWaypointAdvancement(unittest.TestCase):
         self.assertEqual(speed, 0)
 
 
+class TestHeadingErrorGating(unittest.TestCase):
+    """Pivot-in-place gating: speed ramps down as heading error grows."""
+
+    def _make(self) -> WaypointNavController:
+        cfg = WaypointNavConfig(
+            arrival_radius_m=0.5,
+            cruise_speed_byte=40,
+            approach_speed_byte=20,
+            slow_radius_m=2.0,
+            min_rtk_quality=4,
+            stale_timeout_s=3.0,
+            pivot_heading_error_deg=25.0,
+            align_heading_error_deg=8.0,
+        )
+        # Target ~111 m due north; bearing = 0°.
+        wp = Waypoint(lat=0.001, lon=0.0, name="N")
+        return WaypointNavController(cfg, [wp])
+
+    def test_full_speed_when_aligned(self):
+        nav = self._make()
+        _, speed = nav.compute(0.0, 0.0, fix_quality=4, gps_age_s=0.0,
+                               current_heading_deg=0.0)
+        self.assertEqual(speed, 40)
+
+    def test_zero_speed_when_error_exceeds_pivot(self):
+        nav = self._make()
+        # 90° heading error (robot facing east, waypoint is north)
+        _, speed = nav.compute(0.0, 0.0, fix_quality=4, gps_age_s=0.0,
+                               current_heading_deg=90.0)
+        self.assertEqual(speed, 0)
+
+    def test_ramp_between_thresholds(self):
+        nav = self._make()
+        # 16° error is halfway between align (8) and pivot (25)
+        _, speed = nav.compute(0.0, 0.0, fix_quality=4, gps_age_s=0.0,
+                               current_heading_deg=16.0)
+        self.assertGreater(speed, 0)
+        self.assertLess(speed, 40)
+
+    def test_wrap_around_uses_shortest_angle(self):
+        nav = self._make()
+        # Heading 350°, target 0° → error is 10° (not 350°)
+        _, speed = nav.compute(0.0, 0.0, fix_quality=4, gps_age_s=0.0,
+                               current_heading_deg=350.0)
+        self.assertGreater(speed, 0)
+
+    def test_missing_heading_skips_gating(self):
+        nav = self._make()
+        _, speed = nav.compute(0.0, 0.0, fix_quality=4, gps_age_s=0.0,
+                               current_heading_deg=None)
+        self.assertEqual(speed, 40)
+
+
 class TestQualityGating(unittest.TestCase):
 
     def _make(self, min_q: int = 4) -> WaypointNavController:

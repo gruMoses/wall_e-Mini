@@ -315,6 +315,12 @@ def run() -> None:
                         slow_radius_m=config.waypoint_nav.slow_radius_m,
                         min_rtk_quality=config.waypoint_nav.min_rtk_quality,
                         stale_timeout_s=config.gps.stale_timeout_s,
+                        pivot_heading_error_deg=getattr(
+                            config.waypoint_nav, "pivot_heading_error_deg", 25.0
+                        ),
+                        align_heading_error_deg=getattr(
+                            config.waypoint_nav, "align_heading_error_deg", 8.0
+                        ),
                     )
                     wp_file = Path(__file__).resolve().parents[2] / config.waypoint_nav.waypoint_file
                     wps = []

@@ -74,6 +74,14 @@ class WaypointNavConfig:
     slow_radius_m: float = 2.0
     min_rtk_quality: int = 4
     stale_timeout_s: float = 3.0
+    # Heading-error speed gating. Above `pivot_heading_error_deg` the robot
+    # commands zero forward speed so the IMU compensator counter-rotates the
+    # wheels (pivot in place). Below `align_heading_error_deg` full forward
+    # speed is allowed; between the two, speed ramps linearly. Prevents the
+    # "donut" failure where a large heading error plus forward speed produces
+    # a wide arc that never converges.
+    pivot_heading_error_deg: float = 25.0
+    align_heading_error_deg: float = 8.0
 
 
 class WaypointNavController:
@@ -110,11 +118,13 @@ class WaypointNavController:
         lon: float,
         fix_quality: int,
         gps_age_s: float,
+        current_heading_deg: Optional[float] = None,
     ) -> tuple[float, int]:
         """Return (target_bearing_deg, speed_byte).
 
         speed_byte is 0 when GPS quality is insufficient, data is stale,
-        or all waypoints have been reached.
+        all waypoints have been reached, or (when ``current_heading_deg`` is
+        provided) the heading error exceeds ``pivot_heading_error_deg``.
         """
         if self._completed or not self._waypoints:
             return 0.0, 0
@@ -141,9 +151,32 @@ class WaypointNavController:
             brg = bearing_deg(lat, lon, wp.lat, wp.lon)
 
         speed = self._speed_for_distance(dist)
+        if current_heading_deg is not None:
+            speed = self._gate_speed_by_heading(speed, brg, current_heading_deg)
         self._last_bearing_deg = brg
         self._last_distance_m = dist
         return brg, speed
+
+    def _gate_speed_by_heading(
+        self, speed: int, target_bearing_deg: float, current_heading_deg: float
+    ) -> int:
+        """Scale ``speed`` down when heading error is large.
+
+        Returns 0 above ``pivot_heading_error_deg`` so the IMU compensator can
+        counter-rotate the wheels (pivot in place), full speed below
+        ``align_heading_error_deg``, and a linear ramp between.
+        """
+        if speed <= 0:
+            return speed
+        err = abs(((target_bearing_deg - current_heading_deg + 180.0) % 360.0) - 180.0)
+        pivot = float(self._cfg.pivot_heading_error_deg)
+        align = float(self._cfg.align_heading_error_deg)
+        if err >= pivot:
+            return 0
+        if err <= align or pivot <= align:
+            return speed
+        frac = (pivot - err) / (pivot - align)
+        return max(0, int(round(speed * frac)))
 
     def _speed_for_distance(self, dist_m: float) -> int:
         if dist_m <= self._cfg.arrival_radius_m:
