@@ -31,7 +31,7 @@ class GpsHeadingAlignConfig:
     enabled: bool = True
     min_distance_m: float = 2.0       # lock offset after this much displacement
     min_speed_mps: float = 0.3        # only trust GPS COG above this speed
-    min_fix_quality: int = 2          # DGPS or better (see config.py for rationale)
+    min_fix_quality: int = 4          # RTK fixed only
     alpha: float = 0.1                # EMA factor for ongoing drift correction
     history_seconds: float = 4.0      # rolling GPS window
 
