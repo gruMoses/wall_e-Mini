@@ -347,6 +347,10 @@ class WaypointNavConfig:
     # full speed below `align_heading_error_deg`, linear ramp between.
     pivot_heading_error_deg: float = 25.0
     align_heading_error_deg: float = 8.0
+    # Direct pivot motor differential (bytes above/below CENTER=128) when
+    # pivoting in place. Larger than the ±25 IMU correction range so the
+    # robot clears motor deadband and actually rotates cleanly.
+    pivot_speed_byte: int = 60
 
 
 @dataclass(frozen=True)

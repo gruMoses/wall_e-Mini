@@ -417,6 +417,7 @@ class Controller:
                 telemetry["gesture_event"] = gesture_event.name
 
         wp_pivot_active = False
+        wp_direct_pivot = False
         if self._mode == "WAYPOINT_NAV" and self._waypoint_nav is not None:
             gps = self._gps_reading
             if gps is not None:
@@ -437,9 +438,32 @@ class Controller:
                     self._imu_compensator.set_target_heading(target_brg)
                 fwd = min(CENTER_OUTPUT_VALUE + speed, MAX_OUTPUT)
                 left = right = fwd
-                # Pivot-in-place: speed gated to 0 by heading error. Let the
-                # IMU correction drive the wheels counter-rotating below.
-                if speed == 0 and not self._waypoint_nav.completed:
+                # Pivot-in-place: speed gated to 0 by heading error. Drive a
+                # dedicated high-differential pivot rather than relying on the
+                # compensator's ±25-byte correction range (which is insufficient
+                # to overcome motor deadband/friction and just arcs slowly).
+                if (
+                    speed == 0
+                    and not self._waypoint_nav.completed
+                    and current_heading is not None
+                ):
+                    err_signed = ((target_brg - current_heading + 180.0) % 360.0) - 180.0
+                    pivot_byte = int(getattr(
+                        config.waypoint_nav, "pivot_speed_byte", 60
+                    ))
+                    pivot_byte = max(10, min(MAX_OUTPUT - CENTER_OUTPUT_VALUE, pivot_byte))
+                    if err_signed < 0:
+                        # target left of heading → CCW: left back, right fwd
+                        left = CENTER_OUTPUT_VALUE - pivot_byte
+                        right = CENTER_OUTPUT_VALUE + pivot_byte
+                    else:
+                        left = CENTER_OUTPUT_VALUE + pivot_byte
+                        right = CENTER_OUTPUT_VALUE - pivot_byte
+                    wp_pivot_active = True
+                    wp_direct_pivot = True
+                elif speed == 0 and not self._waypoint_nav.completed:
+                    # Speed gated to 0 but no heading available — fall back to
+                    # compensator-driven pivot via wp_pivot_active.
                     wp_pivot_active = True
             else:
                 left = right = self.NEUTRAL
@@ -507,8 +531,14 @@ class Controller:
                 self._imu_compensator.reset_target_heading()
         else:
             imu_correction = self._apply_imu_compensation(steering_input, mono_now)
+        if wp_direct_pivot:
+            # We're commanding the pivot directly — don't let the compensator
+            # stack a correction on top of our motor bytes. PID state still
+            # advances for next-cycle target tracking.
+            imu_correction = None
         telemetry["steering_input"] = steering_input
         telemetry["imu_correction_raw"] = imu_correction
+        telemetry["wp_direct_pivot"] = wp_direct_pivot
 
         # Expose PID debug fields from IMU compensator
         if self._imu_compensator is not None:
