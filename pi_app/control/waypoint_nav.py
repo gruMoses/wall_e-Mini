@@ -230,13 +230,13 @@ class WaypointNavController:
             if err_abs <= cfg.align_threshold_deg:
                 self._state = NavState.DRIVE
             else:
-                yaw = cfg.pivot_yaw_cmd if err_signed > 0 else -cfg.pivot_yaw_cmd
+                yaw = -cfg.pivot_yaw_cmd if err_signed > 0 else cfg.pivot_yaw_cmd
                 return self._emit(NavState.ALIGN, 0.0, yaw)
 
         # DRIVE state
         if err_abs > cfg.recovery_threshold_deg:
             self._state = NavState.ALIGN
-            yaw = cfg.pivot_yaw_cmd if err_signed > 0 else -cfg.pivot_yaw_cmd
+            yaw = -cfg.pivot_yaw_cmd if err_signed > 0 else cfg.pivot_yaw_cmd
             return self._emit(NavState.ALIGN, 0.0, yaw)
 
         v_cmd = self._forward_v_for_distance(dist)
