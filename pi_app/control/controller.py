@@ -644,8 +644,12 @@ class Controller:
 
         # Obstacle avoidance throttle scaling — front camera only gates forward motion.
         # Reverse commands must not be blocked by front camera detections.
+        # "Forward motion" must be true net forward (sum of byte offsets > 0), not just
+        # "either track is >neutral" — otherwise a pure pivot (L<126, R>126) is treated as
+        # forward motion and scaling toward neutral collapses the pivot asymmetrically into
+        # a forward-biased curve (the "left-hand circles" bug).
         obstacle_scale = 1.0
-        is_forward_motion = left > CENTER_OUTPUT_VALUE or right > CENTER_OUTPUT_VALUE
+        is_forward_motion = (left + right) > 2 * CENTER_OUTPUT_VALUE
         if self._obstacle_avoidance is not None and self._obstacle_distance_m is not None:
             obstacle_scale = self._obstacle_avoidance.compute_throttle_scale(
                 self._obstacle_distance_m,
@@ -653,8 +657,13 @@ class Controller:
                 is_manual=(self._mode == "MANUAL"),
             )
             if is_forward_motion:
-                left = self._scale_toward_neutral(left, obstacle_scale)
-                right = self._scale_toward_neutral(right, obstacle_scale)
+                # Scale only the common-mode (forward) component; preserve the
+                # differential (yaw) so pivots-during-forward don't distort.
+                common = (left + right) / 2.0 - CENTER_OUTPUT_VALUE
+                diff = (left - right) / 2.0
+                common_scaled = common * obstacle_scale
+                left = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(CENTER_OUTPUT_VALUE + common_scaled + diff))))
+                right = max(MIN_OUTPUT, min(MAX_OUTPUT, int(round(CENTER_OUTPUT_VALUE + common_scaled - diff))))
             oa_status = self._obstacle_avoidance.get_status()
             telemetry.update(oa_status)
         telemetry["obstacle_throttle_scale"] = obstacle_scale

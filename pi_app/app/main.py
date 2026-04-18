@@ -848,7 +848,12 @@ def run() -> None:
                             "wp_name": telem.get("wp_name"),
                             "wp_bearing_deg": telem.get("wp_bearing_deg"),
                             "wp_distance_m": telem.get("wp_distance_m"),
+                            "wp_heading_error_deg": telem.get("wp_heading_error_deg"),
                             "wp_completed": telem.get("wp_completed"),
+                            "nav_state": telem.get("nav_state"),
+                            "wp_v_cmd": telem.get("wp_v_cmd"),
+                            "wp_yaw_cmd": telem.get("wp_yaw_cmd"),
+                            "wp_in_align": telem.get("wp_in_align"),
                         }),
                         "recording_state": oak_recorder.recording_state if oak_recorder is not None else None,
                         "bms": (lambda s: {
