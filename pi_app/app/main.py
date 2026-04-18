@@ -717,12 +717,36 @@ def run() -> None:
                 else:
                     gps_info = "  GPS(no fix)"
 
+            # Heading-offset observability: always show GPS-derived IMU offset
+            # so the aligner's state is visible in journalctl at a glance.
+            _ho_deg = telem.get("heading_offset_deg")
+            _ho_locked = telem.get("heading_offset_locked")
+            if _ho_deg is None:
+                hdg_off_info = "  HDG_OFF(--)"
+            else:
+                hdg_off_info = f"  HDG_OFF({_ho_deg:+.1f}°{' L' if _ho_locked else ' -'})"
+
+            # In non-MANUAL modes, add nav_state + motor bytes so we can see
+            # ALIGN/DRIVE transitions and whether pivot actually reaches motors.
+            nav_info = ""
+            if mode_str != "MANUAL":
+                _ns = telem.get("nav_state")
+                _ml = telem.get("motor_left_byte")
+                _mr = telem.get("motor_right_byte")
+                parts = []
+                if _ns is not None:
+                    parts.append(f"nav={_ns}")
+                if _ml is not None and _mr is not None:
+                    parts.append(f"mot(L={_ml} R={_mr})")
+                if parts:
+                    nav_info = "  " + " ".join(parts)
+
             line_cli = (
                 f"{src} RC(ch1={s.ch1_us:4d} ch2={s.ch2_us:4d} ch3={s.ch3_us:4d} ch4={s.ch4_us:4d} ch5={s.ch5_us:4d}) "
                 f"{bt_display}  "
                 f"{imu_info}  corr_raw={corr_raw_str} corr_applied={corr_app_str}  "
                 f"armed={'Y' if cmd.is_armed else 'N'} ev={len(events)}"
-                f"{oak_info}{gps_info}{mode_info}   "
+                f"{oak_info}{gps_info}{hdg_off_info}{nav_info}{mode_info}   "
             )
             if pid_debug:
                 print(line_cli)

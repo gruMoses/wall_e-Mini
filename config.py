@@ -16,7 +16,10 @@ class GpsHeadingAlignConfig:
     enabled: bool = True
     min_distance_m: float = 2.0       # lock offset after this much displacement
     min_speed_mps: float = 0.3        # only trust GPS COG above this speed
-    min_fix_quality: int = 4          # require RTK fix
+    # Fix quality gate: 2 = DGPS (≈2 m CEP) is enough given the 2 m
+    # displacement window; bumping to 4 (RTK fixed) means manual driving
+    # won't calibrate heading on sessions that never see RTK.
+    min_fix_quality: int = 2
     alpha: float = 0.1                # EMA factor for ongoing drift correction
     history_seconds: float = 4.0      # rolling GPS position window
 

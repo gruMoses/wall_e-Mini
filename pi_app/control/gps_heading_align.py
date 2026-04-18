@@ -16,9 +16,12 @@ robot is in MANUAL, FOLLOW_ME, or WAYPOINT_NAV.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Optional
+
+_logger = logging.getLogger(__name__)
 
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -28,7 +31,7 @@ class GpsHeadingAlignConfig:
     enabled: bool = True
     min_distance_m: float = 2.0       # lock offset after this much displacement
     min_speed_mps: float = 0.3        # only trust GPS COG above this speed
-    min_fix_quality: int = 4          # require RTK fix
+    min_fix_quality: int = 2          # DGPS or better (see config.py for rationale)
     alpha: float = 0.1                # EMA factor for ongoing drift correction
     history_seconds: float = 4.0      # rolling GPS window
 
@@ -133,6 +136,18 @@ class GpsHeadingAligner:
         if not self._locked:
             self._offset_deg = new_offset
             self._locked = True
+            # One-shot log so the event is visible in journalctl without
+            # needing to scrape the structured JSON log.
+            _logger.warning(
+                "GPS heading aligner LOCKED: offset=%+.1f° "
+                "(gps_cog=%.1f° raw_imu=%.1f° displacement=%.2fm speed=%.2fm/s fix=%d)",
+                self._offset_deg,
+                gps_cog,
+                raw_imu_heading_deg,
+                displacement,
+                speed,
+                fix_quality,
+            )
             return
         # EMA on the shortest-arc difference between offset hypotheses so
         # wraparound is safe even if raw heading is near 0/360.
