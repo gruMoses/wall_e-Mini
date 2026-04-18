@@ -319,6 +319,11 @@ def run() -> None:
                         recovery_threshold_deg=config.waypoint_nav.recovery_threshold_deg,
                         pivot_yaw_cmd=config.waypoint_nav.pivot_yaw_cmd,
                         motor_deadband_byte=config.waypoint_nav.motor_deadband_byte,
+                        gps_align_enabled=config.waypoint_nav.gps_align_enabled,
+                        gps_align_min_distance_m=config.waypoint_nav.gps_align_min_distance_m,
+                        gps_align_min_speed_mps=config.waypoint_nav.gps_align_min_speed_mps,
+                        gps_align_alpha=config.waypoint_nav.gps_align_alpha,
+                        gps_align_history_seconds=config.waypoint_nav.gps_align_history_seconds,
                     )
                     wp_file = Path(__file__).resolve().parents[2] / config.waypoint_nav.waypoint_file
                     wps = []

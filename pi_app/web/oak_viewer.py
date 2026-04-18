@@ -212,8 +212,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="value" id="t-gps-pos" style="font-size:14px;">—</div>
     </div>
     <div class="telem-card">
-      <div class="label">Altitude</div>
-      <div class="value" id="t-gps-alt">—</div>
+      <div class="label">Heading</div>
+      <div class="value" id="t-imu-heading">—</div>
     </div>
     <div class="telem-card">
       <div class="label">LoRa Link</div>
@@ -353,8 +353,8 @@ sse.onmessage = function(e) {
   } else { hdopEl.textContent = '—'; hdopEl.className = 'value'; }
   document.getElementById('t-gps-pos').textContent =
     d.gps_lat != null ? d.gps_lat.toFixed(7) + ', ' + d.gps_lon.toFixed(7) : '—';
-  document.getElementById('t-gps-alt').textContent =
-    d.gps_alt_m != null ? d.gps_alt_m.toFixed(1) + ' m' : '—';
+  document.getElementById('t-imu-heading').textContent =
+    d.imu_heading_deg != null ? d.imu_heading_deg.toFixed(1) + '°' : '—';
   const loraEl = document.getElementById('t-lora-link');
   if (d.gps_diff_age_s != null) {
     const da = d.gps_diff_age_s;

@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -55,6 +56,9 @@ class NavStatus:
     fix_quality: int = 0
     gps_stale: bool = False
     completed: bool = False
+    heading_offset_deg: float = 0.0
+    heading_offset_locked: bool = False
+    imu_target_heading_deg: float = 0.0
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -101,6 +105,11 @@ class WaypointNavConfig:
     recovery_threshold_deg: float = 25.0
     pivot_yaw_cmd: float = 0.5
     motor_deadband_byte: int = 12
+    gps_align_enabled: bool = True
+    gps_align_min_distance_m: float = 2.0
+    gps_align_min_speed_mps: float = 0.3
+    gps_align_alpha: float = 0.1
+    gps_align_history_seconds: float = 4.0
 
 
 def mix_to_bytes(
@@ -153,6 +162,11 @@ class WaypointNavController:
         self._last_heading_error_deg = 0.0
         self._last_v_cmd = 0.0
         self._last_yaw_cmd = 0.0
+        # GPS-derived heading offset: corrected_heading = (raw_imu + offset) mod 360.
+        # Populated only while in DRIVE, after enough displacement to trust GPS COG.
+        self._heading_offset_deg: float = 0.0
+        self._heading_offset_locked: bool = False
+        self._gps_history: list[tuple[float, float, float]] = []  # (mono_t, lat, lon)
 
     @property
     def waypoints(self) -> list[Waypoint]:
@@ -219,7 +233,8 @@ class WaypointNavController:
             self._last_heading_error_deg = 0.0
             return self._emit(self._state if self._state != NavState.IDLE else NavState.ALIGN, 0.0, 0.0)
 
-        err_signed = _heading_error_deg(brg, current_heading_deg)
+        corrected_heading = (current_heading_deg + self._heading_offset_deg) % 360.0
+        err_signed = _heading_error_deg(brg, corrected_heading)
         err_abs = abs(err_signed)
         self._last_heading_error_deg = err_signed
 
@@ -227,6 +242,9 @@ class WaypointNavController:
             self._state = NavState.ALIGN
 
         if self._state == NavState.ALIGN:
+            # Spinning in place -> GPS track is noise; reset history so drift
+            # sampling starts fresh when DRIVE resumes.
+            self._gps_history.clear()
             if err_abs <= cfg.align_threshold_deg:
                 self._state = NavState.DRIVE
             else:
@@ -236,12 +254,61 @@ class WaypointNavController:
         # DRIVE state
         if err_abs > cfg.recovery_threshold_deg:
             self._state = NavState.ALIGN
+            self._gps_history.clear()
             yaw = -cfg.pivot_yaw_cmd if err_signed > 0 else cfg.pivot_yaw_cmd
             return self._emit(NavState.ALIGN, 0.0, yaw)
+
+        if cfg.gps_align_enabled:
+            self._update_heading_offset(lat, lon, current_heading_deg)
 
         v_cmd = self._forward_v_for_distance(dist)
         # yaw_cmd for DRIVE is left to the imu compensator (returned as 0 here).
         return self._emit(NavState.DRIVE, v_cmd, 0.0)
+
+    def _update_heading_offset(
+        self, lat: float, lon: float, raw_imu_heading_deg: float
+    ) -> None:
+        """Sample GPS track vs raw IMU heading; lock/refine heading offset.
+
+        Pushes current (t, lat, lon) onto a rolling buffer, discards samples
+        older than ``gps_align_history_seconds``, and whenever the oldest
+        surviving sample is far enough away and we've been moving fast enough,
+        derives a GPS course-over-ground and updates ``self._heading_offset_deg``.
+        First valid sample locks the offset; subsequent samples apply an EMA.
+        """
+        cfg = self._cfg
+        now = time.monotonic()
+        self._gps_history.append((now, lat, lon))
+        cutoff = now - cfg.gps_align_history_seconds
+        # Drop entries that fell out of the window, keeping at least one.
+        while len(self._gps_history) > 1 and self._gps_history[0][0] < cutoff:
+            self._gps_history.pop(0)
+
+        t0, lat0, lon0 = self._gps_history[0]
+        dt = now - t0
+        if dt <= 0.0:
+            return
+        displacement = haversine_m(lat0, lon0, lat, lon)
+        if displacement < cfg.gps_align_min_distance_m:
+            return
+        speed = displacement / dt
+        if speed < cfg.gps_align_min_speed_mps:
+            return
+
+        gps_cog = bearing_deg(lat0, lon0, lat, lon)
+        new_offset = _heading_error_deg(gps_cog, raw_imu_heading_deg)
+        if not self._heading_offset_locked:
+            self._heading_offset_deg = new_offset
+            self._heading_offset_locked = True
+        else:
+            # EMA on the shortest-arc difference so wraparound is safe.
+            delta = _heading_error_deg(
+                (raw_imu_heading_deg + new_offset) % 360.0,
+                (raw_imu_heading_deg + self._heading_offset_deg) % 360.0,
+            )
+            self._heading_offset_deg = (self._heading_offset_deg + cfg.gps_align_alpha * delta) % 360.0
+            if self._heading_offset_deg > 180.0:
+                self._heading_offset_deg -= 360.0
 
     def _emit(self, state: NavState, v_cmd: float, yaw_cmd: float) -> tuple[float, float, NavState]:
         self._state = state
@@ -268,6 +335,22 @@ class WaypointNavController:
             return max(lo, lo + (hi - lo) * frac)
         return hi
 
+    @property
+    def heading_offset_deg(self) -> float:
+        return self._heading_offset_deg
+
+    @property
+    def heading_offset_locked(self) -> bool:
+        return self._heading_offset_locked
+
+    def imu_target_heading_deg(self, bearing_deg_val: float) -> float:
+        """Target heading in raw-IMU frame for the downstream PID.
+
+        PID consumes raw IMU heading; we want the robot's real heading to match
+        ``bearing_deg_val``, so subtract the learned offset.
+        """
+        return (bearing_deg_val - self._heading_offset_deg) % 360.0
+
     def get_status(self) -> NavStatus:
         wp = self._waypoints[self._index] if self._index < len(self._waypoints) else None
         return NavStatus(
@@ -282,4 +365,7 @@ class WaypointNavController:
             v_cmd=self._last_v_cmd,
             yaw_cmd=self._last_yaw_cmd,
             completed=self._completed,
+            heading_offset_deg=self._heading_offset_deg,
+            heading_offset_locked=self._heading_offset_locked,
+            imu_target_heading_deg=self.imu_target_heading_deg(self._last_bearing_deg),
         )

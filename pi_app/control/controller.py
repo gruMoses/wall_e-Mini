@@ -435,9 +435,12 @@ class Controller:
                 )
                 # Keep the IMU compensator's target heading up-to-date so the
                 # DRIVE-state PID is ready when we transition out of ALIGN.
+                # PID consumes raw IMU heading; waypoint_nav learns an offset
+                # between raw IMU and true north from GPS, so feed the PID a
+                # target in its own frame via imu_target_heading_deg.
                 if self._imu_compensator is not None and not self._waypoint_nav.completed:
                     nav_st = self._waypoint_nav.get_status()
-                    self._imu_compensator.set_target_heading(nav_st.bearing_deg)
+                    self._imu_compensator.set_target_heading(nav_st.imu_target_heading_deg)
                 deadband = int(getattr(config.waypoint_nav, "motor_deadband_byte", 12))
                 left, right = mix_to_bytes(v_cmd, yaw_cmd, deadband_byte=deadband,
                                            neutral=CENTER_OUTPUT_VALUE, half_range=127)
@@ -458,6 +461,8 @@ class Controller:
             telemetry["nav_state"] = nav_st.state
             telemetry["wp_v_cmd"] = nav_st.v_cmd
             telemetry["wp_yaw_cmd"] = nav_st.yaw_cmd
+            telemetry["wp_heading_offset_deg"] = nav_st.heading_offset_deg
+            telemetry["wp_heading_offset_locked"] = nav_st.heading_offset_locked
             if nav_st.completed:
                 self._mode = "MANUAL"
         elif self._mode == "FOLLOW_ME" and self._follow_me is not None:

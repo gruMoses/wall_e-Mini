@@ -350,6 +350,16 @@ class WaypointNavConfig:
     pivot_yaw_cmd: float = 0.5             # normalized yaw command during ALIGN pivot
     motor_deadband_byte: int = 12          # minimum byte offset to overcome motor deadband
 
+    # GPS course-over-ground heading alignment.
+    # The OAK-D Lite has no magnetometer, so IMU heading drifts relative to true
+    # north. Once moving in DRIVE, compare GPS-derived track to raw IMU heading
+    # to estimate and continuously correct the offset.
+    gps_align_enabled: bool = True
+    gps_align_min_distance_m: float = 2.0   # lock offset after this much displacement
+    gps_align_min_speed_mps: float = 0.3    # only trust GPS COG above this speed
+    gps_align_alpha: float = 0.1            # EMA factor for ongoing drift correction
+    gps_align_history_seconds: float = 4.0  # rolling GPS position window
+
 
 @dataclass(frozen=True)
 class GestureConfig:
