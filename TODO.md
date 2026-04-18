@@ -1,7 +1,16 @@
 # WALL-E Mini TODO
 
-Last updated: 2026-04-01 (BMS + charger inhibit complete)
-Scope: Bug fixes and features tracked here; see `wall_e-Mini/docs/performance_optimization_todo.md` for the full engineering roadmap.
+Last updated: 2026-04-18
+Scope: Bug fixes and features tracked here; see `docs/performance_optimization_todo.md` for the full engineering roadmap.
+
+---
+
+## Known Issues (not yet investigated)
+
+- [ ] **VESC telemetry RPM stuck at 0**
+  - CAN STATUS frame parsing is present and voltage-based shutdown works (uses STATUS_5).
+  - But the RPM/speed readback always returns 0 — wheel-speed feedback is not usable.
+  - Root cause unknown; not yet investigated.
 
 ---
 

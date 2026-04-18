@@ -4,16 +4,16 @@ This document describes the IMU-based steering compensation system for the WALL-
 
 ## Overview
 
-The IMU steering compensation system uses a 9-axis IMU (accelerometer, gyroscope, and magnetometer) to:
+The IMU steering compensation system uses an IMU (accelerometer + gyroscope) to:
 - **Compensate for bumps and terrain variations** that cause unintended turning
 - **Maintain straight-line travel** when no steering input is given
 - **Provide smooth corrections** for external disturbances
 
-## Hardware Requirements
+## Hardware
 
-- **IMU**: SparkFun ISM330DHCX (6-axis accelerometer + gyroscope)
-- **Magnetometer**: SparkFun MMC5983MA (3-axis magnetometer)
-- **Connection**: I2C (Qwiic connector)
+The active IMU is the **OAK-D Lite onboard BMI270** (gyroscope + accelerometer only — **no magnetometer**). Heading is integrated from the gyro and is **relative to the robot's orientation at startup**, not referenced to magnetic north.
+
+The system also supports external I2C breakout boards (ICM-20948, or ISM330DHCX + MMC5983MA combo). Source priority is controlled by `imu_source` in `config.py` (default `"auto"`: external first, OAK-D BMI270 fallback). The magnetometer is disabled by default (`imu_use_magnetometer = False`).
 
 ## How It Works
 
@@ -56,10 +56,7 @@ class ImuSteeringConfig:
     update_rate_hz: float = 80.0
 ```
 
-To disable the magnetometer and rely solely on the accelerometer and gyro,
-set `imu_use_magnetometer = False` in `Config`. When disabled, the IMU reader
-skips magnetometer initialization and returns zero magnetic field values while
-yaw is estimated by integrating the gyroscope.
+Magnetometer fusion is off by default (`imu_use_magnetometer = False`). If an external I2C IMU with a magnetometer is present and you want to use it, set `imu_use_magnetometer = True` in `Config`.
 
 ### Tuning Guidelines
 
@@ -120,24 +117,23 @@ if imu_status:
 ## Troubleshooting
 
 ### IMU Not Detected
-- Check I2C connections
-- Verify power supply
-- Run `i2cdetect -y 1` to scan for devices
+- Check I2C connections (for external breakout)
+- Verify OAK-D is connected and OAK pipeline is running (for BMI270)
+- Run `i2cdetect -y 1` to scan for external devices
 
 ### Excessive Corrections
 - Reduce `kp` gain
 - Increase `deadband_deg`
-- Check for magnetic interference
 
 ### Oscillations
 - Reduce `kp` gain
 - Increase `kd` gain
 - Check for loose hardware
 
-### Drift Issues
-- Increase `ki` gain
-- Check IMU calibration
-- Verify magnetometer orientation
+### Drift Issues (heading wandering over time)
+- Expected with gyro-only integration — the BMI270 has no magnetometer
+- Increase `ki` gain to correct slow bias
+- GPS COG heading alignment (in progress) will help re-zero heading at session start
 
 ## Safety Features
 

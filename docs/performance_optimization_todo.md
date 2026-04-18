@@ -1,6 +1,6 @@
 # WALL-E Mini Unified Roadmap & TODO
 
-Last updated: 2026-03-15  
+Last updated: 2026-04-18  
 Scope: Single source of truth for active engineering work and prioritized enhancements.
 
 ## Current Status
@@ -31,7 +31,7 @@ Scope: Single source of truth for active engineering work and prioritized enhanc
 ### P1 (High Impact, Near Term)
 
 - [ ] Wheel speed feedback via VESC telemetry read-back in `VescCanDriver`
-  - parse status CAN frames and expose RPM/speed API
+  - CAN frame parsing exists (STATUS_5 used for voltage shutdown) but RPM readback returns 0 — needs investigation
 - [ ] Slew rate limiter for track commands (mode-aware, accel/decel asymmetric)
 - [ ] Terrain roughness governor (accel RMS + high-pass + speed scaling)
 - [ ] Tilt protection governor (roll/pitch-based speed reduction + hard stop at extreme tilt)
@@ -70,6 +70,9 @@ Scope: Single source of truth for active engineering work and prioritized enhanc
 - [ ] Gain scheduling (speed/mode/surface indexed PID sets)
 - [ ] RTK GPS hardening
   - reconnection/backoff, quality transition handling, startup convergence policy
+- [~] **GPS COG heading alignment** *(in progress)*
+  - Initialize heading from GPS course-over-ground at session start instead of assuming startup pose = reference
+  - Mitigates gyro drift for waypoint navigation
 
 ### P4 (Longer Horizon)
 
@@ -82,11 +85,14 @@ Scope: Single source of truth for active engineering work and prioritized enhanc
 ## Completed Highlights (Condensed)
 
 - [x] OAK depth offload, queue-policy tuning, recorder load reductions
-- [x] Follow Me tracker continuity and docs alignment
+- [x] Follow Me tracker continuity and docs alignment; YOLOv8n works well
 - [x] IMU device timestamp propagation and controller cadence alignment
 - [x] IMU telemetry precision restoration
 - [x] IMU bounded ingestion mode + safe fallback controls
 - [x] Optional drift/noise features implemented; conservative defaults validated
+- [x] Waypoint nav refactored to ALIGN→DRIVE→ARRIVE state machine with command-space mixer (commits e4cbfd0, 776ee66)
+- [x] Obstacle avoidance yaw-differential preserved during ALIGN pivots (c12b23d)
+- [x] ALIGN yaw sign corrected to match physical robot (776ee66)
 
 ---
 

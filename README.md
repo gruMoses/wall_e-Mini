@@ -72,6 +72,23 @@ The loop prints:
 PID err=<heading_error> P=<proportional> I=<integral> D=<derivative> yaw=<yaw_rate> int=<integral_state>
 ```
 
+## Waypoint Navigation
+
+The GPS waypoint navigator (`pi_app/control/waypoint_nav.py`) implements a three-state machine:
+
+- **ALIGN**: pivot in place until heading error drops below threshold (default 12°)
+- **DRIVE**: drive forward with PID steering; falls back to ALIGN on large errors
+- **ARRIVE**: within arrival radius of target; advance to next waypoint
+
+`compute()` returns `(v_cmd, yaw_cmd, state)` as normalized floats; a mixer converts these to left/right motor bytes. Requires RTK GPS fix quality ≥ 4.
+
+GPS COG heading alignment is **in progress** — will let the robot initialize its heading from GPS course-over-ground instead of relying solely on gyro integration.
+
+## Known Issues
+
+- **VESC telemetry / RPM**: CAN STATUS frames are parsed (voltage threshold shutdown works) but RPM readback is stuck at 0. Root cause not yet investigated.
+- **IMU heading drift**: OAK-D Lite BMI270 is gyro+accel only (no magnetometer). Heading drifts over time and is relative to startup orientation.
+
 ## Documentation Index
 
 - `docs/services.md`: systemd services, startup flow, logs
