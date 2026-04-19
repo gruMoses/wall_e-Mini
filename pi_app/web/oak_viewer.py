@@ -22,7 +22,7 @@ from copy import deepcopy
 logger = logging.getLogger(__name__)
 
 try:
-    from flask import Flask, Response, send_from_directory, abort
+    from flask import Flask, Response, send_from_directory, abort, request
 except ImportError:
     Flask = None  # type: ignore[assignment,misc]
 
@@ -75,8 +75,28 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .telem-card .value.red { color: #e63946; }
   .telem-card .value.yellow { color: #e6a239; }
   .telem-card .value.blue { color: #4a9eff; }
+  .rtk-panel { background: #1a1d27; border-radius: 8px; padding: 12px; margin-bottom: 16px; }
+  .rtk-panel h2 { font-size: 13px; color: #bbb; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase; }
+  .rtk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+  .rtk-card { background: #161923; border: 1px solid #22252f; border-radius: 8px; padding: 10px; }
+  .rtk-card .label { font-size: 11px; color: #7f8798; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
+  .rtk-card .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .rtk-card .value.small { font-size: 15px; font-weight: 500; }
+  .rtk-note { margin-top: 8px; font-size: 12px; color: #7f8798; }
   .recordings { background: #1a1d27; border-radius: 8px; padding: 16px; }
   .recordings h2 { font-size: 14px; margin-bottom: 12px; color: #ccc; }
+  .teleop { background: #1a1d27; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+  .teleop h2 { font-size: 14px; margin-bottom: 10px; color: #ccc; }
+  .teleop-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .teleop-top label { font-size: 12px; color: #aaa; }
+  .teleop-top input[type=range] { width: 170px; }
+  .teleop-status { font-size: 12px; color: #888; }
+  .teleop-grid { display: grid; grid-template-columns: repeat(3, 64px); gap: 8px; justify-content: start; }
+  .teleop-btn { height: 56px; border: 1px solid #2a2d37; border-radius: 8px; background: #22252f; color: #e0e0e0;
+                font-weight: 700; cursor: pointer; user-select: none; touch-action: manipulation; }
+  .teleop-btn:active, .teleop-btn.active { background: #4a9eff; color: #111; border-color: #4a9eff; }
+  .teleop-btn.stop { background: #e63946; border-color: #e63946; color: #fff; }
+  .teleop-hint { margin-top: 8px; font-size: 11px; color: #666; }
   .rec-list { list-style: none; }
   .rec-list li { padding: 8px 0; border-bottom: 1px solid #22252f; display: flex;
                  align-items: center; justify-content: space-between; }
@@ -170,6 +190,39 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="stream-status" id="depth-status"></div>
     </div>
   </div>
+  <div class="teleop">
+    <h2>Web Remote Drive (Manual Mode)</h2>
+    <div class="teleop-top">
+      <label for="teleop-speed">Speed</label>
+      <input id="teleop-speed" type="range" min="0.20" max="1.00" step="0.05" value="0.60">
+      <span class="teleop-status" id="teleop-status">Idle</span>
+    </div>
+    <div class="teleop-grid">
+      <div></div>
+      <button class="teleop-btn" id="btn-fwd"
+              onpointerdown="teleopPress(event, 'forward')"
+              onpointerup="teleopRelease()"
+              onpointerleave="teleopRelease()">W</button>
+      <div></div>
+      <button class="teleop-btn" id="btn-left"
+              onpointerdown="teleopPress(event, 'left')"
+              onpointerup="teleopRelease()"
+              onpointerleave="teleopRelease()">A</button>
+      <button class="teleop-btn stop"
+              onclick="teleopStop()">STOP</button>
+      <button class="teleop-btn" id="btn-right"
+              onpointerdown="teleopPress(event, 'right')"
+              onpointerup="teleopRelease()"
+              onpointerleave="teleopRelease()">D</button>
+      <div></div>
+      <button class="teleop-btn" id="btn-back"
+              onpointerdown="teleopPress(event, 'reverse')"
+              onpointerup="teleopRelease()"
+              onpointerleave="teleopRelease()">S</button>
+      <div></div>
+    </div>
+    <div class="teleop-hint">Hold buttons or use keyboard W/A/S/D. Works through existing BT override safety gate.</div>
+  </div>
   <div class="telemetry">
     <div class="telem-card">
       <div class="label">Mode</div>
@@ -231,6 +284,52 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="label">Depth Age</div>
       <div class="value" id="t-cam-depth-age">—</div>
     </div>
+    <div class="telem-card">
+      <div class="label">Battery SOC</div>
+      <div class="value" id="t-bms-soc">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">Battery V / A</div>
+      <div class="value" id="t-bms-va">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">BMS Status</div>
+      <div class="value" id="t-bms-status">—</div>
+    </div>
+    <div class="telem-card">
+      <div class="label">Cell Delta</div>
+      <div class="value" id="t-bms-delta">—</div>
+    </div>
+  </div>
+  <div class="rtk-panel">
+    <h2>RTK Diagnostics</h2>
+    <div class="rtk-grid">
+      <div class="rtk-card">
+        <div class="label">RTK State</div>
+        <div class="value" id="t-rtk-state">—</div>
+      </div>
+      <div class="rtk-card">
+        <div class="label">Correction Age</div>
+        <div class="value" id="t-rtk-corr-age">—</div>
+      </div>
+      <div class="rtk-card">
+        <div class="label">Base Station</div>
+        <div class="value small" id="t-rtk-base">—</div>
+      </div>
+      <div class="rtk-card">
+        <div class="label">Float Duration</div>
+        <div class="value" id="t-rtk-float-age">—</div>
+      </div>
+      <div class="rtk-card">
+        <div class="label">Fix Duration</div>
+        <div class="value" id="t-rtk-fix-age">—</div>
+      </div>
+      <div class="rtk-card">
+        <div class="label">Quality Hint</div>
+        <div class="value small" id="t-rtk-quality">—</div>
+      </div>
+    </div>
+    <div class="rtk-note" id="t-rtk-note">Looking for stable corrections...</div>
   </div>
   <div id="fm-panel" class="fm-panel">
     <h2>Follow-Me Status <span id="fm-mode-badge" class="fm-badge">&mdash;</span></h2>
@@ -293,6 +392,158 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 const sse = new EventSource('/api/telemetry');
 const radarCanvas = document.getElementById('radar');
 const radarCtx = radarCanvas.getContext('2d');
+let teleopInterval = null;
+let teleopDirection = null;
+let teleopArmed = false;
+let teleopMode = 'MANUAL';
+let rtkModeName = null;
+let rtkModeSinceMs = Date.now();
+
+function teleopSpeed() {
+  const el = document.getElementById('teleop-speed');
+  const v = parseFloat(el ? el.value : '0.6');
+  return Number.isFinite(v) ? Math.max(0.2, Math.min(1.0, v)) : 0.6;
+}
+
+function teleopMix(direction) {
+  const s = teleopSpeed();
+  if (direction === 'forward') return [s, s];
+  if (direction === 'reverse') return [-s, -s];
+  if (direction === 'left') return [-s, s];
+  if (direction === 'right') return [s, -s];
+  return [0.0, 0.0];
+}
+
+function setTeleopStatus(text, isWarn) {
+  const el = document.getElementById('teleop-status');
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = isWarn ? '#e6a239' : '#888';
+}
+
+function setTeleopActiveButton(direction) {
+  ['btn-fwd', 'btn-back', 'btn-left', 'btn-right'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.classList.remove('active');
+  });
+  const map = {forward: 'btn-fwd', reverse: 'btn-back', left: 'btn-left', right: 'btn-right'};
+  const activeId = map[direction];
+  if (activeId) {
+    const btn = document.getElementById(activeId);
+    if (btn) btn.classList.add('active');
+  }
+}
+
+async function sendTeleop(direction) {
+  const [left_f, right_f] = teleopMix(direction);
+  try {
+    await fetch('/api/teleop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({left_f, right_f})
+    });
+  } catch (e) {}
+}
+
+function teleopPress(ev, direction) {
+  if (ev) ev.preventDefault();
+  teleopDirection = direction;
+  setTeleopActiveButton(direction);
+  if (!teleopArmed) {
+    setTeleopStatus('Arm robot to drive', true);
+    return;
+  }
+  if (teleopMode !== 'MANUAL') {
+    setTeleopStatus('Switch to MANUAL mode first', true);
+    return;
+  }
+  sendTeleop(direction);
+  if (teleopInterval) clearInterval(teleopInterval);
+  teleopInterval = setInterval(() => { if (teleopDirection) sendTeleop(teleopDirection); }, 120);
+  setTeleopStatus('Driving ' + direction.toUpperCase(), false);
+}
+
+function teleopRelease() {
+  teleopDirection = null;
+  setTeleopActiveButton(null);
+  if (teleopInterval) {
+    clearInterval(teleopInterval);
+    teleopInterval = null;
+  }
+  teleopStop();
+}
+
+function teleopStop() {
+  fetch('/api/teleop/stop', {method: 'POST'}).catch(() => {});
+  setTeleopStatus('Idle', false);
+}
+
+function formatDuration(sec) {
+  if (!(sec >= 0)) return '—';
+  if (sec < 60) return sec.toFixed(0) + 's';
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  if (m < 60) return m + 'm ' + String(s).padStart(2, '0') + 's';
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return h + 'h ' + String(mm).padStart(2, '0') + 'm';
+}
+
+function updateRtkPanel(d) {
+  const fix = d.gps_fix;
+  const corrAge = d.gps_diff_age_s;
+  const sats = d.gps_sats;
+  const hdop = d.gps_hdop;
+  const station = d.gps_station_id;
+  const state = (fix === 4) ? 'RTK FIXED' : (fix === 5) ? 'RTK FLOAT' : (fix >= 1) ? 'GPS ONLY' : 'NO FIX';
+  const nowMs = Date.now();
+  if (rtkModeName !== state) {
+    rtkModeName = state;
+    rtkModeSinceMs = nowMs;
+  }
+  const modeAgeSec = (nowMs - rtkModeSinceMs) / 1000.0;
+  const stateEl = document.getElementById('t-rtk-state');
+  stateEl.textContent = state;
+  stateEl.className = 'value ' + (
+    state === 'RTK FIXED' ? 'green' :
+    state === 'RTK FLOAT' ? 'yellow' :
+    state === 'GPS ONLY' ? 'blue' : 'red'
+  );
+  const corrEl = document.getElementById('t-rtk-corr-age');
+  if (corrAge != null) {
+    corrEl.textContent = corrAge.toFixed(1) + 's';
+    corrEl.className = 'value ' + (corrAge < 2 ? 'green' : corrAge < 5 ? 'yellow' : 'red');
+  } else {
+    corrEl.textContent = '—';
+    corrEl.className = 'value';
+  }
+  document.getElementById('t-rtk-base').textContent = station ? ('#' + station) : 'none';
+  document.getElementById('t-rtk-float-age').textContent = (state === 'RTK FLOAT') ? formatDuration(modeAgeSec) : '0s';
+  document.getElementById('t-rtk-fix-age').textContent = (state === 'RTK FIXED') ? formatDuration(modeAgeSec) : '0s';
+  const qEl = document.getElementById('t-rtk-quality');
+  const noteEl = document.getElementById('t-rtk-note');
+  if (state === 'RTK FIXED' && corrAge != null && corrAge < 2) {
+    qEl.textContent = 'Locked';
+    qEl.className = 'value small green';
+    noteEl.textContent = 'Integer ambiguity solved. This is your highest-quality state.';
+  } else if (state === 'RTK FLOAT' && corrAge != null && corrAge < 2) {
+    qEl.textContent = 'Corrections OK';
+    qEl.className = 'value small yellow';
+    noteEl.textContent = 'Receiving corrections, but ambiguity is unresolved (float).';
+  } else if (state === 'GPS ONLY') {
+    qEl.textContent = 'No RTK';
+    qEl.className = 'value small blue';
+    noteEl.textContent = 'Rover has GNSS fix but no RTK solution.';
+  } else {
+    qEl.textContent = 'Degraded';
+    qEl.className = 'value small red';
+    noteEl.textContent = 'Correction stream missing/stale or rover has no valid fix.';
+  }
+  if (sats != null && hdop != null) {
+    noteEl.textContent += ' Sats=' + sats + ', HDOP=' + hdop.toFixed(2) + '.';
+  }
+}
+
 function drawRadar(detections, targetX, targetZ, tracking, mode) {
   const W = radarCanvas.width, H = radarCanvas.height;
   const cx = W / 2, maxZ = 5.0, maxX = 3.0;
@@ -327,6 +578,8 @@ function drawRadar(detections, targetX, targetZ, tracking, mode) {
 sse.onmessage = function(e) {
   const d = JSON.parse(e.data);
   document.getElementById('t-mode').textContent = d.mode || '—';
+  teleopArmed = !!d.is_armed;
+  teleopMode = d.mode || 'MANUAL';
   const dist = d.obstacle_distance_m;
   document.getElementById('t-dist').textContent = dist != null ? dist.toFixed(2) + 'm' : '—';
   const scl = d.throttle_scale;
@@ -372,13 +625,22 @@ sse.onmessage = function(e) {
     loraEl.textContent = (d.gps_fix != null && d.gps_fix < 4) ? 'No Link' : '—';
     loraEl.className = 'value ' + (d.gps_fix != null && d.gps_fix < 4 ? 'red' : '');
   }
+  updateRtkPanel(d);
   const cam = d.camera_health || {};
   const pipeEl = document.getElementById('t-cam-pipeline');
   const rgbAgeEl = document.getElementById('t-cam-rgb-age');
   const depthAgeEl = document.getElementById('t-cam-depth-age');
   if (cam.pipeline_running === true) {
-    pipeEl.textContent = cam.is_stale ? 'STALE' : 'RUNNING';
-    pipeEl.className = 'value ' + (cam.is_stale ? 'yellow' : 'green');
+    if (cam.critical_stale) {
+      pipeEl.textContent = 'STALE';
+      pipeEl.className = 'value yellow';
+    } else if (cam.is_stale) {
+      pipeEl.textContent = 'DEGRADED';
+      pipeEl.className = 'value yellow';
+    } else {
+      pipeEl.textContent = 'RUNNING';
+      pipeEl.className = 'value green';
+    }
   } else if (cam.pipeline_running === false) {
     pipeEl.textContent = 'STOPPED';
     pipeEl.className = 'value red';
@@ -401,6 +663,48 @@ sse.onmessage = function(e) {
   } else {
     depthAgeEl.textContent = '—';
     depthAgeEl.className = 'value';
+  }
+  const socEl = document.getElementById('t-bms-soc');
+  const vaEl = document.getElementById('t-bms-va');
+  const statusEl = document.getElementById('t-bms-status');
+  const deltaEl = document.getElementById('t-bms-delta');
+  const bmsConnected = d.bms_connected === true;
+  const bmsSoc = d.bms_soc_pct;
+  if (bmsConnected && bmsSoc != null) {
+    socEl.textContent = bmsSoc.toFixed(1) + '%';
+    socEl.className = 'value ' + (bmsSoc >= 40 ? 'green' : bmsSoc >= 20 ? 'yellow' : 'red');
+  } else {
+    socEl.textContent = '—';
+    socEl.className = 'value';
+  }
+  if (bmsConnected && d.bms_voltage_v != null) {
+    const aStr = d.bms_current_a != null ? d.bms_current_a.toFixed(1) + 'A' : '—';
+    vaEl.textContent = d.bms_voltage_v.toFixed(2) + 'V / ' + aStr;
+    vaEl.className = 'value';
+  } else {
+    vaEl.textContent = '—';
+    vaEl.className = 'value';
+  }
+  if (!bmsConnected) {
+    statusEl.textContent = 'OFFLINE';
+    statusEl.className = 'value red';
+  } else if (d.bms_charging === true) {
+    statusEl.textContent = 'CHARGING';
+    statusEl.className = 'value blue';
+  } else if (d.bms_discharge_fet_on === false) {
+    statusEl.textContent = 'DISCHARGE OFF';
+    statusEl.className = 'value yellow';
+  } else {
+    statusEl.textContent = 'ONLINE';
+    statusEl.className = 'value green';
+  }
+  if (bmsConnected && d.bms_cell_delta_mv != null) {
+    const dv = d.bms_cell_delta_mv;
+    deltaEl.textContent = dv + 'mV';
+    deltaEl.className = 'value ' + (dv <= 20 ? 'green' : dv <= 40 ? 'yellow' : 'red');
+  } else {
+    deltaEl.textContent = '—';
+    deltaEl.className = 'value';
   }
   const badge = document.getElementById('rec-badge');
   const rs = d.recording_state || 'IDLE';
@@ -458,6 +762,18 @@ sse.onmessage = function(e) {
     hint.textContent = 'System must be armed (ch3 high)';
   }
 };
+document.addEventListener('keydown', function(e) {
+  if (e.repeat) return;
+  if (e.key === 'w' || e.key === 'W') teleopPress(e, 'forward');
+  else if (e.key === 's' || e.key === 'S') teleopPress(e, 'reverse');
+  else if (e.key === 'a' || e.key === 'A') teleopPress(e, 'left');
+  else if (e.key === 'd' || e.key === 'D') teleopPress(e, 'right');
+  else if (e.key === ' ') { e.preventDefault(); teleopStop(); }
+});
+document.addEventListener('keyup', function(e) {
+  const k = (e.key || '').toLowerCase();
+  if (k === 'w' || k === 'a' || k === 's' || k === 'd') teleopRelease();
+});
 function toggleFollowMe() {
   const btn = document.getElementById('follow-btn');
   btn.disabled = true;
@@ -690,6 +1006,33 @@ def _placeholder_jpeg() -> bytes:
         return b""
 
 
+def _depth_frame_to_jpeg(depth_frame) -> bytes | None:
+    """Best-effort depth colorization for web preview fallback."""
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return None
+    if depth_frame is None:
+        return None
+    try:
+        valid_mask = depth_frame > 0
+        if not valid_mask.any():
+            return None
+        max_mm = min(float(np.max(depth_frame[valid_mask])), 10000.0)
+        norm = np.zeros_like(depth_frame, dtype=np.uint8)
+        if max_mm > 0:
+            norm[valid_mask] = (
+                np.clip(depth_frame[valid_mask].astype(np.float32) / max_mm, 0, 1) * 255
+            ).astype(np.uint8)
+        colorized = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+        colorized = cv2.resize(colorized, (320, 240), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", colorized, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        return buf.tobytes() if ok else None
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Flask app factory
 # ---------------------------------------------------------------------------
@@ -706,6 +1049,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
     rec_cache: list[dict] = []
     rec_cache_ts = 0.0
     rec_cache_ttl_s = 5.0
+    bt_override_path = Path("/tmp/wall_e_bt_latest.json")
 
     # -- Dashboard -----------------------------------------------------------
 
@@ -747,11 +1091,20 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
 
     @app.route("/stream/depth")
     def stream_depth():
-        if recorder is None:
-            return Response(placeholder, mimetype="image/jpeg")
+        def _get_depth_jpeg():
+            jpeg = recorder.get_latest_depth_jpeg() if recorder is not None else None
+            if jpeg:
+                return jpeg
+            # Fallback: colorize latest raw depth frame directly from the OAK reader.
+            if oak_reader is not None:
+                try:
+                    return _depth_frame_to_jpeg(oak_reader.get_latest_depth_frame())
+                except Exception:
+                    return None
+            return None
         return Response(
             _mjpeg_generator(
-                recorder.get_latest_depth_jpeg,
+                _get_depth_jpeg,
                 fps=max(0.5, float(getattr(config, "depth_stream_fps", 3.0))),
                 stream_name="depth",
             ),
@@ -798,7 +1151,23 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "gps_hdop": round(t.gps_hdop, 2) if t.gps_hdop is not None else None,
                     "gps_diff_age_s": round(t.gps_diff_age_s, 2) if t.gps_diff_age_s is not None else None,
                     "gps_station_id": t.gps_station_id,
+                    "bms_voltage_v": _finite_or_none(getattr(t, "bms_voltage_v", None), 2),
+                    "bms_current_a": _finite_or_none(getattr(t, "bms_current_a", None), 1),
+                    "bms_soc_pct": _finite_or_none(getattr(t, "bms_soc_pct", None), 1),
+                    "bms_cell_delta_mv": getattr(t, "bms_cell_delta_mv", None),
+                    "bms_temp_max_c": _finite_or_none(getattr(t, "bms_temp_max_c", None), 1),
+                    "bms_connected": getattr(t, "bms_connected", None),
+                    "bms_charging": getattr(t, "bms_charging", None),
+                    "bms_discharge_fet_on": getattr(t, "bms_discharge_fet_on", None),
                     "imu_heading_deg": round(t.imu_heading_deg, 1) if t.imu_heading_deg is not None else None,
+                    "vesc_left_rpm": getattr(t, "vesc_left_rpm", None),
+                    "vesc_right_rpm": getattr(t, "vesc_right_rpm", None),
+                    "vesc_actual_speed_mps": _finite_or_none(getattr(t, "vesc_actual_speed_mps", None), 3),
+                    "vesc_rx_frame_count": getattr(t, "vesc_rx_frame_count", 0),
+                    "vesc_rx_parse_error_count": getattr(t, "vesc_rx_parse_error_count", 0),
+                    "vesc_rx_recv_error_count": getattr(t, "vesc_rx_recv_error_count", 0),
+                    "vesc_rx_reopen_count": getattr(t, "vesc_rx_reopen_count", 0),
+                    "vesc_rx_last_frame_age_s": _finite_or_none(getattr(t, "vesc_rx_last_frame_age_s", None), 3),
                     "wp_index": getattr(t, "wp_index", None),
                     "wp_total": getattr(t, "wp_total", None),
                     "wp_name": getattr(t, "wp_name", None),
@@ -867,7 +1236,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
             if ok:
                 return Response(json.dumps({"mode": "FOLLOW_ME", "action": "activated"}),
                                 content_type="application/json")
-            return Response(json.dumps({"error": "must be armed", "mode": mode}),
+            return Response(json.dumps({"error": "must be armed with target present", "mode": mode}),
                             status=400, content_type="application/json")
 
     @app.route("/api/follow_me/reset_counter", methods=["POST"])
@@ -879,6 +1248,51 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
             fm = getattr(controller, "_follow_me", None)
             if fm is not None and hasattr(fm, "reset_debug_counters"):
                 fm.reset_debug_counters()
+            return Response(json.dumps({"ok": True}), content_type="application/json")
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500,
+                            content_type="application/json")
+
+    @app.route("/api/teleop", methods=["POST"])
+    def api_teleop():
+        payload = request.get_json(silent=True) or {}
+        try:
+            left_f = float(payload.get("left_f", 0.0))
+            right_f = float(payload.get("right_f", 0.0))
+        except Exception:
+            return Response(json.dumps({"error": "invalid payload"}), status=400,
+                            content_type="application/json")
+        left_f = max(-1.0, min(1.0, left_f))
+        right_f = max(-1.0, min(1.0, right_f))
+        try:
+            from pi_app.io.bt_proto import floats_to_bytes
+            left_byte, right_byte = floats_to_bytes(left_f, right_f)
+            bt_override_path.write_text(
+                json.dumps({
+                    "left_byte": left_byte,
+                    "right_byte": right_byte,
+                    "last_update_epoch_s": time.time(),
+                }),
+                encoding="utf-8",
+            )
+            return Response(json.dumps({"ok": True, "left_byte": left_byte, "right_byte": right_byte}),
+                            content_type="application/json")
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500,
+                            content_type="application/json")
+
+    @app.route("/api/teleop/stop", methods=["POST"])
+    def api_teleop_stop():
+        try:
+            from pi_app.control.mapping import CENTER_OUTPUT_VALUE
+            bt_override_path.write_text(
+                json.dumps({
+                    "left_byte": CENTER_OUTPUT_VALUE,
+                    "right_byte": CENTER_OUTPUT_VALUE,
+                    "last_update_epoch_s": time.time(),
+                }),
+                encoding="utf-8",
+            )
             return Response(json.dumps({"ok": True}), content_type="application/json")
         except Exception as exc:
             return Response(json.dumps({"error": str(exc)}), status=500,

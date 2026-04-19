@@ -95,7 +95,23 @@ class RecordingTelemetry:
     gps_hdop: float | None = None
     gps_diff_age_s: float | None = None
     gps_station_id: int | None = None
+    bms_voltage_v: float | None = None
+    bms_current_a: float | None = None
+    bms_soc_pct: float | None = None
+    bms_cell_delta_mv: int | None = None
+    bms_temp_max_c: float | None = None
+    bms_connected: bool | None = None
+    bms_charging: bool | None = None
+    bms_discharge_fet_on: bool | None = None
     imu_heading_deg: float | None = None
+    vesc_left_rpm: int | None = None
+    vesc_right_rpm: int | None = None
+    vesc_actual_speed_mps: float | None = None
+    vesc_rx_frame_count: int = 0
+    vesc_rx_parse_error_count: int = 0
+    vesc_rx_recv_error_count: int = 0
+    vesc_rx_reopen_count: int = 0
+    vesc_rx_last_frame_age_s: float | None = None
     # ── Follow-Me visualization fields (Items 2 + 4) ─────────────────
     follow_mode: str | None = None
     trail_points_xy: list | None = None       # [[x,y], ...] last 20

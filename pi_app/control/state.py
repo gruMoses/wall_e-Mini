@@ -9,3 +9,12 @@ class DriveCommand:
     emergency_active: bool
 
 
+@dataclass(frozen=True)
+class AutonomyCommand:
+    """Mode-agnostic autonomy command represented as motor bytes."""
+    source: str
+    left_byte: int
+    right_byte: int
+    steering_input: float
+    nav_state: str | None = None
+

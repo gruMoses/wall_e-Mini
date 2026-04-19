@@ -32,6 +32,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from config import FollowMeConfig
 from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT
+from pi_app.control.drive_math import skid_steer_mix
 from pi_app.control.gps_odometry import GpsOdometry, GpsOdometryConfig
 from pi_app.control.odometry import DeadReckonOdometry
 from pi_app.control.pure_pursuit import PurePursuitController, PursuitConfig
@@ -454,11 +455,13 @@ class SafetyLayer:
 
 def _mix_commands(speed_offset: float, steer_offset: float) -> tuple[int, int]:
     """Combine speed and steering differentials into left/right motor bytes."""
-    left = int(round(NEUTRAL + speed_offset + steer_offset))
-    right = int(round(NEUTRAL + speed_offset - steer_offset))
-    return (
-        max(MIN_OUTPUT, min(MAX_OUTPUT, left)),
-        max(MIN_OUTPUT, min(MAX_OUTPUT, right)),
+    return skid_steer_mix(
+        speed_offset,
+        steer_offset,
+        neutral=NEUTRAL,
+        min_output=MIN_OUTPUT,
+        max_output=MAX_OUTPUT,
+        deadband_byte=0,
     )
 
 
@@ -1189,10 +1192,11 @@ class FollowMeController:
             self._trail._rejected_jump_count = 0
             self._trail._rejected_speed_count = 0
 
-    def get_status(self) -> dict:
+    def get_status(self, now: float | None = None) -> dict:
         """Return telemetry dict for web viewer / SSE / logging."""
         # Determine human-readable follow mode
-        now = time.monotonic()
+        if now is None:
+            now = time.monotonic()
         if self._tracking:
             follow_mode = "TRAIL_PURSUIT" if self._pursuit_mode == "trail" else "DIRECT_PID"
         elif self._pursuit_mode == "search":

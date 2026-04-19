@@ -14,11 +14,13 @@ class GpsHeadingAlignConfig:
     IMU heading can ask for a true-north-referenced value.
     """
     enabled: bool = True
-    min_distance_m: float = 2.0       # lock offset after this much displacement
-    min_speed_mps: float = 0.3        # only trust GPS COG above this speed
+    # Calibrated for slower real-world drive patterns so lock/refinement can
+    # occur during normal operation (not only fast straight runs).
+    min_distance_m: float = 0.8       # displacement required in history window
+    min_speed_mps: float = 0.12       # trust COG once robot is clearly moving
     min_fix_quality: int = 4          # RTK fixed only
     alpha: float = 0.1                # EMA factor for ongoing drift correction
-    history_seconds: float = 4.0      # rolling GPS position window
+    history_seconds: float = 8.0      # longer window stabilizes low-speed COG
 
 
 @dataclass(frozen=True)
@@ -37,10 +39,16 @@ class ImuSteeringConfig:
     max_correction: int = 35      # Maximum steering correction in byte units (0-255)
     deadband_deg: float = 0.9    # Minimum heading error to trigger correction (degrees)
     max_integral: float = 30.0   # Maximum integral term to prevent windup
-    invert_output: bool = False   # Invert the sign of IMU steering correction (hardware-specific)
+    invert_output: bool = True   # Invert sign so positive heading error drives corrective turn direction
     # Steering neutral detection (hysteresis) to lock heading until commanded turn
     steering_neutral_enter: float = 0.08  # |steering_input| below this enters neutral
     steering_neutral_exit: float = 0.15   # |steering_input| above this exits neutral
+    # Manual/BT heading-hold gate: if steering intent stays below this while
+    # moving, treat as "go straight" even if channel bytes are imperfectly matched.
+    manual_hold_max_steering: float = 0.18
+    # Safety cap for heading-hold authority while driving via BT/web remote.
+    # Prevents aggressive uncommanded pivots if target or heading jumps.
+    manual_bt_max_correction: float = 12.0
     neutral_dwell_s: float = 0.0          # Optional dwell before locking target (0 = immediate)
     # Straight-intent detection for dual-throttle skid steer
     straight_equal_tolerance_us: int = 120     # |ch1_us - ch2_us| <= tol -> straight intent
@@ -72,8 +80,17 @@ class ImuSteeringConfig:
     oak_nmni_threshold_dps: float = 0.3
     oak_bias_adapt_enabled: bool = False
     oak_bias_adapt_alpha: float = 0.001
-    # IMU lever-arm mitigation: use direct gyro yaw rate by default.
-    # Gravity-projected yaw rate can be re-enabled for A/B testing.
+    # OAK IMU yaw-rate source:
+    # - "auto": lock onto dominant gyro axis while turning (robust to mounting orientation)
+    # - "gyro_x" / "gyro_y" / "gyro_z": force specific axis for diagnostics
+    # - "gravity_projected": project gyro onto gravity vector
+    # Known-good field setup (Apr 2026): source="auto", scale=0.46, gravity_projected=False.
+    oak_yaw_rate_source: str = "auto"
+    # Field-calibrated yaw-rate scale for OAK IMU heading integration.
+    # Derived from in-place turn tests so displayed heading change matches reality.
+    oak_yaw_rate_scale: float = 0.46
+    # Optional IMU lever-arm mitigation toggle for A/B testing.
+    # Keep disabled for the known-good setup above.
     oak_use_gravity_projected_yaw_rate: bool = False
     # Optional derivative-term EMA filtering (0.0 disables).
     dterm_ema_alpha: float = 0.3
@@ -115,11 +132,14 @@ class VescConfig:
     voltage_shutdown_threshold_v: float = 39.0
     voltage_shutdown_delay_s: float = 10.0
 
-    # Wheel geometry for eRPM → wheel speed (m/s) conversion.
-    # wheel_radius_m: centre of hub to contact patch.
+    # Wheel geometry + drivetrain for eRPM -> wheel speed (m/s) conversion.
+    # wheel_radius_m: centre of wheel axle to contact patch (14.5in wheel dia).
     # motor_poles: total magnetic poles; pole_pairs = motor_poles // 2.
-    wheel_radius_m: float = 0.085
+    # drive_gear_ratio: motor revs per wheel rev.
+    #   6:1 gearbox * (20/14) chain stage * (40/10) chain stage = 34.2857:1
+    wheel_radius_m: float = 0.18415
     motor_poles: int = 14
+    drive_gear_ratio: float = 34.2857142857
 
     # Set False to disable all closed-loop telemetry features (pure open-loop fallback).
     vesc_telemetry_enabled: bool = True
@@ -318,8 +338,8 @@ class OakRecordingConfig:
     # If true, MCAP image snapshots are recorded only for follow/person contexts.
     mcap_images_follow_only: bool = True
     # Local preview generation budget (used by web viewer + MCAP image capture path)
-    preview_rgb_fps: float = 6.0
-    preview_depth_fps: float = 3.0
+    preview_rgb_fps: float = 10.0
+    preview_depth_fps: float = 8.0
 
     # Storage management
     max_total_mb: int = 4000
@@ -332,9 +352,9 @@ class OakWebViewerConfig:
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 8080
-    rgb_stream_fps: float = 6.0
-    depth_stream_fps: float = 3.0
-    telemetry_hz: float = 4.0
+    rgb_stream_fps: float = 10.0
+    depth_stream_fps: float = 8.0
+    telemetry_hz: float = 8.0
 
 
 @dataclass(frozen=True)

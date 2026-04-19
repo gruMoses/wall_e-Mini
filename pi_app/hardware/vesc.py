@@ -84,6 +84,11 @@ class VescTelemetry:
     timestamp: float = 0.0
     can_send_alert: bool = False
     can_send_fail_count: int = 0
+    can_rx_frame_count: int = 0
+    can_rx_parse_error_count: int = 0
+    can_rx_recv_error_count: int = 0
+    can_rx_reopen_count: int = 0
+    can_rx_last_frame_age_s: Optional[float] = None
 
 
 class VescCanDriver:
@@ -101,6 +106,7 @@ class VescCanDriver:
         self._max_rpm = max_rpm
         self._cfg = vesc_cfg
         self._bus = None  # Lazy-init python-can Bus
+        self._bus_lock = threading.Lock()
 
         # Telemetry state — read/write only under _telem_lock
         self._telem_lock = threading.Lock()
@@ -126,6 +132,14 @@ class VescCanDriver:
         self._SEND_FAIL_THRESHOLD = _SEND_FAIL_THRESHOLD
         self._SEND_FAIL_WINDOW_S = _SEND_FAIL_WINDOW_S
 
+        # CAN RX health counters — used for live diagnostics and telemetry.
+        self._rx_frame_count: int = 0
+        self._rx_parse_error_count: int = 0
+        self._rx_recv_error_count: int = 0
+        self._rx_reopen_count: int = 0
+        self._rx_last_frame_s: float = 0.0
+        self._rx_last_reopen_s: float = 0.0
+
     # ──────────────────────────────────────────────────────────────────────────
     # Lifecycle
     # ──────────────────────────────────────────────────────────────────────────
@@ -144,14 +158,21 @@ class VescCanDriver:
         logger.info("VESC CAN RX thread started (left_id=%d right_id=%d)", self._left_id, self._right_id)
 
     def stop(self) -> None:
-        """Stop both motors and terminate the background RX thread."""
+        """Command both motors to zero RPM without stopping telemetry RX."""
         self._send_rpm(self._left_id, 0)
         self._send_rpm(self._right_id, 0)
+        with self._telem_lock:
+            self._send_fail_consecutive = 0
+
+    def shutdown(self) -> None:
+        """Terminate background RX thread and close CAN bus."""
+        self.stop()
         if self._stop_event is not None:
             self._stop_event.set()
         if self._rx_thread is not None:
             self._rx_thread.join(timeout=2.0)
             self._rx_thread = None
+        self._close_bus()
 
     # ──────────────────────────────────────────────────────────────────────────
     # MotorDriver API
@@ -214,29 +235,86 @@ class VescCanDriver:
             )
             telem.can_send_alert = self._send_fail_alert
             telem.can_send_fail_count = self._send_fail_count
+            telem.can_rx_frame_count = self._rx_frame_count
+            telem.can_rx_parse_error_count = self._rx_parse_error_count
+            telem.can_rx_recv_error_count = self._rx_recv_error_count
+            telem.can_rx_reopen_count = self._rx_reopen_count
+            telem.can_rx_last_frame_age_s = (
+                max(0.0, time.monotonic() - self._rx_last_frame_s)
+                if self._rx_last_frame_s > 0.0
+                else None
+            )
             return telem
+
+    def get_rx_health(self) -> dict:
+        """Return CAN RX health counters for diagnostics/telemetry UI."""
+        with self._telem_lock:
+            return {
+                "rx_frame_count": int(self._rx_frame_count),
+                "rx_parse_error_count": int(self._rx_parse_error_count),
+                "rx_recv_error_count": int(self._rx_recv_error_count),
+                "rx_reopen_count": int(self._rx_reopen_count),
+                "rx_last_frame_age_s": (
+                    max(0.0, time.monotonic() - self._rx_last_frame_s)
+                    if self._rx_last_frame_s > 0.0
+                    else None
+                ),
+            }
 
     # ──────────────────────────────────────────────────────────────────────────
     # Background CAN RX loop
     # ──────────────────────────────────────────────────────────────────────────
 
     def _rx_loop(self) -> None:
-        while not self._stop_event.is_set():  # type: ignore[union-attr]
+        stop_event = self._stop_event
+        while stop_event is not None and not stop_event.is_set():
             try:
-                self._ensure_bus()
+                with self._bus_lock:
+                    self._ensure_bus()
             except RuntimeError:
-                # CAN bus unavailable (e.g., hardware not present); retry after a pause
+                # python-can unavailable.
+                time.sleep(1.0)
+                continue
+            except Exception as exc:
+                # SocketCAN open/init can fail transiently; force reopen path.
+                logger.warning("VESC CAN open failed on %s: %s", self._channel, exc)
+                self._close_bus()
+                with self._telem_lock:
+                    self._rx_reopen_count += 1
                 time.sleep(1.0)
                 continue
 
             try:
-                msg = self._bus.recv(timeout=0.1)  # type: ignore[union-attr]
+                with self._bus_lock:
+                    msg = self._bus.recv(timeout=0.1)  # type: ignore[union-attr]
             except Exception as exc:
-                logger.debug("VESC CAN recv error: %s", exc)
+                logger.warning("VESC CAN recv error on %s: %s; reopening bus", self._channel, exc)
+                with self._telem_lock:
+                    self._rx_recv_error_count += 1
+                    self._rx_reopen_count += 1
+                self._close_bus()
                 time.sleep(0.05)
                 continue
 
             if msg is None:
+                now = time.monotonic()
+                with self._telem_lock:
+                    last_frame_s = self._rx_last_frame_s
+                    last_reopen_s = self._rx_last_reopen_s
+                if (
+                    last_frame_s > 0.0
+                    and (now - last_frame_s) > 1.0
+                    and (now - last_reopen_s) > 1.0
+                ):
+                    logger.warning(
+                        "VESC CAN RX stale for %.2fs on %s; reopening bus",
+                        now - last_frame_s,
+                        self._channel,
+                    )
+                    with self._telem_lock:
+                        self._rx_reopen_count += 1
+                        self._rx_last_reopen_s = now
+                    self._close_bus()
                 continue
 
             if not msg.is_extended_id:
@@ -253,15 +331,33 @@ class VescCanDriver:
 
             try:
                 if packet_id == _CAN_PACKET_STATUS:
+                    with self._telem_lock:
+                        self._rx_frame_count += 1
+                        self._rx_last_frame_s = now
                     self._parse_status(motor, msg.data, now)
                 elif packet_id == _CAN_PACKET_STATUS_4:
+                    with self._telem_lock:
+                        self._rx_frame_count += 1
+                        self._rx_last_frame_s = now
                     self._parse_status4(motor, msg.data, now)
                 elif packet_id == _CAN_PACKET_STATUS_5:
+                    with self._telem_lock:
+                        self._rx_frame_count += 1
+                        self._rx_last_frame_s = now
                     self._parse_status5(motor, msg.data, now)
             except Exception as exc:
+                with self._telem_lock:
+                    self._rx_parse_error_count += 1
                 logger.debug("VESC frame parse error (pkt=%d motor=%s): %s", packet_id, motor, exc)
 
-            self._check_voltage_shutdown()
+            try:
+                self._check_voltage_shutdown()
+            except Exception as exc:
+                logger.warning("VESC voltage monitor error: %s; reopening bus", exc)
+                with self._telem_lock:
+                    self._rx_parse_error_count += 1
+                    self._rx_reopen_count += 1
+                self._close_bus()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Frame parsers
@@ -396,9 +492,23 @@ class VescCanDriver:
             ) from exc
         self._bus = can.interface.Bus(channel=self._channel, bustype="socketcan")
 
+    def _close_bus(self) -> None:
+        with self._bus_lock:
+            bus = self._bus
+            self._bus = None
+        if bus is None:
+            return
+        try:
+            shutdown = getattr(bus, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+        except Exception:
+            pass
+
     def _send_rpm(self, can_id: int, rpm: int) -> None:
         try:
-            self._ensure_bus()
+            with self._bus_lock:
+                self._ensure_bus()
         except RuntimeError:
             return
 
@@ -410,9 +520,11 @@ class VescCanDriver:
         arbitration_id = 0x300 + can_id
         data = struct.pack(">i", int(rpm))
         msg = can.Message(arbitration_id=arbitration_id, data=data, is_extended_id=True)
+        close_bus = False
         try:
-            assert self._bus is not None
-            self._bus.send(msg)
+            with self._bus_lock:
+                assert self._bus is not None
+                self._bus.send(msg)
             with self._telem_lock:
                 self._send_fail_consecutive = 0
                 if self._send_fail_alert:
@@ -436,6 +548,9 @@ class VescCanDriver:
                             now - self._send_fail_first_ts,
                             exc,
                         )
+                close_bus = True
+        if close_bus:
+            self._close_bus()
 
     @staticmethod
     def _byte_to_rpm(byte_value: int, max_rpm: Optional[int] = None) -> int:

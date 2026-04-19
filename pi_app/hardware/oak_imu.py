@@ -33,6 +33,8 @@ class OakImuReader:
         nmni_threshold_dps: float = 0.3,
         bias_adapt_enabled: bool = False,
         bias_adapt_alpha: float = 0.001,
+        yaw_rate_source: str = "auto",
+        yaw_rate_scale: float = 1.0,
         use_gravity_projected_yaw_rate: bool = False,
     ) -> None:
         self._oak = oak_reader
@@ -53,7 +55,14 @@ class OakImuReader:
         self._nmni_threshold_dps = float(nmni_threshold_dps)
         self._bias_adapt_enabled = bool(bias_adapt_enabled)
         self._bias_adapt_alpha = max(0.0, min(1.0, float(bias_adapt_alpha)))
+        src = str(yaw_rate_source or "auto").strip().lower()
+        self._yaw_rate_source = (
+            src if src in ("auto", "gyro_x", "gyro_y", "gyro_z", "gravity_projected") else "auto"
+        )
+        self._yaw_rate_scale = max(0.05, min(5.0, float(yaw_rate_scale)))
         self._use_gravity_projected_yaw_rate = bool(use_gravity_projected_yaw_rate)
+        self._auto_axis: str = "gyro_y"
+        self._auto_axis_lock_until_s: float = 0.0
 
         # EMA-smoothed accelerometer for gravity projection (reduces
         # vibration noise while preserving the true gravity direction).
@@ -70,19 +79,40 @@ class OakImuReader:
         sx: float,
         sy: float,
         sz: float,
+        source: str,
+        auto_axis: str,
         use_gravity_projected: bool,
     ) -> float:
         """Compute world-yaw rate from gyro, optionally using gravity projection.
 
-        Direct-gyro mode is the default to avoid lever-arm acceleration coupling
-        when the IMU is offset from the robot pivot.
+        For OAK-D Lite camera frame (X=right, Y=down, Z=forward), robot yaw
+        (turning about vertical) maps best to the body-frame Y gyro component.
+        We also expose explicit axis selection for diagnostics.
         """
-        if not use_gravity_projected:
+        if source == "auto":
+            source = auto_axis
+        if source == "gravity_projected" or use_gravity_projected:
+            a_norm_sq = sx * sx + sy * sy + sz * sz
+            if a_norm_sq > 0.25:
+                return (gx * sx + gy * sy + gz * sz) / a_norm_sq
+            return gy
+        if source == "gyro_x":
+            return gx
+        if source == "gyro_z":
             return gz
-        a_norm_sq = sx * sx + sy * sy + sz * sz
-        if a_norm_sq > 0.25:
-            return (gx * sx + gy * sy + gz * sz) / a_norm_sq
-        return gz
+        # Default: gyro_y (OAK camera frame yaw axis)
+        return gy
+
+    @staticmethod
+    def _dominant_axis(gx_dps: float, gy_dps: float, gz_dps: float) -> str:
+        ax = abs(gx_dps)
+        ay = abs(gy_dps)
+        az = abs(gz_dps)
+        if ax >= ay and ax >= az:
+            return "gyro_x"
+        if ay >= ax and ay >= az:
+            return "gyro_y"
+        return "gyro_z"
 
     def calibrate_gyro(self, duration_s: float = 3.0) -> tuple:
         """Collect gyro samples from OAK-D IMU to estimate bias."""
@@ -143,6 +173,13 @@ class OakImuReader:
         gx_dps = gx_raw_dps - self.gyro_bias_dps[0]
         gy_dps = gy_raw_dps - self.gyro_bias_dps[1]
         gz_dps = gz_raw_dps - self.gyro_bias_dps[2]
+        if self._yaw_rate_source == "auto":
+            now = time.monotonic()
+            turn_mag = max(abs(gx_dps), abs(gy_dps), abs(gz_dps))
+            # Re-select dominant axis only when truly turning, then hold briefly.
+            if turn_mag > 8.0 and now >= self._auto_axis_lock_until_s:
+                self._auto_axis = self._dominant_axis(gx_dps, gy_dps, gz_dps)
+                self._auto_axis_lock_until_s = now + 0.8
         if self._bias_adapt_enabled:
             if (
                 abs(gx_dps) < self._nmni_threshold_dps
@@ -199,8 +236,17 @@ class OakImuReader:
             self.pitch_rad = self.alpha_rp * (self.pitch_rad + gx * dt) + (1.0 - self.alpha_rp) * pitch_acc
 
             yaw_rate_rads = self._compute_yaw_rate_rads(
-                gx, gy, gz, sx, sy, sz, self._use_gravity_projected_yaw_rate
+                gx,
+                gy,
+                gz,
+                sx,
+                sy,
+                sz,
+                self._yaw_rate_source,
+                self._auto_axis,
+                self._use_gravity_projected_yaw_rate,
             )
+            yaw_rate_rads *= self._yaw_rate_scale
 
             yaw_rate_world_dps = math.degrees(yaw_rate_rads)
             if self._nmni_enabled and abs(yaw_rate_world_dps) < self._nmni_threshold_dps:

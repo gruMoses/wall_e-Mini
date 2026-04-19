@@ -280,6 +280,8 @@ def run() -> None:
                     nmni_threshold_dps=float(getattr(config.imu_steering, "oak_nmni_threshold_dps", 0.3)),
                     bias_adapt_enabled=bool(getattr(config.imu_steering, "oak_bias_adapt_enabled", False)),
                     bias_adapt_alpha=float(getattr(config.imu_steering, "oak_bias_adapt_alpha", 0.001)),
+                    yaw_rate_source=str(getattr(config.imu_steering, "oak_yaw_rate_source", "gyro_y")),
+                    yaw_rate_scale=float(getattr(config.imu_steering, "oak_yaw_rate_scale", 1.0)),
                     use_gravity_projected_yaw_rate=bool(
                         getattr(config.imu_steering, "oak_use_gravity_projected_yaw_rate", False)
                     ),
@@ -441,6 +443,8 @@ def run() -> None:
         oak_imu_metrics_getter = None
         oak_health_getter = None
         oak_prev_stale = None
+        last_imu_heading_deg = None
+        last_imu_yaw_rate_dps = None
         if oak_reader is not None:
             try:
                 maybe_getter = getattr(oak_reader, "get_imu_metrics", None)
@@ -514,6 +518,16 @@ def run() -> None:
             if bms_service is not None:
                 controller.set_charger_inhibit(bms_service.is_charging() or _bms_safety_stopped)
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
+            # Snapshot IMU status early in loop and retain last-good values for telemetry
+            # so brief status fetch hiccups do not blank heading in the UI.
+            imu_status = controller.get_imu_status()
+            if imu_status and imu_status.get("is_available"):
+                h = imu_status.get("heading_deg")
+                yr = imu_status.get("yaw_rate_dps")
+                if isinstance(h, (int, float)):
+                    last_imu_heading_deg = float(h)
+                if isinstance(yr, (int, float)):
+                    last_imu_yaw_rate_dps = float(yr)
 
             # P3: BMS discharge FET safety — rate-limited warning + post-grace safety timeout.
             if bms_service is not None and cmd.is_armed:
@@ -576,6 +590,8 @@ def run() -> None:
                     need_depth = oak_recorder.wants_depth_preview()
                     if oak_reader is not None:
                         oak_reader.set_rgb_poll_enabled(need_rgb)
+                    bms_state = bms_service.get_state() if bms_service is not None else None
+                    bms_charging = bms_service.is_charging() if bms_service is not None else None
                     rec_telem = RecordingTelemetry(
                         timestamp=time.time(),
                         mode=telem.get("mode", "MANUAL"),
@@ -589,8 +605,9 @@ def run() -> None:
                         follow_tracking=telem.get("follow_me_tracking", False),
                         follow_target_x_m=telem.get("follow_me_target_x_m"),
                         follow_target_z_m=telem.get("follow_me_target_z_m"),
-                        heading_deg=(imu_status or {}).get("heading_deg"),
-                        yaw_rate_dps=(imu_status or {}).get("yaw_rate_dps"),
+                        heading_deg=last_imu_heading_deg,
+                        imu_heading_deg=last_imu_heading_deg,
+                        yaw_rate_dps=last_imu_yaw_rate_dps,
                         pursuit_mode=telem.get("follow_me_pursuit_mode"),
                         trail_length=telem.get("trail_length"),
                         trail_distance_m=telem.get("trail_distance_m"),
@@ -612,6 +629,22 @@ def run() -> None:
                         gps_hdop=gps_reading.hdop if gps_reading else None,
                         gps_diff_age_s=gps_reading.diff_age_s if gps_reading else None,
                         gps_station_id=gps_reading.station_id if gps_reading else None,
+                        bms_voltage_v=(bms_state.pack_voltage_v if bms_state is not None else None),
+                        bms_current_a=(bms_state.pack_current_a if bms_state is not None else None),
+                        bms_soc_pct=(bms_state.soc_pct if bms_state is not None else None),
+                        bms_cell_delta_mv=(bms_state.cell_delta_mv if bms_state is not None else None),
+                        bms_temp_max_c=(bms_state.temp_max_c if bms_state is not None else None),
+                        bms_connected=(bms_state.connected if bms_state is not None else None),
+                        bms_charging=bms_charging,
+                        bms_discharge_fet_on=(bms_state.discharge_fet_on if bms_state is not None else None),
+                        vesc_left_rpm=telem.get("vesc_left_rpm"),
+                        vesc_right_rpm=telem.get("vesc_right_rpm"),
+                        vesc_actual_speed_mps=telem.get("vesc_actual_speed_mps"),
+                        vesc_rx_frame_count=telem.get("vesc_rx_frame_count", 0),
+                        vesc_rx_parse_error_count=telem.get("vesc_rx_parse_error_count", 0),
+                        vesc_rx_recv_error_count=telem.get("vesc_rx_recv_error_count", 0),
+                        vesc_rx_reopen_count=telem.get("vesc_rx_reopen_count", 0),
+                        vesc_rx_last_frame_age_s=telem.get("vesc_rx_last_frame_age_s"),
                         # Follow-Me visualization (Items 2 + 4)
                         follow_mode=telem.get("follow_mode"),
                         trail_points_xy=telem.get("trail_points_xy"),
@@ -651,11 +684,6 @@ def run() -> None:
                 imu_dt_ms = int(round((imu_update_ts - prev_imu_ts) * 1000))
             prev_imu_ts = imu_update_ts
             # Suppress BT extrema debug output to keep CLI clean
-            # Get IMU status for display
-            imu_status = controller.get_imu_status()
-            # Populate IMU heading in recorder telemetry (for map overlay)
-            if imu_status and imu_status.get('is_available'):
-                rec_telem.imu_heading_deg = imu_status.get('heading_deg')
             # Prepare concise IMU info (heading → target)
             if imu_status and imu_status.get('is_available'):
                 imu_info = f"IMU {imu_status['heading_deg']:.0f}°→{imu_status['target_heading_deg']:.0f}°"
@@ -908,6 +936,15 @@ def run() -> None:
                             "right_rpm": telem.get("vesc_right_rpm"),
                             "speed_mps": round(telem.get("vesc_actual_speed_mps"), 3)
                                          if telem.get("vesc_actual_speed_mps") is not None else None,
+                            "rx_frame_count": telem.get("vesc_rx_frame_count"),
+                            "rx_parse_error_count": telem.get("vesc_rx_parse_error_count"),
+                            "rx_recv_error_count": telem.get("vesc_rx_recv_error_count"),
+                            "rx_reopen_count": telem.get("vesc_rx_reopen_count"),
+                            "rx_last_frame_age_s": (
+                                round(telem.get("vesc_rx_last_frame_age_s"), 3)
+                                if isinstance(telem.get("vesc_rx_last_frame_age_s"), (int, float))
+                                else None
+                            ),
                         },
                         "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
                         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
@@ -984,6 +1021,9 @@ def run() -> None:
         try:
             if motor_driver is not None:
                 motor_driver.stop()
+                shutdown_fn = getattr(motor_driver, "shutdown", None)
+                if callable(shutdown_fn):
+                    shutdown_fn()
         except Exception:
             pass
         try:

@@ -23,6 +23,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from pi_app.control.drive_math import skid_steer_mix
+
 EARTH_RADIUS_M = 6_371_000.0
 
 
@@ -124,18 +126,15 @@ def mix_to_bytes(
     """
     left_raw = max(-1.0, min(1.0, v_cmd + yaw_cmd))
     right_raw = max(-1.0, min(1.0, v_cmd - yaw_cmd))
-
-    left_byte = int(round(neutral + left_raw * half_range))
-    right_byte = int(round(neutral + right_raw * half_range))
-
-    if left_raw != 0.0 and abs(left_byte - neutral) < deadband_byte:
-        left_byte = neutral + deadband_byte * (1 if left_raw > 0 else -1)
-    if right_raw != 0.0 and abs(right_byte - neutral) < deadband_byte:
-        right_byte = neutral + deadband_byte * (1 if right_raw > 0 else -1)
-
-    return (
-        max(0, min(255, left_byte)),
-        max(0, min(255, right_byte)),
+    speed_offset = (left_raw + right_raw) * 0.5 * half_range
+    yaw_offset = (left_raw - right_raw) * 0.5 * half_range
+    return skid_steer_mix(
+        speed_offset,
+        yaw_offset,
+        neutral=neutral,
+        min_output=0,
+        max_output=255,
+        deadband_byte=deadband_byte,
     )
 
 

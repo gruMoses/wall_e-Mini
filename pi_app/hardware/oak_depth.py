@@ -338,6 +338,7 @@ class OakDepthReader:
             det_err = self._last_detection_error_msg
             rgb_err = self._last_rgb_error_msg
             imu_err = self._last_imu_error_msg
+            rgb_expected = bool(self._rgb_poll_enabled or self._rgb_always_poll)
 
         loop_age_s = (now - loop_ts) if loop_ts > 0.0 else float("inf")
         depth_age_s = (now - depth_ts) if depth_ts > 0.0 else float("inf")
@@ -350,7 +351,10 @@ class OakDepthReader:
         loop_stale = (not running) or (loop_age_s > loop_stale_s)
         depth_stale = depth_recv_age_s > depth_stale_s
         det_stale = det_age_s > det_stale_s
-        rgb_stale = rgb_age_s > rgb_stale_s
+        rgb_stale = rgb_expected and (rgb_age_s > rgb_stale_s)
+        # "Critical" stale means obstacle/depth safety path is unhealthy.
+        # Detection/RGB stalls are degraded but should not hard-mark pipeline stale.
+        critical_stale = loop_stale or depth_stale
 
         return {
             "pipeline_running": running,
@@ -367,7 +371,9 @@ class OakDepthReader:
             "depth_stale": depth_stale,
             "detections_stale": det_stale,
             "rgb_stale": rgb_stale,
+            "rgb_expected": rgb_expected,
             "pipeline_dead": self._pipeline_dead,
+            "critical_stale": critical_stale,
             "is_stale": loop_stale or depth_stale or det_stale or rgb_stale,
             "last_pipeline_error": pipe_err or None,
             "last_depth_error": depth_err or None,
@@ -822,6 +828,16 @@ class OakDepthReader:
             if frame is None:
                 return
 
+            # In gesture mode, hand tracking consumes the same RGB queue used for
+            # diagnostics/preview. Update RGB liveness here so camera health and
+            # web RGB stream do not falsely age out when _poll_rgb sees no frame.
+            now = time.monotonic()
+            with self._lock:
+                self._rgb_state.frame = frame
+                self._rgb_state.timestamp = now
+                self._last_rgb_poll_ts = now
+                self._last_rgb_error_msg = ""
+
             rgb_frame = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
             hands = self._ensure_mp_hands()
             results = hands.process(rgb_frame)
@@ -842,7 +858,9 @@ class OakDepthReader:
                 self._hand_state.hand_data = hd
                 self._hand_state.timestamp = time.monotonic()
 
-        except Exception:
+        except Exception as e:
+            with self._lock:
+                self._last_rgb_error_msg = self._format_err("poll_hand_rgb", e)
             logger.warning("Hand poll error", exc_info=True)
 
     # -- Depth / detection / RGB / IMU polling --------------------------------

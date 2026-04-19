@@ -17,7 +17,7 @@ from pi_app.control.mapping import (
     CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT,
 )
 from pi_app.control.safety import update_safety, SafetyState, SafetyParams, SafetyEvent
-from pi_app.control.state import DriveCommand
+from pi_app.control.state import DriveCommand, AutonomyCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
 from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
 from pi_app.control.follow_me import FollowMeController, PersonDetection
@@ -134,6 +134,7 @@ class Controller:
         self._was_moving_straight = False
         self._straight_latched = False
         self._straight_disengage_deadline = 0.0
+        self._straight_target_true_heading: Optional[float] = None
 
         # Obstacle avoidance, Follow Me, Waypoint Nav, and Gesture control
         self._obstacle_avoidance = obstacle_avoidance
@@ -171,6 +172,11 @@ class Controller:
         self._actual_left_rpm: Optional[int] = None
         self._actual_right_rpm: Optional[int] = None
         self._actual_speed_mps: Optional[float] = None
+        self._vesc_rx_frame_count: int = 0
+        self._vesc_rx_parse_error_count: int = 0
+        self._vesc_rx_recv_error_count: int = 0
+        self._vesc_rx_reopen_count: int = 0
+        self._vesc_rx_last_frame_age_s: Optional[float] = None
 
     def _reset_imu_timestamp(self, now: float) -> None:
         """Reset the monotonic timestamp used to throttle IMU updates.
@@ -205,9 +211,17 @@ class Controller:
         """
         self._charger_inhibit = inhibit
 
+    def _follow_me_target_present(self) -> bool:
+        """True when a Follow Me target candidate is currently visible."""
+        return bool(self._person_detections)
+
     def activate_follow_me(self) -> bool:
         """Enter FOLLOW_ME mode from web UI. Returns True if activated."""
-        if self._follow_me is not None and self._safety_state.is_armed:
+        if (
+            self._follow_me is not None
+            and self._safety_state.is_armed
+            and self._follow_me_target_present()
+        ):
             self._mode = "FOLLOW_ME"
             self._safety_state.set_follow_me_active(True)
             return True
@@ -265,6 +279,7 @@ class Controller:
         self._slew_last_update = now_s
         self._slew_initialized = False
         self._slew_seen_non_neutral = False
+        self._straight_target_true_heading = None
 
     @staticmethod
     def _slew_toward_target(
@@ -297,6 +312,120 @@ class Controller:
             return float(slewc.waypoint_nav_accel_bps), float(slewc.waypoint_nav_decel_bps)
         return float(slewc.manual_accel_bps), float(slewc.manual_decel_bps)
 
+    def _compute_waypoint_autonomy_command(self, telemetry: dict) -> tuple[AutonomyCommand, bool, bool]:
+        left = right = self.NEUTRAL
+        wp_pivot_active = False
+        wp_in_align = False
+        nav_state = NavState.IDLE
+        if self._waypoint_nav is None:
+            return (
+                AutonomyCommand(
+                    source="WAYPOINT_NAV",
+                    left_byte=left,
+                    right_byte=right,
+                    steering_input=0.0,
+                    nav_state=nav_state.value,
+                ),
+                wp_pivot_active,
+                wp_in_align,
+            )
+
+        gps = self._gps_reading
+        if gps is not None:
+            gps_age = time.monotonic() - gps.timestamp
+            raw_heading = None
+            if self._imu_compensator is not None:
+                try:
+                    raw_heading = self._imu_compensator.get_heading_deg()
+                except Exception:
+                    raw_heading = None
+            if raw_heading is not None and self._gps_heading_aligner is not None:
+                corrected_heading = self._gps_heading_aligner.correct(raw_heading)
+            else:
+                corrected_heading = raw_heading
+            v_cmd, yaw_cmd, nav_state = self._waypoint_nav.compute(
+                gps.latitude, gps.longitude, gps.fix_quality, gps_age,
+                current_heading_deg=corrected_heading,
+            )
+            # Keep target heading in sync so DRIVE transition is seamless.
+            if self._imu_compensator is not None and not self._waypoint_nav.completed:
+                nav_st = self._waypoint_nav.get_status()
+                if self._gps_heading_aligner is not None:
+                    imu_target = self._gps_heading_aligner.imu_target_heading(nav_st.bearing_deg)
+                else:
+                    imu_target = nav_st.bearing_deg
+                self._imu_compensator.set_target_heading(imu_target)
+            deadband = int(getattr(config.waypoint_nav, "motor_deadband_byte", 12))
+            left, right = mix_to_bytes(v_cmd, yaw_cmd, deadband_byte=deadband,
+                                       neutral=CENTER_OUTPUT_VALUE, half_range=127)
+            if nav_state == NavState.ALIGN:
+                wp_in_align = True
+                wp_pivot_active = True
+
+        nav_st = self._waypoint_nav.get_status()
+        telemetry["wp_index"] = nav_st.waypoint_index
+        telemetry["wp_total"] = nav_st.waypoint_total
+        telemetry["wp_name"] = nav_st.waypoint_name
+        telemetry["wp_bearing_deg"] = nav_st.bearing_deg
+        telemetry["wp_distance_m"] = nav_st.distance_m
+        telemetry["wp_heading_error_deg"] = nav_st.heading_error_deg
+        telemetry["wp_completed"] = nav_st.completed
+        telemetry["nav_state"] = nav_st.state
+        telemetry["wp_v_cmd"] = nav_st.v_cmd
+        telemetry["wp_yaw_cmd"] = nav_st.yaw_cmd
+        if nav_st.completed:
+            self._mode = "MANUAL"
+
+        return (
+            AutonomyCommand(
+                source="WAYPOINT_NAV",
+                left_byte=left,
+                right_byte=right,
+                steering_input=0.0,
+                nav_state=nav_st.state,
+            ),
+            wp_pivot_active,
+            wp_in_align,
+        )
+
+    def _compute_follow_me_autonomy_command(self, telemetry: dict, mono_now: float) -> AutonomyCommand:
+        left = right = self.NEUTRAL
+        heading = 0.0
+        if self._imu_compensator is not None:
+            try:
+                heading = self._imu_compensator.get_heading_deg()
+                self._last_imu_update = mono_now
+            except Exception:
+                pass
+        if self._follow_me is not None:
+            self._follow_me.update_pose(
+                heading, self._slew_last_left, self._slew_last_right, mono_now
+            )
+            if self._gps_reading is not None:
+                self._follow_me.update_gps(
+                    self._gps_reading.latitude,
+                    self._gps_reading.longitude,
+                    self._gps_reading.fix_quality,
+                    self._gps_reading.timestamp,
+                )
+            self._follow_me.update_telemetry(
+                left_rpm=self._actual_left_rpm,
+                right_rpm=self._actual_right_rpm,
+                actual_speed_mps=self._actual_speed_mps,
+            )
+            detections = self._person_detections or []
+            left, right = self._follow_me.compute(detections)
+            fm_status = self._follow_me.get_status(now=mono_now)
+            fm_status["follow_me_num_persons"] = len(detections)
+            telemetry.update(fm_status)
+        steering_input = self._bytes_to_steering_input(left, right)
+        return AutonomyCommand(
+            source="FOLLOW_ME",
+            left_byte=left,
+            right_byte=right,
+            steering_input=steering_input,
+        )
+
     def process(
         self,
         rc: RCInputs,
@@ -314,6 +443,11 @@ class Controller:
                 _telem = self._motor.get_telemetry()
             except Exception:
                 _telem = None
+            try:
+                _rx_health_fn = getattr(self._motor, "get_rx_health", None)
+                _rx_health = _rx_health_fn() if callable(_rx_health_fn) else None
+            except Exception:
+                _rx_health = None
             self._telem_last_poll = mono_now
             if _telem is not None:
                 self._telem_stale_warned = False
@@ -327,10 +461,25 @@ class Controller:
                     _avg_erpm = sum(_valid_rpms) / len(_valid_rpms)
                     _poles = int(getattr(_vesc_cfg, "motor_poles", 14))
                     _radius = float(getattr(_vesc_cfg, "wheel_radius_m", 0.085))
-                    _mech_rpm = _avg_erpm / max(_poles // 2, 1)
+                    _gear = float(getattr(_vesc_cfg, "drive_gear_ratio", 1.0))
+                    _pole_pairs = max(_poles // 2, 1)
+                    _mech_rpm = _avg_erpm / max(_pole_pairs * max(_gear, 1e-6), 1e-6)
                     self._actual_speed_mps = (_mech_rpm / 60.0) * 2.0 * math.pi * _radius
                 else:
                     self._actual_speed_mps = None
+                self._vesc_rx_frame_count = int(getattr(_telem, "can_rx_frame_count", self._vesc_rx_frame_count))
+                self._vesc_rx_parse_error_count = int(
+                    getattr(_telem, "can_rx_parse_error_count", self._vesc_rx_parse_error_count)
+                )
+                self._vesc_rx_recv_error_count = int(
+                    getattr(_telem, "can_rx_recv_error_count", self._vesc_rx_recv_error_count)
+                )
+                self._vesc_rx_reopen_count = int(
+                    getattr(_telem, "can_rx_reopen_count", self._vesc_rx_reopen_count)
+                )
+                self._vesc_rx_last_frame_age_s = getattr(
+                    _telem, "can_rx_last_frame_age_s", self._vesc_rx_last_frame_age_s
+                )
             elif (self._telem_last_valid > 0.0
                   and (mono_now - self._telem_last_valid) > 0.5
                   and not self._telem_stale_warned):
@@ -341,6 +490,19 @@ class Controller:
                 self._actual_left_rpm = None
                 self._actual_right_rpm = None
                 self._actual_speed_mps = None
+            if isinstance(_rx_health, dict):
+                self._vesc_rx_frame_count = int(_rx_health.get("rx_frame_count", self._vesc_rx_frame_count))
+                self._vesc_rx_parse_error_count = int(
+                    _rx_health.get("rx_parse_error_count", self._vesc_rx_parse_error_count)
+                )
+                self._vesc_rx_recv_error_count = int(
+                    _rx_health.get("rx_recv_error_count", self._vesc_rx_recv_error_count)
+                )
+                self._vesc_rx_reopen_count = int(_rx_health.get("rx_reopen_count", self._vesc_rx_reopen_count))
+                _rx_age = _rx_health.get("rx_last_frame_age_s", self._vesc_rx_last_frame_age_s)
+                self._vesc_rx_last_frame_age_s = (
+                    float(_rx_age) if isinstance(_rx_age, (int, float)) else None
+                )
 
         # ── GPS heading aligner: runs every tick in every mode ──────────────
         # The aligner self-gates on fix quality, displacement, and speed, so
@@ -406,7 +568,14 @@ class Controller:
         # React to mode transitions from safety events
         for ev in events:
             if ev is SafetyEvent.FOLLOW_ME_ENTERED:
-                self._mode = "FOLLOW_ME"
+                if self._follow_me_target_present():
+                    self._mode = "FOLLOW_ME"
+                else:
+                    # New engagement rule: don't enter Follow Me unless a
+                    # target is already present.
+                    self._mode = "MANUAL"
+                    self._safety_state.set_follow_me_active(False)
+                    telemetry["follow_me_activation_blocked"] = "no_target"
             elif ev in (SafetyEvent.FOLLOW_ME_EXITED, SafetyEvent.EMERGENCY_TRIGGERED):
                 self._mode = "MANUAL"
                 if self._gesture is not None:
@@ -420,7 +589,11 @@ class Controller:
         if self._gesture is not None:
             gesture_event = self._gesture.update(self._hand_data)
             if gesture_event is GestureEvent.ACTIVATE:
-                if self._follow_me is not None and self._safety_state.is_armed:
+                if (
+                    self._follow_me is not None
+                    and self._safety_state.is_armed
+                    and self._follow_me_target_present()
+                ):
                     self._mode = "FOLLOW_ME"
                     self._safety_state.set_follow_me_active(True)
                 else:
@@ -445,91 +618,17 @@ class Controller:
 
         wp_pivot_active = False
         wp_in_align = False
+        autonomy_cmd: AutonomyCommand | None = None
         if self._mode == "WAYPOINT_NAV" and self._waypoint_nav is not None:
-            gps = self._gps_reading
-            nav_state = NavState.IDLE
-            if gps is not None:
-                gps_age = time.monotonic() - gps.timestamp
-                raw_heading = None
-                if self._imu_compensator is not None:
-                    try:
-                        raw_heading = self._imu_compensator.get_heading_deg()
-                    except Exception:
-                        raw_heading = None
-                # Feed waypoint_nav heading in true-north frame when the aligner
-                # can correct; otherwise fall back to raw IMU heading.
-                if raw_heading is not None and self._gps_heading_aligner is not None:
-                    corrected_heading = self._gps_heading_aligner.correct(raw_heading)
-                else:
-                    corrected_heading = raw_heading
-                v_cmd, yaw_cmd, nav_state = self._waypoint_nav.compute(
-                    gps.latitude, gps.longitude, gps.fix_quality, gps_age,
-                    current_heading_deg=corrected_heading,
-                )
-                # Keep the IMU compensator's target heading up-to-date so the
-                # DRIVE-state PID is ready when we transition out of ALIGN.
-                # PID consumes raw IMU heading; aligner converts the true-frame
-                # bearing into raw-IMU frame.
-                if self._imu_compensator is not None and not self._waypoint_nav.completed:
-                    nav_st = self._waypoint_nav.get_status()
-                    if self._gps_heading_aligner is not None:
-                        imu_target = self._gps_heading_aligner.imu_target_heading(nav_st.bearing_deg)
-                    else:
-                        imu_target = nav_st.bearing_deg
-                    self._imu_compensator.set_target_heading(imu_target)
-                deadband = int(getattr(config.waypoint_nav, "motor_deadband_byte", 12))
-                left, right = mix_to_bytes(v_cmd, yaw_cmd, deadband_byte=deadband,
-                                           neutral=CENTER_OUTPUT_VALUE, half_range=127)
-                if nav_state == NavState.ALIGN:
-                    wp_in_align = True
-                    wp_pivot_active = True
-            else:
-                left = right = self.NEUTRAL
-            steering_input = 0.0
-            nav_st = self._waypoint_nav.get_status()
-            telemetry["wp_index"] = nav_st.waypoint_index
-            telemetry["wp_total"] = nav_st.waypoint_total
-            telemetry["wp_name"] = nav_st.waypoint_name
-            telemetry["wp_bearing_deg"] = nav_st.bearing_deg
-            telemetry["wp_distance_m"] = nav_st.distance_m
-            telemetry["wp_heading_error_deg"] = nav_st.heading_error_deg
-            telemetry["wp_completed"] = nav_st.completed
-            telemetry["nav_state"] = nav_st.state
-            telemetry["wp_v_cmd"] = nav_st.v_cmd
-            telemetry["wp_yaw_cmd"] = nav_st.yaw_cmd
-            if nav_st.completed:
-                self._mode = "MANUAL"
+            autonomy_cmd, wp_pivot_active, wp_in_align = self._compute_waypoint_autonomy_command(telemetry)
+            left = autonomy_cmd.left_byte
+            right = autonomy_cmd.right_byte
+            steering_input = autonomy_cmd.steering_input
         elif self._mode == "FOLLOW_ME" and self._follow_me is not None:
-            heading = 0.0
-            if self._imu_compensator is not None:
-                try:
-                    heading = self._imu_compensator.get_heading_deg()
-                    self._last_imu_update = mono_now
-                except Exception:
-                    pass
-            self._follow_me.update_pose(
-                heading, self._slew_last_left, self._slew_last_right, mono_now
-            )
-            # Feed GPS position for GPS-based trail odometry
-            if self._gps_reading is not None:
-                self._follow_me.update_gps(
-                    self._gps_reading.latitude,
-                    self._gps_reading.longitude,
-                    self._gps_reading.fix_quality,
-                    self._gps_reading.timestamp,
-                )
-            # Feed VESC telemetry for closed-loop speed and slip detection
-            self._follow_me.update_telemetry(
-                left_rpm=self._actual_left_rpm,
-                right_rpm=self._actual_right_rpm,
-                actual_speed_mps=self._actual_speed_mps,
-            )
-            detections = self._person_detections or []
-            left, right = self._follow_me.compute(detections)
-            steering_input = self._bytes_to_steering_input(left, right)
-            fm_status = self._follow_me.get_status()
-            fm_status["follow_me_num_persons"] = len(detections)
-            telemetry.update(fm_status)
+            autonomy_cmd = self._compute_follow_me_autonomy_command(telemetry, mono_now)
+            left = autonomy_cmd.left_byte
+            right = autonomy_cmd.right_byte
+            steering_input = autonomy_cmd.steering_input
         elif bt_override_bytes is not None:
             left, right = bt_override_bytes
             steering_input = self._bytes_to_steering_input(left, right)
@@ -545,9 +644,18 @@ class Controller:
             right = map_pulse_to_byte_saturated(rc.ch2_us, f_full, r_full)
             steering_input = self._bytes_to_steering_input(left, right)
 
+        telemetry["autonomy_source"] = autonomy_cmd.source if autonomy_cmd is not None else "MANUAL_OR_BT"
+
         # Apply IMU steering compensation — skip in Follow Me mode where the
         # controller intentionally changes heading to track a person.
         if self._mode == "FOLLOW_ME":
+            imu_correction = None
+            if self._imu_compensator is not None:
+                self._imu_compensator.reset_target_heading()
+        elif self._mode == "MANUAL" and bt_override_bytes is not None:
+            # Web/BT teleop should follow operator wheel commands exactly.
+            # Disable IMU auto-steer in this path to prevent left/right bias
+            # from heading-hold corrections during straight W/S holds.
             imu_correction = None
             if self._imu_compensator is not None:
                 self._imu_compensator.reset_target_heading()
@@ -618,6 +726,12 @@ class Controller:
             max_abs = max(abs(d1), abs(d2), 1)
             equal_rel_ok = (abs_diff / max_abs) <= rel_pct
         equal_ok = equal_abs_ok or (moving_ok and equal_rel_ok)
+        # Manual/BT: low steering intent should still count as straight command
+        # even when raw track values are slightly mismatched.
+        if self._mode == "MANUAL":
+            hold_steer = float(getattr(config.imu_steering, "manual_hold_max_steering", 0.18))
+            if moving_ok and abs(steering_input) <= hold_steer:
+                equal_ok = True
         now_s = mono_now
         is_moving_straight = False
         if moving_ok and equal_ok:
@@ -629,11 +743,36 @@ class Controller:
                 is_moving_straight = True
             else:
                 self._straight_latched = False
-        if self._imu_compensator is not None and is_moving_straight and not self._was_moving_straight:
+        if self._imu_compensator is not None and is_moving_straight:
             try:
-                self._imu_compensator.reset_target_heading()
+                imu_state = self._imu_compensator.get_status()
+                raw_heading = float(imu_state.heading_deg)
+                if self._gps_heading_aligner is not None and self._gps_heading_aligner.locked:
+                    # Keep a true-frame target while driving straight. As GPS
+                    # heading offset refines, remap target back into raw-IMU frame
+                    # so heading correction stays seamless.
+                    # In MANUAL BT/web teleop, prioritize operator intent and
+                    # avoid live GPS-offset retargeting, which can inject turns
+                    # during straight "W" holds if offset estimation jumps.
+                    allow_true_frame_retarget = not (
+                        self._mode == "MANUAL" and bt_override_bytes is not None
+                    )
+                    if allow_true_frame_retarget:
+                        if (not self._was_moving_straight) or self._straight_target_true_heading is None:
+                            self._straight_target_true_heading = self._gps_heading_aligner.correct(raw_heading)
+                        raw_target = self._gps_heading_aligner.imu_target_heading(self._straight_target_true_heading)
+                        self._imu_compensator.set_target_heading(raw_target, reset_integral_jump_deg=180.0)
+                    elif not self._was_moving_straight:
+                        # Lock heading in raw IMU frame at straight-drive entry.
+                        self._straight_target_true_heading = None
+                        self._imu_compensator.set_target_heading(raw_heading, reset_integral_jump_deg=180.0)
+                elif not self._was_moving_straight:
+                    self._straight_target_true_heading = None
+                    self._imu_compensator.reset_target_heading()
             except Exception:
                 pass
+        elif not is_moving_straight:
+            self._straight_target_true_heading = None
         self._was_moving_straight = is_moving_straight
 
         # Apply correction to motor outputs continuously with steering-scaled blending
@@ -648,6 +787,10 @@ class Controller:
                 blend = max(0.0, 1.0 - (si / zero_at))
             telemetry["correction_blend"] = blend
             corr = imu_correction * blend
+
+            if self._mode == "MANUAL" and bt_override_bytes is not None:
+                bt_max_corr = float(getattr(config.imu_steering, "manual_bt_max_correction", 12.0))
+                corr = max(-bt_max_corr, min(bt_max_corr, corr))
 
             # Speed-dependent gain scheduling: attenuate correction at high
             # wheel speed where each byte produces more turning force.
@@ -751,7 +894,25 @@ class Controller:
 
             if slewc_enabled:
                 bypass_on_hard_stop = bool(getattr(slewc, "bypass_on_hard_stop", True))
-                if hard_stop_active and bypass_on_hard_stop:
+                # Web BT override: neutral release should be immediate so a
+                # brief turn command does not keep turning from slew inertia.
+                bt_neutral = (
+                    bt_override_bytes is not None
+                    and left_in == CENTER_OUTPUT_VALUE
+                    and right_in == CENTER_OUTPUT_VALUE
+                )
+                if bt_neutral:
+                    slew_bypassed = True
+                    left = left_in
+                    right = right_in
+                    self._slew_initialized = True
+                    self._slew_seen_non_neutral = (
+                        left != CENTER_OUTPUT_VALUE or right != CENTER_OUTPUT_VALUE
+                    )
+                    self._slew_last_update = mono_now
+                    self._slew_last_left = left
+                    self._slew_last_right = right
+                elif hard_stop_active and bypass_on_hard_stop:
                     slew_bypassed = True
                     left = left_in
                     right = right_in
@@ -833,6 +994,11 @@ class Controller:
         telemetry["vesc_left_rpm"] = self._actual_left_rpm
         telemetry["vesc_right_rpm"] = self._actual_right_rpm
         telemetry["vesc_actual_speed_mps"] = self._actual_speed_mps
+        telemetry["vesc_rx_frame_count"] = self._vesc_rx_frame_count
+        telemetry["vesc_rx_parse_error_count"] = self._vesc_rx_parse_error_count
+        telemetry["vesc_rx_recv_error_count"] = self._vesc_rx_recv_error_count
+        telemetry["vesc_rx_reopen_count"] = self._vesc_rx_reopen_count
+        telemetry["vesc_rx_last_frame_age_s"] = self._vesc_rx_last_frame_age_s
         if self._gps_heading_aligner is not None:
             telemetry["heading_offset_deg"] = self._gps_heading_aligner.offset_deg
             telemetry["heading_offset_locked"] = self._gps_heading_aligner.locked

@@ -33,6 +33,7 @@ class _FakeBus:
     def __init__(self, *args, **kwargs):
         self._queue: list[_FakeMessage] = []
         self.sent: list[_FakeMessage] = []
+        self.closed = False
 
     def recv(self, timeout: float = 0.1) -> Optional[_FakeMessage]:
         if self._queue:
@@ -46,6 +47,9 @@ class _FakeBus:
     def push(self, msg: _FakeMessage) -> None:
         """Test helper: enqueue a frame for the RX thread to consume."""
         self._queue.append(msg)
+
+    def shutdown(self) -> None:
+        self.closed = True
 
 
 fake_can = types.ModuleType("can")
@@ -318,7 +322,7 @@ class TestRxThread(unittest.TestCase):
             _inject(d, _status_frame(2, 1500, 4.0, 0.3))
             self.assertEqual(d.get_rpm("left"), 1500)
         finally:
-            d.stop()
+            d.shutdown()
 
     def test_rx_thread_parses_status5_voltage(self):
         d = self._started_driver()
@@ -326,7 +330,7 @@ class TestRxThread(unittest.TestCase):
             _inject(d, _status5_frame(2, 24.2))
             self.assertAlmostEqual(d.get_voltage(), 24.2, places=1)
         finally:
-            d.stop()
+            d.shutdown()
 
     def test_rx_thread_ignores_unknown_vesc_id(self):
         d = self._started_driver()
@@ -335,7 +339,7 @@ class TestRxThread(unittest.TestCase):
             self.assertIsNone(d.get_rpm("left"))
             self.assertIsNone(d.get_rpm("right"))
         finally:
-            d.stop()
+            d.shutdown()
 
     def test_rx_thread_ignores_non_extended_frame(self):
         d = self._started_driver()
@@ -348,11 +352,14 @@ class TestRxThread(unittest.TestCase):
             _inject(d, frame)
             self.assertIsNone(d.get_rpm("left"))
         finally:
-            d.stop()
+            d.shutdown()
 
     def test_stop_joins_thread(self):
         d = self._started_driver()
         d.stop()
+        self.assertIsNotNone(d._rx_thread)
+        self.assertTrue(d._rx_thread.is_alive())
+        d.shutdown()
         self.assertIsNone(d._rx_thread)
 
     def test_multiple_motors_independent(self):
@@ -365,7 +372,37 @@ class TestRxThread(unittest.TestCase):
             self.assertEqual(d.get_rpm("left"), 1000)
             self.assertEqual(d.get_rpm("right"), -500)
         finally:
-            d.stop()
+            d.shutdown()
+
+    def test_rx_health_counts_frames(self):
+        d = self._started_driver()
+        try:
+            _inject(d, _status_frame(2, 1000, 2.0, 0.1), _status_frame(1, 900, 2.0, 0.1))
+            h = d.get_rx_health()
+            self.assertGreaterEqual(h["rx_frame_count"], 2)
+            self.assertIsInstance(h["rx_last_frame_age_s"], float)
+            self.assertEqual(h["rx_parse_error_count"], 0)
+            self.assertEqual(h["rx_recv_error_count"], 0)
+        finally:
+            d.shutdown()
+
+    def test_rx_reopens_bus_on_recv_error(self):
+        d = self._started_driver()
+        try:
+            original_bus = d._bus
+            self.assertIsNotNone(original_bus)
+
+            def _boom(timeout=0.1):
+                raise RuntimeError("forced recv failure")
+
+            d._bus.recv = _boom  # type: ignore[method-assign]
+            time.sleep(0.2)
+            h = d.get_rx_health()
+            self.assertGreaterEqual(h["rx_recv_error_count"], 1)
+            self.assertGreaterEqual(h["rx_reopen_count"], 1)
+            self.assertIsNot(d._bus, original_bus)
+        finally:
+            d.shutdown()
 
     def test_voltage_shutdown_fires_via_rx_thread(self):
         d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg(

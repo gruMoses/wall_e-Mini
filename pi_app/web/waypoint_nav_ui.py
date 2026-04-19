@@ -116,6 +116,25 @@ _NAV_HTML = r"""<!DOCTYPE html>
   .sheet-status .mode-label { font-weight: 700; color: #7aa2f7; }
   .sheet-status .wp-count { margin-left: auto; }
 
+  .mission-strip { display: flex; gap: 6px; padding: 0 12px 8px; flex-wrap: wrap; }
+  .mission-chip { border: 1px solid #2a2d37; border-radius: 999px; padding: 3px 8px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.4px; color: #787c99;
+    background: #0f1117; text-transform: uppercase; }
+  .mission-chip.ok { color: #9ece6a; border-color: #9ece6a; }
+  .mission-chip.warn { color: #e0af68; border-color: #e0af68; }
+  .mission-chip.err { color: #f7768e; border-color: #f7768e; }
+  .mission-timeline { padding: 0 12px 8px; display: flex; align-items: center; gap: 4px;
+    overflow-x: auto; scrollbar-width: thin; }
+  .timeline-node { min-width: 18px; height: 18px; border-radius: 999px;
+    border: 1px solid #2a2d37; background: #0f1117; color: #787c99;
+    font-size: 10px; font-weight: 700; display: inline-flex; align-items: center;
+    justify-content: center; }
+  .timeline-node.done { border-color: #9ece6a; color: #9ece6a; }
+  .timeline-node.active { border-color: #ff9e64; color: #ff9e64; background: rgba(255,158,100,0.12); }
+  .timeline-node.pending { border-color: #3b3f54; color: #565a6e; }
+  .timeline-link { min-width: 14px; height: 2px; background: #3b3f54; border-radius: 1px; }
+  .timeline-link.done { background: #9ece6a; }
+
   .sheet-body { padding: 0 12px 12px; overflow-y: auto; flex: 1;
     -webkit-overflow-scrolling: touch; display: none; }
   .bottom-sheet.half .sheet-body,
@@ -127,14 +146,23 @@ _NAV_HTML = r"""<!DOCTYPE html>
   /* ── Waypoint List ── */
   .wp-list { list-style: none; margin: 0 0 10px; }
   .wp-list li { display: flex; align-items: center; gap: 8px;
-    padding: 10px 8px; background: #0f1117; border-radius: 8px;
+    padding: 10px 8px; background: #0f1117; border: 1px solid #252a36; border-radius: 8px;
     margin-bottom: 4px; font-size: 13px; touch-action: manipulation; }
+  .wp-main { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .wp-main-top { display: flex; align-items: center; gap: 8px; }
+  .wp-main-bottom { display: flex; align-items: center; gap: 8px; color: #565a6e; font-size: 10px;
+    font-family: 'SF Mono', 'Fira Code', monospace; }
   .wp-list li .wp-num { width: 26px; height: 26px; border-radius: 50%;
     background: #7aa2f7; color: #0f1117; font-weight: 700; font-size: 12px;
     display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
   .wp-list li .wp-coords { flex: 1; color: #787c99; font-size: 11px;
     font-family: 'SF Mono', 'Fira Code', monospace; }
-  .wp-list li .wp-dist { color: #565a6e; font-size: 11px; white-space: nowrap; }
+  .wp-list li .wp-dist { color: #565a6e; font-size: 11px; white-space: nowrap; min-width: 48px; text-align: right; }
+  .wp-list li .wp-state { color: #787c99; border: 1px solid #2a2d37;
+    border-radius: 10px; font-size: 9px; font-weight: 700; letter-spacing: 0.3px;
+    padding: 2px 6px; text-transform: uppercase; }
+  .wp-list li .wp-state.active { color: #ff9e64; border-color: #ff9e64; }
+  .wp-list li .wp-state.done { color: #9ece6a; border-color: #9ece6a; }
   .wp-list li .wp-del { width: 28px; height: 28px; border: none;
     background: transparent; color: #f7768e; font-size: 16px; cursor: pointer;
     border-radius: 6px; display: flex; align-items: center; justify-content: center; }
@@ -142,8 +170,27 @@ _NAV_HTML = r"""<!DOCTYPE html>
   .wp-list li.completed .wp-num { background: #9ece6a; }
   .wp-list li.active .wp-num { background: #ff9e64;
     animation: pulse-wp 1.2s ease-in-out infinite; }
-  .wp-list li .wp-drag { cursor: grab; color: #565a6e; font-size: 16px;
-    padding: 0 2px; touch-action: none; user-select: none; }
+  .wp-list li .wp-drag { cursor: grab; color: #565a6e; font-size: 17px;
+    width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 6px; background: #171b24; border: 1px solid #2a2d37;
+    touch-action: none; user-select: none; }
+  .wp-list li .wp-drag:active { background: #222838; }
+  .wp-list li .wp-drag.disabled { opacity: 0.4; cursor: not-allowed; }
+  .wp-list li .wp-del[disabled] { opacity: 0.35; cursor: not-allowed; }
+  .wp-row-actions { display: inline-flex; align-items: center; gap: 6px; }
+  .wp-more { width: 24px; height: 24px; border-radius: 6px; border: 1px solid #2a2d37;
+    background: #171b24; color: #787c99; font-size: 14px; display: inline-flex;
+    align-items: center; justify-content: center; cursor: pointer; }
+  .wp-more:active { background: #222838; }
+  .wp-more[disabled] { opacity: 0.35; cursor: not-allowed; }
+  .wp-editor { margin-top: 6px; padding: 8px; border-radius: 8px; background: #131722;
+    border: 1px solid #2a2d37; display: grid; grid-template-columns: 1fr 70px; gap: 6px; }
+  .wp-editor input { height: 30px; border-radius: 6px; border: 1px solid #2a2d37;
+    background: #0f1117; color: #c0caf5; font-size: 11px; padding: 0 8px; }
+  .wp-editor label { font-size: 9px; color: #565a6e; text-transform: uppercase; letter-spacing: 0.3px; }
+  .wp-editor-actions { grid-column: 1 / -1; display: flex; gap: 6px; }
+  .wp-editor-actions button { height: 28px; border-radius: 6px; border: 1px solid #2a2d37;
+    background: #0f1117; color: #787c99; font-size: 10px; font-weight: 700; cursor: pointer; }
 
   @keyframes pulse-wp { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
 
@@ -159,6 +206,8 @@ _NAV_HTML = r"""<!DOCTYPE html>
   .btn-go.armed-required { background: #3b2020; color: #f7768e; }
   .btn-stop { background: #4a2222; color: #f7768e; display: none; }
   .btn-stop:active { background: #5a2a2a; }
+  .btn-pause { background: #2e2a1a; color: #e0af68; display: none; border: 1px solid #5a4a2a !important; }
+  .btn-resume { background: #1f3a2a; color: #9ece6a; display: none; border: 1px solid #2f5a3a !important; }
   .btn-skip { background: #1a1d27; color: #e0af68; border: 1px solid #2a2d37 !important; display: none; }
   .btn-clear { background: #1a1d27; color: #787c99; border: 1px solid #2a2d37 !important; }
 
@@ -184,6 +233,49 @@ _NAV_HTML = r"""<!DOCTYPE html>
   .setting-group input[type=range] { width: 100%; accent-color: #7aa2f7; }
   .setting-group .setting-val { font-size: 12px; color: #c0caf5;
     float: right; font-weight: 600; }
+  .validation-panel { border: 1px solid #2a2d37; background: #0f1117; border-radius: 10px;
+    padding: 8px; margin: 10px 0; }
+  .validation-title { font-size: 11px; color: #787c99; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
+  .validation-list { list-style: none; margin: 0; padding: 0; display: flex;
+    flex-direction: column; gap: 4px; }
+  .validation-list li { font-size: 11px; color: #787c99; }
+  .validation-list li.ok { color: #9ece6a; }
+  .validation-list li.warn { color: #e0af68; }
+  .validation-list li.err { color: #f7768e; }
+  .event-log { list-style: none; margin: 0; padding: 0; max-height: 120px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 4px; }
+  .event-log li { font-size: 11px; color: #787c99; border: 1px solid #252a36; border-radius: 6px;
+    background: #111722; padding: 4px 6px; display: flex; justify-content: space-between; gap: 8px; }
+  .event-log .t { color: #565a6e; min-width: 44px; text-align: right; }
+  .route-summary { border: 1px solid #2a2d37; background: #0f1117; border-radius: 10px;
+    padding: 8px; margin: 8px 0 10px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+  .route-metric { border: 1px solid #252a36; border-radius: 8px; padding: 6px; background: #141925; }
+  .route-metric .k { font-size: 9px; color: #565a6e; text-transform: uppercase; letter-spacing: 0.3px; }
+  .route-metric .v { font-size: 12px; font-weight: 700; color: #c0caf5; margin-top: 3px; }
+  .dryrun-row { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+  .dryrun-row input[type=range] { flex: 1; accent-color: #bb9af7; }
+  .dryrun-chip { border: 1px solid #2a2d37; border-radius: 999px; padding: 3px 8px;
+    font-size: 10px; color: #bb9af7; background: #111722; min-width: 78px; text-align: center; }
+
+  @media (min-width: 1100px) {
+    .bottom-sheet {
+      top: calc(env(safe-area-inset-top, 0px) + 56px);
+      left: auto;
+      right: 0;
+      bottom: 0;
+      width: min(430px, 36vw);
+      max-height: none;
+      border-radius: 0;
+      border-top: none;
+      border-left: 1px solid #2a2d37;
+      padding-bottom: 0;
+    }
+    .sheet-handle { display: none; }
+    .sheet-body { display: block !important; }
+    .sheet-settings { display: block; }
+  }
+  .wp-list li.selected { border-color: #7aa2f7; background: #121826; }
 
   /* ── Waypoint Markers (Leaflet divIcons) ── */
   .wp-marker { width: 32px; height: 32px; border-radius: 50%;
@@ -221,6 +313,18 @@ _NAV_HTML = r"""<!DOCTYPE html>
     pointer-events: none; }
   .toast.show { opacity: 1; }
 
+  .help-overlay { position: fixed; inset: 0; background: rgba(8,10,16,0.78); z-index: 1300;
+    display: none; align-items: center; justify-content: center; padding: 16px; }
+  .help-overlay.show { display: flex; }
+  .help-card { width: min(560px, 100%); background: #111521; border: 1px solid #2a2d37;
+    border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.45); padding: 12px; color: #c0caf5; }
+  .help-title { font-size: 13px; font-weight: 800; margin-bottom: 8px; color: #7aa2f7; }
+  .help-grid { display: grid; grid-template-columns: 130px 1fr; gap: 6px 10px; font-size: 12px; }
+  .help-grid kbd { display: inline-block; border: 1px solid #3b3f54; border-bottom-width: 2px;
+    border-radius: 6px; padding: 2px 6px; background: #0f1117; color: #9ece6a; font-size: 11px; }
+  .help-close { margin-top: 10px; width: 100%; height: 34px; border-radius: 8px; border: 1px solid #2a2d37;
+    background: #171b24; color: #c0caf5; cursor: pointer; }
+
   /* ── Nav Progress Line ── */
   .nav-progress-line { stroke: #ff9e64; stroke-width: 2; stroke-dasharray: 8 4; }
 
@@ -233,6 +337,7 @@ _NAV_HTML = r"""<!DOCTYPE html>
 <!-- Mode Toolbar -->
 <div class="toolbar">
   <a href="/" class="back-btn" title="Dashboard">&larr;</a>
+  <button class="back-btn" title="Help / Shortcuts" onclick="toggleHelp(true)">?</button>
   <button class="mode-btn active" data-mode="navigate" onclick="setMode('navigate')">
     <svg viewBox="0 0 24 24"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/></svg>
     Navigate
@@ -256,6 +361,21 @@ _NAV_HTML = r"""<!DOCTYPE html>
 
 <!-- Toast -->
 <div class="toast" id="toast"></div>
+<div class="help-overlay" id="helpOverlay" onclick="if(event.target===this)toggleHelp(false)">
+  <div class="help-card">
+    <div class="help-title">Navigation Shortcuts</div>
+    <div class="help-grid">
+      <div><kbd>Ctrl/Cmd + Z</kbd></div><div>Undo route edit</div>
+      <div><kbd>Ctrl/Cmd + Shift + Z</kbd></div><div>Redo route edit</div>
+      <div><kbd>Ctrl/Cmd + Y</kbd></div><div>Redo route edit</div>
+      <div><kbd>F</kbd></div><div>Fit map to route</div>
+      <div><kbd>C</kbd></div><div>Center on robot</div>
+      <div><kbd>?</kbd></div><div>Toggle this help panel</div>
+      <div><kbd>Esc</kbd></div><div>Close help panel</div>
+    </div>
+    <button class="help-close" onclick="toggleHelp(false)">Close</button>
+  </div>
+</div>
 
 <!-- Map -->
 <div id="map"></div>
@@ -268,6 +388,12 @@ _NAV_HTML = r"""<!DOCTYPE html>
     <span id="sheetNavStatus"></span>
     <span class="wp-count" id="wpCount">0 waypoints</span>
   </div>
+  <div class="mission-strip">
+    <span class="mission-chip" id="missionDirty">Saved</span>
+    <span class="mission-chip" id="missionGate">No Waypoints</span>
+    <span class="mission-chip" id="missionRun">Idle</span>
+  </div>
+  <div class="mission-timeline" id="missionTimeline"></div>
   <div class="sheet-body">
     <!-- Route save/load -->
     <div class="route-row" id="routeRow">
@@ -276,12 +402,22 @@ _NAV_HTML = r"""<!DOCTYPE html>
       <input type="text" id="routeName" placeholder="Route name…" />
       <button onclick="saveRoute()">Save</button>
     </div>
+    <div class="route-row">
+      <button onclick="exportRoute()">Export JSON</button>
+      <button onclick="triggerImportRoute()">Import JSON</button>
+      <input id="routeImportInput" type="file" accept="application/json,.json" style="display:none" onchange="importRouteFile(event)" />
+    </div>
 
     <!-- Waypoint list -->
     <ul class="wp-list" id="wpList"></ul>
 
     <!-- Path distance -->
     <div style="font-size:12px;color:#787c99;margin-bottom:8px;text-align:right" id="totalDist"></div>
+    <div class="route-summary" id="routeSummary">
+      <div class="route-metric"><div class="k">Waypoints</div><div class="v" id="metricWp">0</div></div>
+      <div class="route-metric"><div class="k">Distance</div><div class="v" id="metricDist">0 m</div></div>
+      <div class="route-metric"><div class="k">ETA</div><div class="v" id="metricEta">--</div></div>
+    </div>
 
     <!-- Actions -->
     <div class="action-row">
@@ -290,7 +426,35 @@ _NAV_HTML = r"""<!DOCTYPE html>
         HOLD TO GO
       </button>
       <button class="btn-stop" id="btnStop" onclick="stopNav()">STOP</button>
+      <button class="btn-pause" id="btnPause" onclick="pauseNav()">PAUSE</button>
+      <button class="btn-resume" id="btnResume" onclick="resumeNav()">RESUME</button>
       <button class="btn-skip" id="btnSkip" onclick="skipWp()">SKIP &raquo;</button>
+    </div>
+    <div class="action-row" style="margin-top:6px">
+      <button class="btn-clear" onclick="centerRobot()">Center Robot</button>
+      <button class="btn-clear" onclick="fitRoute()">Fit Route</button>
+    </div>
+    <div class="action-row" style="margin-top:6px">
+      <button class="btn-clear" onclick="focusActiveWaypoint()">Focus Active WP</button>
+      <button class="btn-clear" onclick="addRobotWaypoint()">Add Robot WP</button>
+    </div>
+    <div class="action-row" style="margin-top:6px">
+      <button class="btn-clear" id="btnDryRun" onclick="toggleDryRun()">Play Dry Run</button>
+    </div>
+    <div class="dryrun-row">
+      <span class="dryrun-chip" id="dryRunState">Dry Run: Off</span>
+      <input id="dryRunSlider" type="range" min="0" max="0" step="1" value="0" oninput="setDryRunIndex(parseInt(this.value,10), true)">
+    </div>
+    <div class="action-row" style="margin-top:6px">
+      <button class="btn-clear" id="btnUndo" onclick="undoRoute()">Undo</button>
+      <button class="btn-clear" id="btnRedo" onclick="redoRoute()">Redo</button>
+    </div>
+    <div class="action-row" style="margin-top:6px">
+      <button class="btn-clear" onclick="reverseRoute()">Reverse Route</button>
+    </div>
+    <div class="action-row" style="margin-top:6px">
+      <button class="btn-clear" onclick="cleanCloseWaypoints()">Clean Close</button>
+      <button class="btn-clear" onclick="simplifyRouteSpacing()">Simplify 1.5m</button>
     </div>
     <div class="action-row" style="margin-top:6px">
       <button class="btn-clear" onclick="clearAll()">Clear All</button>
@@ -298,9 +462,17 @@ _NAV_HTML = r"""<!DOCTYPE html>
 
     <!-- Settings (visible in full mode) -->
     <div class="sheet-settings">
+      <div class="validation-panel">
+        <div class="validation-title">Pre-run Validation</div>
+        <ul class="validation-list" id="validationList"></ul>
+      </div>
+      <div class="validation-panel">
+        <div class="validation-title">Mission Log</div>
+        <ul class="event-log" id="eventLog"></ul>
+      </div>
       <div class="setting-group">
         <label>Cruise Speed <span class="setting-val" id="speedVal">40</span></label>
-        <input type="range" id="speedSlider" min="10" max="80" value="40" oninput="document.getElementById('speedVal').textContent=this.value">
+        <input type="range" id="speedSlider" min="10" max="80" value="40" oninput="document.getElementById('speedVal').textContent=this.value; refreshRouteSummary()">
       </div>
       <div class="setting-group">
         <label>Arrival Radius <span class="setting-val" id="radiusVal">0.5 m</span></label>
@@ -334,8 +506,24 @@ let isArmed = false;
 let gpsFix = 0;
 let gpsSats = 0;
 let navWpIndex = 0, navWpTotal = 0;
+let navState = 'IDLE';
+let navHeadingErrorDeg = 0;
 let goTimer = null;
 let goStart = 0;
+let missionDirty = false;
+let insertGhosts = [];
+let lastListRenderMs = 0;
+let pausedMission = null;
+let expandedWpIdx = -1;
+let routeHistory = [];
+let routeFuture = [];
+let suspendRouteTracking = false;
+let selectedWpIdx = -1;
+let lastValidationWarnKey = '';
+let eventLog = [];
+let dryRunActiveIdx = -1;
+let dryRunTimer = null;
+let dryRunPlaying = false;
 
 // ════════════════════════════════════════════════════════════════════════════
 // Coordinate transforms (matching geo_transform.py logic)
@@ -377,6 +565,221 @@ function haversineM(lat1, lon1, lat2, lon2) {
 
 function fmtDist(m) {
   return m < 1 ? (m*100).toFixed(0) + ' cm' : m.toFixed(1) + ' m';
+}
+
+function setMissionDirty(dirty) {
+  missionDirty = !!dirty;
+  if (missionDirty) {
+    pausedMission = null;
+    stopDryRun(false);
+  }
+  updateMissionStrip();
+}
+
+function toggleHelp(show) {
+  const ov = document.getElementById('helpOverlay');
+  if (!ov) return;
+  const next = (show === undefined) ? !ov.classList.contains('show') : !!show;
+  ov.classList.toggle('show', next);
+}
+
+function getRouteSnapshot() {
+  return waypoints.map(wp => ({
+    px: wp.px,
+    py: wp.py,
+    lat: wp.lat,
+    lon: wp.lon,
+    name: wp.name || '',
+    holdS: Number.isFinite(wp.holdS) ? wp.holdS : 0,
+  }));
+}
+
+function updateUndoRedoButtons() {
+  const u = document.getElementById('btnUndo');
+  const r = document.getElementById('btnRedo');
+  if (!u || !r) return;
+  u.disabled = routeHistory.length === 0 || isNavigating;
+  r.disabled = routeFuture.length === 0 || isNavigating;
+}
+
+function pushUndoState() {
+  if (suspendRouteTracking) return;
+  routeHistory.push(getRouteSnapshot());
+  if (routeHistory.length > 40) routeHistory.shift();
+  routeFuture = [];
+  updateUndoRedoButtons();
+}
+
+function restoreRouteSnapshot(snapshot, markDirty=true) {
+  suspendRouteTracking = true;
+  waypoints.forEach(wp => map.removeLayer(wp.marker));
+  waypoints = [];
+  distLabels.forEach(l => map.removeLayer(l));
+  distLabels = [];
+  (snapshot || []).forEach(wp => addWaypoint(wp.px, wp.py, {name: wp.name, holdS: wp.holdS}));
+  suspendRouteTracking = false;
+  expandedWpIdx = -1;
+  selectedWpIdx = -1;
+  setMissionDirty(!!markDirty);
+  updatePolyline();
+  updateWpList();
+  updateUndoRedoButtons();
+}
+
+function undoRoute() {
+  if (isNavigating) return;
+  if (routeHistory.length === 0) return;
+  routeFuture.push(getRouteSnapshot());
+  const prev = routeHistory.pop();
+  restoreRouteSnapshot(prev, true);
+}
+
+function redoRoute() {
+  if (isNavigating) return;
+  if (routeFuture.length === 0) return;
+  routeHistory.push(getRouteSnapshot());
+  const next = routeFuture.pop();
+  restoreRouteSnapshot(next, true);
+}
+
+function updateMissionStrip() {
+  const dirty = document.getElementById('missionDirty');
+  const gate = document.getElementById('missionGate');
+  const run = document.getElementById('missionRun');
+  if (!dirty || !gate || !run) return;
+
+  dirty.className = 'mission-chip';
+  dirty.textContent = missionDirty ? 'Unsaved' : 'Saved';
+  dirty.classList.add(missionDirty ? 'warn' : 'ok');
+
+  gate.className = 'mission-chip';
+  if (waypoints.length < 1) {
+    gate.textContent = 'No Waypoints';
+    gate.classList.add('err');
+  } else if (!isArmed) {
+    gate.textContent = 'Arm Required';
+    gate.classList.add('err');
+  } else if (gpsFix < 4) {
+    gate.textContent = 'Low GPS';
+    gate.classList.add('warn');
+  } else {
+    gate.textContent = 'Ready';
+    gate.classList.add('ok');
+  }
+
+  run.className = 'mission-chip';
+  if (!isNavigating) {
+    if (dryRunActiveIdx >= 0) {
+      run.textContent = dryRunPlaying ? 'DryRun Play' : 'DryRun Pause';
+      run.classList.add('warn');
+    } else if (pausedMission && pausedMission.length > 0) {
+      run.textContent = 'Paused';
+      run.classList.add('warn');
+    } else {
+      run.textContent = 'Idle';
+      run.classList.add('warn');
+    }
+  } else {
+    let label = 'Running';
+    if (navState === 'ALIGN') label = 'Aligning';
+    if (navState === 'DRIVE') label = 'Driving';
+    if (navState === 'ARRIVE') label = 'Arrived';
+    run.textContent = label;
+    run.classList.add('ok');
+  }
+  updateValidationPanel();
+  updateMissionTimeline();
+}
+
+function updateMissionTimeline() {
+  const el = document.getElementById('missionTimeline');
+  if (!el) return;
+  if (waypoints.length === 0) {
+    el.innerHTML = '<span style="font-size:11px;color:#565a6e">No mission timeline yet</span>';
+    return;
+  }
+  let html = '';
+  const displayActive = isNavigating ? navWpIndex : dryRunActiveIdx;
+  for (let i = 0; i < waypoints.length; i++) {
+    let cls = 'pending';
+    if (displayActive >= 0 && i < displayActive) cls = 'done';
+    else if (displayActive >= 0 && i === displayActive) cls = 'active';
+    html += `<span class="timeline-node ${cls}" title="Waypoint ${i + 1}">${i + 1}</span>`;
+    if (i < waypoints.length - 1) {
+      const linkCls = (displayActive >= 0 && i < displayActive) ? 'done' : '';
+      html += `<span class="timeline-link ${linkCls}"></span>`;
+    }
+  }
+  el.innerHTML = html;
+}
+
+function getRouteValidation() {
+  const checks = [];
+  checks.push({
+    label: waypoints.length > 0 ? 'Route has waypoints' : 'Add at least one waypoint',
+    status: waypoints.length > 0 ? 'ok' : 'err',
+  });
+  checks.push({
+    label: isArmed ? 'Robot armed' : 'Robot not armed',
+    status: isArmed ? 'ok' : 'err',
+  });
+  checks.push({
+    label: gpsFix >= 4 ? 'RTK fixed GPS ready' : 'GPS fix below RTK fixed',
+    status: gpsFix >= 4 ? 'ok' : 'warn',
+  });
+  checks.push({
+    label: calibration && calibration.calibrated ? 'Map calibration loaded' : 'Map calibration unavailable',
+    status: calibration && calibration.calibrated ? 'ok' : 'warn',
+  });
+
+  let shortSegments = 0;
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const d = haversineM(waypoints[i].lat, waypoints[i].lon, waypoints[i + 1].lat, waypoints[i + 1].lon);
+    if (d < 0.5) shortSegments += 1;
+  }
+  checks.push({
+    label: shortSegments > 0 ? `${shortSegments} short segment(s) < 0.5 m` : 'Waypoint spacing looks reasonable',
+    status: shortSegments > 0 ? 'warn' : 'ok',
+  });
+
+  let longSegments = 0;
+  let sharpTurns = 0;
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const d = haversineM(waypoints[i].lat, waypoints[i].lon, waypoints[i + 1].lat, waypoints[i + 1].lon);
+    if (d > 25.0) longSegments += 1;
+  }
+  for (let i = 1; i < waypoints.length - 1; i++) {
+    const a = waypoints[i - 1], b = waypoints[i], c = waypoints[i + 1];
+    const v1x = b.lon - a.lon, v1y = b.lat - a.lat;
+    const v2x = c.lon - b.lon, v2y = c.lat - b.lat;
+    const n1 = Math.hypot(v1x, v1y), n2 = Math.hypot(v2x, v2y);
+    if (n1 < 1e-9 || n2 < 1e-9) continue;
+    const dot = (v1x * v2x + v1y * v2y) / (n1 * n2);
+    const clamped = Math.max(-1, Math.min(1, dot));
+    const ang = Math.acos(clamped) * 180 / Math.PI;
+    if (ang > 120) sharpTurns += 1;
+  }
+  checks.push({
+    label: longSegments > 0 ? `${longSegments} long segment(s) > 25 m` : 'Segment lengths are manageable',
+    status: longSegments > 0 ? 'warn' : 'ok',
+  });
+  checks.push({
+    label: sharpTurns > 0 ? `${sharpTurns} sharp turn(s) > 120°` : 'Turn geometry looks smooth',
+    status: sharpTurns > 0 ? 'warn' : 'ok',
+  });
+  return checks;
+}
+
+function getValidationWarnings() {
+  const checks = getRouteValidation();
+  return checks.filter(c => c.status === 'warn' || c.status === 'err');
+}
+
+function updateValidationPanel() {
+  const el = document.getElementById('validationList');
+  if (!el) return;
+  const checks = getRouteValidation();
+  el.innerHTML = checks.map(c => `<li class="${c.status}">${c.label}</li>`).join('');
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -460,6 +863,7 @@ function setupLeaflet(imageUrl) {
 
   // Load route list
   refreshRouteList();
+  updateMissionStrip();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -514,6 +918,43 @@ function animateRobot() {
   }
 }
 
+function centerRobot() {
+  if (!map) return;
+  map.panTo(pxToLatLng(robotPxX, robotPxY), {animate: true, duration: 0.4});
+}
+
+function fitRoute() {
+  if (!map || waypoints.length === 0) return;
+  const pts = waypoints.map(wp => pxToLatLng(wp.px, wp.py));
+  if (robotPxX !== 0 || robotPxY !== 0) pts.push(pxToLatLng(robotPxX, robotPxY));
+  map.fitBounds(pts, {padding: [50, 50]});
+}
+
+function focusWaypointByIndex(idx) {
+  if (!map) return;
+  if (idx < 0 || idx >= waypoints.length) return;
+  selectedWpIdx = idx;
+  const wp = waypoints[idx];
+  map.panTo(pxToLatLng(wp.px, wp.py), {animate: true, duration: 0.35});
+  updateWpList();
+}
+
+function focusActiveWaypoint() {
+  if (!map || waypoints.length === 0) return;
+  const idx = isNavigating ? Math.max(0, Math.min(navWpIndex, waypoints.length - 1)) : 0;
+  focusWaypointByIndex(idx);
+}
+
+function addRobotWaypoint() {
+  if (isNavigating) { showToast('Stop navigation before editing route'); return; }
+  if (robotLat === 0 && robotLon === 0) {
+    showToast('No robot GPS position yet');
+    return;
+  }
+  addWaypoint(robotPxX, robotPxY, {name: 'Robot', holdS: 0});
+  focusWaypointByIndex(waypoints.length - 1);
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // SSE Telemetry
 // ════════════════════════════════════════════════════════════════════════════
@@ -535,8 +976,14 @@ function connectSSE() {
       isArmed = !!d.is_armed;
       const navMode = d.mode || 'MANUAL';
       isNavigating = navMode === 'WAYPOINT_NAV';
+      if (isNavigating) {
+        pausedMission = null;
+        stopDryRun(false);
+      }
       navWpIndex = d.wp_index || 0;
       navWpTotal = d.wp_total || 0;
+      navState = d.nav_state || 'IDLE';
+      navHeadingErrorDeg = (typeof d.wp_heading_error_deg === 'number') ? d.wp_heading_error_deg : 0;
 
       if (lat !== 0 && lon !== 0) {
         updateRobotPosition(lat, lon, heading);
@@ -578,6 +1025,10 @@ function updateGpsBadge() {
 // Mode Switching
 // ════════════════════════════════════════════════════════════════════════════
 function setMode(m) {
+  if (isNavigating && (m === 'draw' || m === 'waypoint' || m === 'edit')) {
+    showToast('Editing modes are disabled while navigating');
+    m = 'navigate';
+  }
   // Finalize draw path if leaving draw mode
   if (mode === 'draw' && m !== 'draw') finalizeDrawPath();
 
@@ -599,12 +1050,14 @@ function setMode(m) {
   } else {
     mapEl.style.cursor = '';
   }
+  updateInsertHandles();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 // Map Click → Place Waypoint / Draw Vertex
 // ════════════════════════════════════════════════════════════════════════════
 function onMapClick(e) {
+  if (isNavigating) return;
   // Leaflet latlng -> image-file pixel (px, py) with py=0 at top
   const p = latLngToPx(e.latlng.lat, e.latlng.lng);
   if (mode === 'waypoint') {
@@ -617,60 +1070,116 @@ function onMapClick(e) {
 // ════════════════════════════════════════════════════════════════════════════
 // Waypoint Management
 // ════════════════════════════════════════════════════════════════════════════
-function addWaypoint(px, py) {
+function addWaypoint(px, py, meta=null) {
+  if (!suspendRouteTracking) pushUndoState();
   const gps = pixelToGps(px, py);
-  const idx = waypoints.length;
-  const num = idx + 1;
+  const wp = {
+    px, py, lat: gps.lat, lon: gps.lon, marker: null, num: waypoints.length + 1,
+    name: (meta && meta.name) ? String(meta.name) : '',
+    holdS: (meta && Number.isFinite(Number(meta.holdS))) ? Number(meta.holdS) : 0,
+  };
 
   const icon = L.divIcon({
     className: '',
-    html: `<div class="wp-marker" data-idx="${idx}">${num}</div>`,
+    html: `<div class="wp-marker">${wp.num}</div>`,
     iconSize: [48, 48],
     iconAnchor: [24, 24],
   });
 
   const marker = L.marker(pxToLatLng(px, py), {icon, draggable: mode === 'edit', zIndexOffset: 2000}).addTo(map);
+  wp.marker = marker;
 
   marker.on('dragstart', function() {
     const el = marker.getElement();
     if (el) el.querySelector('.wp-marker').classList.add('dragging');
   });
   marker.on('dragend', function(ev) {
+    if (!suspendRouteTracking) pushUndoState();
     const el = marker.getElement();
     if (el) el.querySelector('.wp-marker').classList.remove('dragging');
     const pos = ev.target.getLatLng();
     const p = latLngToPx(pos.lat, pos.lng);
-    const wp = waypoints[idx];
     wp.px = p.px;
     wp.py = p.py;
     const g = pixelToGps(wp.px, wp.py);
     wp.lat = g.lat;
     wp.lon = g.lon;
+    setMissionDirty(true);
     updatePolyline();
     updateWpList();
   });
 
-  waypoints.push({px, py, lat: gps.lat, lon: gps.lon, marker, num});
+  waypoints.push(wp);
+  renumberWaypoints();
+  setMissionDirty(true);
   updatePolyline();
   updateWpList();
 }
 
+function insertWaypointAt(insertIdx, px, py, meta=null) {
+  if (!suspendRouteTracking) pushUndoState();
+  const gps = pixelToGps(px, py);
+  const wp = {
+    px, py, lat: gps.lat, lon: gps.lon, marker: null, num: 0,
+    name: (meta && meta.name) ? String(meta.name) : '',
+    holdS: (meta && Number.isFinite(Number(meta.holdS))) ? Number(meta.holdS) : 0,
+  };
+  const icon = L.divIcon({
+    className: '',
+    html: `<div class="wp-marker"></div>`,
+    iconSize: [48, 48],
+    iconAnchor: [24, 24],
+  });
+  const marker = L.marker(pxToLatLng(px, py), {icon, draggable: mode === 'edit', zIndexOffset: 2000}).addTo(map);
+  wp.marker = marker;
+  marker.on('dragstart', function() {
+    const el = marker.getElement();
+    if (el) el.querySelector('.wp-marker').classList.add('dragging');
+  });
+  marker.on('dragend', function(ev) {
+    if (!suspendRouteTracking) pushUndoState();
+    const el = marker.getElement();
+    if (el) el.querySelector('.wp-marker').classList.remove('dragging');
+    const pos = ev.target.getLatLng();
+    const p = latLngToPx(pos.lat, pos.lng);
+    wp.px = p.px;
+    wp.py = p.py;
+    const g = pixelToGps(wp.px, wp.py);
+    wp.lat = g.lat;
+    wp.lon = g.lon;
+    setMissionDirty(true);
+    updatePolyline();
+    updateWpList();
+  });
+  waypoints.splice(insertIdx, 0, wp);
+  renumberWaypoints();
+  setMissionDirty(true);
+  updatePolyline();
+  updateWpList();
+}
+
+function renumberWaypoints() {
+  if (selectedWpIdx >= waypoints.length) selectedWpIdx = waypoints.length - 1;
+  waypoints.forEach((w, i) => {
+    w.num = i + 1;
+    const el = w.marker && w.marker.getElement ? w.marker.getElement() : null;
+    if (el) {
+      const mkr = el.querySelector('.wp-marker');
+      if (mkr) mkr.textContent = w.num;
+    }
+  });
+  rebindDragEvents();
+}
+
 function removeWaypoint(idx) {
+  if (isNavigating) { showToast('Stop navigation before editing route'); return; }
   if (idx < 0 || idx >= waypoints.length) return;
+  pushUndoState();
   const wp = waypoints[idx];
   map.removeLayer(wp.marker);
   waypoints.splice(idx, 1);
-  // Re-number
-  waypoints.forEach((w, i) => {
-    w.num = i + 1;
-    const el = w.marker.getElement();
-    if (el) {
-      const mkr = el.querySelector('.wp-marker');
-      if (mkr) { mkr.textContent = w.num; mkr.dataset.idx = i; }
-    }
-  });
-  // Rebind drag events with correct indices
-  rebindDragEvents();
+  renumberWaypoints();
+  setMissionDirty(true);
   updatePolyline();
   updateWpList();
 }
@@ -679,6 +1188,7 @@ function rebindDragEvents() {
   waypoints.forEach((wp, idx) => {
     wp.marker.off('dragend');
     wp.marker.on('dragend', function(ev) {
+      if (!suspendRouteTracking) pushUndoState();
       const el = wp.marker.getElement();
       if (el) el.querySelector('.wp-marker').classList.remove('dragging');
       const pos = ev.target.getLatLng();
@@ -688,6 +1198,7 @@ function rebindDragEvents() {
       const g = pixelToGps(wp.px, wp.py);
       wp.lat = g.lat;
       wp.lon = g.lon;
+      setMissionDirty(true);
       updatePolyline();
       updateWpList();
     });
@@ -696,11 +1207,125 @@ function rebindDragEvents() {
 
 function clearAll() {
   if (waypoints.length === 0) return;
+  if (isNavigating) { showToast('Stop navigation before editing route'); return; }
   if (!confirm('Clear all waypoints?')) return;
+  pushUndoState();
   waypoints.forEach(wp => map.removeLayer(wp.marker));
   waypoints = [];
+  setMissionDirty(true);
   updatePolyline();
   updateWpList();
+}
+
+function undoLastWaypoint() {
+  if (isNavigating) { showToast('Stop navigation before editing route'); return; }
+  if (waypoints.length === 0) return;
+  removeWaypoint(waypoints.length - 1);
+}
+
+function reverseRoute() {
+  if (isNavigating) { showToast('Stop navigation before editing route'); return; }
+  if (waypoints.length < 2) return;
+  pushUndoState();
+  waypoints.reverse();
+  renumberWaypoints();
+  setMissionDirty(true);
+  updatePolyline();
+  updateWpList();
+}
+
+function duplicateWaypoint(idx) {
+  if (isNavigating) { showToast('Stop navigation before editing route'); return; }
+  if (idx < 0 || idx >= waypoints.length) return;
+  const wp = waypoints[idx];
+  insertWaypointAt(idx + 1, wp.px, wp.py, {
+    name: (wp.name && wp.name.trim()) ? `${wp.name} copy` : '',
+    holdS: wp.holdS || 0,
+  });
+}
+
+function moveWaypointTo(idx, target) {
+  if (isNavigating) return;
+  if (idx < 0 || idx >= waypoints.length) return;
+  const to = target === 'top' ? 0 : (waypoints.length - 1);
+  if (to === idx) return;
+  pushUndoState();
+  const wp = waypoints.splice(idx, 1)[0];
+  waypoints.splice(to, 0, wp);
+  renumberWaypoints();
+  setMissionDirty(true);
+  updatePolyline();
+  updateWpList();
+}
+
+function cleanCloseWaypoints(minSpacingM=0.4) {
+  if (isNavigating) { showToast('Stop navigation before editing route'); return; }
+  if (waypoints.length < 3) return;
+  if (!confirm(`Remove waypoints closer than ${minSpacingM.toFixed(1)} m?`)) return;
+  pushUndoState();
+  const snap = getRouteSnapshot();
+  const kept = [snap[0]];
+  for (let i = 1; i < snap.length - 1; i++) {
+    const prev = kept[kept.length - 1];
+    const cur = snap[i];
+    const d = haversineM(prev.lat, prev.lon, cur.lat, cur.lon);
+    if (d >= minSpacingM) kept.push(cur);
+  }
+  kept.push(snap[snap.length - 1]);
+  const removed = snap.length - kept.length;
+  if (removed <= 0) {
+    routeHistory.pop();
+    updateUndoRedoButtons();
+    showToast('No close waypoints to clean');
+    return;
+  }
+  restoreRouteSnapshot(kept, true);
+  showToast(`Removed ${removed} close waypoint${removed === 1 ? '' : 's'}`);
+}
+
+function simplifyRouteSpacing(defaultSpacingM=1.5) {
+  if (isNavigating) { showToast('Stop navigation before editing route'); return; }
+  if (waypoints.length < 2) return;
+  const input = prompt('Target spacing (meters)', String(defaultSpacingM));
+  if (input === null) return;
+  const spacing = Math.max(0.4, Math.min(15.0, Number(input) || defaultSpacingM));
+  if (!Number.isFinite(spacing)) return;
+  if (!confirm(`Resample route to approximately ${spacing.toFixed(1)} m waypoint spacing?`)) return;
+
+  const snap = getRouteSnapshot();
+  let total = 0;
+  const cumulative = [0];
+  for (let i = 1; i < snap.length; i++) {
+    total += haversineM(snap[i - 1].lat, snap[i - 1].lon, snap[i].lat, snap[i].lon);
+    cumulative.push(total);
+  }
+  if (total < spacing * 1.2) {
+    showToast('Route too short to simplify spacing');
+    return;
+  }
+
+  pushUndoState();
+  const out = [snap[0]];
+  for (let s = spacing; s < total; s += spacing) {
+    let seg = 1;
+    while (seg < cumulative.length && cumulative[seg] < s) seg += 1;
+    if (seg >= snap.length) break;
+    const a = snap[seg - 1];
+    const b = snap[seg];
+    const span = Math.max(1e-6, cumulative[seg] - cumulative[seg - 1]);
+    const t = (s - cumulative[seg - 1]) / span;
+    out.push({
+      px: a.px + (b.px - a.px) * t,
+      py: a.py + (b.py - a.py) * t,
+      lat: a.lat + (b.lat - a.lat) * t,
+      lon: a.lon + (b.lon - a.lon) * t,
+      name: '',
+      holdS: 0,
+    });
+  }
+  out.push(snap[snap.length - 1]);
+  restoreRouteSnapshot(out, true);
+  showToast(`Simplified route to ${out.length} waypoints`);
 }
 
 function updatePolyline() {
@@ -721,11 +1346,146 @@ function updatePolyline() {
     distLabels.push(label);
   }
   // Total distance
+  const total = getTotalRouteDistanceM();
+  document.getElementById('totalDist').textContent = waypoints.length > 1 ? 'Total: ' + fmtDist(total) : '';
+  updateRouteSummary(total);
+  updateInsertHandles();
+}
+
+function getTotalRouteDistanceM() {
   let total = 0;
   for (let i = 0; i < waypoints.length - 1; i++) {
-    total += haversineM(waypoints[i].lat, waypoints[i].lon, waypoints[i+1].lat, waypoints[i+1].lon);
+    total += haversineM(waypoints[i].lat, waypoints[i].lon, waypoints[i + 1].lat, waypoints[i + 1].lon);
   }
-  document.getElementById('totalDist').textContent = waypoints.length > 1 ? 'Total: ' + fmtDist(total) : '';
+  return total;
+}
+
+function updateRouteSummary(totalDistanceM) {
+  const wpEl = document.getElementById('metricWp');
+  const dEl = document.getElementById('metricDist');
+  const eEl = document.getElementById('metricEta');
+  if (!wpEl || !dEl || !eEl) return;
+  wpEl.textContent = String(waypoints.length);
+  dEl.textContent = waypoints.length > 1 ? fmtDist(totalDistanceM) : '0 m';
+
+  // Heuristic conversion for operator planning only.
+  const speedByte = parseInt(document.getElementById('speedSlider').value || '40', 10);
+  const estMps = Math.max(0.1, speedByte * 0.02);
+  if (totalDistanceM <= 0.0) {
+    eEl.textContent = '--';
+    return;
+  }
+  const seconds = Math.round(totalDistanceM / estMps);
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  eEl.textContent = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+}
+
+function refreshRouteSummary() {
+  updateRouteSummary(getTotalRouteDistanceM());
+}
+
+function updateDryRunControls() {
+  const slider = document.getElementById('dryRunSlider');
+  const chip = document.getElementById('dryRunState');
+  const btn = document.getElementById('btnDryRun');
+  if (!slider || !chip || !btn) return;
+  const maxIdx = Math.max(0, waypoints.length - 1);
+  slider.max = String(maxIdx);
+  if (dryRunActiveIdx < 0) slider.value = '0';
+  else slider.value = String(Math.max(0, Math.min(maxIdx, dryRunActiveIdx)));
+  chip.textContent = dryRunActiveIdx < 0
+    ? 'Dry Run: Off'
+    : `Dry Run: WP ${Math.min(maxIdx, dryRunActiveIdx) + 1}`;
+  btn.textContent = dryRunPlaying ? 'Stop Dry Run' : 'Play Dry Run';
+  btn.disabled = waypoints.length < 2 || isNavigating;
+}
+
+function setDryRunIndex(idx, fromSlider=false) {
+  if (isNavigating || waypoints.length === 0) return;
+  const clamped = Math.max(0, Math.min(waypoints.length - 1, Number(idx) || 0));
+  dryRunActiveIdx = clamped;
+  if (!fromSlider) {
+    const slider = document.getElementById('dryRunSlider');
+    if (slider) slider.value = String(clamped);
+  }
+  selectedWpIdx = clamped;
+  updateMissionStrip();
+  updateWpList();
+}
+
+function stopDryRun(withToast=true) {
+  if (dryRunTimer) {
+    clearInterval(dryRunTimer);
+    dryRunTimer = null;
+  }
+  const wasOn = dryRunActiveIdx >= 0 || dryRunPlaying;
+  dryRunPlaying = false;
+  dryRunActiveIdx = -1;
+  updateMissionStrip();
+  updateWpList();
+  if (withToast && wasOn) showToast('Dry run stopped');
+}
+
+function toggleDryRun() {
+  if (isNavigating) return;
+  if (waypoints.length < 2) {
+    showToast('Need at least two waypoints for dry run');
+    return;
+  }
+  if (dryRunPlaying) {
+    stopDryRun(true);
+    return;
+  }
+  if (dryRunActiveIdx < 0) setDryRunIndex(0);
+  dryRunPlaying = true;
+  showToast('Dry run started');
+  dryRunTimer = setInterval(() => {
+    if (isNavigating || waypoints.length < 2) {
+      stopDryRun(false);
+      return;
+    }
+    if (dryRunActiveIdx >= waypoints.length - 1) {
+      stopDryRun(false);
+      showToast('Dry run complete');
+      return;
+    }
+    setDryRunIndex(dryRunActiveIdx + 1);
+  }, 800);
+  updateDryRunControls();
+}
+
+function clearInsertHandles() {
+  insertGhosts.forEach(h => map.removeLayer(h));
+  insertGhosts = [];
+}
+
+function updateInsertHandles() {
+  clearInsertHandles();
+  if (!map) return;
+  if (isNavigating) return;
+  if (!(mode === 'waypoint' || mode === 'edit')) return;
+  if (waypoints.length < 2) return;
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const a = waypoints[i];
+    const b = waypoints[i + 1];
+    const midPx = (a.px + b.px) / 2;
+    const midPy = (a.py + b.py) / 2;
+    const ghost = L.circleMarker(pxToLatLng(midPx, midPy), {
+      radius: 7,
+      color: '#7aa2f7',
+      weight: 2,
+      fillColor: '#0f1117',
+      fillOpacity: 0.95,
+      interactive: true,
+      pane: 'markerPane',
+    }).addTo(map);
+    ghost.bindTooltip('+', {permanent: true, direction: 'center', className: 'dist-label'});
+    ghost.on('click', function() {
+      insertWaypointAt(i + 1, midPx, midPy);
+    });
+    insertGhosts.push(ghost);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -760,6 +1520,8 @@ function finalizeDrawPath() {
   // Interpolate waypoints at ~1.5m intervals along the path
   const INTERVAL_M = 1.5;
   const pathGps = drawVertices.map(v => pixelToGps(v.px, v.py));
+  pushUndoState();
+  suspendRouteTracking = true;
 
   // Always add the first point
   addWaypoint(drawVertices[0].px, drawVertices[0].py);
@@ -784,6 +1546,8 @@ function finalizeDrawPath() {
   // Always add the last point
   const last = drawVertices[drawVertices.length - 1];
   addWaypoint(last.px, last.py);
+  suspendRouteTracking = false;
+  setMissionDirty(true);
 
   // Cleanup draw artifacts
   drawVertices.forEach(v => { if (v.circle) map.removeLayer(v.circle); });
@@ -801,29 +1565,111 @@ function updateWpList() {
   list.innerHTML = '';
   waypoints.forEach((wp, i) => {
     const li = document.createElement('li');
-    if (isNavigating && i < navWpIndex) li.classList.add('completed');
-    if (isNavigating && i === navWpIndex) li.classList.add('active');
+    const displayActive = isNavigating ? navWpIndex : dryRunActiveIdx;
+    if (displayActive >= 0 && i < displayActive) li.classList.add('completed');
+    if (displayActive >= 0 && i === displayActive) li.classList.add('active');
+    if (i === selectedWpIdx) li.classList.add('selected');
+    li.dataset.idx = String(i);
 
     const dist = i < waypoints.length - 1
       ? haversineM(wp.lat, wp.lon, waypoints[i+1].lat, waypoints[i+1].lon) : 0;
+    const fromRobot = (robotLat !== 0 || robotLon !== 0)
+      ? haversineM(robotLat, robotLon, wp.lat, wp.lon)
+      : null;
+    let state = 'Pending';
+    let stateCls = '';
+    if (displayActive >= 0 && i < displayActive) {
+      state = 'Done';
+      stateCls = 'done';
+    } else if (displayActive >= 0 && i === displayActive) {
+      state = isNavigating ? (navState === 'ALIGN' ? 'Align' : 'Active') : 'Preview';
+      stateCls = 'active';
+    }
+
+    const dragCls = isNavigating ? 'disabled' : '';
+    const dragSym = isNavigating ? '&#x1f512;' : '&#x2630;';
+
+    const name = wp.name && wp.name.trim().length ? wp.name.trim() : `WP ${wp.num}`;
+    const editor = expandedWpIdx === i ? `
+      <div class="wp-editor">
+        <div>
+          <label>Name</label>
+          <input type="text" value="${name.replace(/"/g, '&quot;')}" onclick="event.stopPropagation()" oninput="updateWaypointMeta(${i}, 'name', this.value)">
+        </div>
+        <div>
+          <label>Hold (s)</label>
+          <input type="number" min="0" max="120" step="1" value="${Number.isFinite(wp.holdS) ? wp.holdS : 0}" onclick="event.stopPropagation()" oninput="updateWaypointMeta(${i}, 'holdS', this.value)">
+        </div>
+        <div class="wp-editor-actions">
+          <button onclick="event.stopPropagation(); duplicateWaypoint(${i})">Duplicate</button>
+          <button onclick="event.stopPropagation(); moveWaypointTo(${i}, 'top')">Move Top</button>
+          <button onclick="event.stopPropagation(); moveWaypointTo(${i}, 'bottom')">Move Bottom</button>
+        </div>
+      </div>` : '';
 
     li.innerHTML = `
-      <span class="wp-drag">&#x2630;</span>
+      <span class="wp-drag ${dragCls}">${dragSym}</span>
       <span class="wp-num">${wp.num}</span>
-      <span class="wp-coords">${wp.lat.toFixed(7)}, ${wp.lon.toFixed(7)}</span>
-      ${dist > 0 ? '<span class="wp-dist">' + fmtDist(dist) + '</span>' : ''}
-      <button class="wp-del" onclick="removeWaypoint(${i})">&times;</button>
+      <div class="wp-main">
+        <div class="wp-main-top">
+          <span class="wp-coords">${name}</span>
+          <span class="wp-state ${stateCls}">${state}</span>
+          ${dist > 0 ? '<span class="wp-dist">' + fmtDist(dist) + '</span>' : '<span class="wp-dist">--</span>'}
+        </div>
+        <div class="wp-main-bottom">
+          <span>${wp.lat.toFixed(6)}, ${wp.lon.toFixed(6)}</span>
+          <span>|</span>
+          <span>R:${fromRobot !== null ? fmtDist(fromRobot) : '--'}</span>
+          <span>|</span>
+          <span>${i < waypoints.length - 1 ? 'seg '+fmtDist(dist) : 'final waypoint'}${(wp.holdS||0) > 0 ? ' | hold '+wp.holdS+'s' : ''}</span>
+        </div>
+        ${editor}
+      </div>
+      <div class="wp-row-actions">
+        <button class="wp-more" ${isNavigating ? 'disabled' : ''} onclick="event.stopPropagation(); toggleWpDetails(${i})">&#8942;</button>
+        <button class="wp-del" ${isNavigating ? 'disabled' : ''} onclick="event.stopPropagation(); removeWaypoint(${i})">&times;</button>
+      </div>
     `;
+    li.onclick = () => focusWaypointByIndex(i);
     list.appendChild(li);
   });
   document.getElementById('wpCount').textContent = waypoints.length + ' waypoint' + (waypoints.length !== 1 ? 's' : '');
   updateGoButton();
+  updateMissionStrip();
 
   // Enable list drag reorder
   enableListDragReorder();
+  updateUndoRedoButtons();
+  updateDryRunControls();
+  if (isNavigating) {
+    const active = list.querySelector(`li[data-idx="${navWpIndex}"]`);
+    if (active && typeof active.scrollIntoView === 'function') {
+      active.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+    }
+  }
+}
+
+function toggleWpDetails(idx) {
+  if (isNavigating) return;
+  expandedWpIdx = expandedWpIdx === idx ? -1 : idx;
+  updateWpList();
+}
+
+function updateWaypointMeta(idx, key, value) {
+  if (idx < 0 || idx >= waypoints.length) return;
+  const wp = waypoints[idx];
+  if (key === 'name') {
+    wp.name = String(value || '').slice(0, 32);
+  } else if (key === 'holdS') {
+    const v = Math.max(0, Math.min(120, Number(value) || 0));
+    wp.holdS = Math.round(v);
+  }
+  setMissionDirty(true);
+  updateWpList();
 }
 
 function enableListDragReorder() {
+  if (isNavigating) return;
   const list = document.getElementById('wpList');
   let dragIdx = null;
 
@@ -862,17 +1708,12 @@ function enableListDragReorder() {
 }
 
 function reorderWaypoint(fromIdx, toIdx) {
+  if (isNavigating) return;
+  pushUndoState();
   const wp = waypoints.splice(fromIdx, 1)[0];
   waypoints.splice(toIdx, 0, wp);
-  waypoints.forEach((w, i) => {
-    w.num = i + 1;
-    const el = w.marker.getElement();
-    if (el) {
-      const mkr = el.querySelector('.wp-marker');
-      if (mkr) { mkr.textContent = w.num; mkr.dataset.idx = i; }
-    }
-  });
-  rebindDragEvents();
+  renumberWaypoints();
+  setMissionDirty(true);
   updatePolyline();
   updateWpList();
 }
@@ -882,18 +1723,28 @@ function reorderWaypoint(fromIdx, toIdx) {
 // ════════════════════════════════════════════════════════════════════════════
 function updateGoButton() {
   const btn = document.getElementById('btnGo');
+  const btnPause = document.getElementById('btnPause');
+  const btnResume = document.getElementById('btnResume');
+  const btnStop = document.getElementById('btnStop');
+  const btnSkip = document.getElementById('btnSkip');
   btn.classList.remove('armed-required');
+  btnPause.style.display = 'none';
+  btnResume.style.display = 'none';
+  btnStop.style.display = 'none';
+  btnSkip.style.display = 'none';
 
   if (isNavigating) {
     btn.style.display = 'none';
-    document.getElementById('btnStop').style.display = '';
-    document.getElementById('btnSkip').style.display = '';
+    btnPause.style.display = '';
+    btnStop.style.display = '';
+    btnSkip.style.display = '';
     return;
   }
 
   btn.style.display = '';
-  document.getElementById('btnStop').style.display = 'none';
-  document.getElementById('btnSkip').style.display = 'none';
+  if (pausedMission && pausedMission.length > 0) {
+    btnResume.style.display = '';
+  }
 
   if (waypoints.length < 1) {
     btn.disabled = true;
@@ -907,19 +1758,21 @@ function updateGoButton() {
     return;
   }
   if (gpsFix < 4) {
-    btn.disabled = false;  // Allow but warn
-    btn.innerHTML = '<span class="go-fill" id="goFill"></span>&#x26a0; HOLD TO GO (LOW GPS)';
+    btn.disabled = true;
+    btn.innerHTML = '<span class="go-fill" id="goFill"></span>LOW GPS FIX REQUIRED';
     return;
   }
   btn.disabled = false;
   btn.innerHTML = '<span class="go-fill" id="goFill"></span>HOLD TO GO';
+  updateUndoRedoButtons();
 }
 
 function updateNavUI() {
   updateGoButton();
   const status = document.getElementById('sheetNavStatus');
   if (isNavigating) {
-    status.textContent = `WP ${navWpIndex + 1}/${navWpTotal}`;
+    const herr = Number.isFinite(navHeadingErrorDeg) ? ` | err ${Math.abs(navHeadingErrorDeg).toFixed(1)}°` : '';
+    status.textContent = `WP ${navWpIndex + 1}/${navWpTotal} | ${navState}${herr}`;
     // Update waypoint marker styles
     waypoints.forEach((wp, i) => {
       const el = wp.marker.getElement();
@@ -933,7 +1786,13 @@ function updateNavUI() {
   } else {
     status.textContent = '';
   }
-  updateWpList();
+  updateMissionStrip();
+  const now = Date.now();
+  if (now - lastListRenderMs > 400) {
+    lastListRenderMs = now;
+    updateWpList();
+  }
+  updateInsertHandles();
 }
 
 function goDown(e) {
@@ -965,8 +1824,22 @@ function goUp() {
   if (fill) fill.style.width = '0';
 }
 
-async function startNav() {
-  const wpData = waypoints.map(wp => ({px: wp.px, py: wp.py, lat: wp.lat, lon: wp.lon}));
+async function startNavWithWaypoints(wpData, isResume=false) {
+  if (!wpData || wpData.length < 1) {
+    showToast('No waypoints to run');
+    return;
+  }
+  const issues = getValidationWarnings();
+  if (issues.length > 0) {
+    const key = issues.map(i => i.label).join('|');
+    if (key !== lastValidationWarnKey) {
+      const msg = 'Validation warnings:\n- ' + issues.map(i => i.label).join('\n- ') + '\n\nProceed anyway?';
+      if (!confirm(msg)) return;
+      lastValidationWarnKey = key;
+    }
+  } else {
+    lastValidationWarnKey = '';
+  }
   try {
     const resp = await fetch('/api/nav/start', {
       method: 'POST',
@@ -979,22 +1852,44 @@ async function startNav() {
     });
     const data = await resp.json();
     if (data.ok) {
-      showToast('Navigation started!');
+      pausedMission = null;
+      showToast(isResume ? 'Navigation resumed' : 'Navigation started!');
     } else {
       showToast('Error: ' + (data.error || 'unknown'));
     }
   } catch(err) {
-    showToast('Failed to start navigation');
+    showToast(isResume ? 'Failed to resume navigation' : 'Failed to start navigation');
   }
 }
 
-async function stopNav() {
+async function startNav() {
+  const wpData = waypoints.map(wp => ({px: wp.px, py: wp.py, lat: wp.lat, lon: wp.lon, name: wp.name || '', holdS: wp.holdS || 0}));
+  await startNavWithWaypoints(wpData, false);
+}
+
+async function stopNav(showMsg=true) {
   try {
     await fetch('/api/nav/stop', {method: 'POST'});
-    showToast('Navigation stopped');
+    if (showMsg) showToast('Navigation stopped');
   } catch(err) {
-    showToast('Failed to stop');
+    if (showMsg) showToast('Failed to stop');
   }
+}
+
+async function pauseNav() {
+  const idx = Math.max(0, Math.min(navWpIndex, waypoints.length - 1));
+  pausedMission = waypoints.slice(idx).map(wp => ({px: wp.px, py: wp.py, lat: wp.lat, lon: wp.lon, name: wp.name || '', holdS: wp.holdS || 0}));
+  await stopNav(false);
+  showToast(pausedMission.length > 0 ? 'Navigation paused' : 'Paused');
+  updateGoButton();
+}
+
+async function resumeNav() {
+  if (!pausedMission || pausedMission.length < 1) {
+    showToast('No paused mission');
+    return;
+  }
+  await startNavWithWaypoints(pausedMission, true);
 }
 
 async function skipWp() {
@@ -1009,6 +1904,67 @@ async function skipWp() {
 // ════════════════════════════════════════════════════════════════════════════
 // Route Save/Load
 // ════════════════════════════════════════════════════════════════════════════
+function exportRoute() {
+  if (waypoints.length === 0) { showToast('No route to export'); return; }
+  const payload = {
+    exported_at: new Date().toISOString(),
+    waypoints: waypoints.map(wp => ({
+      px: wp.px, py: wp.py, lat: wp.lat, lon: wp.lon, name: wp.name || '', holdS: wp.holdS || 0,
+    })),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `route-${Date.now()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showToast('Route exported');
+}
+
+function triggerImportRoute() {
+  if (isNavigating) { showToast('Stop navigation before import'); return; }
+  if (waypoints.length > 0 && !confirm('Importing will replace current unsaved route. Continue?')) return;
+  const input = document.getElementById('routeImportInput');
+  if (!input) return;
+  input.value = '';
+  input.click();
+}
+
+async function importRouteFile(e) {
+  if (isNavigating) { showToast('Stop navigation before import'); return; }
+  const file = e.target && e.target.files ? e.target.files[0] : null;
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const raw = Array.isArray(parsed) ? parsed : parsed.waypoints;
+    if (!Array.isArray(raw) || raw.length < 1) {
+      showToast('Invalid route file');
+      return;
+    }
+    routeHistory = [];
+    routeFuture = [];
+    suspendRouteTracking = true;
+    waypoints.forEach(wp => map.removeLayer(wp.marker));
+    waypoints = [];
+    distLabels.forEach(l => map.removeLayer(l));
+    distLabels = [];
+    raw.forEach(wp => addWaypoint(wp.px, wp.py, {name: wp.name || '', holdS: wp.holdS || 0}));
+    suspendRouteTracking = false;
+    setMissionDirty(true);
+    expandedWpIdx = -1;
+    selectedWpIdx = -1;
+    updatePolyline();
+    updateWpList();
+    showToast(`Imported ${waypoints.length} waypoint${waypoints.length === 1 ? '' : 's'}`);
+  } catch(err) {
+    showToast('Failed to import route JSON');
+  }
+}
+
 async function refreshRouteList() {
   try {
     const resp = await fetch('/api/nav/waypoints');
@@ -1028,8 +1984,11 @@ async function saveRoute() {
   const name = document.getElementById('routeName').value.trim();
   if (!name) { showToast('Enter a route name'); return; }
   if (waypoints.length === 0) { showToast('No waypoints to save'); return; }
+  const sel = document.getElementById('routeSelect');
+  const existing = sel ? Array.from(sel.options).some(o => o.value === name) : false;
+  if (existing && !confirm(`Overwrite existing route "${name}"?`)) return;
 
-  const wpData = waypoints.map(wp => ({px: wp.px, py: wp.py, lat: wp.lat, lon: wp.lon}));
+  const wpData = waypoints.map(wp => ({px: wp.px, py: wp.py, lat: wp.lat, lon: wp.lon, name: wp.name || '', holdS: wp.holdS || 0}));
   try {
     const resp = await fetch('/api/nav/waypoints', {
       method: 'POST',
@@ -1039,6 +1998,7 @@ async function saveRoute() {
     const data = await resp.json();
     if (data.ok) {
       showToast('Route "' + name + '" saved');
+      setMissionDirty(false);
       refreshRouteList();
       document.getElementById('routeName').value = '';
     } else {
@@ -1050,6 +2010,9 @@ async function saveRoute() {
 }
 
 async function loadRoute() {
+  if (missionDirty && waypoints.length > 0) {
+    if (!confirm('Discard unsaved route changes and load selected route?')) return;
+  }
   const name = document.getElementById('routeSelect').value;
   if (!name) { showToast('Select a route'); return; }
 
@@ -1066,8 +2029,13 @@ async function loadRoute() {
       waypoints = [];
       distLabels.forEach(l => map.removeLayer(l));
       distLabels = [];
-
-      data.waypoints.forEach(wp => addWaypoint(wp.px, wp.py));
+      routeHistory = [];
+      routeFuture = [];
+      suspendRouteTracking = true;
+      data.waypoints.forEach(wp => addWaypoint(wp.px, wp.py, {name: wp.name || '', holdS: wp.holdS || 0}));
+      suspendRouteTracking = false;
+      setMissionDirty(false);
+      expandedWpIdx = -1;
       showToast('Route "' + name + '" loaded (' + waypoints.length + ' waypoints)');
 
       // Zoom to fit
@@ -1128,7 +2096,18 @@ async function loadRoute() {
 // Toast
 // ════════════════════════════════════════════════════════════════════════════
 let toastTimeout;
+function logEvent(msg) {
+  const ts = new Date();
+  const stamp = ts.toTimeString().slice(0, 8);
+  eventLog.unshift({t: stamp, msg: String(msg)});
+  if (eventLog.length > 12) eventLog = eventLog.slice(0, 12);
+  const el = document.getElementById('eventLog');
+  if (!el) return;
+  el.innerHTML = eventLog.map(e => `<li><span>${e.msg}</span><span class="t">${e.t}</span></li>`).join('');
+}
+
 function showToast(msg) {
+  logEvent(msg);
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.classList.add('show');
@@ -1139,6 +2118,53 @@ function showToast(msg) {
 // ════════════════════════════════════════════════════════════════════════════
 // Init
 // ════════════════════════════════════════════════════════════════════════════
+document.addEventListener('keydown', function(e) {
+  const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+  if (e.key === 'Escape') {
+    toggleHelp(false);
+    return;
+  }
+  if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+    e.preventDefault();
+    toggleHelp();
+    return;
+  }
+  if (tag === 'input' || tag === 'textarea') return;
+  const helpOpen = document.getElementById('helpOverlay')?.classList.contains('show');
+  if (helpOpen) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    if (e.shiftKey) redoRoute();
+    else undoRoute();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+    e.preventDefault();
+    redoRoute();
+    return;
+  }
+  if (e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    fitRoute();
+    return;
+  }
+  if (e.key.toLowerCase() === 'c') {
+    e.preventDefault();
+    centerRobot();
+  }
+});
+
+window.addEventListener('beforeunload', function(e) {
+  if (!missionDirty) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden && dryRunPlaying) stopDryRun(false);
+});
+
+logEvent('Waypoint UI ready');
 initMap();
 </script>
 </body>
