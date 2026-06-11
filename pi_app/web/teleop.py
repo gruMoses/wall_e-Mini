@@ -563,6 +563,23 @@ def register_teleop(app, session: "TeleopSession", *, token: str = "",
             return _json({"error": "unauthorized"}, 401)
         return _json(_status_payload())
 
+    # -- PWA assets (additive; no auth — manifest/icons are public) ----------
+
+    @bp.route("/drive/manifest.json")
+    def drive_manifest():
+        return Response(_MANIFEST_JSON, content_type="application/manifest+json")
+
+    @bp.route("/drive/icon.svg")
+    def drive_icon_svg():
+        return Response(_ROBOT_SVG, content_type="image/svg+xml")
+
+    @bp.route("/drive/icon-<int:size>.png")
+    def drive_icon_png(size):
+        if size not in (180, 192, 512):
+            from flask import abort as _abort
+            _abort(404)
+        return Response(_get_robot_png(size), content_type="image/png")
+
     app.register_blueprint(bp)
 
     # -- WebSocket ----------------------------------------------------------
@@ -639,168 +656,787 @@ def _dispatch_ws(session: "TeleopSession", msg: dict) -> None:
         session.set_speed(str(msg.get("level", "")))
 
 
-# Minimal phone-first /drive UI. Tranche 2 will replace this with the "sexy" UI;
-# tranche 1 only needs functional, fail-safe controls.
+# ---------------------------------------------------------------------------
+# PWA assets: manifest, SVG icon, and pure-Python PNG icon generator
+# (no external image library required).
+# ---------------------------------------------------------------------------
+
+_MANIFEST_JSON = json.dumps({
+    "name": "WALL-E Drive",
+    "short_name": "W-E Drive",
+    "description": "Fail-safe phone controller for WALL-E Mini",
+    "start_url": "/drive",
+    "display": "standalone",
+    "orientation": "portrait",
+    "theme_color": "#080a0f",
+    "background_color": "#080a0f",
+    "icons": [
+        {"src": "/drive/icon.svg",     "sizes": "any",     "type": "image/svg+xml", "purpose": "any maskable"},
+        {"src": "/drive/icon-180.png", "sizes": "180x180", "type": "image/png"},
+        {"src": "/drive/icon-192.png", "sizes": "192x192", "type": "image/png"},
+        {"src": "/drive/icon-512.png", "sizes": "512x512", "type": "image/png"},
+    ],
+}, separators=(",", ":"))
+
+# Simple WALL-E robot glyph: binocular eyes, boxy head/body, twin track pods.
+_ROBOT_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">'
+    '<rect width="512" height="512" rx="96" fill="#080a0f"/>'
+    # tracks
+    '<rect x="86" y="318" width="80" height="140" rx="40" fill="#1a1d27" stroke="#2563eb" stroke-width="8"/>'
+    '<rect x="346" y="318" width="80" height="140" rx="40" fill="#1a1d27" stroke="#2563eb" stroke-width="8"/>'
+    # body
+    '<rect x="120" y="230" width="272" height="200" rx="32" fill="#1a1d27" stroke="#2563eb" stroke-width="8"/>'
+    # head
+    '<rect x="150" y="100" width="212" height="158" rx="24" fill="#1a1d27" stroke="#2563eb" stroke-width="8"/>'
+    # eyes (binocular rings)
+    '<circle cx="210" cy="172" r="44" fill="#080a0f" stroke="#2563eb" stroke-width="8"/>'
+    '<circle cx="210" cy="172" r="26" fill="#2563eb"/>'
+    '<circle cx="302" cy="172" r="44" fill="#080a0f" stroke="#2563eb" stroke-width="8"/>'
+    '<circle cx="302" cy="172" r="26" fill="#2563eb"/>'
+    # antenna
+    '<line x1="256" y1="100" x2="256" y2="56" stroke="#2563eb" stroke-width="10" stroke-linecap="round"/>'
+    '<circle cx="256" cy="48" r="18" fill="#2563eb"/>'
+    '</svg>'
+)
+
+_PNG_CACHE: dict = {}
+
+
+def _get_robot_png(size: int) -> bytes:
+    if size not in _PNG_CACHE:
+        _PNG_CACHE[size] = _robot_png_bytes(size)
+    return _PNG_CACHE[size]
+
+
+def _robot_png_bytes(size: int) -> bytes:
+    """Generate a WALL-E glyph PNG icon.  Uses numpy when available (fast);
+    falls back to pure Python without any extra deps."""
+    import struct
+    import zlib
+
+    bg   = (8,   10,  15)   # #080a0f
+    body = (26,  29,  39)   # #1a1d27
+    blue = (37,  99,  235)  # #2563eb
+
+    try:
+        import numpy as np
+        img = np.empty((size, size, 3), dtype=np.uint8)
+        img[:, :] = bg
+
+        Y, X = np.mgrid[0:size, 0:size]
+        NY = Y / size
+        NX = X / size
+
+        head  = (NX >= 0.29) & (NX <= 0.71) & (NY >= 0.14) & (NY <= 0.45)
+        bod   = (NX >= 0.23) & (NX <= 0.77) & (NY >= 0.43) & (NY <= 0.83)
+        lt    = (NX >= 0.10) & (NX <= 0.26) & (NY >= 0.55) & (NY <= 0.92)
+        rt    = (NX >= 0.74) & (NX <= 0.90) & (NY >= 0.55) & (NY <= 0.92)
+        struct_m = head | bod | lt | rt
+
+        le  = (NX - 0.41) ** 2 + (NY - 0.30) ** 2 < 0.070 ** 2
+        re  = (NX - 0.59) ** 2 + (NY - 0.30) ** 2 < 0.070 ** 2
+        ant = (NX - 0.50) ** 2 + (NY - 0.08) ** 2 < 0.050 ** 2
+        stm = (NX >= 0.485) & (NX <= 0.515) & (NY >= 0.08) & (NY <= 0.17)
+        accent_m = le | re | ant | stm
+
+        img[struct_m]  = body
+        img[accent_m]  = blue
+        pixels = img
+
+    except ImportError:
+        rows_list = []
+        for y in range(size):
+            ny = y / size
+            row = []
+            for x in range(size):
+                nx = x / size
+                if ((nx - 0.41) ** 2 + (ny - 0.30) ** 2 < 0.070 ** 2 or
+                        (nx - 0.59) ** 2 + (ny - 0.30) ** 2 < 0.070 ** 2 or
+                        (nx - 0.50) ** 2 + (ny - 0.08) ** 2 < 0.050 ** 2 or
+                        (0.485 <= nx <= 0.515 and 0.08 <= ny <= 0.17)):
+                    row.append(blue)
+                elif ((0.29 <= nx <= 0.71 and 0.14 <= ny <= 0.45) or
+                      (0.23 <= nx <= 0.77 and 0.43 <= ny <= 0.83) or
+                      (0.10 <= nx <= 0.26 and 0.55 <= ny <= 0.92) or
+                      (0.74 <= nx <= 0.90 and 0.55 <= ny <= 0.92)):
+                    row.append(body)
+                else:
+                    row.append(bg)
+            rows_list.append(row)
+        pixels = rows_list
+
+    def png_chunk(tag: bytes, data: bytes) -> bytes:
+        hdr = tag + data
+        return struct.pack(">I", len(data)) + hdr + struct.pack(">I", zlib.crc32(hdr) & 0xFFFFFFFF)
+
+    raw = bytearray()
+    if hasattr(pixels, "flatten"):          # numpy path
+        for row_arr in pixels:
+            raw.append(0)                   # filter = None
+            raw.extend(row_arr.flatten().tolist())
+    else:                                   # pure-Python path
+        for row_list in pixels:
+            raw.append(0)
+            for (r, g, b) in row_list:
+                raw.extend((r, g, b))
+
+    ihdr = png_chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+    idat = png_chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+    iend = png_chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + ihdr + idat + iend
+
+
+# ---------------------------------------------------------------------------
+# Polished phone-first /drive UI  (tranche 2 — the "sexy" UI)
+# ---------------------------------------------------------------------------
 _DRIVE_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="WALL-E Drive">
+<meta name="theme-color" content="#080a0f">
+<link rel="manifest" href="/drive/manifest.json">
+<link rel="apple-touch-icon" href="/drive/icon.svg">
 <title>WALL-E Drive</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
-  body { margin: 0; background: #0d0f14; color: #e6e6e6; font: 14px/1.4 system-ui, sans-serif;
-         height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-  #status { padding: 8px 10px; font-size: 12px; background: #14171f; border-bottom: 1px solid #222;
-            white-space: pre-wrap; }
-  #status b { color: #4a9eff; }
-  .bad { color: #e63946; } .ok { color: #38b000; } .warn { color: #e6a239; }
-  #bar { display: flex; gap: 8px; padding: 8px 10px; align-items: center; flex-wrap: wrap; }
-  button { font: inherit; border: 1px solid #2a2d37; border-radius: 8px; background: #22252f;
-           color: #e6e6e6; padding: 10px 12px; }
-  #arm { flex: 1; min-width: 120px; }
-  #arm.armed { background: #38b000; color: #061; border-color: #38b000; }
-  #estop { background: #e63946; border-color: #e63946; color: #fff; font-weight: 700; min-width: 110px; }
-  #estop.latched { background: #fff; color: #e63946; }
-  .speed.sel { background: #4a9eff; color: #06121f; border-color: #4a9eff; }
-  label.chk { font-size: 12px; color: #aaa; display: flex; align-items: center; gap: 4px; }
-  #pads { flex: 1; display: flex; gap: 10px; padding: 10px; min-height: 0; }
-  .pad { flex: 1; position: relative; background: #161922; border: 1px solid #2a2d37;
-         border-radius: 12px; touch-action: none; overflow: hidden; }
-  .pad .lbl { position: absolute; top: 6px; left: 0; right: 0; text-align: center; color: #667; font-size: 12px; }
-  .pad .fill { position: absolute; left: 0; right: 0; background: #1f6feb55; }
-  .pad .mid { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: #2a2d37; }
-  .hint { padding: 4px 10px 10px; color: #556; font-size: 11px; }
+:root{
+  --bg:#080a0f;--s1:#111318;--s2:#1a1d27;--bd:#252836;
+  --blue:#2563eb;--blue-lo:rgba(37,99,235,.13);--blue-md:rgba(37,99,235,.32);
+  --green:#10b981;--green-lo:rgba(16,185,129,.13);--green-md:rgba(16,185,129,.3);
+  --red:#ef4444;--red-lo:rgba(239,68,68,.13);--red-md:rgba(239,68,68,.32);
+  --amber:#f59e0b;
+  --text:#f1f5f9;--t2:#94a3b8;--t3:#475569;
+  color-scheme:dark;
+}
+*,*::before,*::after{
+  box-sizing:border-box;
+  -webkit-user-select:none;user-select:none;
+  -webkit-tap-highlight-color:transparent;
+}
+html,body{margin:0;height:100%;overflow:hidden;}
+body{
+  background:var(--bg);color:var(--text);
+  font:700 13px/1 -apple-system,"SF Pro Display",system-ui,sans-serif;
+  display:flex;flex-direction:column;
+  padding-top:env(safe-area-inset-top);
+  padding-bottom:env(safe-area-inset-bottom);
+  padding-left:env(safe-area-inset-left);
+  padding-right:env(safe-area-inset-right);
+}
+/* ---- overlay ---- */
+#overlay{
+  position:fixed;inset:0;z-index:100;
+  background:rgba(8,10,15,.94);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:13px;
+}
+#overlay.hidden{display:none;}
+.ov-icon{font-size:58px;line-height:1;animation:blink 1.4s ease-in-out infinite;}
+.ov-title{font-size:24px;font-weight:800;color:var(--red);letter-spacing:.06em;}
+.ov-sub{font-size:12px;color:var(--t2);text-align:center;max-width:270px;line-height:1.5;}
+.ov-btn{
+  margin-top:8px;padding:13px 44px;
+  border:1.5px solid var(--bd);border-radius:12px;
+  background:var(--s2);color:var(--text);
+  font:inherit;font-size:14px;letter-spacing:.08em;
+  transition:background .12s;
+}
+.ov-btn:active{background:var(--s1);}
+/* ---- A2HS banner ---- */
+#a2hs{
+  background:var(--s1);border-bottom:1px solid var(--bd);
+  padding:9px 14px;display:flex;align-items:center;
+  gap:10px;font-size:11px;color:var(--t2);flex-shrink:0;
+}
+#a2hs.hidden{display:none;}
+#a2hs-msg{flex:1;line-height:1.4;}
+#a2hs-dismiss{
+  border:1px solid var(--bd);border-radius:6px;
+  background:var(--s2);color:var(--t2);
+  font:inherit;padding:4px 9px;flex-shrink:0;
+}
+/* ---- HUD ---- */
+.hud{
+  background:var(--s1);border-bottom:1px solid var(--bd);
+  padding:8px 14px;flex-shrink:0;
+}
+.hud-r{display:flex;align-items:center;gap:6px;}
+.hud-r+.hud-r{margin-top:5px;}
+.sp{flex:1;}
+.dot{
+  width:8px;height:8px;border-radius:50%;background:var(--t3);flex-shrink:0;
+  transition:background .3s,box-shadow .3s;
+}
+.dot.live{background:var(--green);box-shadow:0 0 0 3px rgba(16,185,129,.18);animation:hbp 1.2s ease-in-out infinite;}
+.dot.dead{background:var(--red);box-shadow:0 0 0 3px rgba(239,68,68,.18);}
+.lnk{font-size:10px;letter-spacing:.06em;color:var(--t2);transition:color .3s;}
+.lnk.live{color:var(--green);}.lnk.dead{color:var(--red);}
+.chip{
+  font-size:10px;letter-spacing:.05em;
+  border:1px solid var(--bd);border-radius:6px;
+  padding:3px 7px;background:var(--s2);color:var(--t2);white-space:nowrap;
+  transition:all .2s;
+}
+.chip.ok{background:var(--green-lo);border-color:var(--green);color:var(--green);}
+.chip.warn{border-color:var(--amber);color:var(--amber);}
+.chip.bad{background:var(--red-lo);border-color:var(--red);color:var(--red);animation:blink .9s infinite;}
+/* ---- speed seg ---- */
+.spd-seg{
+  display:flex;flex-shrink:0;
+  margin:7px 12px 0;
+  background:var(--s1);border:1px solid var(--bd);
+  border-radius:10px;padding:3px;gap:2px;
+}
+.seg{
+  flex:1;padding:8px 2px;border:none;border-radius:7px;
+  background:transparent;color:var(--t3);
+  font:700 10px/1 inherit;letter-spacing:.1em;
+  transition:background .14s,color .14s,box-shadow .14s;
+}
+.seg.on{background:var(--blue);color:#fff;box-shadow:0 2px 10px var(--blue-md);}
+/* ---- e-stop ---- */
+.estop-wrap{padding:8px 12px 4px;flex-shrink:0;}
+.estop{
+  width:100%;height:56px;border:none;border-radius:14px;
+  background:var(--red);color:#fff;
+  font:800 17px/1 inherit;letter-spacing:.14em;
+  box-shadow:0 4px 22px var(--red-md),0 2px 4px rgba(0,0,0,.4);
+  transition:transform .08s,box-shadow .08s;
+  position:relative;overflow:hidden;
+}
+.estop::after{
+  content:'';position:absolute;inset:0;
+  background:rgba(255,255,255,0);transition:background .1s;
+}
+.estop:active{transform:scaleY(.96);box-shadow:0 2px 10px var(--red-md);}
+.estop:active::after{background:rgba(255,255,255,.08);}
+.estop.latched{
+  background:#fff;color:var(--red);
+  box-shadow:0 0 0 3px var(--red),0 4px 22px var(--red-md);
+  animation:latch 1.1s ease-in-out infinite;
+}
+.estop.dim1{
+  background:rgba(239,68,68,.15);color:#fff;
+  border:2px solid var(--red);box-shadow:none;animation:none;
+}
+/* ---- arm row ---- */
+.arm-row{display:flex;align-items:center;gap:10px;padding:6px 12px;flex-shrink:0;}
+.arm-outer{flex:1;position:relative;}
+.arm-btn{
+  width:100%;height:44px;border-radius:10px;
+  border:1.5px solid var(--bd);background:var(--s2);
+  color:var(--t2);font:700 12px/1 inherit;letter-spacing:.07em;
+  transition:background .15s,color .15s,border-color .15s,box-shadow .15s;
+}
+.arm-btn.arming{border-color:var(--green);color:var(--green);background:rgba(16,185,129,.05);}
+.arm-btn.armed{background:var(--green-lo);border-color:var(--green);color:var(--green);box-shadow:0 2px 14px var(--green-lo);}
+.arm-btn:disabled{opacity:.38;pointer-events:none;}
+/* radial progress ring */
+.arm-ring{
+  position:absolute;top:-7px;right:-7px;
+  width:30px;height:30px;pointer-events:none;overflow:visible;
+}
+.r-bg{fill:none;stroke:var(--bd);stroke-width:2.5;}
+.r-fg{
+  fill:none;stroke:var(--green);stroke-width:2.5;
+  stroke-linecap:round;
+  stroke-dasharray:94.25;stroke-dashoffset:94.25;
+}
+.rc-lbl{
+  display:flex;align-items:center;gap:6px;
+  font-size:11px;color:var(--t2);flex-shrink:0;
+  cursor:pointer;touch-action:manipulation;
+}
+.rc-lbl input{width:16px;height:16px;accent-color:var(--blue);cursor:pointer;}
+/* ---- sticks ---- */
+.sticks{flex:1;display:flex;gap:10px;padding:6px 12px 8px;min-height:0;}
+.stick-col{flex:1;display:flex;flex-direction:column;gap:4px;min-height:0;}
+.slbl{text-align:center;font-size:9px;font-weight:700;color:var(--t3);letter-spacing:.14em;flex-shrink:0;}
+.pad{
+  flex:1;position:relative;overflow:hidden;
+  background:var(--s1);border:1px solid var(--bd);
+  border-radius:18px;touch-action:none;
+  box-shadow:inset 0 2px 12px rgba(0,0,0,.5);
+  transition:border-color .15s,box-shadow .15s;
+}
+.pad::after{
+  content:'';position:absolute;left:8px;right:8px;top:50%;height:1px;
+  background:var(--bd);pointer-events:none;
+}
+.pad.fwd{border-color:rgba(37,99,235,.45);box-shadow:inset 0 2px 12px rgba(0,0,0,.5),0 0 0 1px rgba(37,99,235,.12);}
+.pad.rev{border-color:rgba(239,68,68,.45);box-shadow:inset 0 2px 12px rgba(0,0,0,.5),0 0 0 1px rgba(239,68,68,.12);}
+.pfill{
+  position:absolute;left:5px;right:5px;
+  border-radius:5px;pointer-events:none;
+}
+.pknob{
+  position:absolute;width:52px;height:52px;border-radius:50%;
+  background:radial-gradient(circle at 38% 32%,#3c4263,#1a1d27);
+  border:1.5px solid #3a3f52;
+  box-shadow:0 4px 14px rgba(0,0,0,.65),0 0 0 1px rgba(255,255,255,.04);
+  transform:translate(-50%,-50%);
+  left:50%;top:50%;
+  pointer-events:none;
+  transition:top .22s cubic-bezier(.34,1.56,.64,1);
+}
+.pknob::before{
+  content:'';position:absolute;
+  width:10px;height:10px;border-radius:50%;
+  background:rgba(255,255,255,.07);
+  top:10px;left:50%;transform:translateX(-50%);
+}
+.pknob::after{
+  content:'';position:absolute;inset:-4px;
+  border-radius:50%;border:2px solid transparent;transition:border-color .12s;
+}
+.pad.fwd .pknob::after{border-color:rgba(37,99,235,.5);}
+.pad.rev .pknob::after{border-color:rgba(239,68,68,.5);}
+.pknob.drag{transition:none;}
+/* ---- keyframes ---- */
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:.55;}}
+@keyframes hbp{
+  0%,100%{opacity:1;box-shadow:0 0 0 3px rgba(16,185,129,.18);}
+  50%{opacity:.7;box-shadow:0 0 0 5px rgba(16,185,129,.07);}
+}
+@keyframes latch{
+  0%,100%{box-shadow:0 0 0 3px var(--red),0 4px 22px var(--red-md);}
+  50%{box-shadow:0 0 0 6px var(--red),0 6px 30px var(--red-md);}
+}
+/* ---- landscape compact ---- */
+@media(orientation:landscape)and(max-height:480px){
+  .hud{padding:4px 14px;}
+  .hud-r+.hud-r{display:none;}
+  .spd-seg{margin:4px 12px 0;}
+  .seg{padding:6px 2px;font-size:9px;}
+  .estop-wrap{padding:4px 12px;}
+  .estop{height:44px;font-size:14px;}
+  .arm-row{padding:3px 12px;}
+  .arm-btn{height:36px;}
+  .sticks{padding:4px 12px 5px;}
+}
 </style>
 </head>
 <body>
-<div id="status">connecting…</div>
-<div id="bar">
-  <button id="arm">HOLD TO ARM</button>
-  <button id="estop">E-STOP</button>
-  <button class="speed sel" data-l="slow">slow</button>
-  <button class="speed" data-l="normal">normal</button>
-  <button class="speed" data-l="fast">fast</button>
-  <label class="chk"><input type="checkbox" id="rcinhand"> RC in my hand</label>
-</div>
-<div id="pads">
-  <div class="pad" id="padL"><div class="mid"></div><div class="fill"></div><div class="lbl">LEFT TRACK</div></div>
-  <div class="pad" id="padR"><div class="mid"></div><div class="fill"></div><div class="lbl">RIGHT TRACK</div></div>
-</div>
-<div class="hint">Drag up = forward, down = reverse. Release = stop. Loses link → robot stops (server deadman 250&nbsp;ms). RC always overrides.</div>
-<script>
-const qs = new URLSearchParams(location.search);
-const token = qs.get('token');
-let ws = null, connected = false;
-let seq = 1;
-let left = 0, right = 0;
-let lastStatus = {};
-let rtt = null;
 
+<!-- disconnected / deadman overlay — requires explicit dismiss before re-arm -->
+<div id="overlay" class="hidden">
+  <div class="ov-icon">&#9888;</div>
+  <div class="ov-title" id="ov-title">DISCONNECTED</div>
+  <div class="ov-sub"  id="ov-sub">Robot stopped &middot; reconnecting&hellip;</div>
+  <button class="ov-btn" id="ov-btn">DISMISS</button>
+</div>
+
+<!-- iOS Add-to-Home-Screen hint (dismissible, not shown in standalone mode) -->
+<div id="a2hs" class="hidden">
+  <span id="a2hs-msg">Tap <b>&#8679; Share</b> &rarr; <b>Add to Home Screen</b> for full-screen mode</span>
+  <button id="a2hs-dismiss">&#x2715;</button>
+</div>
+
+<!-- HUD -->
+<div class="hud">
+  <div class="hud-r">
+    <div class="dot" id="dot"></div>
+    <span class="lnk" id="lnklbl">CONNECTING</span>
+    <div class="sp"></div>
+    <span class="chip" id="c-rtt">RTT &mdash;</span>
+    <span class="chip" id="c-arm">DISARMED</span>
+  </div>
+  <div class="hud-r">
+    <span class="chip" id="c-batt">BATT &mdash;</span>
+    <span class="chip" id="c-cap">CAP &mdash;</span>
+    <span class="chip" id="c-dm">DM &mdash;</span>
+    <span class="chip" id="c-rc">RC &mdash;</span>
+  </div>
+</div>
+
+<!-- Speed segmented control -->
+<div class="spd-seg" id="spd-seg">
+  <button class="seg on" data-l="slow">SLOW</button>
+  <button class="seg"    data-l="normal">NORMAL</button>
+  <button class="seg"    data-l="fast">FAST</button>
+</div>
+
+<!-- E-STOP -->
+<div class="estop-wrap">
+  <button class="estop" id="estop">E &mdash; STOP</button>
+</div>
+
+<!-- ARM -->
+<div class="arm-row">
+  <div class="arm-outer">
+    <button class="arm-btn" id="arm-btn">HOLD TO ARM</button>
+    <svg class="arm-ring" viewBox="0 0 32 32" aria-hidden="true">
+      <circle class="r-bg" cx="16" cy="16" r="15"/>
+      <circle class="r-fg" cx="16" cy="16" r="15" id="ring" transform="rotate(-90 16 16)"/>
+    </svg>
+  </div>
+  <label class="rc-lbl">
+    <input type="checkbox" id="rc-in-hand">
+    <span>RC in hand</span>
+  </label>
+</div>
+
+<!-- Joysticks — bottom half, thumb-zone -->
+<div class="sticks">
+  <div class="stick-col">
+    <div class="pad" id="padL">
+      <div class="pfill" id="fillL"></div>
+      <div class="pknob" id="knobL"></div>
+    </div>
+    <div class="slbl">L TRACK</div>
+  </div>
+  <div class="stick-col">
+    <div class="pad" id="padR">
+      <div class="pfill" id="fillR"></div>
+      <div class="pknob" id="knobR"></div>
+    </div>
+    <div class="slbl">R TRACK</div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+/* ---- config ---- */
+const QS       = new URLSearchParams(location.search);
+const TOKEN    = QS.get('token');
+const ARM_MS   = 520;     // >= 500 ms server minimum
+const RING_C   = 94.25;   // 2*pi*15 — ring circumference for 32x32 SVG, r=15
+
+/* ---- state ---- */
+let ws = null, connected = false;
+let rtt = null, lastSt = {}, seq = 1;
+let leftV = 0, rightV = 0;
+
+/* ---- WebSocket ---- */
 function wsUrl() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  let u = proto + '://' + location.host + '/ws/drive';
-  if (token) u += '?token=' + encodeURIComponent(token);
-  return u;
+  var p = location.protocol === 'https:' ? 'wss' : 'ws';
+  var u = p + '://' + location.host + '/ws/drive';
+  return TOKEN ? u + '?token=' + encodeURIComponent(TOKEN) : u;
 }
 function connect() {
   ws = new WebSocket(wsUrl());
-  ws.onopen = () => { connected = true; render(); };
-  ws.onclose = () => { connected = false; render(); setTimeout(connect, 600); };
-  ws.onerror = () => { try { ws.close(); } catch(e){} };
-  ws.onmessage = (ev) => {
-    let m; try { m = JSON.parse(ev.data); } catch(e) { return; }
-    if (m.type === 'status') {
-      lastStatus = m;
-      if (m.echo_ts != null) rtt = Math.max(0, Math.round(performance.now() - m.echo_ts));
-      render();
-    }
+  ws.onopen  = function() { connected = true;  renderConn(); hideOverlay(); };
+  ws.onclose = function() {
+    connected = false; renderConn();
+    showOverlay('disconnected');
+    setTimeout(connect, 800);
+  };
+  ws.onerror = function() { try { ws.close(); } catch(_) {} };
+  ws.onmessage = function(ev) {
+    var m; try { m = JSON.parse(ev.data); } catch(_) { return; }
+    if (m.type !== 'status') return;
+    var wasArmed = lastSt.armed;
+    lastSt = m;
+    if (!m.armed) armPending = false;
+    if (m.echo_ts != null) rtt = Math.max(0, Math.round(performance.now() - m.echo_ts));
+    if (wasArmed && !m.armed && m.tripped_reason === 'deadman') showOverlay('deadman');
+    renderAll();
   };
 }
-function send(o) { if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify(o)); } catch(e){} } }
+function send(o) {
+  if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify(o)); } catch(_) {} }
+}
 
-// Heartbeat 10 Hz; drive 15 Hz coalesced with the heartbeat timestamp.
-setInterval(() => send({type: 'hb', t: performance.now()}), 100);
-setInterval(() => {
-  if (lastStatus.armed) send({type: 'drive', seq: seq++, t: performance.now(), left, right});
+/* ---- drive loops — identical timing to tranche-1 minimal UI ---- */
+/* heartbeat 10 Hz */
+setInterval(function() { send({type:'hb', t: performance.now()}); }, 100);
+/* drive 15 Hz, only when session is armed */
+setInterval(function() {
+  if (lastSt.armed) send({type:'drive', seq: seq++, t: performance.now(), left: leftV, right: rightV});
 }, 66);
 
-// Arm = press and hold >= 500 ms.
-const armBtn = document.getElementById('arm');
-let holdStart = 0, holdTimer = null;
-function armDown(e){ e.preventDefault(); holdStart = performance.now();
-  armBtn.textContent = 'HOLD…';
-  holdTimer = setTimeout(() => {
-    send({type:'arm', hold_ms: Math.round(performance.now()-holdStart),
-          rc_in_hand: document.getElementById('rcinhand').checked});
-  }, 520);
-}
-function armUp(e){ e.preventDefault(); if (holdTimer){clearTimeout(holdTimer); holdTimer=null;}
-  if (lastStatus.armed) { /* hold complete-> stays armed */ } else { armBtn.textContent='HOLD TO ARM'; }
-}
-armBtn.addEventListener('pointerdown', armDown);
-armBtn.addEventListener('pointerup', armUp);
-armBtn.addEventListener('pointerleave', armUp);
-armBtn.addEventListener('click', (e)=>{ if (lastStatus.armed) { send({type:'disarm'}); } });
-
-document.getElementById('estop').addEventListener('click', () => {
-  if (lastStatus.estop_latched) { send({type:'clear_estop'}); }
-  else { left = right = 0; send({type:'estop'}); }
+/* ---- client-side safety belt: zero sticks immediately on page hide ---- */
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) {
+    leftV = rightV = 0;
+    send({type:'drive', seq: seq++, t: performance.now(), left: 0, right: 0});
+  }
 });
-document.querySelectorAll('.speed').forEach(b => b.addEventListener('click', () => {
-  send({type:'speed', level: b.dataset.l});
-  document.querySelectorAll('.speed').forEach(x=>x.classList.remove('sel'));
-  b.classList.add('sel');
-}));
+window.addEventListener('pagehide', function() {
+  leftV = rightV = 0;
+  send({type:'drive', seq: seq++, t: performance.now(), left: 0, right: 0});
+});
 
-// Touch zones: vertical drag -> throttle [-1,1].
-function bindPad(padId, setFn) {
-  const pad = document.getElementById(padId);
-  const fill = pad.querySelector('.fill');
-  let active = null;
-  function val(ev) {
-    const r = pad.getBoundingClientRect();
-    let f = 1 - 2 * ((ev.clientY - r.top) / r.height); // top=+1, bottom=-1
-    return Math.max(-1, Math.min(1, f));
+/* ---- overlay ---- */
+function showOverlay(reason) {
+  var titles = {disconnected:'DISCONNECTED', deadman:'LINK LOST'};
+  var subs   = {
+    disconnected: 'Robot stopped · reconnecting…',
+    deadman:      'Deadman tripped — robot stopped · re-arm to resume',
+  };
+  document.getElementById('ov-title').textContent = titles[reason] || 'STOPPED';
+  document.getElementById('ov-sub').textContent   = subs[reason]   || 'Robot stopped';
+  document.getElementById('overlay').classList.remove('hidden');
+}
+function hideOverlay() { document.getElementById('overlay').classList.add('hidden'); }
+document.getElementById('ov-btn').addEventListener('click', hideOverlay);
+
+/* ---- iOS A2HS banner ---- */
+(function() {
+  var ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if (ios && !window.navigator.standalone && !localStorage.getItem('walle-a2hs-v1')) {
+    document.getElementById('a2hs').classList.remove('hidden');
+  }
+  document.getElementById('a2hs-dismiss').addEventListener('click', function() {
+    localStorage.setItem('walle-a2hs-v1', '1');
+    document.getElementById('a2hs').classList.add('hidden');
+  });
+})();
+
+/* ---- speed segmented control ---- */
+document.getElementById('spd-seg').addEventListener('click', function(e) {
+  var b = e.target.closest('.seg');
+  if (!b) return;
+  send({type:'speed', level: b.dataset.l});
+  document.querySelectorAll('.seg').forEach(function(x) { x.classList.toggle('on', x === b); });
+});
+
+/* ---- E-STOP ---- */
+var estopEl    = document.getElementById('estop');
+var dimStep    = 0;
+var dimTmr     = null;
+
+estopEl.addEventListener('pointerdown', function() {
+  if (lastSt.estop_latched) return;   /* latched state handled by click */
+  leftV = rightV = 0;
+  send({type:'estop'});
+  if (navigator.vibrate) navigator.vibrate(150);
+});
+
+estopEl.addEventListener('click', function() {
+  if (!lastSt.estop_latched) return;
+  if (dimStep === 0) {
+    dimStep = 1;
+    estopEl.classList.add('dim1');
+    estopEl.textContent = 'TAP AGAIN TO CLEAR';
+    dimTmr = setTimeout(function() {
+      dimStep = 0; estopEl.classList.remove('dim1'); renderEstop();
+    }, 3000);
+  } else {
+    clearTimeout(dimTmr); dimStep = 0;
+    estopEl.classList.remove('dim1');
+    send({type:'clear_estop'});
+  }
+});
+
+function renderEstop() {
+  if (dimStep) return;
+  estopEl.classList.toggle('latched', !!lastSt.estop_latched);
+  estopEl.textContent = lastSt.estop_latched ? 'E-STOP LATCHED' : 'E — STOP';
+}
+
+/* ---- ARM button with 500 ms hold + radial progress ring ---- */
+var armEl      = document.getElementById('arm-btn');
+var ring       = document.getElementById('ring');
+var isHolding  = false;
+var armPending = false;
+var justArmed  = false;
+var holdTmr    = null;
+var holdStart  = 0;
+var holdRAF    = null;
+
+function setRing(frac) {
+  ring.style.strokeDashoffset = (RING_C * (1 - Math.max(0, Math.min(1, frac)))).toFixed(2);
+}
+function animRing() {
+  setRing((performance.now() - holdStart) / ARM_MS);
+  holdRAF = requestAnimationFrame(animRing);
+}
+function cancelHold() {
+  isHolding = false;
+  if (holdTmr) { clearTimeout(holdTmr); holdTmr = null; }
+  if (holdRAF) { cancelAnimationFrame(holdRAF); holdRAF = null; }
+  setRing(0);
+  armEl.classList.remove('arming');
+  renderArm();
+}
+
+armEl.addEventListener('pointerdown', function(e) {
+  e.preventDefault();
+  if (lastSt.armed || lastSt.estop_latched || isHolding) return;
+  isHolding = true;
+  holdStart = performance.now();
+  armEl.classList.add('arming');
+  armEl.textContent = 'HOLD…';
+  setRing(0);
+  holdRAF = requestAnimationFrame(animRing);
+  holdTmr = setTimeout(function() {
+    holdTmr  = null;
+    isHolding = false;
+    justArmed = true;
+    armPending = true;
+    send({type:'arm',
+          hold_ms: Math.round(performance.now() - holdStart),
+          rc_in_hand: document.getElementById('rc-in-hand').checked});
+    if (navigator.vibrate) navigator.vibrate([25, 15, 25]);
+    if (holdRAF) { cancelAnimationFrame(holdRAF); holdRAF = null; }
+    setRing(1);
+    armEl.classList.remove('arming');
+    armEl.textContent = 'ARMING…';
+  }, ARM_MS);
+});
+
+armEl.addEventListener('pointerup',     cancelHold);
+armEl.addEventListener('pointerleave',  cancelHold);
+armEl.addEventListener('pointercancel', cancelHold);
+
+armEl.addEventListener('click', function() {
+  if (justArmed) { justArmed = false; return; }  /* swallow click after successful hold */
+  if (lastSt.armed) send({type:'disarm'});
+});
+
+function renderArm() {
+  if (isHolding) return;
+  armEl.classList.toggle('armed', !!lastSt.armed);
+  armEl.classList.remove('arming');
+  if (lastSt.armed) {
+    armPending = false;
+    armEl.textContent = 'ARMED · TAP TO DISARM';
+    armEl.disabled = false;
+  } else if (armPending) {
+    armEl.textContent = 'ARMING…';
+    armEl.disabled = false;
+  } else if (lastSt.estop_latched) {
+    armEl.textContent = 'CLEAR E-STOP FIRST';
+    armEl.disabled = true;
+  } else {
+    armEl.textContent = 'HOLD TO ARM';
+    armEl.disabled = false;
+    setRing(0);
+  }
+}
+
+/* ---- joystick pads (tank drive — vertical axis only) ---- */
+function bindPad(padId, fillId, knobId, setter) {
+  var pad  = document.getElementById(padId);
+  var fill = document.getElementById(fillId);
+  var knob = document.getElementById(knobId);
+  var ptr  = null;
+
+  function calcV(e) {
+    var r = pad.getBoundingClientRect();
+    return Math.max(-1, Math.min(1, 1 - 2 * (e.clientY - r.top) / r.height));
   }
   function paint(v) {
-    const r = pad.getBoundingClientRect();
-    const mid = r.height/2, h = Math.abs(v)*mid;
-    fill.style.height = h + 'px';
-    fill.style.top = v >= 0 ? (mid - h) + 'px' : mid + 'px';
-    fill.style.background = v >= 0 ? '#1f6feb66' : '#e6394666';
+    /* knob: 38 % travel from centre in each direction */
+    knob.style.top = (50 - v * 38).toFixed(1) + '%';
+    /* fill bar */
+    var h = Math.abs(v) * 50;
+    fill.style.top    = v >= 0 ? (50 - h).toFixed(1) + '%' : '50%';
+    fill.style.height = h.toFixed(1) + '%';
+    fill.style.background = v >= 0 ? 'var(--blue-lo)' : 'var(--red-lo)';
+    pad.classList.toggle('fwd', v >  0.05);
+    pad.classList.toggle('rev', v < -0.05);
   }
-  pad.addEventListener('pointerdown', e => { e.preventDefault(); active = e.pointerId;
-    pad.setPointerCapture(e.pointerId); const v=val(e); setFn(v); paint(v); });
-  pad.addEventListener('pointermove', e => { if (active!==e.pointerId) return; const v=val(e); setFn(v); paint(v); });
-  function end(e){ if (active!==e.pointerId) return; active=null; setFn(0); paint(0); }
-  pad.addEventListener('pointerup', end);
-  pad.addEventListener('pointercancel', end);
-  pad.addEventListener('pointerleave', end);
-}
-bindPad('padL', v => left = v);
-bindPad('padR', v => right = v);
+  function spring() {
+    knob.classList.remove('drag');
+    knob.style.top = '50%';           /* CSS spring transition fires here */
+    fill.style.height = '0';
+    pad.classList.remove('fwd', 'rev');
+  }
 
-function render() {
-  const s = lastStatus;
-  armBtn.classList.toggle('armed', !!s.armed);
-  armBtn.textContent = s.armed ? 'ARMED — tap to disarm' : 'HOLD TO ARM';
-  const eb = document.getElementById('estop');
-  eb.classList.toggle('latched', !!s.estop_latched);
-  eb.textContent = s.estop_latched ? 'E-STOP LATCHED — tap to clear' : 'E-STOP';
-  const armTxt = s.armed ? '<span class="ok">ARMED</span>' : '<span class="warn">disarmed</span>';
-  const dm = s.armed
-      ? ((s.heartbeat_age_ms!=null && s.heartbeat_age_ms <= s.deadman_ms) ? '<span class="ok">live</span>' : '<span class="bad">STALE</span>')
-      : (s.tripped_reason ? '<span class="bad">'+s.tripped_reason+'</span>' : 'idle');
-  const rc = s.rc_state ? ('rc_armed='+s.rc_state[0]+' rc_estop='+s.rc_state[1]) : 'rc=unknown';
-  const batt = (s.battery_v!=null) ? s.battery_v.toFixed(1)+'V' : '—';
-  document.getElementById('status').innerHTML =
-    (connected ? '<b>link up</b>' : '<span class="bad">link down</span>') +
-    '  arm: ' + armTxt + '  deadman: ' + dm +
-    '  rtt: ' + (rtt!=null ? rtt+'ms' : '—') +
-    '  speed: ' + (s.speed_level||'—') + '  batt: ' + batt + '\n' + rc;
+  pad.addEventListener('pointerdown', function(e) {
+    e.preventDefault();
+    pad.setPointerCapture(e.pointerId);
+    ptr = e.pointerId;
+    knob.classList.add('drag');
+    var v = calcV(e); setter(v); paint(v);
+  });
+  pad.addEventListener('pointermove', function(e) {
+    if (ptr !== e.pointerId) return;
+    var v = calcV(e); setter(v); paint(v);
+  });
+  function end(e) {
+    if (ptr !== e.pointerId) return;
+    ptr = null; setter(0); spring();
+  }
+  pad.addEventListener('pointerup',     end);
+  pad.addEventListener('pointercancel', end);
+  pad.addEventListener('pointerleave',  end);
 }
+
+bindPad('padL', 'fillL', 'knobL', function(v) { leftV  = v; });
+bindPad('padR', 'fillR', 'knobR', function(v) { rightV = v; });
+
+/* ---- HUD render ---- */
+function renderConn() {
+  var d = document.getElementById('dot');
+  var l = document.getElementById('lnklbl');
+  d.className = 'dot ' + (connected ? 'live' : 'dead');
+  l.className = 'lnk ' + (connected ? 'live' : 'dead');
+  l.textContent = connected ? 'LINK UP' : 'LINK DOWN';
+}
+
+function renderAll() {
+  var s = lastSt;
+
+  /* RTT */
+  var rttEl = document.getElementById('c-rtt');
+  rttEl.textContent = rtt != null ? 'RTT ' + rtt + ' ms' : 'RTT —';
+  rttEl.className   = 'chip' + (rtt != null && rtt > 120 ? ' warn' : '');
+
+  /* arm badge */
+  var ac = document.getElementById('c-arm');
+  if (s.armed) {
+    ac.textContent = 'ARMED'; ac.className = 'chip ok';
+  } else if (s.tripped_reason) {
+    ac.textContent = s.tripped_reason.replace(/_/g,' ').toUpperCase();
+    ac.className = 'chip bad';
+  } else {
+    ac.textContent = 'DISARMED'; ac.className = 'chip';
+  }
+
+  /* battery */
+  var bc = document.getElementById('c-batt');
+  if (s.battery_v != null) {
+    bc.textContent = s.battery_v.toFixed(1) + ' V';
+    bc.className   = 'chip' + (s.battery_v < 21.0 ? ' warn' : '');
+  } else {
+    bc.textContent = 'BATT —'; bc.className = 'chip';
+  }
+
+  /* speed cap */
+  document.getElementById('c-cap').textContent =
+    s.speed_cap != null ? 'CAP ' + Math.round(s.speed_cap * 100) + '%' : 'CAP —';
+
+  /* deadman age */
+  var dc = document.getElementById('c-dm');
+  if (s.armed && s.heartbeat_age_ms != null) {
+    var pct = s.heartbeat_age_ms / (s.deadman_ms || 250);
+    dc.textContent = 'HB ' + s.heartbeat_age_ms + ' ms';
+    dc.className   = 'chip' + (pct > 0.7 ? ' warn' : '');
+  } else {
+    dc.textContent = 'DM —'; dc.className = 'chip';
+  }
+
+  /* RC state */
+  var rc = document.getElementById('c-rc');
+  if (s.rc_state) {
+    var ra = s.rc_state[0], re = s.rc_state[1];
+    rc.textContent = 'RC ' + (re ? 'ESTOP' : ra ? 'ARMED' : 'DISARMD');
+    rc.className   = 'chip' + (re ? ' bad' : ra ? ' ok' : '');
+  } else {
+    rc.textContent = 'RC —'; rc.className = 'chip';
+  }
+
+  /* sync speed seg to server-reported level */
+  if (s.speed_level) {
+    document.querySelectorAll('.seg').forEach(function(b) {
+      b.classList.toggle('on', b.dataset.l === s.speed_level);
+    });
+  }
+
+  renderArm();
+  renderEstop();
+}
+
+/* ---- start ---- */
 connect();
 </script>
 </body>
