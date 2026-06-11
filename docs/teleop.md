@@ -234,21 +234,37 @@ code degrades to the REST fallback rather than crashing.
 │  [ HOLD TO ARM   ◎ ]  ☐ RC in hand │  ARM button + ring + checkbox
 ├─────────────────────────────────────┤
 │                                     │
-│  ┌───────────┐    ┌───────────┐    │
-│  │  ↑ fwd    │    │  ↑ fwd    │    │  Joystick pads
-│  │   (knob)  │    │   (knob)  │    │  (flex-1, thumb zones)
-│  │  ↓ rev    │    │  ↓ rev    │    │
-│  └───────────┘    └───────────┘    │
-│  L TRACK          R TRACK          │
+│         ┌─────────────────┐        │
+│         │    ↑ fwd        │        │  Single arcade-mix joystick
+│         │ ←  (knob)  →   │        │  (centered, ~57 vw, square)
+│         │    ↓ rev        │        │
+│         └─────────────────┘        │
+│         ↑ FWD/REV ↓  ← STEER →    │
 └─────────────────────────────────────┘
 ```
 
-### Joysticks
-Tank-drive mapping: left pad = left track, right pad = right track. Vertical
-axis only — drag up = forward (+1), drag down = reverse (−1), release =
-spring-return to center (CSS `cubic-bezier(.34,1.56,.64,1)` spring). Each pad
-uses Pointer Events with `setPointerCapture` for reliable multi-touch; knob
-glows blue (forward) or red (reverse).
+### Joystick (arcade mix)
+Single centered 2-D joystick — **up/down = forward/reverse, left/right =
+steering**. The joystick mixes to left/right track values client-side before
+sending; the server protocol and all server-side logic are unchanged.
+
+Arcade mix (STEER_GAIN = 0.8):
+```
+throttle = -y   (stick up = +1)
+steer    =  x
+left  = clamp(throttle + 0.8 * steer, -1, 1)
+right = clamp(throttle - 0.8 * steer, -1, 1)
+```
+
+Full sideways at zero throttle gives a gentle differential pivot (not a
+full-rate skid spin). The pad uses Pointer Events with `setPointerCapture`
+for reliable single-thumb tracking; the knob springs back to center on release
+via a CSS `cubic-bezier(.34,1.56,.64,1)` transition on both axes. Knob glows
+blue when throttle > 0 (forward) or red when throttle < 0 (reverse).
+
+The WebSocket protocol is **byte-identical** to the two-pad version: the page
+still sends `{type:"drive", seq, t, left, right}` tank values; the mix is
+purely client-side.
 
 ### ARM ceremony
 Press-and-hold renders a radial progress ring (rAF, 520 ms fill) around the

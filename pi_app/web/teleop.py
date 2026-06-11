@@ -1353,15 +1353,22 @@ body{
 }
 .rc-lbl input{width:16px;height:16px;accent-color:var(--blue);cursor:pointer;}
 /* ---- sticks ---- */
-.sticks{flex:1;display:flex;gap:10px;padding:6px 12px 8px;min-height:0;}
-.stick-col{flex:1;display:flex;flex-direction:column;gap:4px;min-height:0;}
-.slbl{text-align:center;font-size:9px;font-weight:700;color:var(--t3);letter-spacing:.14em;flex-shrink:0;}
+.sticks{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px 12px 8px;min-height:0;}
+.slbl{text-align:center;font-size:9px;font-weight:700;color:var(--t3);letter-spacing:.14em;flex-shrink:0;margin-top:5px;}
 .pad{
-  flex:1;position:relative;overflow:hidden;
+  /* single centered pad: ~57% of viewport width, capped at 340px, square */
+  width:min(57vw,340px);height:min(57vw,340px);
+  position:relative;overflow:hidden;
   background:var(--s1);border:1px solid var(--bd);
   border-radius:18px;touch-action:none;
   box-shadow:inset 0 2px 12px rgba(0,0,0,.5);
   transition:border-color .15s,box-shadow .15s;
+  flex-shrink:0;
+}
+/* crosshair guides */
+.pad::before{
+  content:'';position:absolute;top:8px;bottom:8px;left:50%;width:1px;
+  background:var(--bd);pointer-events:none;transform:translateX(-50%);
 }
 .pad::after{
   content:'';position:absolute;left:8px;right:8px;top:50%;height:1px;
@@ -1369,19 +1376,15 @@ body{
 }
 .pad.fwd{border-color:rgba(37,99,235,.45);box-shadow:inset 0 2px 12px rgba(0,0,0,.5),0 0 0 1px rgba(37,99,235,.12);}
 .pad.rev{border-color:rgba(239,68,68,.45);box-shadow:inset 0 2px 12px rgba(0,0,0,.5),0 0 0 1px rgba(239,68,68,.12);}
-.pfill{
-  position:absolute;left:5px;right:5px;
-  border-radius:5px;pointer-events:none;
-}
 .pknob{
-  position:absolute;width:52px;height:52px;border-radius:50%;
+  position:absolute;width:62px;height:62px;border-radius:50%;
   background:radial-gradient(circle at 38% 32%,#3c4263,#1a1d27);
   border:1.5px solid #3a3f52;
   box-shadow:0 4px 14px rgba(0,0,0,.65),0 0 0 1px rgba(255,255,255,.04);
   transform:translate(-50%,-50%);
   left:50%;top:50%;
   pointer-events:none;
-  transition:top .22s cubic-bezier(.34,1.56,.64,1);
+  transition:left .22s cubic-bezier(.34,1.56,.64,1),top .22s cubic-bezier(.34,1.56,.64,1);
 }
 .pknob::before{
   content:'';position:absolute;
@@ -1446,7 +1449,7 @@ body{
   .estop{height:44px;font-size:14px;}
   .arm-row{padding:3px 12px;}
   .arm-btn{height:36px;}
-  .sticks{padding:4px 12px 5px;}
+  .sticks{padding:4px 12px 5px;gap:4px;}
   .cam-panel{padding:0 8px 2px;}
 }
 </style>
@@ -1520,22 +1523,12 @@ body{
   </label>
 </div>
 
-<!-- Joysticks — bottom half, thumb-zone -->
+<!-- Joystick — single arcade-mix stick, centered -->
 <div class="sticks">
-  <div class="stick-col">
-    <div class="pad" id="padL">
-      <div class="pfill" id="fillL"></div>
-      <div class="pknob" id="knobL"></div>
-    </div>
-    <div class="slbl">L TRACK</div>
+  <div class="pad" id="padS">
+    <div class="pknob" id="knobS"></div>
   </div>
-  <div class="stick-col">
-    <div class="pad" id="padR">
-      <div class="pfill" id="fillR"></div>
-      <div class="pknob" id="knobR"></div>
-    </div>
-    <div class="slbl">R TRACK</div>
-  </div>
+  <div class="slbl">↑ FWD / REV ↓ &nbsp;&nbsp; ← STEER →</div>
 </div>
 
 <script>
@@ -1567,8 +1560,20 @@ const TOKEN = resolveToken();
 /* ---- state ---- */
 let ws = null, connected = false;
 let rtt = null, lastSt = {}, seq = 1;
-let leftV = 0, rightV = 0;
-let clientId = null;      // server-issued single-driver id (DEFECT-1)
+let leftV = 0, rightV = 0;   // mixed arcade values, sent as tank protocol
+let stickX = 0, stickY = 0;  // raw joystick axes [-1,1]
+let clientId = null;          // server-issued single-driver id (DEFECT-1)
+
+/* ---- arcade mix ---- */
+const STEER_GAIN = 0.8;
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function applyArcadeMix() {
+  /* throttle = -y (stick up = +1), steer = x */
+  var throttle = -stickY;
+  var steer    = stickX;
+  leftV  = clamp(throttle + STEER_GAIN * steer, -1, 1);
+  rightV = clamp(throttle - STEER_GAIN * steer, -1, 1);
+}
 
 /* ---- WebSocket ---- */
 function wsUrl() {
@@ -1614,12 +1619,12 @@ setInterval(function() {
 /* ---- client-side safety belt: zero sticks immediately on page hide ---- */
 document.addEventListener('visibilitychange', function() {
   if (document.hidden) {
-    leftV = rightV = 0;
+    stickX = stickY = 0; leftV = rightV = 0;
     send({type:'drive', seq: seq++, t: performance.now(), left: 0, right: 0});
   }
 });
 window.addEventListener('pagehide', function() {
-  leftV = rightV = 0;
+  stickX = stickY = 0; leftV = rightV = 0;
   send({type:'drive', seq: seq++, t: performance.now(), left: 0, right: 0});
 });
 
@@ -1665,7 +1670,7 @@ var dimTmr     = null;
 
 estopEl.addEventListener('pointerdown', function() {
   if (lastSt.estop_latched) return;   /* latched state handled by click */
-  leftV = rightV = 0;
+  stickX = stickY = 0; leftV = rightV = 0;
   send({type:'estop'});
   if (navigator.vibrate) navigator.vibrate(150);
 });
@@ -1797,32 +1802,31 @@ function renderArm() {
   }
 }
 
-/* ---- joystick pads (tank drive — vertical axis only) ---- */
-function bindPad(padId, fillId, knobId, setter) {
+/* ---- single arcade-mix joystick (2-D) ---- */
+function bindStick(padId, knobId) {
   var pad  = document.getElementById(padId);
-  var fill = document.getElementById(fillId);
   var knob = document.getElementById(knobId);
   var ptr  = null;
 
-  function calcV(e) {
+  function calcXY(e) {
     var r = pad.getBoundingClientRect();
-    return Math.max(-1, Math.min(1, 1 - 2 * (e.clientY - r.top) / r.height));
+    var x = Math.max(-1, Math.min(1,  2 * (e.clientX - r.left) / r.width  - 1));
+    var y = Math.max(-1, Math.min(1,  2 * (e.clientY - r.top)  / r.height - 1));
+    return [x, y];
   }
-  function paint(v) {
-    /* knob: 38 % travel from centre in each direction */
-    knob.style.top = (50 - v * 38).toFixed(1) + '%';
-    /* fill bar */
-    var h = Math.abs(v) * 50;
-    fill.style.top    = v >= 0 ? (50 - h).toFixed(1) + '%' : '50%';
-    fill.style.height = h.toFixed(1) + '%';
-    fill.style.background = v >= 0 ? 'var(--blue-lo)' : 'var(--red-lo)';
-    pad.classList.toggle('fwd', v >  0.05);
-    pad.classList.toggle('rev', v < -0.05);
+  function paint(x, y) {
+    /* knob travels ±38% of pad size in each axis */
+    knob.style.left = (50 + x * 38).toFixed(1) + '%';
+    knob.style.top  = (50 + y * 38).toFixed(1) + '%';
+    /* throttle = -y; forward when y < 0 */
+    pad.classList.toggle('fwd', -y >  0.05);
+    pad.classList.toggle('rev', -y < -0.05);
   }
   function spring() {
     knob.classList.remove('drag');
-    knob.style.top = '50%';           /* CSS spring transition fires here */
-    fill.style.height = '0';
+    /* CSS spring transition fires here — both axes return to centre */
+    knob.style.left = '50%';
+    knob.style.top  = '50%';
     pad.classList.remove('fwd', 'rev');
   }
 
@@ -1831,23 +1835,30 @@ function bindPad(padId, fillId, knobId, setter) {
     pad.setPointerCapture(e.pointerId);
     ptr = e.pointerId;
     knob.classList.add('drag');
-    var v = calcV(e); setter(v); paint(v);
+    var xy = calcXY(e);
+    stickX = xy[0]; stickY = xy[1];
+    applyArcadeMix();
+    paint(xy[0], xy[1]);
   });
   pad.addEventListener('pointermove', function(e) {
     if (ptr !== e.pointerId) return;
-    var v = calcV(e); setter(v); paint(v);
+    var xy = calcXY(e);
+    stickX = xy[0]; stickY = xy[1];
+    applyArcadeMix();
+    paint(xy[0], xy[1]);
   });
   function end(e) {
     if (ptr !== e.pointerId) return;
-    ptr = null; setter(0); spring();
+    ptr = null;
+    stickX = stickY = 0; leftV = rightV = 0;
+    spring();
   }
   pad.addEventListener('pointerup',     end);
   pad.addEventListener('pointercancel', end);
   pad.addEventListener('pointerleave',  end);
 }
 
-bindPad('padL', 'fillL', 'knobL', function(v) { leftV  = v; });
-bindPad('padR', 'fillR', 'knobR', function(v) { rightV = v; });
+bindStick('padS', 'knobS');
 
 /* ---- HUD render ---- */
 function renderConn() {
