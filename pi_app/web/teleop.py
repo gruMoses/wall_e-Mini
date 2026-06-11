@@ -694,7 +694,8 @@ def resolve_teleop_token(
 def register_teleop(app, session: "TeleopSession", *, token: Optional[str] = None,
                     battery_provider: Optional[Callable[[], Optional[float]]] = None,
                     token_path: str = DEFAULT_TOKEN_PATH,
-                    frame_source: Optional[Callable[[], Optional[bytes]]] = None) -> None:
+                    frame_source: Optional[Callable[[], Optional[bytes]]] = None,
+                    frame_client_hook: Optional[Callable[[bool], None]] = None) -> None:
     """Register the /drive page, the drive WebSocket, and REST fallbacks on ``app``.
 
     Additive only: it adds new routes and does not modify any existing route.
@@ -831,7 +832,13 @@ def register_teleop(app, session: "TeleopSession", *, token: Optional[str] = Non
         """REST fallback: latest JPEG frame, token-gated.
 
         Returns 401 when auth fails, 503 when no frame source is registered or
-        the frame source returns None (no frame yet).
+        the frame source returns None after the poll window.
+
+        If a ``frame_client_hook`` is provided and the initial frame_source()
+        call returns None (preview not yet enabled), the hook is called with
+        True to register this client, then frame_source is polled for up to
+        ~0.8 s at 50 ms intervals.  The hook(False) is always called in a
+        finally block so the recorder's client count stays balanced.
         """
         if not _auth_ok():
             return Response("unauthorized", status=401)
@@ -842,6 +849,30 @@ def register_teleop(app, session: "TeleopSession", *, token: Optional[str] = Non
         except Exception:
             logger.exception("camera frame_source raised")
             data = None
+        if not data and frame_client_hook is not None:
+            # Preview not yet active — register this caller and poll briefly.
+            try:
+                frame_client_hook(True)
+            except Exception:
+                logger.exception("frame_client_hook(True) raised in REST camera frame")
+            try:
+                _POLL_INTERVAL_S = 0.05
+                _POLL_TOTAL_S = 0.80
+                _polls = int(_POLL_TOTAL_S / _POLL_INTERVAL_S)
+                for _ in range(_polls):
+                    time.sleep(_POLL_INTERVAL_S)
+                    try:
+                        data = frame_source()
+                    except Exception:
+                        logger.exception("camera frame_source raised during poll")
+                        data = None
+                    if data:
+                        break
+            finally:
+                try:
+                    frame_client_hook(False)
+                except Exception:
+                    logger.exception("frame_client_hook(False) raised in REST camera frame")
         if not data:
             return Response("no frame available", status=503)
         return Response(data, status=200, content_type="image/jpeg")
@@ -959,27 +990,45 @@ def register_teleop(app, session: "TeleopSession", *, token: Optional[str] = Non
                             pass
                     return
 
-            # Push JPEG frames as binary messages at ~8 fps.
-            # Pacing: record the wall-clock time before the send; if the send
-            # took longer than one frame period (slow send, network backpressure)
-            # skip the sleep entirely to avoid building a queue.  This keeps the
-            # frame rate honest without queuing stale frames.
-            while True:
-                t0 = time.monotonic()
+            # Register this WS connection as a preview client so the recorder
+            # starts producing JPEG previews (OakRecorder only generates them
+            # when at least one consumer is connected).
+            if frame_client_hook is not None:
                 try:
-                    data = frame_source()
+                    frame_client_hook(True)
                 except Exception:
-                    logger.exception("camera frame_source raised in /ws/camera")
-                    data = None
-                if data:
+                    logger.exception("frame_client_hook(True) raised in /ws/camera")
+
+            try:
+                # Push JPEG frames as binary messages at ~8 fps.
+                # Pacing: record the wall-clock time before the send; if the send
+                # took longer than one frame period (slow send, network backpressure)
+                # skip the sleep entirely to avoid building a queue.  This keeps the
+                # frame rate honest without queuing stale frames.
+                while True:
+                    t0 = time.monotonic()
                     try:
-                        ws.send(data)
+                        data = frame_source()
                     except Exception:
-                        break   # client disconnected or error; exit cleanly
-                elapsed = time.monotonic() - t0
-                remaining = _CAMERA_FRAME_S - elapsed
-                if remaining > 0:
-                    time.sleep(remaining)
+                        logger.exception("camera frame_source raised in /ws/camera")
+                        data = None
+                    if data:
+                        try:
+                            ws.send(data)
+                        except Exception:
+                            break   # client disconnected or error; exit cleanly
+                    elapsed = time.monotonic() - t0
+                    remaining = _CAMERA_FRAME_S - elapsed
+                    if remaining > 0:
+                        time.sleep(remaining)
+            finally:
+                # Always deregister — the hook is called exactly once per direction
+                # per connection, so the recorder's client count stays balanced.
+                if frame_client_hook is not None:
+                    try:
+                        frame_client_hook(False)
+                    except Exception:
+                        logger.exception("frame_client_hook(False) raised in /ws/camera")
 
 
 def _dispatch_ws(session: "TeleopSession", msg: dict,

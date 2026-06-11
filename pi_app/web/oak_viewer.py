@@ -1470,6 +1470,10 @@ class OakWebViewer:
                     battery_provider=make_recorder_battery_provider(self._recorder),
                     frame_source=(self._recorder.get_latest_annotated_jpeg
                                   if self._recorder is not None else None),
+                    frame_client_hook=(
+                        (lambda c: self._recorder.set_stream_client_connected("rgb", c))
+                        if self._recorder is not None else None
+                    ),
                 )
                 self._teleop_session.start_watchdog()
                 logger.info("Fail-safe teleop registered at /drive (deadman watchdog running)")

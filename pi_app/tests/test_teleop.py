@@ -733,3 +733,97 @@ def test_camera_ws_route_registered_only_when_frame_source_present(tmp_path):
     app_without, _ = _make_flask_app_with_camera("T0K", tmp_path, frame_source=None)
     rules_without = {r.rule for r in app_without.url_map.iter_rules()}
     assert "/ws/camera" not in rules_without
+
+
+# ==========================================================================
+# frame_client_hook — REST camera frame path
+# ==========================================================================
+
+def _make_flask_app_with_hook(token, tmp_path, frame_source, frame_client_hook):
+    """Build a Flask test app with both frame_source and frame_client_hook wired in."""
+    from flask import Flask
+    from pi_app.web.teleop import register_teleop
+    app = Flask(__name__)
+    motor = MockMotor()
+    s = TeleopSession(command_sink=motor, require_rc_arm=False)
+    register_teleop(app, s, token=token,
+                    token_path=str(tmp_path / "tok"),
+                    frame_source=frame_source,
+                    frame_client_hook=frame_client_hook)
+    return app, s
+
+
+def test_rest_camera_hook_called_and_frame_returned_after_poll(tmp_path):
+    """REST /api/teleop/camera/frame: hook(True) called, frame_source returns
+    None twice then bytes, endpoint returns 200 with the bytes, hook(False) called."""
+    hook_calls = []
+    call_count = [0]
+
+    def _frame_source():
+        call_count[0] += 1
+        # Return None for first two calls, then the JPEG.
+        if call_count[0] < 3:
+            return None
+        return _FAKE_JPEG
+
+    def _hook(connected: bool):
+        hook_calls.append(connected)
+
+    app, _ = _make_flask_app_with_hook("TOK", tmp_path, _frame_source, _hook)
+    c = app.test_client()
+    r = c.get("/api/teleop/camera/frame?token=TOK")
+    assert r.status_code == 200
+    assert r.data == _FAKE_JPEG
+    # hook(True) before poll, hook(False) in finally — exactly once each.
+    assert hook_calls.count(True) == 1
+    assert hook_calls.count(False) == 1
+    assert hook_calls[0] is True    # True was first
+    assert hook_calls[-1] is False  # False was last
+
+
+def test_rest_camera_no_hook_503_when_source_returns_none(tmp_path):
+    """No hook provided: immediate 503 when frame_source returns None, unchanged."""
+    app, _ = _make_flask_app_with_camera("TOK", tmp_path, frame_source=lambda: None)
+    c = app.test_client()
+    r = c.get("/api/teleop/camera/frame?token=TOK")
+    assert r.status_code == 503
+
+
+def test_rest_camera_hook_raises_does_not_500_endpoint(tmp_path):
+    """A hook that raises must not propagate; the frame is still served if available."""
+    call_count = [0]
+
+    def _frame_source():
+        call_count[0] += 1
+        if call_count[0] < 2:
+            return None
+        return _FAKE_JPEG
+
+    def _bad_hook(connected: bool):
+        raise RuntimeError("hook exploded")
+
+    app, _ = _make_flask_app_with_hook("TOK", tmp_path, _frame_source, _bad_hook)
+    c = app.test_client()
+    r = c.get("/api/teleop/camera/frame?token=TOK")
+    # Hook errors must not kill the endpoint — frame was found during poll.
+    assert r.status_code == 200
+    assert r.data == _FAKE_JPEG
+
+
+def test_register_teleop_backward_compat_without_frame_client_hook(tmp_path):
+    """register_teleop without frame_client_hook kwarg is fully backward-compatible.
+    Existing routes work and camera/frame returns 503 (no hook, source returns None)."""
+    from flask import Flask
+    from pi_app.web.teleop import register_teleop
+    app = Flask(__name__)
+    motor = MockMotor()
+    s = TeleopSession(command_sink=motor, require_rc_arm=False)
+    # Deliberately omit frame_client_hook — must not raise.
+    register_teleop(app, s, token="T0K",
+                    token_path=str(tmp_path / "tok"),
+                    frame_source=lambda: None)
+    c = app.test_client()
+    assert c.get("/drive?token=T0K").status_code == 200
+    assert c.get("/api/teleop/session/status?token=T0K").status_code == 200
+    # Without hook, None frame -> immediate 503.
+    assert c.get("/api/teleop/camera/frame?token=T0K").status_code == 503
