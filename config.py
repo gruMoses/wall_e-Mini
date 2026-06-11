@@ -186,7 +186,7 @@ class FollowMeConfig:
     min_bbox_area: float = 0.0015        # minimum bbox area (fraction of frame); rejects tiny far detections
 
     # ── Layer 2: Target tracker ───────────────────────────────────────────────
-    target_ema_alpha: float = 0.3        # EMA smoothing on normalized horizontal offset (0=heavy, 1=none)
+    target_ema_alpha: float = 0.5        # EMA smoothing on normalized horizontal offset (0=heavy, 1=none)
     target_persistence_s: float = 2.0   # hold last known position this long before declaring target lost
 
     # ── Host-side tracklet layer (IoU + constant-velocity Kalman) ─────────────
@@ -200,9 +200,9 @@ class FollowMeConfig:
 
     # ── Layer 3: Lateral PID steering ────────────────────────────────────────
     # Error = normalized horizontal offset (-1.0 to +1.0); output scales to ±max_steer_offset_byte.
-    pid_lateral_kp: float = 0.8
+    pid_lateral_kp: float = 0.4
     pid_lateral_ki: float = 0.0
-    pid_lateral_kd: float = 0.3
+    pid_lateral_kd: float = 0.2
     pid_lateral_integral_limit: float = 0.5  # anti-windup clamp (normalised units)
 
     # ── Depth EMA filter (stabilises stereo depth at long range) ────────────────
@@ -289,7 +289,7 @@ class FollowMeConfig:
     reacq_slew_window_s: float = 0.5           # ramp steer from 0 → full over this window after a detection dropout
     search_mode_delay_s: float = 1.5           # wait this long after trail exhaustion before entering search mode
     trail_exhausted_remaining: int = 3         # trail point count below which trail is considered exhausted
-    mode_switch_dwell_s: float = 0.5           # minimum dwell time before switching between trail/direct pursuit modes
+    mode_switch_dwell_s: float = 1.5           # minimum dwell time before switching between trail/direct pursuit modes
 
     # Trail/direct steering blend: when person is off-center in trail mode,
     # blend in direct pursuit steering so robot reacts to WHERE the person IS.
