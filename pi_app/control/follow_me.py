@@ -21,8 +21,10 @@ Motor output is rate-limited to ~15 Hz (configurable), decoupled from the
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -203,6 +205,7 @@ class TargetTracker:
         self._alpha = ema_alpha
         self._persistence_s = persistence_s
         self._state: _TargetState | None = None
+        self._fresh_raw_x_norm: float | None = None  # raw (pre-EMA) normalized_x of this tick's selected detection
 
     def update(
         self,
@@ -212,8 +215,10 @@ class TargetTracker:
         """Update tracker; return current state or None when target is lost."""
         if candidates:
             best = self._select(candidates)
+            self._fresh_raw_x_norm = best.normalized_x
             self._apply_ema(best, now)
         else:
+            self._fresh_raw_x_norm = None
             # No fresh detection — check persistence window
             if self._state is None:
                 return None
@@ -249,10 +254,16 @@ class TargetTracker:
 
     def reset(self) -> None:
         self._state = None
+        self._fresh_raw_x_norm = None
 
     @property
     def last_seen_time(self) -> float:
         return self._state.last_seen_time if self._state is not None else 0.0
+
+    @property
+    def fresh_raw_x_norm(self) -> float | None:
+        """Raw (pre-EMA) normalized_x of the selected detection this tick; None if no detection."""
+        return self._fresh_raw_x_norm
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -574,6 +585,16 @@ class FollowMeController:
         self._last_valid_time: float = 0.0
         self._pursuit_mode: str = "direct"
 
+        # ── Steer slew cap (output-gate state) ──────────────────────────────
+        self._last_emitted_steer: float = 0.0  # steer (bytes) at last 15Hz emission
+
+        # ── Recorder state (per-tick FM trial JSONL) ─────────────────────────
+        self._recorder_file = None   # open file handle, or None when not recording
+        self._recorder_last_flush: float = 0.0
+        self._recorder_engagement_ts: float | None = None
+        self._last_x_err_norm: float | None = None       # post-deadband error for recorder
+        self._last_slew_capped_steer: float = 0.0        # steer after slew cap for recorder
+
         # ── VESC telemetry (for closed-loop speed and slip detection) ────────
         self._actual_left_rpm: int | None = None
         self._actual_right_rpm: int | None = None
@@ -813,7 +834,9 @@ class FollowMeController:
 
             self._last_speed_offset = speed
             self._last_steer_offset = steer
-            left, right = _mix_commands(speed, steer)
+            # Mixing is deferred into the rate-limit gate so the slew cap can
+            # be applied on the pre-mix steer value at the emission rate.
+            left = right = NEUTRAL  # placeholders; overwritten inside gate when target present
 
         # ── Rate-limit motor OUTPUT only ──────────────────────────────────────
         # Always emit immediately on first call or state transition (target
@@ -826,7 +849,24 @@ class FollowMeController:
         if (self._last_output_time <= 0.0
                 or dt_output >= self._output_interval_s
                 or state_changed):
+            if target_present:
+                # Steer slew cap: limit change per output tick to avoid step-inputs
+                # caused by PID spikes. Cap is (steer_slew_per_tick * max_byte) bytes.
+                max_steer = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
+                slew_limit = float(getattr(self._cfg, "steer_slew_per_tick", 0.1)) * max_steer
+                slew_capped = max(
+                    self._last_emitted_steer - slew_limit,
+                    min(self._last_emitted_steer + slew_limit, self._last_steer_offset),
+                )
+                self._last_emitted_steer = slew_capped
+                self._last_slew_capped_steer = slew_capped
+                left, right = _mix_commands(self._last_speed_offset, slew_capped)
+            else:
+                self._last_emitted_steer = 0.0
             self._cache_output((left, right), now)
+
+        # ── Per-tick trial recorder ───────────────────────────────────────────
+        self._write_trial_record(now, target)
 
         return self._cached_left, self._cached_right
 
@@ -835,6 +875,63 @@ class FollowMeController:
     def _cache_output(self, cmd: tuple[int, int], now: float) -> None:
         self._cached_left, self._cached_right = cmd
         self._last_output_time = now
+
+    # ── Trial recorder ───────────────────────────────────────────────────────
+
+    def _write_trial_record(self, now: float, target: _TargetState | None) -> None:
+        """Append one JSON line per control tick to /tmp/fm_trials/<ts>.jsonl.
+
+        All I/O is wrapped in try/except — never raises into the control loop.
+        """
+        try:
+            if self._recorder_file is None:
+                ts = int(time.time())
+                self._recorder_engagement_ts = ts
+                trial_dir = "/tmp/fm_trials"
+                os.makedirs(trial_dir, exist_ok=True)
+                path = os.path.join(trial_dir, f"{ts}.jsonl")
+                self._recorder_file = open(path, "a", buffering=1)
+                self._recorder_last_flush = now
+
+            mode_raw = self._pursuit_mode if self._tracking else "lost"
+            if mode_raw == "trail":
+                mode_str = "pp"
+            elif mode_raw == "search":
+                mode_str = "search"
+            elif mode_raw == "direct":
+                mode_str = "direct"
+            else:
+                mode_str = "lost"
+
+            record = {
+                "t": now,
+                "x_raw": self._tracker.fresh_raw_x_norm,
+                "x_filt": round(target.normalized_x, 4) if target is not None else None,
+                "x_err": round(self._last_x_err_norm, 4) if self._last_x_err_norm is not None else None,
+                "steer": round(self._last_slew_capped_steer, 3),
+                "speed": round(self._last_speed_offset, 3),
+                "mode": mode_str,
+                "track_id": target.track_id if target is not None else None,
+                "depth": round(target.depth_m, 3) if target is not None else None,
+                "conf": round(target.confidence, 3) if target is not None else None,
+            }
+            self._recorder_file.write(json.dumps(record) + "\n")
+
+            if now - self._recorder_last_flush >= 1.0:
+                self._recorder_file.flush()
+                self._recorder_last_flush = now
+        except Exception:
+            pass  # recorder must never interrupt the control loop
+
+    def stop_recorder(self) -> None:
+        """Close the trial recorder file if open. Call on FM disengage."""
+        try:
+            if self._recorder_file is not None:
+                self._recorder_file.flush()
+                self._recorder_file.close()
+                self._recorder_file = None
+        except Exception:
+            pass
 
     def _pick_odometry(self):
         """Return the best available odometry source (GPS preferred)."""
@@ -860,6 +957,7 @@ class FollowMeController:
         breadcrumbs, target is far / turning).  Falls back to Layer 3 PID
         direct pursuit otherwise.
         """
+        self._last_x_err_norm = None  # trail path never populates this; direct path overwrites below
         odom = self._pick_odometry()
         mode_dwell_s = float(getattr(self._cfg, "mode_switch_dwell_s", 0.5))
 
@@ -926,7 +1024,13 @@ class FollowMeController:
             self._steering.reset()
         self._pursuit_mode = "direct"
         self._last_pursuit_mode = "direct"
-        steer = self._steering.compute(target.normalized_x, dt)
+        # Bbox-x deadband: suppress PID input while gait wobbles the centroid ±~2-3% frame.
+        x_err = target.normalized_x
+        deadband = float(getattr(self._cfg, "steer_deadband_norm", 0.04))
+        if abs(x_err) < deadband:
+            x_err = 0.0
+        self._last_x_err_norm = x_err
+        steer = self._steering.compute(x_err, dt)
         # Cap direct-mode steering lower than the global max; close-range detections
         # are noisier and a full-gain correction causes overshoot.  Also scale back
         # proportionally when confidence is below 0.6 to prevent spikes on uncertain
@@ -1180,6 +1284,9 @@ class FollowMeController:
             self._odometry.reset()
         if self._gps_odom is not None:
             self._gps_odom.reset()
+        self._last_emitted_steer = 0.0
+        self._last_x_err_norm = None
+        self._last_slew_capped_steer = 0.0
 
     # ── Status / telemetry ───────────────────────────────────────────────────
 

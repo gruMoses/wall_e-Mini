@@ -138,5 +138,175 @@ class TestFollowMeController(unittest.TestCase):
         self.assertLessEqual(right, 255)
 
 
+class TestSteerDeadband(unittest.TestCase):
+    """Unit tests for the bbox-x steer deadband (steer_deadband_norm config param)."""
+
+    def _make(self, **overrides) -> FollowMeController:
+        cfg = FollowMeConfig(**overrides)
+        return FollowMeController(cfg)
+
+    def _person_at_norm_x(self, norm_x: float, z_m: float = 2.0) -> PersonDetection:
+        """Build a detection whose bbox maps to a specific normalized_x."""
+        cx = norm_x / 2.0 + 0.5
+        half = 0.1
+        return PersonDetection(
+            x_m=norm_x * z_m,
+            z_m=z_m,
+            confidence=0.9,
+            bbox=(cx - half, 0.3, cx + half, 0.8),
+        )
+
+    def test_deadband_suppresses_error_inside_band(self):
+        """Person inside the deadband → steer output is symmetric (no differential)."""
+        fm = self._make(
+            steer_deadband_norm=0.05,
+            pid_lateral_kp=2.0,
+            pid_lateral_kd=0.0,
+            pid_lateral_ki=0.0,
+            steer_slew_per_tick=1.0,  # no effective slew cap
+            follow_output_rate_hz=10000.0,
+        )
+        # norm_x = 0.03 < 0.05 deadband → x_err should be clamped to 0
+        det = self._person_at_norm_x(0.03)
+        left, right = fm.compute([det])
+        self.assertEqual(left, right, "Steer inside deadband must produce zero differential")
+
+    def test_deadband_passes_error_outside_band(self):
+        """Person outside the deadband → controller produces a steering differential."""
+        fm = self._make(
+            steer_deadband_norm=0.05,
+            pid_lateral_kp=2.0,
+            pid_lateral_kd=0.0,
+            pid_lateral_ki=0.0,
+            steer_slew_per_tick=1.0,
+            follow_output_rate_hz=10000.0,
+        )
+        # norm_x = 0.20 >> 0.05 deadband → x_err = 0.20 → non-zero steer
+        det = self._person_at_norm_x(0.20)
+        left, right = fm.compute([det])
+        self.assertGreater(left, right, "Person right of deadband must turn right (left > right)")
+
+    def test_deadband_respects_negative_offset(self):
+        """Deadband is symmetric: small negative offset is also suppressed."""
+        fm = self._make(
+            steer_deadband_norm=0.05,
+            pid_lateral_kp=2.0,
+            pid_lateral_kd=0.0,
+            pid_lateral_ki=0.0,
+            steer_slew_per_tick=1.0,
+            follow_output_rate_hz=10000.0,
+        )
+        det = self._person_at_norm_x(-0.03)
+        left, right = fm.compute([det])
+        self.assertEqual(left, right, "Steer inside negative deadband must produce zero differential")
+
+    def test_zero_deadband_always_steers(self):
+        """With deadband=0, any non-zero offset produces a steer differential."""
+        fm = self._make(
+            steer_deadband_norm=0.0,
+            pid_lateral_kp=2.0,
+            pid_lateral_kd=0.0,
+            pid_lateral_ki=0.0,
+            steer_slew_per_tick=1.0,
+            follow_output_rate_hz=10000.0,
+        )
+        # Very small offset — without deadband this should still steer
+        det = self._person_at_norm_x(0.01)
+        left, right = fm.compute([det])
+        self.assertGreater(left, right, "Zero deadband must pass through even tiny offsets")
+
+
+class TestSteerSlewCap(unittest.TestCase):
+    """Unit tests for the per-tick steer slew cap (steer_slew_per_tick config param)."""
+
+    def _make(self, **overrides) -> FollowMeController:
+        cfg = FollowMeConfig(**overrides)
+        return FollowMeController(cfg)
+
+    def _person_hard_right(self) -> PersonDetection:
+        """Detection far to the right to saturate PID output."""
+        return PersonDetection(
+            x_m=2.0, z_m=2.0, confidence=0.9,
+            bbox=(0.85, 0.3, 1.0, 0.8),  # cx=0.925, norm_x=0.85
+        )
+
+    def test_slew_cap_limits_first_emission(self):
+        """Step from 0 → saturated steer: first emission must not exceed slew_limit."""
+        max_steer = 20.0
+        slew_per_tick = 0.1   # 2.0 bytes limit
+        fm = self._make(
+            steer_deadband_norm=0.0,
+            steer_slew_per_tick=slew_per_tick,
+            max_steer_offset_byte=max_steer,
+            direct_mode_max_steer_byte=max_steer,
+            pid_lateral_kp=10.0,  # saturates output at max_steer
+            pid_lateral_kd=0.0,
+            pid_lateral_ki=0.0,
+            follow_output_rate_hz=10000.0,  # emit on every compute() call
+        )
+        fm.compute([self._person_hard_right()])
+        emitted = fm._last_emitted_steer
+        slew_limit = slew_per_tick * max_steer  # 2.0
+        self.assertLessEqual(
+            abs(emitted), slew_limit + 1e-9,
+            f"First emission {emitted:.3f} must not exceed slew limit {slew_limit}",
+        )
+
+    def test_slew_cap_ramps_over_multiple_ticks(self):
+        """Output must ramp toward target over multiple ticks, each ≤ slew_limit."""
+        max_steer = 20.0
+        slew_per_tick = 0.1   # 2.0 bytes per tick
+        fm = self._make(
+            steer_deadband_norm=0.0,
+            steer_slew_per_tick=slew_per_tick,
+            max_steer_offset_byte=max_steer,
+            direct_mode_max_steer_byte=max_steer,
+            pid_lateral_kp=10.0,
+            pid_lateral_kd=0.0,
+            pid_lateral_ki=0.0,
+            follow_output_rate_hz=10000.0,
+        )
+        det = self._person_hard_right()
+        prev_steer = 0.0
+        slew_limit = slew_per_tick * max_steer  # 2.0
+        for tick in range(5):
+            fm.compute([det])
+            current_steer = fm._last_emitted_steer
+            delta = current_steer - prev_steer
+            self.assertLessEqual(
+                delta, slew_limit + 1e-9,
+                f"Tick {tick}: delta {delta:.3f} exceeds slew limit {slew_limit}",
+            )
+            prev_steer = current_steer
+        # After 5 ticks, steer must have grown from 0
+        self.assertGreater(prev_steer, 0.0, "Steer must have increased over 5 ticks")
+
+    def test_slew_cap_does_not_block_small_request(self):
+        """A steer request smaller than slew_limit must pass through fully in one tick."""
+        max_steer = 20.0
+        slew_per_tick = 0.5   # 10.0 bytes per tick — large cap
+        fm = self._make(
+            steer_deadband_norm=0.0,
+            steer_slew_per_tick=slew_per_tick,
+            max_steer_offset_byte=max_steer,
+            direct_mode_max_steer_byte=max_steer,
+            pid_lateral_kp=1.0,
+            pid_lateral_kd=0.0,
+            pid_lateral_ki=0.0,
+            follow_output_rate_hz=10000.0,
+        )
+        # norm_x ≈ 0.1 → PID raw = 0.1, scaled = 0.1 * 20 = 2.0 bytes < slew_limit 10.0
+        det = PersonDetection(
+            x_m=0.2, z_m=2.0, confidence=0.9,
+            bbox=(0.55, 0.3, 0.65, 0.8),  # cx=0.60, norm_x=0.20
+        )
+        fm.compute([det])
+        emitted = fm._last_emitted_steer
+        slew_limit = slew_per_tick * max_steer  # 10.0
+        # emitted must be well within one slew step of the PID output (not blocked to 0)
+        self.assertGreater(emitted, 0.0, "Small request must produce non-zero steer")
+        self.assertLessEqual(emitted, slew_limit + 1e-9)
+
+
 if __name__ == "__main__":
     unittest.main()

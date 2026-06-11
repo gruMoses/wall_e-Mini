@@ -285,6 +285,10 @@ class FollowMeConfig:
     # ── Direct pursuit steering cap ──────────────────────────────────────────
     direct_mode_max_steer_byte: float = 18.0   # max steer in direct pursuit (lower than trail to limit close-range overshoot)
 
+    # ── Steer deadband and slew limiter ──────────────────────────────────────
+    steer_deadband_norm: float = 0.04   # |x_err| below this → treat error as 0 (suppresses gait-wobble chasing; ~2-3% frame width)
+    steer_slew_per_tick: float = 0.1    # max steer change per 15 Hz output tick, as fraction of max_steer_offset_byte
+
     # ── Re-acquisition / search / mode-switch timing ─────────────────────────
     reacq_slew_window_s: float = 0.5           # ramp steer from 0 → full over this window after a detection dropout
     search_mode_delay_s: float = 1.5           # wait this long after trail exhaustion before entering search mode
