@@ -5,6 +5,10 @@ Commands a fixed low RPM for --duration seconds, samples reported ERPM and
 RX counters at ~10 Hz, prints a per-sample table, and emits a final verdict
 (per-type counter delta, whether ERPM was ever nonzero, commanded vs reported).
 
+NOTE: VESC firmware command timeout — motors stop if RPM commands are not
+refreshed within ~1 s; this is VESC firmware behavior, observed 2026-06-11
+on the real robot.
+
 SAFETY GATES — this script CAN spin motors:
   1. --i-confirm-wheels-are-off-the-ground  (literal flag, required)
   2. Refuses to run if the wall-e systemd service is active unless
@@ -114,6 +118,7 @@ def _check_safety_gates(args: argparse.Namespace) -> None:
 
 _HEADER = (
     f"{'t(s)':>6}  "
+    f"{'cmd_tx':>6}  "
     f"{'L-ERPM':>8}  {'R-ERPM':>8}  "
     f"{'rx_tot':>6}  {'rx_s9':>5}  {'rx_s16':>6}  {'rx_s27':>6}  "
     f"{'parse_err':>9}  {'recv_err':>8}"
@@ -126,11 +131,13 @@ def _fmt_row(
     left_rpm: Optional[int],
     right_rpm: Optional[int],
     health: dict,
+    cmd_tx: int = 0,
 ) -> str:
     lrpm = f"{left_rpm:+d}" if left_rpm is not None else "None"
     rrpm = f"{right_rpm:+d}" if right_rpm is not None else "None"
     return (
         f"{elapsed:>6.2f}  "
+        f"{cmd_tx:>6}  "
         f"{lrpm:>8}  {rrpm:>8}  "
         f"{health['rx_frame_count']:>6}  "
         f"{health['rx_status_count']:>5}  "
@@ -171,8 +178,10 @@ def run_bench(args: argparse.Namespace) -> int:
 
     driver.start()
 
-    samples: list[tuple[float, Optional[int], Optional[int], dict]] = []
+    # samples stores (elapsed, left_rpm, right_rpm, health, cmd_tx)
+    samples: list[tuple[float, Optional[int], Optional[int], dict, int]] = []
     erpm_ever_nonzero = False
+    cmd_tx = 0  # running count of RPM command sends
 
     # Snapshot health at start so we can compute deltas
     health0 = driver.get_rx_health()
@@ -191,11 +200,11 @@ def run_bench(args: argparse.Namespace) -> int:
 
     # Command target RPM and sample in a try/finally so stop is ALWAYS sent
     try:
-        # Send RPM command to both motors using set_tracks byte-encoding path
-        # or directly via the internal _send_rpm for exact ERPM control.
+        # Initial send before entering the loop
         # We use _send_rpm directly so the value is the exact commanded ERPM.
         driver._send_rpm(args.left_id, rpm)
         driver._send_rpm(args.right_id, rpm)
+        cmd_tx += 1
 
         t_start = time.monotonic()
         next_sample = t_start
@@ -208,12 +217,18 @@ def run_bench(args: argparse.Namespace) -> int:
                 break
 
             if now >= next_sample:
+                # Re-send RPM on every sample tick to prevent VESC ~1 s command
+                # timeout from stopping the motors during the run.
+                driver._send_rpm(args.left_id, rpm)
+                driver._send_rpm(args.right_id, rpm)
+                cmd_tx += 1
+
                 left_rpm = driver.get_rpm("left")
                 right_rpm = driver.get_rpm("right")
                 health = driver.get_rx_health()
 
-                samples.append((elapsed, left_rpm, right_rpm, health))
-                print(_fmt_row(elapsed, left_rpm, right_rpm, health))
+                samples.append((elapsed, left_rpm, right_rpm, health, cmd_tx))
+                print(_fmt_row(elapsed, left_rpm, right_rpm, health, cmd_tx))
 
                 if (left_rpm is not None and left_rpm != 0) or \
                    (right_rpm is not None and right_rpm != 0):
@@ -239,17 +254,36 @@ def run_bench(args: argparse.Namespace) -> int:
                        "rx_parse_error_count", "rx_recv_error_count",
                        "rx_reopen_count")}
 
-    last_l = samples[-1][1] if samples else None
-    last_r = samples[-1][2] if samples else None
+    # Steady-state window: samples with elapsed > 0.5 s
+    steady = [(s[1], s[2]) for s in samples if s[0] > 0.5]
+    steady_l = [v for v, _ in steady if v is not None]
+    steady_r = [v for _, v in steady if v is not None]
+
+    mean_l = (sum(steady_l) / len(steady_l)) if steady_l else None
+    mean_r = (sum(steady_r) / len(steady_r)) if steady_r else None
+
+    def _pct_err(mean: Optional[float], cmd: int) -> str:
+        if mean is None or cmd == 0:
+            return "N/A"
+        return f"{((mean - cmd) / cmd) * 100:+.1f}%"
 
     print()
     print(_SEP)
     print("VERDICT")
     print(_SEP)
-    print(f"  Commanded ERPM         : {rpm:+d}")
-    print(f"  Final reported L-ERPM  : {last_l}")
-    print(f"  Final reported R-ERPM  : {last_r}")
-    print(f"  ERPM ever nonzero      : {'YES' if erpm_ever_nonzero else 'NO  <-- STATUS(9) packets may not be flowing'}")
+    print(f"  Commanded ERPM              : {rpm:+d}")
+    print(f"  RPM commands sent (cmd_tx)  : {cmd_tx}  (initial + {cmd_tx - 1} loop refreshes)")
+    print()
+    print("  Steady-state window (t > 0.5 s):")
+    if steady_l or steady_r:
+        print(f"    Left  — mean reported ERPM : {mean_l:+.1f}  "
+              f"({len(steady_l)} samples, error vs commanded: {_pct_err(mean_l, rpm)})")
+        print(f"    Right — mean reported ERPM : {mean_r:+.1f}  "
+              f"({len(steady_r)} samples, error vs commanded: {_pct_err(mean_r, rpm)})")
+    else:
+        print("    No steady-state samples (run too short or ERPM never reported).")
+    print()
+    print(f"  ERPM ever nonzero           : {'YES' if erpm_ever_nonzero else 'NO  <-- STATUS(9) packets may not be flowing'}")
     print()
     print("  RX counter deltas over run:")
     print(f"    rx_frame_count    (total)   : {delta['rx_frame_count']}")

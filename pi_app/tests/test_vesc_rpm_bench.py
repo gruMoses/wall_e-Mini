@@ -371,6 +371,106 @@ class TestErpmCap:
 
 
 # ---------------------------------------------------------------------------
+# Tests: RPM command refreshed during run / stop always last
+# ---------------------------------------------------------------------------
+
+class TestCommandRefresh:
+    """Verify that the RPM command is re-sent on every sample tick so the VESC
+    ~1 s firmware timeout never fires during a normal run, and that the stop
+    command (ERPM=0) is always the very last RPM frame sent to each motor."""
+
+    def _run_bench(self, rpm: int = 500, duration: float = 0.5) -> _FakeBus:
+        global _the_bus
+        _the_bus = None
+        args = _args(confirm=True, service_stopped=True, rpm=rpm, duration=duration)
+        with patch.object(bench, "_is_service_active", return_value=False):
+            bench.run_bench(args)
+        return _the_bus  # type: ignore[return-value]
+
+    def test_multiple_rpm_sends_per_side(self):
+        """Each motor must receive ≥ duration*5 RPM command sends (10 Hz over the run)."""
+        duration = 0.5
+        bus = self._run_bench(rpm=500, duration=duration)
+        assert bus is not None, "Bus was never created"
+
+        left_vals = _sent_erpms(bus, 2)   # left_id default = 2
+        right_vals = _sent_erpms(bus, 1)  # right_id default = 1
+
+        min_expected = int(duration * 5)  # conservative: at least half the 10 Hz ticks
+
+        nonzero_left = [v for v in left_vals if v != 0]
+        nonzero_right = [v for v in right_vals if v != 0]
+
+        assert len(nonzero_left) >= min_expected, (
+            f"Left motor received only {len(nonzero_left)} nonzero RPM sends "
+            f"(expected >= {min_expected} for {duration}s at ~10 Hz). "
+            f"All left sends: {left_vals}"
+        )
+        assert len(nonzero_right) >= min_expected, (
+            f"Right motor received only {len(nonzero_right)} nonzero RPM sends "
+            f"(expected >= {min_expected} for {duration}s at ~10 Hz). "
+            f"All right sends: {right_vals}"
+        )
+
+    def test_stop_is_last_send_on_each_side(self):
+        """ERPM=0 (stop) must be the final RPM frame sent to each motor."""
+        bus = self._run_bench(rpm=500, duration=0.5)
+        assert bus is not None, "Bus was never created"
+
+        left_vals = _sent_erpms(bus, 2)
+        right_vals = _sent_erpms(bus, 1)
+
+        assert left_vals, "No frames sent to left motor at all"
+        assert right_vals, "No frames sent to right motor at all"
+
+        assert left_vals[-1] == 0, (
+            f"Last left motor send was ERPM={left_vals[-1]}, expected 0 (stop). "
+            f"Full sequence: {left_vals}"
+        )
+        assert right_vals[-1] == 0, (
+            f"Last right motor send was ERPM={right_vals[-1]}, expected 0 (stop). "
+            f"Full sequence: {right_vals}"
+        )
+
+    def test_stop_last_even_after_exception(self):
+        """Even when the loop crashes mid-run, the stop frame must be the last
+        frame sent to each motor (try/finally guarantee with refresh)."""
+        global _the_bus
+        _the_bus = None
+
+        args = _args(confirm=True, service_stopped=True, rpm=500, duration=5.0)
+
+        call_count = [0]
+        from pi_app.hardware.vesc import VescCanDriver  # noqa: PLC0415
+
+        original_get_rpm = VescCanDriver.get_rpm
+
+        def _boom_get_rpm(self, motor):
+            call_count[0] += 1
+            if call_count[0] >= 3:
+                raise RuntimeError("simulated crash for refresh test")
+            return original_get_rpm(self, motor)
+
+        with patch.object(bench, "_is_service_active", return_value=False):
+            with patch.object(VescCanDriver, "get_rpm", _boom_get_rpm):
+                with pytest.raises(RuntimeError, match="simulated crash for refresh test"):
+                    bench.run_bench(args)
+
+        bus = _the_bus
+        assert bus is not None
+
+        left_vals = _sent_erpms(bus, 2)
+        right_vals = _sent_erpms(bus, 1)
+
+        assert left_vals and left_vals[-1] == 0, (
+            f"Left stop not last after crash. Sent: {left_vals}"
+        )
+        assert right_vals and right_vals[-1] == 0, (
+            f"Right stop not last after crash. Sent: {right_vals}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tests: service-active gate
 # ---------------------------------------------------------------------------
 
