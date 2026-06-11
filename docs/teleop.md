@@ -1,12 +1,12 @@
-# Phone teleop — fail-safe `/drive` (Tranche 1)
+# Phone teleop — fail-safe `/drive`
 
 A phone-browser driver for WALL-E that is **fail-safe by construction**: if the
 internet/wifi drops, the phone sleeps, the tab crashes, or the WebSocket handler
 thread dies, the robot stops. Stopping is enforced **server-side, in a watchdog
 loop** — never by the browser and never by the WS handler.
 
-This is tranche 1 (the safety core). Tranche 2 = the "sexy" UI. Tranche 3 =
-auth/network hardening. See the bottom of this file.
+Tranche 1 delivered the safety core; **tranche 2 (this doc) delivered the polished
+UI.** Tranche 3 = auth/network hardening. See the bottom of this file.
 
 ## Where the code lives
 
@@ -158,11 +158,75 @@ threaded=True)`) without eventlet/gevent — the WS runs on its own request thre
 matching the existing MJPEG/SSE streaming model. If it is missing at runtime the
 code degrades to the REST fallback rather than crashing.
 
-## What tranche 2 / 3 will add
+## UI layout (tranche 2, portrait iPhone)
 
-- **Tranche 2 (UI):** the polished, "sexy" phone UI — proper joysticks/haptics,
-  big legible status, camera/telemetry overlay, theming. The current `/drive`
-  page is intentionally minimal.
+```
+┌─────────────────────────────────────┐
+│  ● LINK UP   RTT 18ms  ARMED  BATT  │  HUD bar (2 rows of chips)
+│  CAP 30%    HB 45ms   RC ARMED     │
+├─────────────────────────────────────┤
+│  [ SLOW ]   [ NORMAL ]   [ FAST ]  │  Speed segmented control
+├─────────────────────────────────────┤
+│  ╔═══════════════════════════════╗  │
+│  ║          E — STOP             ║  │  Big red button (56 px tall)
+│  ╚═══════════════════════════════╝  │
+├─────────────────────────────────────┤
+│  [ HOLD TO ARM   ◎ ]  ☐ RC in hand │  ARM button + ring + checkbox
+├─────────────────────────────────────┤
+│                                     │
+│  ┌───────────┐    ┌───────────┐    │
+│  │  ↑ fwd    │    │  ↑ fwd    │    │  Joystick pads
+│  │   (knob)  │    │   (knob)  │    │  (flex-1, thumb zones)
+│  │  ↓ rev    │    │  ↓ rev    │    │
+│  └───────────┘    └───────────┘    │
+│  L TRACK          R TRACK          │
+└─────────────────────────────────────┘
+```
+
+### Joysticks
+Tank-drive mapping: left pad = left track, right pad = right track. Vertical
+axis only — drag up = forward (+1), drag down = reverse (−1), release =
+spring-return to center (CSS `cubic-bezier(.34,1.56,.64,1)` spring). Each pad
+uses Pointer Events with `setPointerCapture` for reliable multi-touch; knob
+glows blue (forward) or red (reverse).
+
+### ARM ceremony
+Press-and-hold renders a radial progress ring (rAF, 520 ms fill) around the
+button. On completion the arm message is sent with `hold_ms` + `rc_in_hand`.
+The server still enforces ≥ 500 ms hold; the UI ring is purely cosmetic. While
+`armed`, a single tap disarms. The `justArmed` flag prevents the click event
+that ends the hold from immediately disarming.
+
+### E-STOP
+Immediate on `pointerdown` (not click): zeroes sticks, sends `{type:"estop"}`,
+triggers haptic. Latched state pulses red. Two-step dismiss: first tap shows
+"TAP AGAIN TO CLEAR" (3 s timeout), second tap sends `{type:"clear_estop"}`.
+Re-arm still requires the full hold ceremony.
+
+### Disconnect / deadman overlay
+Full-screen blurred overlay is shown when:
+- WS drops (auto-reconnect in background after 800 ms), or
+- Deadman trips while armed (robot was moving).
+
+The overlay must be explicitly dismissed before re-arming; it never auto-dismisses
+or auto-re-arms — the server ceremony remains the only gate.
+
+### Client-side safety (belt, in addition to server deadman)
+- `visibilitychange` hidden: zeroes sticks + sends `drive` with 0/0 immediately.
+- `pagehide`: same.
+- `pointercancel` on each pad: zeroes that track immediately.
+
+### PWA
+- `/drive/manifest.json` — name "WALL-E Drive", standalone, portrait, dark
+  `theme_color: #080a0f`.
+- `/drive/icon.svg` — WALL-E glyph (boxy head, binocular eyes, twin track pods).
+- `/drive/icon-{180,192,512}.png` — generated on first request by pure Python
+  (numpy fast path, stdlib fallback); no extra pip deps.
+- iOS Add-to-Home-Screen hint banner shown in mobile Safari when not in standalone
+  mode; dismissed via `localStorage`.
+
+## What tranche 3 will add
+
 - **Tranche 3 (hardening):** real auth (per-device tokens / session cookies)
   closing the `WALL_E_TELEOP_TOKEN`-unset gap and the unauthenticated
   `/api/teleop`; rate limiting; TLS/`wss`; optional single-active-driver lock.
