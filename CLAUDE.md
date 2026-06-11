@@ -46,7 +46,7 @@ Daly SPIM08HP over BLE (`bleak`). Polls SOC / cell voltages / temp / MOSFET stat
 
 ## Known Issues
 
-- **VESC telemetry stuck at 0 RPM**: STATUS/STATUS_4/STATUS_5 CAN frames are parsed and voltage threshold triggering works, but the RPM/speed readback is always 0. Root cause not yet investigated.
+- **VESC RPM telemetry — RESOLVED 2026-06-11**: bench test (`tools/vesc_rpm_bench.py`, wheels off ground) proved ERPM readback works: commanded +1500, steady-state error −1.0% L / −0.4% R, ~100 Hz per STATUS type, zero parse errors. The old "always 0" observation did not reproduce. Two follow-ups: (1) confirm `vesc_left_rpm`/`vesc_right_rpm` in /api/telemetry go nonzero during the next real drive, then consider re-enabling the velocity PID (`speed_kp/ki/kd` in config.py, currently 0). (2) VESC firmware has a ~1 s command timeout — motors stop if drive commands are not refreshed (confirmed on hardware; the service's 15–30 Hz loop clears it easily, and it acts as a free deadman).
 - **OAK USB disconnect**: no auto-reconnect; service restart required if OAK re-enumerates.
 - **IMU heading drift**: gyro-only integration drifts over time (minutes). GPS COG alignment (in progress) will partially mitigate this at session start.
 
