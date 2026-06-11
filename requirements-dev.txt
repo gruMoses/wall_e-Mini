@@ -1,2 +1,6 @@
 numpy
 pytest
+# CLI/tooling only — used by tools/fm_autotune.py (GP-BO steering auto-tuner).
+# NOT a runtime dependency of the wall-e service; the service must never import
+# this. fm_autotune imports it lazily and prints an install hint if missing.
+scikit-optimize
