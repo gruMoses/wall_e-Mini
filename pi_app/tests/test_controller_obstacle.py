@@ -188,11 +188,23 @@ class TestControllerFollowMe(unittest.TestCase):
         )
         return ctrl, motor
 
+    # A minimal visible-person detection used to satisfy the target-present gate
+    # introduced in a1bbe22: controller refuses to enter FOLLOW_ME unless a
+    # candidate detection is already present.
+    _FAKE_TARGET = PersonDetection(x_m=0.0, z_m=2.0, confidence=0.9,
+                                   bbox=(0.45, 0.3, 0.55, 0.8))
+
     def _enter_follow_me(self, ctrl, t):
-        """Arm and flip ch4 high. Returns time after."""
+        """Arm, register a fake target, and flip ch4 high.  Returns time after.
+
+        A person detection must be present at the moment ch4 goes high or the
+        controller (correctly) blocks FOLLOW_ME entry (no_target safety rule).
+        """
         arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                           last_update_epoch_s=0.0)
         ctrl.process(arm_rc, now_epoch_s=t)
+        # Register a target so _follow_me_target_present() returns True.
+        ctrl.set_person_detections([self._FAKE_TARGET])
         fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1900, ch5_us=1000,
                          last_update_epoch_s=0.0)
         ctrl.process(fm_rc, now_epoch_s=t + 0.1)
@@ -202,6 +214,26 @@ class TestControllerFollowMe(unittest.TestCase):
         ctrl, motor = self._make_controller()
         self._enter_follow_me(ctrl, 10.0)
         self.assertEqual(ctrl._mode, "FOLLOW_ME")
+
+    def test_follow_me_blocked_without_target(self):
+        """Safety gate: ch4-high without a visible target must NOT enter FOLLOW_ME.
+
+        This pins the deliberate a1bbe22 engagement rule — the no_target
+        telemetry marker must be emitted and the mode must remain MANUAL.
+        """
+        ctrl, motor = self._make_controller()
+        # Arm, but do NOT register any person detection.
+        arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
+                          last_update_epoch_s=0.0)
+        ctrl.process(arm_rc, now_epoch_s=10.0)
+        # Flip ch4 high with no target present.
+        fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1900, ch5_us=1000,
+                         last_update_epoch_s=0.0)
+        _, _, telem = ctrl.process(fm_rc, now_epoch_s=10.1)
+        self.assertEqual(ctrl._mode, "MANUAL",
+                         "FOLLOW_ME entry must be blocked when no target is present")
+        self.assertEqual(telem.get("follow_me_activation_blocked"), "no_target",
+                         "Telemetry must report the no_target block reason")
 
     def test_follow_me_mode_deactivates_on_ch4_low(self):
         ctrl, motor = self._make_controller()
