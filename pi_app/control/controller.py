@@ -239,6 +239,18 @@ class Controller:
     def motor_driver(self) -> MotorDriver:
         return self._motor
 
+    @property
+    def is_armed(self) -> bool:
+        """Current armed state. Read by the calibration wizard so it can abort
+        its direct motor commands when the operator disarms (ch3) mid-run."""
+        return self._safety_state.is_armed
+
+    @property
+    def emergency_active(self) -> bool:
+        """True once a latched ch5 e-stop has fired. Read by the calibration
+        wizard so it aborts on emergency."""
+        return self._safety_state.emergency_active
+
     def enter_calibration_mode(self) -> None:
         """Pause normal control; process() will output neutral commands."""
         self._mode = "MANUAL"
@@ -526,15 +538,6 @@ class Controller:
                     mono_now,
                 )
 
-        if self._calibration_mode:
-            cmd = DriveCommand(
-                left_byte=CENTER_OUTPUT_VALUE,
-                right_byte=CENTER_OUTPUT_VALUE,
-                is_armed=self._safety_state.is_armed,
-                emergency_active=self._safety_state.emergency_active,
-            )
-            return cmd, [], {"mode": "CALIBRATING", "calibration": True}
-
         # RC staleness watchdog: if no RC update for >1s, force disarm
         rc_age = epoch_now - rc.last_update_epoch_s if rc.last_update_epoch_s > 0.0 else 0.0
         if rc_age > RC_STALE_TIMEOUT_S:
@@ -555,7 +558,9 @@ class Controller:
             )
             return cmd, [SafetyEvent.RC_STALE], {"mode": "MANUAL", "rc_stale": True, "rc_age_s": rc_age}
 
-        # Update safety
+        # Update safety. This now runs on EVERY tick before the calibration
+        # early-return below, so RC-stale disarm, ch3 disarm, and ch5 e-stop
+        # take effect even while the calibration wizard is driving the motors.
         self._safety_state, events = update_safety(
             self._safety_state,
             ch3_us=rc.ch3_us,
@@ -564,6 +569,29 @@ class Controller:
             now_epoch_s=epoch_now,
             params=self._safety_params,
         )
+
+        # Calibration early-return — now AFTER update_safety so safety is
+        # always enforced. The wizard issues drive commands directly, so
+        # process() outputs neutral here, but we still cut the motors and
+        # mirror the emergency/disarm behavior when safety demands it.
+        if self._calibration_mode:
+            if any(e is SafetyEvent.EMERGENCY_TRIGGERED for e in events):
+                self._shutdown.schedule_shutdown(delay_seconds=5.0)
+            if (not self._safety_state.is_armed) or self._safety_state.emergency_active:
+                self._motor.stop()
+            self._relay.set_armed(self._safety_state.is_armed)
+            cmd = DriveCommand(
+                left_byte=CENTER_OUTPUT_VALUE,
+                right_byte=CENTER_OUTPUT_VALUE,
+                is_armed=self._safety_state.is_armed,
+                emergency_active=self._safety_state.emergency_active,
+            )
+            return cmd, events, {
+                "mode": "CALIBRATING",
+                "calibration": True,
+                "is_armed": self._safety_state.is_armed,
+                "emergency_active": self._safety_state.emergency_active,
+            }
 
         # React to mode transitions from safety events
         for ev in events:

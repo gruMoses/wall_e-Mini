@@ -44,6 +44,11 @@ class CalibrationManager:
 
     STATES = ("IDLE", "WAITING_USER", "RUNNING", "COMPLETE", "FAILED")
 
+    # Hard cap on how long the motors may be driven within one calibration
+    # step. If a routine hangs (lost camera, stuck loop), the wizard aborts
+    # and neutralizes the motors rather than spinning indefinitely.
+    WATCHDOG_S = 60.0
+
     def __init__(self, controller=None, oak_reader=None, motor_driver=None,
                  imu_reader=None) -> None:
         self._controller = controller
@@ -58,6 +63,10 @@ class CalibrationManager:
         self._thread: Optional[threading.Thread] = None
         self._result: Optional[dict] = None
         self._lock = threading.Lock()
+        # Watchdog deadline (monotonic). None while waiting for the operator,
+        # so a slow "I'm Ready" tap does not count against the motor budget.
+        self._motor_deadline: Optional[float] = None
+        self._abort_logged = False
 
     @property
     def state(self) -> str:
@@ -89,6 +98,22 @@ class CalibrationManager:
 
     # ── Lifecycle ──
 
+    def is_armed(self) -> bool:
+        """True only when a controller is wired AND reports armed (RC ch3 high).
+
+        Calibration drives the motors directly, bypassing the normal command
+        path, so we refuse to start unless the operator has armed the rover.
+        Without this gate, two unauthenticated LAN POSTs could spin the wheels
+        while the RC arm/e-stop switches were doing nothing.
+        """
+        ctrl = self._controller
+        if ctrl is None:
+            return False
+        try:
+            return bool(ctrl.is_armed) and not bool(ctrl.emergency_active)
+        except Exception:
+            return False
+
     def start(self, tool: str, params: dict | None = None) -> bool:
         with self._lock:
             if self._state not in ("IDLE", "COMPLETE", "FAILED"):
@@ -96,6 +121,8 @@ class CalibrationManager:
             self._state = "RUNNING"
             self._tool = tool
             self._result = None
+            self._abort_logged = False
+            self._motor_deadline = time.monotonic() + self.WATCHDOG_S
             self._cancel_event.clear()
             self._step_event.clear()
             while not self._progress.empty():
@@ -135,19 +162,56 @@ class CalibrationManager:
         self._state = "WAITING_USER"
         self._step_event.clear()
         self._emit("wait_user", instruction=instruction)
+        # Pause the motor watchdog while waiting — motors are neutral here, so
+        # a slow operator should not burn the driving budget.
+        self._motor_deadline = None
         deadline = time.monotonic() + timeout_s
         while not self._step_event.is_set():
-            if self._cancel_event.is_set():
+            # Abort on operator cancel, disarm, or e-stop even while waiting.
+            if self._cancelled():
                 return False
             if time.monotonic() > deadline:
                 self._emit("log", msg="Timed out waiting for user.")
                 return False
             time.sleep(0.1)
         self._state = "RUNNING"
+        # (Re)arm the watchdog now that driving is about to begin.
+        self._motor_deadline = time.monotonic() + self.WATCHDOG_S
         return True
 
+    def _abort_reason(self) -> Optional[str]:
+        """Return a reason to abort the run, or None to continue.
+
+        Honors operator cancel, controller disarm / e-stop (the calibration
+        wizard drives motors directly, so it must respect the same safety
+        gates as controller.process()), and the motor watchdog.
+        """
+        if self._cancel_event.is_set():
+            return "cancelled"
+        ctrl = self._controller
+        if ctrl is not None:
+            try:
+                if not ctrl.is_armed:
+                    return "disarmed"
+                if ctrl.emergency_active:
+                    return "e-stop"
+            except Exception:
+                pass
+        if self._motor_deadline is not None and time.monotonic() > self._motor_deadline:
+            return f"watchdog timeout (>{self.WATCHDOG_S:.0f}s)"
+        return None
+
     def _cancelled(self) -> bool:
-        return self._cancel_event.is_set()
+        reason = self._abort_reason()
+        if reason is not None and reason != "cancelled" and not self._abort_logged:
+            self._abort_logged = True
+            self._emit("log", msg=f"Calibration aborted — {reason}. Stopping motors.")
+            if self._motor:
+                try:
+                    self._motor.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+                except Exception:
+                    pass
+        return reason is not None
 
     # ── Dispatch ──
 
@@ -184,7 +248,8 @@ class CalibrationManager:
 
         ok = self._wait_for_user(
             "Clear the area around the rover — it will spin in place. "
-            "ARM the rover via RC, then tap 'I'm Ready'."
+            "Keep the rover ARMED (RC ch3 high), then tap 'I'm Ready'. "
+            "Disarming or hitting e-stop at any point aborts and stops the motors."
         )
         if not ok:
             self._finish(None, failed=True)
@@ -454,7 +519,8 @@ class CalibrationManager:
 
         ok = self._wait_for_user(
             "Clear the area — the rover will drive forward at several speeds. "
-            "ARM via RC, then tap 'I'm Ready'."
+            "Keep the rover ARMED (RC ch3 high), then tap 'I'm Ready'. "
+            "Disarming or hitting e-stop at any point aborts and stops the motors."
         )
         if not ok:
             self._finish(None, failed=True)
@@ -623,6 +689,15 @@ def create_calibration_blueprint(cal_manager: CalibrationManager) -> Blueprint:
         body = request.get_json(force=True, silent=True) or {}
         tool = body.get("tool", "")
         params = body.get("params", {})
+        # Safety gate: calibration drives the motors directly, so refuse to
+        # start unless the rover is armed (RC ch3 high). Returns 400 so the
+        # UI can surface a clear instruction.
+        if not cal_manager.is_armed():
+            return _json_resp(
+                {"error": "WALL-E must be armed to calibrate. Set the RC arm "
+                          "switch (ch3) high, then try again."},
+                400,
+            )
         ok = cal_manager.start(tool, params)
         if ok:
             return _json_resp({"status": "started", "tool": tool})

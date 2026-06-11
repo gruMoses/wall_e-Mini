@@ -215,6 +215,59 @@ class TestSlewLimiter(unittest.TestCase):
         self.assertEqual(follow_cmd.right_byte, 151)
 
 
+class TestCalibrationSafety(unittest.TestCase):
+    """Bug #1: safety (e-stop / disarm) must run every tick, including while in
+    calibration mode where the wizard drives the motors directly."""
+
+    def _armed_calibration_controller(self):
+        motor = FakeMotor()
+        relay = FakeRelay()
+        shutdown = FakeShutdown()
+        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
+                       safety_params=SafetyParams(debounce_seconds=0.0))
+        # Arm
+        arm = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
+                       last_update_epoch_s=100.0)
+        c.process(arm, now_epoch_s=100.0)
+        self.assertTrue(c.is_armed)
+        c.enter_calibration_mode()
+        return c, motor, relay, shutdown
+
+    def test_estop_during_calibration_disarms_stops_and_schedules_shutdown(self):
+        c, motor, relay, shutdown = self._armed_calibration_controller()
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1900,
+                      last_update_epoch_s=100.0)
+        cmd, events, telem = c.process(rc, now_epoch_s=100.1)
+        self.assertIn(SafetyEvent.EMERGENCY_TRIGGERED, events)
+        self.assertFalse(c.is_armed)
+        self.assertFalse(cmd.is_armed)
+        self.assertTrue(cmd.emergency_active)
+        self.assertGreaterEqual(motor.stops, 1)
+        self.assertEqual(shutdown.scheduled, [5.0])
+        self.assertTrue(telem.get("calibration"))
+
+    def test_disarm_during_calibration_stops_motor(self):
+        c, motor, relay, shutdown = self._armed_calibration_controller()
+        stops_before = motor.stops
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000,
+                      last_update_epoch_s=100.0)  # ch3 low = disarm
+        cmd, events, telem = c.process(rc, now_epoch_s=100.1)
+        self.assertFalse(c.is_armed)
+        self.assertGreater(motor.stops, stops_before)
+        self.assertEqual(telem.get("mode"), "CALIBRATING")
+
+    def test_armed_calm_calibration_does_not_stop_motor(self):
+        # While safely armed, process() must not fight the wizard by stopping.
+        c, motor, relay, shutdown = self._armed_calibration_controller()
+        stops_before = motor.stops
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
+                      last_update_epoch_s=100.0)
+        cmd, events, telem = c.process(rc, now_epoch_s=100.1)
+        self.assertTrue(c.is_armed)
+        self.assertEqual(motor.stops, stops_before)
+        self.assertTrue(telem.get("calibration"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
