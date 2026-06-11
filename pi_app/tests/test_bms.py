@@ -108,9 +108,15 @@ def _temp_payload(max_raw: int = 65, min_raw: int = 63) -> bytes:
 
 
 def _mosfet_payload(charge_on: bool = True, discharge_on: bool = True) -> bytes:
-    """8-byte payload for MOSFET status (0x93)."""
+    """8-byte payload for MOSFET status (0x93).
+
+    cb8d2f6 fix(bms): byte 0 is a mode enum (not a bitmask); charge FET on/off
+    is at byte 1 and discharge FET on/off is at byte 2 (plain boolean).
+    """
     buf = bytearray(8)
-    buf[0] = (0x01 if charge_on else 0) | (0x02 if discharge_on else 0)
+    # byte 0: mode enum — leave 0 (normal operation)
+    buf[1] = 0x01 if charge_on else 0x00
+    buf[2] = 0x01 if discharge_on else 0x00
     return bytes(buf)
 
 
@@ -123,9 +129,13 @@ def _status_payload(num_cells: int = 8, cycles: int = 42) -> bytes:
 
 
 def _errors_payload(flags: int = 0) -> bytes:
-    """8-byte payload for errors (0x97)."""
+    """8-byte payload for errors (0x98).
+
+    ``flags`` is written directly into buf[0] (the voltage-alarm byte).
+    cb8d2f6: command changed from 0x97 → 0x98; b3718aa: bit table corrected.
+    """
     buf = bytearray(8)
-    struct.pack_into(">H", buf, 0, flags)
+    buf[0] = flags & 0xFF
     return bytes(buf)
 
 
@@ -217,14 +227,20 @@ class TestDalyParsing(unittest.TestCase):
         self.assertEqual(state.cycle_count, 42)
 
     def test_error_flags_parsed(self):
-        # Bit 0 = "Cell OVP", bit 1 = "Cell UVP"
-        resp = _make_daly_response(0x97, _errors_payload(flags=0b11))
+        # b3718aa fix(bms): alarm bit table was corrected; pattern is
+        # even bit = Warning (L1), odd bit = Trip (L2).
+        # Byte 0 bits: 0="Cell OVP Warning", 1="Cell OVP Trip",
+        #              2="Cell UVP Warning", 3="Cell UVP Trip".
+        # Use flags=0b0101 (bits 0+2) to trigger one OVP and one UVP warning.
+        # The command byte is 0x98 (not 0x97 — also corrected in cb8d2f6).
+        resp = _make_daly_response(0x98, _errors_payload(flags=0b0101))
         state = self._run_poll_with_responses({"errors": resp})
-        self.assertIn("Cell OVP", state.error_flags)
-        self.assertIn("Cell UVP", state.error_flags)
+        self.assertIn("Cell OVP Warning", state.error_flags)
+        self.assertIn("Cell UVP Warning", state.error_flags)
 
     def test_no_error_flags(self):
-        resp = _make_daly_response(0x97, _errors_payload(flags=0))
+        # cb8d2f6: errors command is 0x98, not 0x97.
+        resp = _make_daly_response(0x98, _errors_payload(flags=0))
         state = self._run_poll_with_responses({"errors": resp})
         self.assertEqual(state.error_flags, [])
 
