@@ -1259,6 +1259,48 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
             return Response(json.dumps({"error": str(exc)}), status=500,
                             content_type="application/json")
 
+    @app.route("/api/follow_me/params", methods=["GET"])
+    def api_follow_me_params_get():
+        """Return the five runtime-tunable Follow-Me steering params."""
+        if controller is None:
+            return Response(json.dumps({"error": "no controller"}), status=503,
+                            content_type="application/json")
+        fm = getattr(controller, "_follow_me", None)
+        if fm is None or not hasattr(fm, "get_tunable_params"):
+            return Response(json.dumps({"error": "follow-me unavailable"}), status=503,
+                            content_type="application/json")
+        return Response(json.dumps(fm.get_tunable_params()),
+                        content_type="application/json")
+
+    @app.route("/api/follow_me/params", methods=["POST"])
+    def api_follow_me_params_set():
+        """Apply a subset of the five tunable params to the live controller.
+
+        Validates hard bounds; rejects any out-of-range value or unknown key
+        with 400 and applies NOTHING (all-or-nothing). Changes are volatile
+        (lost on restart) — intended for tuning trials. Sets gains/filters
+        only; cannot command motion.
+        """
+        if controller is None:
+            return Response(json.dumps({"error": "no controller"}), status=503,
+                            content_type="application/json")
+        fm = getattr(controller, "_follow_me", None)
+        if fm is None or not hasattr(fm, "apply_tunable_params"):
+            return Response(json.dumps({"error": "follow-me unavailable"}), status=503,
+                            content_type="application/json")
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or not payload:
+            return Response(
+                json.dumps({"error": "JSON body with at least one param required"}),
+                status=400, content_type="application/json")
+        try:
+            applied = fm.apply_tunable_params(payload)
+        except ValueError as exc:
+            return Response(json.dumps({"error": str(exc)}), status=400,
+                            content_type="application/json")
+        return Response(json.dumps({"ok": True, "applied": applied}),
+                        content_type="application/json")
+
     @app.route("/api/teleop", methods=["POST"])
     def api_teleop():
         payload = request.get_json(silent=True) or {}

@@ -46,6 +46,24 @@ _log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Runtime-tunable Follow-Me parameters
+# ─────────────────────────────────────────────────────────────────────────────
+# The ONLY five FollowMeConfig fields that may be changed live (volatile, lost
+# on restart) for steering auto-tuning. Each maps to an inclusive (min, max)
+# hard bound — values outside the bound are rejected, never clamped. The web
+# override endpoint and the standalone fm_autotune CLI both validate against
+# this single source of truth. Note: speed_kp/ki/kd are deliberately absent —
+# the velocity loop stays disabled (see FollowMeConfig).
+TUNABLE_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
+    "pid_lateral_kp": (0.1, 0.8),
+    "pid_lateral_kd": (0.0, 0.5),
+    "target_ema_alpha": (0.2, 0.9),
+    "steer_deadband_norm": (0.0, 0.1),
+    "steer_slew_per_tick": (0.03, 0.4),
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public dataclass — API contract with oak_depth.py; do not rename fields.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -517,6 +535,12 @@ class FollowMeController:
     def __init__(self, config: FollowMeConfig) -> None:
         self._cfg = config
 
+        # Runtime overrides for config-backed tunables (FollowMeConfig is a
+        # frozen dataclass and can't be mutated). Only the deadband/slew params
+        # live here; kp/kd/alpha are applied directly to the sub-objects below.
+        # See apply_tunable_params(). Volatile — lost on restart, by design.
+        self._tunable_overrides: dict[str, float] = {}
+
         # ── Layer 1: Detection filter ────────────────────────────────────────
         self._filter = DetectionFilter(
             conf_threshold=config.detection_confidence,
@@ -898,7 +922,7 @@ class FollowMeController:
                 # Steer slew cap: limit change per output tick to avoid step-inputs
                 # caused by PID spikes. Cap is (steer_slew_per_tick * max_byte) bytes.
                 max_steer = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
-                slew_limit = float(getattr(self._cfg, "steer_slew_per_tick", 0.1)) * max_steer
+                slew_limit = float(self._tunable("steer_slew_per_tick")) * max_steer
                 slew_capped = max(
                     self._last_emitted_steer - slew_limit,
                     min(self._last_emitted_steer + slew_limit, self._last_steer_offset),
@@ -1071,7 +1095,7 @@ class FollowMeController:
         self._last_pursuit_mode = "direct"
         # Bbox-x deadband: suppress PID input while gait wobbles the centroid ±~2-3% frame.
         x_err = target.normalized_x
-        deadband = float(getattr(self._cfg, "steer_deadband_norm", 0.04))
+        deadband = float(self._tunable("steer_deadband_norm"))
         if abs(x_err) < deadband:
             x_err = 0.0
         self._last_x_err_norm = x_err
@@ -1337,6 +1361,82 @@ class FollowMeController:
         self._last_slew_capped_steer = 0.0
 
     # ── Status / telemetry ───────────────────────────────────────────────────
+
+    def _tunable(self, name: str) -> float:
+        """Live value of a config-backed tunable: runtime override if set, else
+        the frozen-config default. ``dict.get`` is a single atomic call under
+        the GIL, so the control loop never sees a torn value mid-write."""
+        val = self._tunable_overrides.get(name)
+        return getattr(self._cfg, name) if val is None else val
+
+    def get_tunable_params(self) -> dict:
+        """Return the current live values of the five runtime-tunable params.
+
+        Reads the actual live state — kp/kd off the PID, ema off the tracker,
+        deadband/slew off the override layer — so it reflects exactly what the
+        next control tick will use, not just the frozen config defaults.
+        """
+        return {
+            "pid_lateral_kp": float(self._steering._pid.kp),
+            "pid_lateral_kd": float(self._steering._pid.kd),
+            "target_ema_alpha": float(self._tracker._alpha),
+            "steer_deadband_norm": float(self._tunable("steer_deadband_norm")),
+            "steer_slew_per_tick": float(self._tunable("steer_slew_per_tick")),
+        }
+
+    def apply_tunable_params(self, params: dict) -> dict:
+        """Validate and apply runtime tuning params to the live control objects.
+
+        Validation is all-or-nothing: if *any* key is unknown or *any* value is
+        out of its hard bound (``TUNABLE_PARAM_BOUNDS``), raises ``ValueError``
+        and applies nothing. Returns the dict of applied values on success.
+
+        Thread-safety: the control loop reads each of these params as a single
+        lookup per tick — kp/kd off ``self._steering._pid``, ema off
+        ``self._tracker``, and deadband/slew via ``self._tunable()`` (one
+        ``dict.get``). Applying a value here is a single attribute store
+        (kp/kd/ema) or a single dict item store (deadband/slew). Each of those
+        is one bytecode, atomic under the GIL, and no param is part of a read-
+        modify-write that spans ticks. So plain assignment from the web thread
+        is safe without a lock: a concurrent tick sees either the old or the new
+        float, never a torn value. The only observable effect is that a single
+        15 Hz tick might mix old/new across the five params (e.g. new kp with
+        old kd for one tick) — harmless for tuning, and the very next tick is
+        fully consistent. This method sets gains/filters ONLY; it cannot command
+        motion.
+
+        (``FollowMeConfig`` is a frozen dataclass, so deadband/slew are applied
+        via the ``self._tunable_overrides`` layer rather than mutating config.)
+        """
+        # ── Phase 1: validate everything before touching any live state ──
+        validated: dict[str, float] = {}
+        for key, raw in params.items():
+            if key not in TUNABLE_PARAM_BOUNDS:
+                raise ValueError(f"unknown param: {key!r}")
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number, got {raw!r}")
+            lo, hi = TUNABLE_PARAM_BOUNDS[key]
+            # NaN/inf fail this comparison and are rejected.
+            if not (lo <= val <= hi):
+                raise ValueError(f"{key}={val} out of bounds [{lo}, {hi}]")
+            validated[key] = val
+
+        # ── Phase 2: apply (all values already validated) ──
+        current = self.get_tunable_params()
+        for key, val in validated.items():
+            old = current[key]
+            if key == "pid_lateral_kp":
+                self._steering._pid.kp = val
+            elif key == "pid_lateral_kd":
+                self._steering._pid.kd = val
+            elif key == "target_ema_alpha":
+                self._tracker._alpha = val
+            else:  # steer_deadband_norm / steer_slew_per_tick — read live via _tunable()
+                self._tunable_overrides[key] = val
+            _log.info("FM tunable param %s: %.4f -> %.4f", key, old, val)
+        return validated
 
     def reset_debug_counters(self):
         """Reset visualization debug counters (rejected jumps/speeds, hysteresis)."""
