@@ -368,6 +368,98 @@ class TestConnectionManagement(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Unit tests: clean shutdown (no "exited unexpectedly" on normal stop)
+# ---------------------------------------------------------------------------
+
+class TestCleanShutdown(unittest.TestCase):
+    """Verify that stop() terminates the BMS thread without error log messages."""
+
+    def test_stop_with_empty_mac_is_clean(self):
+        """stop() on a service with no MAC configured must be silent and fast."""
+        import logging as _logging
+        cfg = _BmsCfg(bms_mac_address="")
+        svc = BmsService(cfg)
+
+        with self.assertLogs("pi_app.hardware.bms", level=_logging.DEBUG) as log_ctx:
+            svc.start()
+            time.sleep(0.05)
+            svc.stop()
+
+        # Thread must be reaped
+        self.assertIsNone(svc._thread)
+        # The "exited unexpectedly" message must not appear in any log record
+        unexpected = [r for r in log_ctx.output if "exited unexpectedly" in r]
+        self.assertEqual(
+            unexpected, [],
+            msg=f"Got unexpected-exit log(s): {unexpected}",
+        )
+
+    def test_stop_with_active_mac_is_clean(self):
+        """stop() while the BLE loop is running (bleak mocked) must be clean and fast.
+
+        Uses a real MAC address so _poll_forever enters its connect loop.  The
+        fake BleakClient hangs inside __aenter__ long enough that stop() fires
+        during the BLE wait; the task cancellation must unblock it cleanly.
+        """
+        import asyncio as _asyncio
+        import logging as _logging
+
+        # Make BleakClient block briefly inside __aenter__ so stop() races it.
+        class _HangingBleakClient:
+            def __init__(self, address, timeout=15):
+                self.address = address
+                self.services = []
+
+            async def __aenter__(self):
+                # Simulate a slow BLE connect — stop() will cancel us here.
+                await _asyncio.sleep(10.0)
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        import sys as _sys
+        import types as _types
+
+        hanging_bleak = _types.ModuleType("bleak")
+        hanging_bleak.BleakClient = _HangingBleakClient
+        hanging_bleak.BleakScanner = MagicMock()
+
+        original_bleak = _sys.modules.get("bleak")
+        _sys.modules["bleak"] = hanging_bleak
+        try:
+            cfg = _BmsCfg(
+                bms_mac_address="AA:BB:CC:DD:EE:FF",
+                bms_poll_interval_s=0.05,
+            )
+            svc = BmsService(cfg)
+
+            with self.assertLogs("pi_app.hardware.bms", level=_logging.DEBUG) as log_ctx:
+                svc.start()
+                # Give the thread time to enter the asyncio sleep inside __aenter__
+                time.sleep(0.1)
+                t0 = time.monotonic()
+                svc.stop()
+                elapsed = time.monotonic() - t0
+        finally:
+            if original_bleak is None:
+                _sys.modules.pop("bleak", None)
+            else:
+                _sys.modules["bleak"] = original_bleak
+
+        # Thread must be reaped
+        self.assertIsNone(svc._thread)
+        # Must finish well within 2 seconds
+        self.assertLess(elapsed, 2.0, msg=f"stop() took {elapsed:.2f}s — too slow")
+        # The "exited unexpectedly" message must not appear
+        unexpected = [r for r in log_ctx.output if "exited unexpectedly" in r]
+        self.assertEqual(
+            unexpected, [],
+            msg=f"Got unexpected-exit log(s): {unexpected}",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Integration test: controller charger inhibit
 # ---------------------------------------------------------------------------
 

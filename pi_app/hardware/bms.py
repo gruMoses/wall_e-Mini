@@ -139,6 +139,7 @@ class BmsService:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._poll_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         # Monotonic timestamp of the last successful poll (0.0 = never polled)
         self._last_success_monotonic: float = 0.0
 
@@ -161,8 +162,10 @@ class BmsService:
         """Stop the background thread and close the BLE connection."""
         self._stop_event.set()
         loop = self._loop
-        if loop is not None:
-            loop.call_soon_threadsafe(loop.stop)
+        if loop is not None and not loop.is_closed():
+            task = self._poll_task
+            if task is not None and not task.done():
+                loop.call_soon_threadsafe(task.cancel)
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
@@ -207,10 +210,15 @@ class BmsService:
         loop = asyncio.new_event_loop()
         self._loop = loop
         try:
-            loop.run_until_complete(self._poll_forever())
+            self._poll_task = loop.create_task(self._poll_forever())
+            loop.run_until_complete(self._poll_task)
+        except asyncio.CancelledError:
+            # Normal shutdown path: task was cancelled by stop()
+            pass
         except Exception:
             logger.exception("BMS event loop exited unexpectedly")
         finally:
+            self._poll_task = None
             loop.close()
             self._loop = None
 
