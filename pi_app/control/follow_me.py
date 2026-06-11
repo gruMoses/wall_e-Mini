@@ -129,13 +129,24 @@ class DepthFilter:
     Before updating the EMA, the implied velocity (|raw − filtered| / dt) is
     checked against *max_velocity_mps*.  Readings that exceed the threshold are
     rejected and the previous filtered value is returned unchanged.
+
+    Anti-latch: rejections advance ``_last_time``, so after a genuine step
+    change (e.g. a target switch with a depth gap) dt stays tiny and *every*
+    subsequent frame would be rejected forever, regulating speed against the
+    stale depth until the full loss timeout. To break that latch, a run of
+    ``_MAX_CONSECUTIVE_REJECTS`` consecutive rejections is treated as evidence
+    the world really moved: the raw value is accepted as a fresh seed. Any
+    accepted sample (EMA or seed) resets the counter.
     """
+
+    _MAX_CONSECUTIVE_REJECTS = 5
 
     def __init__(self, alpha: float = 0.35, max_velocity_mps: float = 5.0) -> None:
         self._alpha = alpha
         self._max_vel = max_velocity_mps
         self._filtered: float | None = None
         self._last_time: float | None = None
+        self._reject_count: int = 0
 
     def update(self, raw_z: float, now: float) -> float:
         """Return filtered depth in metres."""
@@ -143,6 +154,7 @@ class DepthFilter:
             # First reading — seed the filter
             self._filtered = raw_z
             self._last_time = now
+            self._reject_count = 0
             return self._filtered
 
         dt = now - self._last_time
@@ -152,19 +164,29 @@ class DepthFilter:
         # Reject physically implausible jumps
         implied_vel = abs(raw_z - self._filtered) / dt
         if implied_vel > self._max_vel:
-            # Bad reading — keep previous estimate, but advance timestamp
+            self._reject_count += 1
             self._last_time = now
+            if self._reject_count >= self._MAX_CONSECUTIVE_REJECTS:
+                # Latch-breaker: a sustained "implausible" reading is real —
+                # reseed the EMA to it rather than reject forever.
+                self._filtered = raw_z
+                self._reject_count = 0
+                return self._filtered
+            # Bad reading — keep previous estimate, but advance timestamp
             return self._filtered
 
-        # Standard EMA update
+        # Standard EMA update — an accepted sample clears the reject streak
+        self._reject_count = 0
         self._filtered = self._alpha * raw_z + (1.0 - self._alpha) * self._filtered
         self._last_time = now
         return self._filtered
 
     def reset(self) -> None:
-        """Clear state — call when follow-me is engaged/disengaged."""
+        """Clear state — call when follow-me is engaged/disengaged or the
+        selected target switches (track_id change)."""
         self._filtered = None
         self._last_time = None
+        self._reject_count = 0
 
     @property
     def value(self) -> float | None:
@@ -728,6 +750,14 @@ class FollowMeController:
         # Telemetry: always update from tracker result
         target_present = target is not None
         if target_present:
+            # ── Target switch → reseed depth filter immediately ──────────────
+            # track_id is real since 6ef3378. When the tracker locks onto a
+            # different person the depth typically jumps; reseeding here stops
+            # the new target's depth from being rejected against the old one's
+            # filtered value (the rejection-latch failure mode).
+            if (target.track_id is not None
+                    and target.track_id != self._last_target_track_id):
+                self._depth_filter.reset()
             # ── Apply depth EMA filter before any distance-based decisions ───
             filtered_depth = self._depth_filter.update(target.depth_m, now)
             target.depth_m = filtered_depth
