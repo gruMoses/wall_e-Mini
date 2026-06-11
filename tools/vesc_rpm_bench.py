@@ -38,7 +38,12 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Optional
+
+# Allow running as `python3 tools/vesc_rpm_bench.py` from anywhere: put the
+# repo root on sys.path so `pi_app.hardware.vesc` resolves.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Hard cap: never command more than this ERPM regardless of --rpm value.
 _ERPM_HARD_CAP = 5_000
