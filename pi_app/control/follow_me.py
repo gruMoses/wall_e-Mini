@@ -831,6 +831,13 @@ class FollowMeController:
                 max_s = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
                 clamped_last_steer = max(-0.7 * max_s, min(0.7 * max_s, self._last_fresh_steer))
                 steer = clamped_last_steer * decay
+                # Decay SPEED on the same profile as steer. Previously speed kept
+                # being computed from the frozen persistence depth while steer
+                # decayed away — the robot drove blind at full speed but straight.
+                # Apply the steer decay factor so forward motion ramps to 0 in
+                # lock-step with the turn. (decay was computed from the pre-decay
+                # speed, so the steer profile is unchanged.)
+                speed = speed * decay
                 self._steer_decay_factor = decay
                 self._steer_hold_active = decay > 0.0
                 self._last_fresh_detection = False
@@ -1267,7 +1274,10 @@ class FollowMeController:
                     if abs(steer_sign) > 0.05
                     else 0.0
                 )
-                fwd = float(self._MIN_LOST_TARGET_SPEED)
+                # Search is a PURE PIVOT — no forward creep. Driving blind-forward
+                # while only rotating to reacquire is the dangerous case; rotate
+                # in place instead. (Blind trail pursuit above keeps its floor.)
+                fwd = 0.0
                 self._last_steer_offset = steer
                 self._last_speed_offset = fwd
                 return _mix_commands(fwd, steer)

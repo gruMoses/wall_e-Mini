@@ -240,7 +240,7 @@ class FollowMeConfig:
     follow_output_rate_hz: float = 15.0  # motor commands at this Hz, decoupled from 30 fps vision
     # Allow continued blind trail pursuit longer than short target-drop timeout.
     # This is the key behavior needed to keep moving around corners after LOS loss.
-    lost_target_trail_pursuit_max_s: float = 8.0
+    lost_target_trail_pursuit_max_s: float = 3.0
     lost_target_search_steer_pct: float = 0.40  # fraction of max_follow_speed_byte for search turn
     max_steer_delta_per_s: float = 35.0          # steering differential slew limit (bytes/s)
     max_steer_offset_byte: float = 25.0          # increased from 15 — lets robot turn harder to keep person in FOV
