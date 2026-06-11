@@ -189,6 +189,15 @@ class FollowMeConfig:
     target_ema_alpha: float = 0.3        # EMA smoothing on normalized horizontal offset (0=heavy, 1=none)
     target_persistence_s: float = 2.0   # hold last known position this long before declaring target lost
 
+    # ── Host-side tracklet layer (IoU + constant-velocity Kalman) ─────────────
+    # Assigns stable track_ids to person detections on parse paths that the OAK
+    # device does not already track (host-side YOLOv8 NeuralNetwork parse and the
+    # raw SpatialDetectionNetwork path). Lets follow_me lock onto a specific person
+    # across frames / brief occlusions instead of just "closest by depth".
+    tracklet_iou_threshold: float = 0.3  # min IoU (predicted bbox vs detection) to match a tracklet
+    tracklet_min_hits: int = 3           # consecutive-ish hits before a tracklet is confirmed (reports its id)
+    tracklet_max_age: int = 15           # frames a tracklet survives unmatched before deletion (~1 s @ 15 fps)
+
     # ── Layer 3: Lateral PID steering ────────────────────────────────────────
     # Error = normalized horizontal offset (-1.0 to +1.0); output scales to ±max_steer_offset_byte.
     pid_lateral_kp: float = 0.8
@@ -207,9 +216,17 @@ class FollowMeConfig:
     # Error = target_speed_mps (derived from depth) − actual_speed_mps.
     # Output (m/s) is converted to a byte correction via trail_speed_scale_mps_per_byte.
     # Disabled automatically when VESC telemetry is unavailable (open-loop fallback).
-    speed_kp: float = 0.8
-    speed_ki: float = 0.2
-    speed_kd: float = 0.05
+    #
+    # DISABLED 2026-06-11 (gains zeroed): the wheel-RPM telemetry feeding this loop
+    # is dead/unreliable, so the PID integrates garbage and drives the lunge/stall
+    # cycle (target_speed_mps is computed against a bogus actual_speed_mps). Zeroing
+    # all three gains makes PIDController.compute() return 0.0 (verified: p+i+d all
+    # collapse to 0, no divide-by-gain), so SpeedLayer.compute() falls back to the
+    # pure open-loop throttle-vs-distance mapping (error * gain). Restore the 0.8/0.2/
+    # 0.05 values once VESC eRPM telemetry is trustworthy again.
+    speed_kp: float = 0.0
+    speed_ki: float = 0.0
+    speed_kd: float = 0.0
     speed_integral_limit: float = 50.0   # anti-windup clamp (m/s accumulated)
 
     # ── Slip detection & compensation ─────────────────────────────────────────

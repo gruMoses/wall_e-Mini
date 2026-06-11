@@ -20,7 +20,7 @@ import re
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -128,6 +128,167 @@ class _AllDetsState:
     timestamp: float = 0.0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Host-side tracklet layer (IoU + constant-velocity Kalman)
+#
+# The OAK device's on-device ObjectTracker emits stable track_ids, but the
+# host-side YOLOv8 NeuralNetwork parse path and the raw SpatialDetectionNetwork
+# path do not. This pure-numpy layer assigns stable, monotonic track_ids to
+# person detections on those paths so follow_me can lock onto one person across
+# frames / brief occlusions instead of falling back to "closest by depth".
+# Zero new dependencies — hand-rolled constant-velocity Kalman.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Monotonic, process-global track-id source. Never reused, even across tracker
+# resets, so a re-acquired target always gets a fresh id (matches the "new id
+# after target absent > max_age" contract).
+_track_id_lock = threading.Lock()
+_track_id_counter = 0
+
+
+def _next_track_id() -> int:
+    global _track_id_counter
+    with _track_id_lock:
+        _track_id_counter += 1
+        return _track_id_counter
+
+
+def _iou(a, b) -> float:
+    """Intersection-over-union of two (xmin, ymin, xmax, ymax) boxes."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+class Tracklet:
+    """One tracked person — constant-velocity Kalman over bbox state.
+
+    State vector ``x = [cx, cy, w, h, vx, vy]`` (bbox centre, size, centre
+    velocity). Measurements observe ``[cx, cy, w, h]``; ``vx, vy`` are inferred.
+    """
+
+    def __init__(self, track_id: int, bbox) -> None:
+        import numpy as np
+        cx, cy, w, h = self._bbox_to_z(bbox)
+        self.track_id = track_id
+        self.x = np.array([cx, cy, w, h, 0.0, 0.0], dtype=float)
+        self.P = np.eye(6, dtype=float) * 10.0
+        # Constant-velocity transition: centre advances by its velocity each step.
+        self.F = np.eye(6, dtype=float)
+        self.F[0, 4] = 1.0
+        self.F[1, 5] = 1.0
+        # Measurement matrix: observe [cx, cy, w, h].
+        self.H = np.zeros((4, 6), dtype=float)
+        self.H[0, 0] = self.H[1, 1] = self.H[2, 2] = self.H[3, 3] = 1.0
+        self.Q = np.eye(6, dtype=float) * 1e-3   # process noise
+        self.R = np.eye(4, dtype=float) * 1e-2   # measurement noise
+        self.hits = 1
+        self.age = 1
+        self.time_since_update = 0
+
+    @staticmethod
+    def _bbox_to_z(bbox):
+        x1, y1, x2, y2 = bbox
+        return (x1 + x2) * 0.5, (y1 + y2) * 0.5, (x2 - x1), (y2 - y1)
+
+    def predicted_bbox(self):
+        """Bbox implied by the current (already-predicted) state."""
+        cx, cy, w, h = self.x[0], self.x[1], self.x[2], self.x[3]
+        w = max(0.0, w); h = max(0.0, h)
+        return (cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5)
+
+    def predict(self) -> None:
+        self.x = self.F @ self.x
+        self.P = self.F @ self.P @ self.F.T + self.Q
+        self.age += 1
+        self.time_since_update += 1
+
+    def update(self, bbox) -> None:
+        import numpy as np
+        z = np.array(self._bbox_to_z(bbox), dtype=float)
+        y = z - self.H @ self.x
+        S = self.H @ self.P @ self.H.T + self.R
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+        self.x = self.x + K @ y
+        self.P = (np.eye(6) - K @ self.H) @ self.P
+        self.hits += 1
+        self.time_since_update = 0
+
+
+class TrackletTracker:
+    """Greedy-IoU + Kalman multi-object tracker for person bboxes.
+
+    ``update(detections)`` takes a list of ``(xmin, ymin, xmax, ymax)`` bboxes
+    (normalised 0-1) and returns a parallel list of ``Optional[int]`` track_ids:
+    the confirmed id for a detection matched to (or that grew into) a confirmed
+    tracklet, else ``None``. A tracklet is confirmed only after ``min_hits``
+    hits, so transient / first-seen detections report ``None`` — keeping the
+    None path identical to today's untracked behaviour.
+    """
+
+    def __init__(self, iou_threshold: float = 0.3, min_hits: int = 3, max_age: int = 15) -> None:
+        self._iou_threshold = float(iou_threshold)
+        self._min_hits = int(min_hits)
+        self._max_age = int(max_age)
+        self._tracklets: list[Tracklet] = []
+
+    @property
+    def tracklets(self) -> list:
+        return self._tracklets
+
+    def update(self, detections):
+        """Advance the tracker one frame; return parallel list of Optional[int]."""
+        # 1. Predict every existing tracklet forward one frame.
+        for t in self._tracklets:
+            t.predict()
+
+        n_det = len(detections)
+        assigned = [None] * n_det  # track_id (or None) per detection
+
+        # 2. Greedy IoU matching: predicted tracklet bbox vs new detections.
+        unmatched_tracklets = set(range(len(self._tracklets)))
+        unmatched_dets = set(range(n_det))
+        if self._tracklets and n_det:
+            pairs = []
+            for ti, t in enumerate(self._tracklets):
+                pb = t.predicted_bbox()
+                for di in range(n_det):
+                    iou = _iou(pb, detections[di])
+                    if iou >= self._iou_threshold:
+                        pairs.append((iou, ti, di))
+            pairs.sort(reverse=True)  # highest IoU first
+            for iou, ti, di in pairs:
+                if ti in unmatched_tracklets and di in unmatched_dets:
+                    self._tracklets[ti].update(detections[di])
+                    unmatched_tracklets.discard(ti)
+                    unmatched_dets.discard(di)
+                    t = self._tracklets[ti]
+                    if t.hits >= self._min_hits:
+                        assigned[di] = t.track_id
+
+        # 3. Unmatched detections become new tentative tracklets (report None
+        #    until they reach min_hits).
+        for di in unmatched_dets:
+            t = Tracklet(_next_track_id(), detections[di])
+            self._tracklets.append(t)
+            if t.hits >= self._min_hits:  # only true if min_hits <= 1
+                assigned[di] = t.track_id
+
+        # 4. Age out tracklets unmatched for longer than max_age.
+        self._tracklets = [
+            t for t in self._tracklets if t.time_since_update <= self._max_age
+        ]
+
+        return assigned
+
+
 class OakDepthReader:
     """Background OAK-D Lite reader following the ArduinoRCReader thread pattern."""
 
@@ -159,6 +320,14 @@ class OakDepthReader:
         # Person label index depends on the active model
         _model_type = detection_config.model_type if detection_config is not None else "mobilenet-ssd"
         self._person_label: int = YOLO_PERSON_LABEL if _model_type == "yolov8n" else PERSON_LABEL
+        # Host-side tracklet layer for parse paths the OAK device doesn't track
+        # (YOLOv8 NeuralNetwork parse + raw SpatialDetectionNetwork). Knobs from
+        # FollowMeConfig; getattr defaults keep old configs working.
+        self._tracklet_tracker = TrackletTracker(
+            iou_threshold=getattr(self._fm_cfg, "tracklet_iou_threshold", 0.3),
+            min_hits=getattr(self._fm_cfg, "tracklet_min_hits", 3),
+            max_age=getattr(self._fm_cfg, "tracklet_max_age", 15),
+        )
         self._imu_prev_consumed_ts = 0.0
         self._imu_last_warn_ts = 0.0
         self._lock = threading.Lock()
@@ -1196,6 +1365,20 @@ class OakDepthReader:
         x_m = ((cx_d - dw / 2.0) / fx) * z_m
         return x_m, z_m
 
+    def _assign_track_ids(self, persons: list) -> list:
+        """Run the host-side tracklet layer over person detections.
+
+        Returns a new list of PersonDetection with ``track_id`` populated
+        (confirmed tracklets only; None otherwise). Used by the parse paths the
+        OAK device doesn't track itself. Order is preserved.
+        """
+        if not persons:
+            # Still advance the tracker so unmatched tracklets age out correctly.
+            self._tracklet_tracker.update([])
+            return persons
+        track_ids = self._tracklet_tracker.update([p.bbox for p in persons])
+        return [replace(p, track_id=tid) for p, tid in zip(persons, track_ids)]
+
     def _poll_detections(self, det_q) -> None:
         """Extract person detections with spatial coordinates.
 
@@ -1257,6 +1440,7 @@ class OakDepthReader:
                             x_m=x_m, z_m=z_m, confidence=conf, bbox=bbox,
                         ))
 
+                persons = self._assign_track_ids(persons)
                 with self._lock:
                     self._det_state.persons = persons
                     self._det_state.timestamp = time.monotonic()
@@ -1351,6 +1535,8 @@ class OakDepthReader:
                             "Safety-tier detection: %s (label=%d conf=%.2f z=%.1fm tier=%s)",
                             label_name, label, conf, z_m, tier,
                         )
+                # Raw SpatialDetectionNetwork carries no track ids — assign host-side.
+                persons = self._assign_track_ids(persons)
 
             with self._lock:
                 self._det_state.persons = persons
