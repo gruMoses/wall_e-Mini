@@ -737,6 +737,12 @@ sse.onmessage = function(e) {
     statsHtml += 'Target lateral: <span class="stat-val">' + d.follow_target_x_m.toFixed(2) + ' m' + dir + '</span><br>';
   }
   statsHtml += 'Persons seen: <span class="stat-val">' + (d.num_persons ?? 0) + '</span><br>';
+  if ((d.detections || []).length > 0) {
+    const trackList = d.detections.map(function(det) {
+      return 'id:' + (det.track_id != null ? det.track_id : '—') + ' @ ' + det.z_m.toFixed(1) + 'm';
+    }).join(', ');
+    statsHtml += 'Tracks: <span class="stat-val">' + trackList + '</span><br>';
+  }
   statsHtml += 'Mode: <span class="stat-val">' + d.mode + '</span>';
   if (isFollowMode) statsHtml += '<br>Motors: <span class="stat-val">L=' + d.motor_left + ' R=' + d.motor_right + '</span>';
   stats.innerHTML = statsHtml;
@@ -1140,7 +1146,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "follow_target_z_m": round(t.follow_target_z_m, 2) if t.follow_target_z_m is not None else None,
                     "detections": [
                         {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
-                         "conf": round(d.confidence, 2)}
+                         "conf": round(d.confidence, 2), "track_id": d.track_id}
                         for d in t.person_detections
                     ],
                     "gps_lat": round(t.gps_lat, 7) if t.gps_lat is not None else None,

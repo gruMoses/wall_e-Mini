@@ -976,7 +976,8 @@ class OakRecorder:
         if t.person_detections:
             obj["detections"] = [
                 {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
-                 "conf": round(d.confidence, 2), "bbox": [round(b, 3) for b in d.bbox]}
+                 "conf": round(d.confidence, 2), "track_id": d.track_id,
+                 "bbox": [round(b, 3) for b in d.bbox]}
                 for d in t.person_detections
             ]
         if t.heading_deg is not None:
