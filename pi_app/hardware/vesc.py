@@ -134,6 +134,13 @@ class VescCanDriver:
 
         # CAN RX health counters — used for live diagnostics and telemetry.
         self._rx_frame_count: int = 0
+        # Per-status-type RX counters — the aggregate rx_frame_count can't tell
+        # which status packet types are arriving, a blind spot that previously
+        # caused a misdiagnosis ("rpm stuck at 0"). These prove ERPM/STATUS(9)
+        # packet flow independently of STATUS_4/STATUS_5.
+        self._rx_status_count: int = 0   # CAN_PACKET_STATUS   (9)
+        self._rx_status4_count: int = 0  # CAN_PACKET_STATUS_4 (16)
+        self._rx_status5_count: int = 0  # CAN_PACKET_STATUS_5 (27)
         self._rx_parse_error_count: int = 0
         self._rx_recv_error_count: int = 0
         self._rx_reopen_count: int = 0
@@ -251,6 +258,9 @@ class VescCanDriver:
         with self._telem_lock:
             return {
                 "rx_frame_count": int(self._rx_frame_count),
+                "rx_status_count": int(self._rx_status_count),
+                "rx_status4_count": int(self._rx_status4_count),
+                "rx_status5_count": int(self._rx_status5_count),
                 "rx_parse_error_count": int(self._rx_parse_error_count),
                 "rx_recv_error_count": int(self._rx_recv_error_count),
                 "rx_reopen_count": int(self._rx_reopen_count),
@@ -333,16 +343,19 @@ class VescCanDriver:
                 if packet_id == _CAN_PACKET_STATUS:
                     with self._telem_lock:
                         self._rx_frame_count += 1
+                        self._rx_status_count += 1
                         self._rx_last_frame_s = now
                     self._parse_status(motor, msg.data, now)
                 elif packet_id == _CAN_PACKET_STATUS_4:
                     with self._telem_lock:
                         self._rx_frame_count += 1
+                        self._rx_status4_count += 1
                         self._rx_last_frame_s = now
                     self._parse_status4(motor, msg.data, now)
                 elif packet_id == _CAN_PACKET_STATUS_5:
                     with self._telem_lock:
                         self._rx_frame_count += 1
+                        self._rx_status5_count += 1
                         self._rx_last_frame_s = now
                     self._parse_status5(motor, msg.data, now)
             except Exception as exc:

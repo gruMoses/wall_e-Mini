@@ -386,6 +386,30 @@ class TestRxThread(unittest.TestCase):
         finally:
             d.shutdown()
 
+    def test_rx_health_per_status_type_counters(self):
+        """Per-status-type counters distinguish STATUS(9)/STATUS_4(16)/STATUS_5(27)
+        so ERPM packet flow is provable independently of the other frame types."""
+        d = self._started_driver()
+        try:
+            _inject(
+                d,
+                _status_frame(2, 1000, 2.0, 0.1),    # STATUS (9), left
+                _status_frame(1, 900, 2.0, 0.1),     # STATUS (9), right
+                _status4_frame(2, 40.0, 38.0, 5.0),  # STATUS_4 (16)
+                _status5_frame(2, 24.0),             # STATUS_5 (27)
+            )
+            h = d.get_rx_health()
+            self.assertEqual(h["rx_status_count"], 2)
+            self.assertEqual(h["rx_status4_count"], 1)
+            self.assertEqual(h["rx_status5_count"], 1)
+            # Aggregate count equals the sum of the per-type counts.
+            self.assertEqual(
+                h["rx_frame_count"],
+                h["rx_status_count"] + h["rx_status4_count"] + h["rx_status5_count"],
+            )
+        finally:
+            d.shutdown()
+
     def test_rx_reopens_bus_on_recv_error(self):
         d = self._started_driver()
         try:
