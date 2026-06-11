@@ -9,4 +9,5 @@ blobconverter>=1.4
 opencv-python-headless>=4.8
 mcap>=1.1
 flask>=3.0
+flask-sock>=0.7  # phone teleop /drive WebSocket (deadman heartbeat); pulls in simple-websocket
 smbus2>=0.4
