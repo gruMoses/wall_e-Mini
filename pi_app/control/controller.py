@@ -224,6 +224,7 @@ class Controller:
         ):
             self._mode = "FOLLOW_ME"
             self._safety_state.set_follow_me_active(True)
+            self._follow_me.start_recorder()
             return True
         return False
 
@@ -232,6 +233,8 @@ class Controller:
         if self._mode == "FOLLOW_ME":
             self._mode = "MANUAL"
             self._safety_state.set_follow_me_active(False)
+            if self._follow_me is not None:
+                self._follow_me.stop_recorder()
             if self._gesture is not None:
                 self._gesture.notify_external_deactivation()
 
@@ -410,6 +413,7 @@ class Controller:
             except Exception:
                 pass
         if self._follow_me is not None:
+            self._follow_me.set_arm_state(self._safety_state.is_armed)
             self._follow_me.update_pose(
                 heading, self._slew_last_left, self._slew_last_right, mono_now
             )
@@ -603,6 +607,8 @@ class Controller:
             if ev is SafetyEvent.FOLLOW_ME_ENTERED:
                 if self._follow_me_target_present():
                     self._mode = "FOLLOW_ME"
+                    if self._follow_me is not None:
+                        self._follow_me.start_recorder()
                 else:
                     # New engagement rule: don't enter Follow Me unless a
                     # target is already present.
@@ -610,6 +616,8 @@ class Controller:
                     self._safety_state.set_follow_me_active(False)
                     telemetry["follow_me_activation_blocked"] = "no_target"
             elif ev in (SafetyEvent.FOLLOW_ME_EXITED, SafetyEvent.EMERGENCY_TRIGGERED):
+                if self._follow_me is not None:
+                    self._follow_me.stop_recorder()
                 self._mode = "MANUAL"
                 if self._gesture is not None:
                     self._gesture.notify_external_deactivation()
@@ -629,12 +637,15 @@ class Controller:
                 ):
                     self._mode = "FOLLOW_ME"
                     self._safety_state.set_follow_me_active(True)
+                    self._follow_me.start_recorder()
                 else:
                     gesture_event = None  # cannot activate
             elif gesture_event is GestureEvent.DEACTIVATE:
                 if self._mode == "FOLLOW_ME":
                     self._mode = "MANUAL"
                     self._safety_state.set_follow_me_active(False)
+                    if self._follow_me is not None:
+                        self._follow_me.stop_recorder()
 
         # Emergency triggered: stop motors, disarm, schedule shutdown
         if any(e is SafetyEvent.EMERGENCY_TRIGGERED for e in events):

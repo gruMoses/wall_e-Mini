@@ -643,6 +643,8 @@ class FollowMeController:
         self._recorder_engagement_ts: float | None = None
         self._last_x_err_norm: float | None = None       # post-deadband error for recorder
         self._last_slew_capped_steer: float = 0.0        # steer after slew cap for recorder
+        # Arm state injected from controller.py each tick (or via set_arm_state).
+        self._is_armed: bool = False
 
         # ── VESC telemetry (for closed-loop speed and slip detection) ────────
         self._actual_left_rpm: int | None = None
@@ -972,6 +974,9 @@ class FollowMeController:
             else:
                 mode_str = "lost"
 
+            left_byte, right_byte = _mix_commands(
+                self._last_speed_offset, self._last_slew_capped_steer
+            )
             record = {
                 "t": now,
                 "x_raw": self._tracker.fresh_raw_x_norm,
@@ -983,6 +988,9 @@ class FollowMeController:
                 "track_id": target.track_id if target is not None else None,
                 "depth": round(target.depth_m, 3) if target is not None else None,
                 "conf": round(target.confidence, 3) if target is not None else None,
+                "is_armed": self._is_armed,
+                "left_byte": left_byte,
+                "right_byte": right_byte,
             }
             self._recorder_file.write(json.dumps(record) + "\n")
 
@@ -1001,6 +1009,23 @@ class FollowMeController:
                 self._recorder_file = None
         except Exception:
             pass
+
+    def start_recorder(self) -> None:
+        """Close any open recorder file and arm a fresh one for the next session.
+
+        Call on FOLLOW_ME entry so that each engagement gets its own timestamped
+        JSONL file.  The file itself is created lazily on the first compute()
+        tick (same as before), so this is lightweight and safe to call from the
+        controller's mode-transition site.
+        """
+        self.stop_recorder()  # ensure previous session's file is flushed + closed
+
+    def set_arm_state(self, is_armed: bool) -> None:
+        """Feed the controller arm state so it can be included in recorder rows.
+
+        Called by controller.py each tick before compute() in FOLLOW_ME mode.
+        """
+        self._is_armed = bool(is_armed)
 
     def _pick_odometry(self):
         """Return the best available odometry source (GPS preferred)."""

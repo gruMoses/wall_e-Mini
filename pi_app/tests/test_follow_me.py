@@ -1,4 +1,9 @@
+import json
+import os
+import stat
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from config import FollowMeConfig
 from pi_app.control.follow_me import FollowMeController, PersonDetection, NEUTRAL
@@ -306,6 +311,244 @@ class TestSteerSlewCap(unittest.TestCase):
         # emitted must be well within one slew step of the PID output (not blocked to 0)
         self.assertGreater(emitted, 0.0, "Small request must produce non-zero steer")
         self.assertLessEqual(emitted, slew_limit + 1e-9)
+
+
+class TestRecorder(unittest.TestCase):
+    """Tests for the per-session JSONL flight recorder."""
+
+    def _make(self, **overrides) -> FollowMeController:
+        cfg = FollowMeConfig(**overrides)
+        return FollowMeController(cfg)
+
+    def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
+                bbox=(0.4, 0.3, 0.6, 0.8)) -> PersonDetection:
+        return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence, bbox=bbox)
+
+    # ── (1) Recorder rotation ────────────────────────────────────────────────
+
+    def test_rotation_creates_new_file_per_session(self):
+        """stop_recorder() + start_recorder() must produce a new JSONL file on
+        the next compute(), leaving the previous file closed and complete."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fm = self._make()
+
+            # Patch the recorder directory so we write into our temp dir.
+            with patch("pi_app.control.follow_me.os.makedirs"):
+                # Use a fixed-increment fake time so each session gets a
+                # distinct integer timestamp.
+                call_count = [0]
+                def fake_time():
+                    call_count[0] += 1
+                    return float(1_000_000 + call_count[0])
+
+                with patch("pi_app.control.follow_me.time.time", side_effect=fake_time):
+                    # Redirect the open() to our temp dir by intercepting the path.
+                    opened_paths = []
+                    _real_open = open
+
+                    def fake_open(path, *args, **kwargs):
+                        if "fm_trials" in str(path):
+                            fname = os.path.basename(path)
+                            new_path = os.path.join(tmp, fname)
+                            opened_paths.append(new_path)
+                            return _real_open(new_path, *args, **kwargs)
+                        return _real_open(path, *args, **kwargs)
+
+                    with patch("builtins.open", side_effect=fake_open):
+                        # Session 1: run a few ticks then stop
+                        fm.compute([self._person()])
+                        fm.compute([self._person()])
+                        fm.stop_recorder()
+
+                        # Session 2: start fresh and run more ticks
+                        fm.start_recorder()
+                        fm.compute([self._person()])
+                        fm.stop_recorder()
+
+            # Should have opened exactly two distinct files.
+            self.assertEqual(len(opened_paths), 2,
+                             f"Expected 2 files, got: {opened_paths}")
+            self.assertNotEqual(opened_paths[0], opened_paths[1],
+                                "Two sessions must use different file paths")
+
+            # Both files must be valid JSONL (non-empty, parseable).
+            for p in opened_paths:
+                with open(p) as fh:
+                    lines = [l for l in fh if l.strip()]
+                self.assertGreater(len(lines), 0,
+                                   f"Recorder file {p} is empty")
+                for line in lines:
+                    rec = json.loads(line)
+                    self.assertIn("t", rec)
+
+    def test_old_file_closed_after_stop(self):
+        """After stop_recorder(), the internal file handle must be None."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fm = self._make()
+            with patch("pi_app.control.follow_me.os.makedirs"):
+                with patch("pi_app.control.follow_me.time.time", return_value=1_000_000.0):
+                    _real_open = open
+
+                    def fake_open(path, *args, **kwargs):
+                        if "fm_trials" in str(path):
+                            return _real_open(os.path.join(tmp, "trial.jsonl"), *args, **kwargs)
+                        return _real_open(path, *args, **kwargs)
+
+                    with patch("builtins.open", side_effect=fake_open):
+                        fm.compute([self._person()])
+                        self.assertIsNotNone(fm._recorder_file,
+                                             "Recorder file must be open after first compute()")
+                        fm.stop_recorder()
+
+            self.assertIsNone(fm._recorder_file,
+                              "Recorder file handle must be None after stop_recorder()")
+
+    # ── (2) Unwritable directory ─────────────────────────────────────────────
+
+    def test_unwritable_dir_does_not_raise(self):
+        """When the recorder directory is unwritable, compute() must not raise
+        and must still return valid (left_byte, right_byte) outputs."""
+        fm = self._make()
+
+        def raise_permission(*args, **kwargs):
+            raise PermissionError("read-only filesystem")
+
+        with patch("pi_app.control.follow_me.os.makedirs", side_effect=raise_permission):
+            # Must not raise; should still return motor bytes.
+            try:
+                result = fm.compute([self._person()])
+            except Exception as exc:
+                self.fail(f"compute() raised {type(exc).__name__} with unwritable dir: {exc}")
+
+            self.assertEqual(len(result), 2, "compute() must return (left, right) tuple")
+            left, right = result
+            self.assertIsInstance(left, int)
+            self.assertIsInstance(right, int)
+
+    def test_unwritable_dir_produces_outputs_across_multiple_ticks(self):
+        """Multiple ticks with an unwritable recorder dir must all produce outputs."""
+        fm = self._make()
+
+        def raise_permission(*args, **kwargs):
+            raise PermissionError("read-only filesystem")
+
+        with patch("pi_app.control.follow_me.os.makedirs", side_effect=raise_permission):
+            for _ in range(5):
+                left, right = fm.compute([self._person()])
+                self.assertGreaterEqual(left, 0)
+                self.assertLessEqual(left, 255)
+                self.assertGreaterEqual(right, 0)
+                self.assertLessEqual(right, 255)
+
+    # ── (3) New fields in written records ────────────────────────────────────
+
+    def test_record_contains_is_armed_field(self):
+        """Each JSONL record must include the is_armed boolean field."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fm = self._make()
+            fm.set_arm_state(True)
+
+            with patch("pi_app.control.follow_me.os.makedirs"):
+                with patch("pi_app.control.follow_me.time.time", return_value=1_000_001.0):
+                    _real_open = open
+
+                    def fake_open(path, *args, **kwargs):
+                        if "fm_trials" in str(path):
+                            return _real_open(os.path.join(tmp, "trial.jsonl"), *args, **kwargs)
+                        return _real_open(path, *args, **kwargs)
+
+                    with patch("builtins.open", side_effect=fake_open):
+                        fm.compute([self._person()])
+                        fm.stop_recorder()
+
+            with open(os.path.join(tmp, "trial.jsonl")) as fh:
+                rec = json.loads(fh.readline())
+
+            self.assertIn("is_armed", rec, "Record must contain 'is_armed' field")
+            self.assertIs(rec["is_armed"], True,
+                          "is_armed must reflect the value set via set_arm_state(True)")
+
+    def test_record_is_armed_false_by_default(self):
+        """Without calling set_arm_state(), is_armed must default to False."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fm = self._make()
+            # Do NOT call set_arm_state — should default to False.
+
+            with patch("pi_app.control.follow_me.os.makedirs"):
+                with patch("pi_app.control.follow_me.time.time", return_value=1_000_002.0):
+                    _real_open = open
+
+                    def fake_open(path, *args, **kwargs):
+                        if "fm_trials" in str(path):
+                            return _real_open(os.path.join(tmp, "trial.jsonl"), *args, **kwargs)
+                        return _real_open(path, *args, **kwargs)
+
+                    with patch("builtins.open", side_effect=fake_open):
+                        fm.compute([self._person()])
+                        fm.stop_recorder()
+
+            with open(os.path.join(tmp, "trial.jsonl")) as fh:
+                rec = json.loads(fh.readline())
+
+            self.assertIn("is_armed", rec)
+            self.assertIs(rec["is_armed"], False)
+
+    def test_record_contains_left_right_byte_fields(self):
+        """Each JSONL record must include left_byte and right_byte integer fields."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fm = self._make()
+
+            with patch("pi_app.control.follow_me.os.makedirs"):
+                with patch("pi_app.control.follow_me.time.time", return_value=1_000_003.0):
+                    _real_open = open
+
+                    def fake_open(path, *args, **kwargs):
+                        if "fm_trials" in str(path):
+                            return _real_open(os.path.join(tmp, "trial.jsonl"), *args, **kwargs)
+                        return _real_open(path, *args, **kwargs)
+
+                    with patch("builtins.open", side_effect=fake_open):
+                        fm.compute([self._person()])
+                        fm.stop_recorder()
+
+            with open(os.path.join(tmp, "trial.jsonl")) as fh:
+                rec = json.loads(fh.readline())
+
+            self.assertIn("left_byte", rec, "Record must contain 'left_byte' field")
+            self.assertIn("right_byte", rec, "Record must contain 'right_byte' field")
+            self.assertIsInstance(rec["left_byte"], int)
+            self.assertIsInstance(rec["right_byte"], int)
+            self.assertGreaterEqual(rec["left_byte"], 0)
+            self.assertLessEqual(rec["left_byte"], 255)
+            self.assertGreaterEqual(rec["right_byte"], 0)
+            self.assertLessEqual(rec["right_byte"], 255)
+
+    def test_existing_record_fields_preserved(self):
+        """New fields must not replace or rename the fields fm_score.py depends on."""
+        required_fields = {"t", "x_raw", "x_filt", "x_err", "steer", "speed",
+                           "mode", "track_id", "depth", "conf"}
+        with tempfile.TemporaryDirectory() as tmp:
+            fm = self._make()
+
+            with patch("pi_app.control.follow_me.os.makedirs"):
+                with patch("pi_app.control.follow_me.time.time", return_value=1_000_004.0):
+                    _real_open = open
+
+                    def fake_open(path, *args, **kwargs):
+                        if "fm_trials" in str(path):
+                            return _real_open(os.path.join(tmp, "trial.jsonl"), *args, **kwargs)
+                        return _real_open(path, *args, **kwargs)
+
+                    with patch("builtins.open", side_effect=fake_open):
+                        fm.compute([self._person()])
+                        fm.stop_recorder()
+
+            with open(os.path.join(tmp, "trial.jsonl")) as fh:
+                rec = json.loads(fh.readline())
+
+            for field in required_fields:
+                self.assertIn(field, rec,
+                              f"Legacy field '{field}' must still be present in records")
 
 
 if __name__ == "__main__":
