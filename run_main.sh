@@ -93,6 +93,11 @@ fi
 echo "[run_main] Starting main application (using system Python)..."
 
 cd "$APP_DIR"
+# Teleop auth: Kevin's call 2026-06-11 — trusted home LAN, no token wanted.
+# Set-but-empty disables /drive token auth. To re-enable: delete this line
+# (auto-generates a chmod-600 token file) or set a value here.
+export WALL_E_TELEOP_TOKEN=""
+
 # --pid-debug spams ~30 journal lines/sec (SD wear, unreadable logs).
 # Re-add it temporarily when actively debugging the PID loops.
 exec python3 -u -m app.main
