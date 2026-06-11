@@ -285,6 +285,84 @@ or auto-re-arms — the server ceremony remains the only gate.
 - iOS Add-to-Home-Screen hint banner shown in mobile Safari when not in standalone
   mode; dismissed via `localStorage`.
 
+## Optional camera feed (backlog item F)
+
+The `/drive` page has an optional live camera panel powered by the OAK-D
+annotated RGB feed. It is **off by default** to preserve phone battery and
+bandwidth — the operator enables it with the CAM button.
+
+### Why WebSocket, not MJPEG
+
+MJPEG `<img src="/stream/rgb">` buffers 5–10 s in mobile browsers (the browser
+aggressively pre-fetches chunks). The camera feed pushes raw JPEG bytes over a
+**separate** WebSocket (`/ws/camera`) so the client controls exactly which frame
+is displayed; there is no buffering pipeline to drain.
+
+### Server-side wiring
+
+`register_teleop` accepts an optional `frame_source` keyword argument (a callable
+returning the latest annotated JPEG bytes, or `None` when no frame is available
+yet). In `oak_viewer.py` it is wired to
+`recorder.get_latest_annotated_jpeg` when the recorder is not `None`.
+
+When `frame_source is None`, the `camera_available` flag in
+`/api/teleop/session/status` is `false`, the UI hides the CAM button, and
+`/api/teleop/camera/frame` returns 503. No other behavior changes.
+
+### WebSocket `/ws/camera`
+
+- Only registered when `frame_source` is provided (the route does not exist
+  otherwise).
+- **Token-gated** identically to `/ws/drive`: `?token=` query param or
+  `X-Teleop-Token` header; unauthorized connections receive a JSON error and are
+  closed before any frame is sent.
+- Server pushes raw JPEG bytes as **binary WebSocket messages** at ~8 fps.
+- **Pacing / backpressure**: the sender records wall-clock time before each
+  `frame_source()` call + send. If the round-trip takes longer than one frame
+  period (125 ms), the sleep is skipped entirely — stale frames are never queued.
+  This keeps throughput honest on slow links without building latency.
+- This socket is **completely independent of `/ws/drive`**: the control channel
+  cadence, deadman enforcement, and motor-write path are unaffected regardless of
+  camera latency or errors.
+
+### REST fallback `GET /api/teleop/camera/frame`
+
+Token-gated. Returns the latest JPEG (`Content-Type: image/jpeg`, 200) or:
+- `401` — missing/wrong token.
+- `503` — no `frame_source` registered, or `frame_source()` returned `None`
+  (no frame yet).
+
+### UI behavior
+
+- The CAM panel (above the speed/arm/stick section) is hidden when
+  `status.camera_available` is `false` (no OAK recorder).
+- When `camera_available` is `true`, a **CAM OFF / CAM ON** toggle button
+  appears. Default: OFF.
+- When toggled ON: a WebSocket is opened to `/ws/camera`; each binary message
+  is painted into an `<img>` via `Blob` + `URL.createObjectURL`; the previous
+  object URL is revoked each frame to prevent memory leaks. A small fps/staleness
+  hint is overlaid on the image.
+- When toggled OFF, or on any socket error: the socket is closed, the image panel
+  is hidden, all blob URLs are revoked, and the button returns to "CAM OFF". The
+  socket auto-retries every 1 s while CAM is on.
+- If the server loses the camera mid-session (`camera_available` drops to `false`
+  in a status update), the client turns CAM off automatically.
+
+### Layout (portrait)
+
+```
+┌─────────────────────────────────────┐
+│  [ CAM OFF ]                        │  ← CAM toggle button
+│  ┌─────────────────────────────┐   │
+│  │       live JPEG frame       │   │  ← camera panel (hidden when OFF)
+│  │                    8.0 fps  │   │
+│  └─────────────────────────────┘   │
+├─────────────────────────────────────┤
+│  [ SLOW ]   [ NORMAL ]   [ FAST ]  │
+│  … (rest of drive UI unchanged) …  │
+└─────────────────────────────────────┘
+```
+
 ## What tranche 3 will add
 
 - **Tranche 3 (hardening):** real auth (per-device tokens / session cookies)

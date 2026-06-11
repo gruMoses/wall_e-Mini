@@ -627,3 +627,109 @@ def test_auth_disabled_when_env_empty(tmp_path):
             os.environ.pop("WALL_E_TELEOP_TOKEN", None)
         else:
             os.environ["WALL_E_TELEOP_TOKEN"] = prev
+
+
+# ==========================================================================
+# Camera feed (backlog item F — optional camera on /drive page).
+# ==========================================================================
+
+def _make_flask_app_with_camera(token, tmp_path, frame_source=None):
+    """Like _make_flask_app but optionally wires in a frame_source."""
+    from flask import Flask
+    from pi_app.web.teleop import register_teleop
+    app = Flask(__name__)
+    motor = MockMotor()
+    s = TeleopSession(command_sink=motor, require_rc_arm=False)
+    register_teleop(app, s, token=token,
+                    token_path=str(tmp_path / "tok"),
+                    frame_source=frame_source)
+    return app, s
+
+
+_FAKE_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16 + b"\xff\xd9"  # minimal JPEG sentinel
+
+
+def test_camera_frame_returns_jpeg_with_valid_token(tmp_path):
+    """GET /api/teleop/camera/frame returns the bytes from frame_source."""
+    def _src():
+        return _FAKE_JPEG
+
+    app, _ = _make_flask_app_with_camera("CAM_TOK", tmp_path, frame_source=_src)
+    c = app.test_client()
+    r = c.get("/api/teleop/camera/frame?token=CAM_TOK")
+    assert r.status_code == 200
+    assert r.content_type == "image/jpeg"
+    assert r.data == _FAKE_JPEG
+
+
+def test_camera_frame_401_without_token(tmp_path):
+    """Omitting the token on a token-gated app returns 401."""
+    app, _ = _make_flask_app_with_camera("CAM_TOK", tmp_path, frame_source=lambda: _FAKE_JPEG)
+    c = app.test_client()
+    assert c.get("/api/teleop/camera/frame").status_code == 401
+    assert c.get("/api/teleop/camera/frame?token=wrong").status_code == 401
+
+
+def test_camera_frame_503_when_source_returns_none(tmp_path):
+    """frame_source returning None (no frame yet) gives 503."""
+    app, _ = _make_flask_app_with_camera("CAM_TOK", tmp_path, frame_source=lambda: None)
+    c = app.test_client()
+    r = c.get("/api/teleop/camera/frame?token=CAM_TOK")
+    assert r.status_code == 503
+
+
+def test_camera_frame_503_when_no_source_registered(tmp_path):
+    """No frame_source registered at all gives 503."""
+    app, _ = _make_flask_app_with_camera("CAM_TOK", tmp_path, frame_source=None)
+    c = app.test_client()
+    r = c.get("/api/teleop/camera/frame?token=CAM_TOK")
+    assert r.status_code == 503
+
+
+def test_camera_available_in_status_with_source(tmp_path):
+    """/api/teleop/session/status reports camera_available=True when source given."""
+    app, _ = _make_flask_app_with_camera("CAM_TOK", tmp_path, frame_source=lambda: _FAKE_JPEG)
+    c = app.test_client()
+    import json as _json
+    r = c.get("/api/teleop/session/status?token=CAM_TOK")
+    assert r.status_code == 200
+    data = _json.loads(r.data)
+    assert data["camera_available"] is True
+
+
+def test_camera_available_false_when_no_source(tmp_path):
+    """/api/teleop/session/status reports camera_available=False when no source."""
+    app, _ = _make_flask_app_with_camera("CAM_TOK", tmp_path, frame_source=None)
+    c = app.test_client()
+    import json as _json
+    r = c.get("/api/teleop/session/status?token=CAM_TOK")
+    assert r.status_code == 200
+    data = _json.loads(r.data)
+    assert data["camera_available"] is False
+
+
+def test_register_teleop_backward_compat_no_frame_source(tmp_path):
+    """register_teleop without frame_source works; existing routes unaffected."""
+    app, _ = _make_flask_app("T0K", tmp_path)   # uses old helper (no frame_source)
+    c = app.test_client()
+    # Core drive routes still work.
+    assert c.get("/drive?token=T0K").status_code == 200
+    assert c.get("/api/teleop/session/status?token=T0K").status_code == 200
+    # Camera frame returns 503 (no source), not 404 or 500.
+    assert c.get("/api/teleop/camera/frame?token=T0K").status_code == 503
+
+
+def test_camera_ws_route_registered_only_when_frame_source_present(tmp_path):
+    """The /ws/camera URL pattern is only in the app's URL map when
+    frame_source is provided.  (No live socket needed — we inspect url_map.)"""
+    # With source: /ws/camera must appear in the URL map.
+    app_with, _ = _make_flask_app_with_camera(
+        "T0K", tmp_path, frame_source=lambda: _FAKE_JPEG
+    )
+    rules_with = {r.rule for r in app_with.url_map.iter_rules()}
+    assert "/ws/camera" in rules_with
+
+    # Without source: /ws/camera must NOT appear.
+    app_without, _ = _make_flask_app_with_camera("T0K", tmp_path, frame_source=None)
+    rules_without = {r.rule for r in app_without.url_map.iter_rules()}
+    assert "/ws/camera" not in rules_without

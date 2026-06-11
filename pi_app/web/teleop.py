@@ -693,7 +693,8 @@ def resolve_teleop_token(
 
 def register_teleop(app, session: "TeleopSession", *, token: Optional[str] = None,
                     battery_provider: Optional[Callable[[], Optional[float]]] = None,
-                    token_path: str = DEFAULT_TOKEN_PATH) -> None:
+                    token_path: str = DEFAULT_TOKEN_PATH,
+                    frame_source: Optional[Callable[[], Optional[bytes]]] = None) -> None:
     """Register the /drive page, the drive WebSocket, and REST fallbacks on ``app``.
 
     Additive only: it adds new routes and does not modify any existing route.
@@ -751,6 +752,7 @@ def register_teleop(app, session: "TeleopSession", *, token: Optional[str] = Non
         st = session.status(client_id=client_id)
         st["battery_v"] = _battery_v()
         st["server_t"] = time.time()
+        st["camera_available"] = frame_source is not None
         return st
 
     # -- page ---------------------------------------------------------------
@@ -823,6 +825,26 @@ def register_teleop(app, session: "TeleopSession", *, token: Optional[str] = Non
         if not _auth_ok():
             return _json({"error": "unauthorized"}, 401)
         return _json(_status_payload(_client_id()))
+
+    @bp.route("/api/teleop/camera/frame")
+    def rest_camera_frame():
+        """REST fallback: latest JPEG frame, token-gated.
+
+        Returns 401 when auth fails, 503 when no frame source is registered or
+        the frame source returns None (no frame yet).
+        """
+        if not _auth_ok():
+            return Response("unauthorized", status=401)
+        if frame_source is None:
+            return Response("no camera source", status=503)
+        try:
+            data = frame_source()
+        except Exception:
+            logger.exception("camera frame_source raised")
+            data = None
+        if not data:
+            return Response("no frame available", status=503)
+        return Response(data, status=200, content_type="image/jpeg")
 
     # -- PWA assets (additive; no auth — manifest/icons are public) ----------
 
@@ -911,6 +933,53 @@ def register_teleop(app, session: "TeleopSession", *, token: Optional[str] = Non
                 session.release_driver(client_id)
             except Exception:
                 logger.exception("release_driver on WS close failed")
+
+    # -- Camera WebSocket (only when a frame_source is provided) -------------
+    # Completely separate socket from /ws/drive so camera latency never
+    # affects the control channel or the deadman cadence.
+
+    if frame_source is not None:
+        _CAMERA_TARGET_HZ = 8.0
+        _CAMERA_FRAME_S = 1.0 / _CAMERA_TARGET_HZ   # 125 ms nominal period
+
+        @sock.route("/ws/camera")
+        def ws_camera(ws):  # pragma: no cover - exercised via integration, not unit tests
+            from flask import request as _req
+            if token:
+                supplied = _req.args.get("token") or _req.headers.get("X-Teleop-Token")
+                if supplied != token:
+                    try:
+                        ws.send(json.dumps({"type": "error", "error": "unauthorized"}))
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            ws.close()
+                        except Exception:
+                            pass
+                    return
+
+            # Push JPEG frames as binary messages at ~8 fps.
+            # Pacing: record the wall-clock time before the send; if the send
+            # took longer than one frame period (slow send, network backpressure)
+            # skip the sleep entirely to avoid building a queue.  This keeps the
+            # frame rate honest without queuing stale frames.
+            while True:
+                t0 = time.monotonic()
+                try:
+                    data = frame_source()
+                except Exception:
+                    logger.exception("camera frame_source raised in /ws/camera")
+                    data = None
+                if data:
+                    try:
+                        ws.send(data)
+                    except Exception:
+                        break   # client disconnected or error; exit cleanly
+                elapsed = time.monotonic() - t0
+                remaining = _CAMERA_FRAME_S - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
 
 
 def _dispatch_ws(session: "TeleopSession", msg: dict,
@@ -1288,6 +1357,36 @@ body{
   0%,100%{box-shadow:0 0 0 3px var(--red),0 4px 22px var(--red-md);}
   50%{box-shadow:0 0 0 6px var(--red),0 6px 30px var(--red-md);}
 }
+/* ---- camera panel ---- */
+.cam-panel{
+  flex-shrink:0;padding:0 12px 4px;display:none;
+}
+.cam-panel.visible{display:block;}
+.cam-img-wrap{
+  position:relative;width:100%;
+  background:#000;border-radius:10px;overflow:hidden;
+  border:1px solid var(--bd);
+  aspect-ratio:4/3;
+}
+.cam-img-wrap img{
+  width:100%;height:100%;object-fit:contain;display:block;
+}
+.cam-hint{
+  position:absolute;bottom:4px;right:6px;
+  font-size:9px;color:rgba(255,255,255,.55);
+  pointer-events:none;
+}
+.cam-btn{
+  display:block;width:100%;height:34px;margin-bottom:4px;
+  border:1.5px solid var(--bd);border-radius:8px;
+  background:var(--s2);color:var(--t2);
+  font:700 10px/1 inherit;letter-spacing:.1em;
+  transition:background .15s,border-color .15s,color .15s;
+}
+.cam-btn.on{
+  background:var(--blue-lo);border-color:var(--blue);color:var(--blue);
+}
+.cam-btn:disabled{opacity:.35;pointer-events:none;}
 /* ---- landscape compact ---- */
 @media(orientation:landscape)and(max-height:480px){
   .hud{padding:4px 14px;}
@@ -1299,6 +1398,7 @@ body{
   .arm-row{padding:3px 12px;}
   .arm-btn{height:36px;}
   .sticks{padding:4px 12px 5px;}
+  .cam-panel{padding:0 8px 2px;}
 }
 </style>
 </head>
@@ -1332,6 +1432,15 @@ body{
     <span class="chip" id="c-cap">CAP &mdash;</span>
     <span class="chip" id="c-dm">DM &mdash;</span>
     <span class="chip" id="c-rc">RC &mdash;</span>
+  </div>
+</div>
+
+<!-- Camera panel (above speed/arm/sticks; hidden by default) -->
+<div class="cam-panel" id="cam-panel">
+  <button class="cam-btn" id="cam-btn">CAM OFF</button>
+  <div class="cam-img-wrap" id="cam-wrap" style="display:none">
+    <img id="cam-img" alt="camera feed">
+    <span class="cam-hint" id="cam-hint"></span>
   </div>
 </div>
 
@@ -1438,6 +1547,7 @@ function connect() {
     if (m.echo_ts != null) rtt = Math.max(0, Math.round(performance.now() - m.echo_ts));
     if (wasArmed && !m.armed && m.tripped_reason === 'deadman') showOverlay('deadman');
     renderAll();
+    updateCamFromStatus(m);
   };
 }
 function send(o) {
@@ -1760,6 +1870,116 @@ function renderAll() {
 
   renderArm();
   renderEstop();
+}
+
+/* ---- camera feed ---- */
+var camWs       = null;
+var camOn       = false;
+var camPrevUrl  = null;
+var camFrameTs  = 0;
+var camFpsTs    = 0;
+var camFpsCount = 0;
+var camFps      = null;
+var camAvail    = false;  // populated from status.camera_available
+
+var camPanel = document.getElementById('cam-panel');
+var camBtn   = document.getElementById('cam-btn');
+var camWrap  = document.getElementById('cam-wrap');
+var camImg   = document.getElementById('cam-img');
+var camHint  = document.getElementById('cam-hint');
+
+function camWsUrl() {
+  var p = location.protocol === 'https:' ? 'wss' : 'ws';
+  var u = p + '://' + location.host + '/ws/camera';
+  return TOKEN ? u + '?token=' + encodeURIComponent(TOKEN) : u;
+}
+
+function camStart() {
+  if (camWs) return;
+  camWs = new WebSocket(camWsUrl());
+  camWs.binaryType = 'arraybuffer';
+  camWs.onopen = function() {
+    camWrap.style.display = '';
+  };
+  camWs.onmessage = function(ev) {
+    if (!(ev.data instanceof ArrayBuffer)) return;
+    /* revoke previous object URL to avoid memory leak */
+    if (camPrevUrl) { try { URL.revokeObjectURL(camPrevUrl); } catch(_) {} }
+    var blob = new Blob([ev.data], {type: 'image/jpeg'});
+    var url  = URL.createObjectURL(blob);
+    camImg.src = url;
+    camPrevUrl = url;
+    /* fps / staleness hint */
+    var now = performance.now();
+    camFrameTs = now;
+    camFpsCount++;
+    if (now - camFpsTs >= 2000) {
+      camFps = camFpsCount / ((now - camFpsTs) / 1000);
+      camFpsCount = 0;
+      camFpsTs = now;
+    }
+    renderCamHint();
+  };
+  camWs.onerror = function() { try { camWs.close(); } catch(_) {} };
+  camWs.onclose = function() {
+    camWs = null;
+    if (camOn) {
+      /* auto-retry in 1 s while CAM is on */
+      setTimeout(function() { if (camOn) camStart(); }, 1000);
+    } else {
+      camWrap.style.display = 'none';
+    }
+  };
+}
+
+function camStop() {
+  if (camWs) { try { camWs.close(); } catch(_) {} camWs = null; }
+  if (camPrevUrl) { try { URL.revokeObjectURL(camPrevUrl); } catch(_) {} camPrevUrl = null; }
+  camImg.src = '';
+  camWrap.style.display = 'none';
+  camFps = null; camFpsCount = 0; camFpsTs = 0;
+}
+
+function renderCamHint() {
+  if (!camOn || !camFrameTs) { camHint.textContent = ''; return; }
+  var age = Math.round(performance.now() - camFrameTs);
+  var fps = camFps != null ? camFps.toFixed(1) + ' fps' : '';
+  var stale = age > 2000 ? ' · stale ' + (age / 1000).toFixed(1) + 's' : '';
+  camHint.textContent = fps + stale;
+}
+setInterval(renderCamHint, 500);
+
+function renderCamBtn() {
+  /* Show/hide the whole camera panel based on availability from server status */
+  camPanel.classList.toggle('visible', camAvail);
+  camBtn.disabled = !camAvail;
+  camBtn.classList.toggle('on', camOn);
+  camBtn.textContent = camOn ? 'CAM ON' : 'CAM OFF';
+}
+
+camBtn.addEventListener('click', function() {
+  if (!camAvail) return;
+  camOn = !camOn;
+  if (camOn) {
+    camFpsTs = performance.now();
+    camFpsCount = 0;
+    camStart();
+  } else {
+    camStop();
+  }
+  renderCamBtn();
+});
+
+/* Update camAvail from the status stream */
+function updateCamFromStatus(s) {
+  var prev = camAvail;
+  camAvail = !!s.camera_available;
+  if (!camAvail && camOn) {
+    /* server lost the camera — turn off */
+    camOn = false;
+    camStop();
+  }
+  if (prev !== camAvail) renderCamBtn();
 }
 
 /* ---- start ---- */

@@ -1468,6 +1468,8 @@ class OakWebViewer:
                     app, self._teleop_session,
                     token=os.environ.get("WALL_E_TELEOP_TOKEN", ""),
                     battery_provider=make_recorder_battery_provider(self._recorder),
+                    frame_source=(self._recorder.get_latest_annotated_jpeg
+                                  if self._recorder is not None else None),
                 )
                 self._teleop_session.start_watchdog()
                 logger.info("Fail-safe teleop registered at /drive (deadman watchdog running)")
