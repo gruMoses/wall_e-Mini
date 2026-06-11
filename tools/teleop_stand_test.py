@@ -123,6 +123,10 @@ def main() -> int:
     check("e-stop latched + disarmed",
           st.get("estop_latched") is True and st.get("armed") is False,
           f"latched={st.get('estop_latched')} armed={st.get('armed')}")
+    # The controller slews outputs toward neutral rather than stepping
+    # (observed 2026-06-11: 135/135 one frame after e-stop, 126/126 settled).
+    # Sample after the ramp, not during it.
+    time.sleep(0.8)
     s = _sse_snapshot(base)
     check("motors neutral after e-stop",
           s.get("motor_left") == 126 and s.get("motor_right") == 126,
