@@ -497,6 +497,17 @@ def run() -> None:
             if oak_reader is not None:
                 dist_m, dist_age = oak_reader.get_min_distance()
                 controller.set_obstacle_data(dist_m, dist_age)
+                # YOLO safety-tier stop: feed live detections to the obstacle
+                # controller every tick so a person/animal inside
+                # safety_stop_radius_m latches a hard stop, independent of the
+                # depth corridor. Gated by config so it can be disabled if it
+                # false-stops.
+                if (obstacle_ctrl is not None
+                        and getattr(config.obstacle_avoidance, "yolo_safety_enabled", True)):
+                    try:
+                        obstacle_ctrl.set_safety_detections(oak_reader.get_all_detections())
+                    except Exception:
+                        pass
                 oak_depth_stats = oak_reader.get_depth_stats()
                 if follow_me_ctrl is not None:
                     oak_persons = oak_reader.get_person_detections()
