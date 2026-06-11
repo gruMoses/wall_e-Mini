@@ -93,6 +93,8 @@ fi
 echo "[run_main] Starting main application (using system Python)..."
 
 cd "$APP_DIR"
-exec python3 -u -m app.main --pid-debug
+# --pid-debug spams ~30 journal lines/sec (SD wear, unreadable logs).
+# Re-add it temporarily when actively debugging the PID loops.
+exec python3 -u -m app.main
 
 
