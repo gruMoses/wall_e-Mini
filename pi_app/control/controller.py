@@ -570,6 +570,11 @@ class Controller:
             params=self._safety_params,
         )
 
+        # Initialize telemetry before any event handler can write to it.
+        # (Previously this dict was created further down, so the
+        # FOLLOW_ME_ENTERED-with-no-target branch raised UnboundLocalError.)
+        telemetry: dict = {}
+
         # Calibration early-return — now AFTER update_safety so safety is
         # always enforced. The wizard issues drive commands directly, so
         # process() outputs neutral here, but we still cut the motors and
@@ -638,7 +643,7 @@ class Controller:
             self._shutdown.schedule_shutdown(delay_seconds=5.0)
 
         # Command computation
-        telemetry: dict = {"mode": self._mode}
+        telemetry["mode"] = self._mode
         if self._gesture is not None:
             telemetry["gesture_phase"] = self._gesture.phase_name
             if gesture_event is not None:

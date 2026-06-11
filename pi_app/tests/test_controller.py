@@ -215,6 +215,30 @@ class TestSlewLimiter(unittest.TestCase):
         self.assertEqual(follow_cmd.right_byte, 151)
 
 
+class TestFollowMeNoTargetRegression(unittest.TestCase):
+    """Bug #2: flipping ch4 (follow-me) while armed with no person in frame
+    must NOT raise UnboundLocalError on the telemetry dict."""
+
+    def test_follow_me_entered_no_target_does_not_raise(self):
+        motor = FakeMotor()
+        relay = FakeRelay()
+        shutdown = FakeShutdown()
+        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
+        # Arm with ch4 low (no person detections fed → no target present)
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
+                      last_update_epoch_s=100.0)
+        cmd, _, _ = c.process(rc, now_epoch_s=100.5)
+        self.assertTrue(cmd.is_armed)
+        # ch4 rising edge while armed, still no target. Previously raised
+        # UnboundLocalError because `telemetry` was referenced before assignment.
+        rc2 = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1900, ch5_us=1000,
+                       last_update_epoch_s=100.0)
+        cmd2, events, telem = c.process(rc2, now_epoch_s=100.6)  # must not raise
+        self.assertIn(SafetyEvent.FOLLOW_ME_ENTERED, events)
+        self.assertEqual(telem.get("follow_me_activation_blocked"), "no_target")
+        self.assertEqual(telem.get("mode"), "MANUAL")
+
+
 class TestCalibrationSafety(unittest.TestCase):
     """Bug #1: safety (e-stop / disarm) must run every tick, including while in
     calibration mode where the wizard drives the motors directly."""
