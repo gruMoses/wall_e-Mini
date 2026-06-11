@@ -1160,9 +1160,18 @@ class OakDepthReader:
                 )
 
             if effective_min_mm == float("inf"):
-                # No corridor obstacle AND no safety-tier trigger
+                # Fresh frame, corridor genuinely empty, no safety-tier trigger.
+                # Update the depth-state timestamp so get_min_distance() reports a
+                # fresh age (not stale) and consumers treat this as "corridor clear".
+                # Do NOT skip the timestamp update — that would make a live but
+                # empty corridor indistinguishable from a sensor failure.
+                now_clear = time.monotonic()
                 with self._lock:
                     self._depth_quality_reject_count += 1
+                    self._depth_state.min_distance_m = float("inf")
+                    self._depth_state.timestamp = now_clear
+                    self._last_depth_poll_ts = now_clear
+                    self._last_depth_error_msg = ""
                 return
 
             p5 = effective_min_mm if corridor_rejected else corridor_p5_mm

@@ -14,6 +14,7 @@ detection state — the depth poll is the single, canonical stop tier.
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -60,7 +61,12 @@ class ObstacleAvoidanceController:
         return self._last_scale
 
     def get_status(self) -> dict:
+        # An empty-but-fresh corridor reports distance inf ("clear"); emit None
+        # so JSON consumers (SSE, MCAP, CSV log) never see a non-finite float.
+        dist = self._last_distance_m
+        if dist is not None and not math.isfinite(dist):
+            dist = None
         return {
-            "obstacle_distance_m": self._last_distance_m,
+            "obstacle_distance_m": dist,
             "obstacle_throttle_scale": self._last_scale,
         }
