@@ -19,6 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from config import FollowMeConfig
 from pi_app.hardware.oak_depth import Tracklet, TrackletTracker
+from pi_app.control.follow_me import PersonDetection
 
 
 def _box(cx, cy, w=0.1, h=0.3):
@@ -142,6 +143,106 @@ class TestPartAVelocityPidDisabled(unittest.TestCase):
         self.assertEqual(cfg.tracklet_iou_threshold, 0.3)
         self.assertEqual(cfg.tracklet_min_hits, 3)
         self.assertEqual(cfg.tracklet_max_age, 15)
+
+
+def _make_det(x_m=0.0, z_m=2.0, confidence=0.85,
+              bbox=(0.4, 0.3, 0.6, 0.8), track_id=None) -> PersonDetection:
+    """Build a PersonDetection for serialization tests."""
+    return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence,
+                           bbox=bbox, track_id=track_id)
+
+
+def _sse_detections(person_detections):
+    """Mirror the SSE dict-comprehension from oak_viewer.py ~line 1147-1151."""
+    return [
+        {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
+         "conf": round(d.confidence, 2), "track_id": d.track_id}
+        for d in person_detections
+    ]
+
+
+def _mcap_detections(person_detections):
+    """Mirror the MCAP dict-comprehension from oak_recorder.py ~line 985-990."""
+    return [
+        {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
+         "conf": round(d.confidence, 2), "track_id": d.track_id,
+         "bbox": [round(b, 3) for b in d.bbox]}
+        for d in person_detections
+    ]
+
+
+class TestDetectionTrackIdSerialization(unittest.TestCase):
+    """
+    Backlog G: per-detection track_id in SSE /api/telemetry detections array.
+
+    Both the SSE builder (oak_viewer.py) and the MCAP recorder (oak_recorder.py)
+    emit {"track_id": d.track_id} for each PersonDetection.  These tests verify
+    the field is present with the correct value for tracked detections and is
+    JSON-null-compatible (Python None) for unconfirmed / untracked detections.
+    """
+
+    # ── SSE serialization ─────────────────────────────────────────────────────
+
+    def test_sse_tracked_detection_carries_track_id(self):
+        """A confirmed detection (track_id=7) must appear as track_id=7 in the SSE dict."""
+        det = _make_det(x_m=0.3, z_m=2.5, confidence=0.91, track_id=7)
+        result = _sse_detections([det])
+        self.assertEqual(len(result), 1)
+        self.assertIn("track_id", result[0])
+        self.assertEqual(result[0]["track_id"], 7)
+
+    def test_sse_untracked_detection_track_id_is_none(self):
+        """An unconfirmed detection (track_id=None) must serialize as Python None (JSON null)."""
+        det = _make_det(x_m=-0.1, z_m=3.0, confidence=0.72, track_id=None)
+        result = _sse_detections([det])
+        self.assertEqual(len(result), 1)
+        self.assertIn("track_id", result[0])
+        self.assertIsNone(result[0]["track_id"])
+
+    def test_sse_mixed_detections_preserve_per_detection_track_ids(self):
+        """Mixed list: tracked + untracked detections each get the right track_id."""
+        tracked = _make_det(x_m=0.1, z_m=1.8, confidence=0.95, track_id=3)
+        untracked = _make_det(x_m=0.5, z_m=4.0, confidence=0.61, track_id=None)
+        result = _sse_detections([tracked, untracked])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["track_id"], 3)
+        self.assertIsNone(result[1]["track_id"])
+
+    def test_sse_empty_detections_returns_empty_list(self):
+        """No detections → empty list, no KeyError."""
+        result = _sse_detections([])
+        self.assertEqual(result, [])
+
+    # ── MCAP recorder serialization ───────────────────────────────────────────
+
+    def test_mcap_tracked_detection_carries_track_id(self):
+        """MCAP serialization also emits track_id for a confirmed detection."""
+        det = _make_det(x_m=0.0, z_m=2.0, confidence=0.88, track_id=12)
+        result = _mcap_detections([det])
+        self.assertEqual(len(result), 1)
+        self.assertIn("track_id", result[0])
+        self.assertEqual(result[0]["track_id"], 12)
+
+    def test_mcap_untracked_detection_track_id_is_none(self):
+        """MCAP serialization emits None (JSON null) for an unconfirmed detection."""
+        det = _make_det(x_m=0.2, z_m=5.0, confidence=0.65, track_id=None)
+        result = _mcap_detections([det])
+        self.assertEqual(len(result), 1)
+        self.assertIsNone(result[0]["track_id"])
+
+    # ── PersonDetection dataclass contract ────────────────────────────────────
+
+    def test_person_detection_track_id_defaults_to_none(self):
+        """PersonDetection.track_id defaults to None when not supplied."""
+        det = PersonDetection(x_m=0.0, z_m=1.0, confidence=0.9,
+                              bbox=(0.4, 0.3, 0.6, 0.8))
+        self.assertIsNone(det.track_id)
+
+    def test_person_detection_track_id_accepts_int(self):
+        """PersonDetection.track_id stores a positive integer correctly."""
+        det = PersonDetection(x_m=0.0, z_m=1.0, confidence=0.9,
+                              bbox=(0.4, 0.3, 0.6, 0.8), track_id=42)
+        self.assertEqual(det.track_id, 42)
 
 
 if __name__ == "__main__":
