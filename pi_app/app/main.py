@@ -604,6 +604,11 @@ def run() -> None:
                         motor_left=cmd.left_byte,
                         motor_right=cmd.right_byte,
                         is_armed=cmd.is_armed,
+                        # Mirror the latched RC ch5 e-stop and a monotonic stamp
+                        # so the phone-teleop rc_state_provider sees the real RC
+                        # emergency state and can fail-safe on stale telemetry.
+                        emergency_active=cmd.emergency_active,
+                        ts_mono=time.monotonic(),
                         depth_stats=oak_depth_stats,
                         person_detections=oak_persons,
                         follow_tracking=telem.get("follow_me_tracking", False),

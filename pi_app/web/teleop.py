@@ -119,6 +119,20 @@ class TeleopSession:
         self._intent: Tuple[float, float] = (0.0, 0.0)  # last commanded (left_f, right_f)
         self._driving: bool = False         # are we actively writing drive bytes?
         self._last_echo_ts: Optional[float] = None  # last client ts, echoed for RTT calc
+        # ---- single-driver lock (DEFECT-1) ----
+        # Exactly one client may hold the session armed. The client that completes
+        # the arm ceremony becomes the driver; arm/drive from any other client is
+        # refused. e-stop is accepted from ANY client (never lock out a stop). The
+        # lock is released on driver disconnect, deadman trip, disarm, or e-stop.
+        # A None driver id means "no one holds the lock" (bench/single-client).
+        self._driver_id: Optional[str] = None
+        # ---- e-stop physical re-arm gate (DEFECT-4) ----
+        # When RC state has ever been observed, a latched e-stop is cleared from
+        # the browser only AFTER an RC ch3 cycle (rc_armed False->True). In bench
+        # mode (no RC ever seen) the two-tap browser clear remains.
+        self._rc_ever_seen: bool = False         # provider has ever returned non-None
+        self._rc_saw_disarm_since_estop: bool = False  # saw rc_armed False post-estop
+        self._rc_rearm_since_estop: bool = False       # observed False->True post-estop
         # ---- watchdog thread ----
         self._wd_thread: Optional[threading.Thread] = None
         self._wd_stop = threading.Event()
@@ -126,6 +140,7 @@ class TeleopSession:
     # -- arming ceremony ----------------------------------------------------
 
     def arm(self, *, rc_in_hand: bool = False, hold_ms: int = 0,
+            client_id: Optional[str] = None,
             now: Optional[float] = None) -> Tuple[bool, str]:
         """Attempt to arm the phone session.
 
@@ -135,9 +150,18 @@ class TeleopSession:
         the press-and-hold (``hold_ms``) AND either RC already armed or the
         explicit confirmation. (The downstream controller RC gate applies
         regardless — teleop still cannot move the robot unless RC keeps it armed.)
+
+        Single-driver lock (DEFECT-1): if another client already holds the driver
+        lock, a different ``client_id`` is refused with ``"not_driver"``. The
+        client that successfully arms becomes (or remains) the driver. A ``None``
+        ``client_id`` leaves the lock untouched (bench / single-client).
         """
         with self._lock:
             now = self._now() if now is None else now
+            # Driver lock: a different client cannot arm over the current driver.
+            if (client_id is not None and self._driver_id is not None
+                    and client_id != self._driver_id):
+                return False, "not_driver"
             if self.estop_latched:
                 return False, "estop_latched"
             if hold_ms < self._arm_hold_min_ms:
@@ -153,55 +177,89 @@ class TeleopSession:
             self._last_seq = -1
             self._max_client_ts = float("-inf")
             self._intent = (0.0, 0.0)
+            # The client that completes the ceremony owns the driver lock.
+            if client_id is not None:
+                self._driver_id = client_id
             return True, "armed"
 
-    def disarm(self, reason: str = "user") -> None:
+    def disarm(self, reason: str = "user", *, client_id: Optional[str] = None) -> None:
         with self._lock:
             self.armed = False
             self.tripped_reason = reason
             self._intent = (0.0, 0.0)
+            self._driver_id = None      # release the single-driver lock
             self._stop_motor_if_driving()
 
     # -- e-stop (latched) ---------------------------------------------------
 
-    def estop(self) -> None:
+    def estop(self, *, client_id: Optional[str] = None) -> None:
         """Server-side latched e-stop: neutral + disarm + latch.
 
-        Independent of the RC ch5 e-stop. The latch survives reconnects and is
-        cleared only by ``clear_estop`` followed by a fresh ``arm``.
+        Accepted from ANY client (never lock out a stop). Independent of the RC
+        ch5 e-stop. The latch survives reconnects and is cleared only by
+        ``clear_estop`` (subject to the physical re-arm gate when RC is present)
+        followed by a fresh ``arm``.
         """
         with self._lock:
             self.estop_latched = True
             self.armed = False
             self.tripped_reason = "estop"
             self._intent = (0.0, 0.0)
+            self._driver_id = None      # release the single-driver lock
+            # Reset the physical re-arm tracking: a clear now requires a fresh
+            # RC ch3 cycle (False then True) observed AFTER this e-stop.
+            self._rc_saw_disarm_since_estop = False
+            self._rc_rearm_since_estop = False
             self._stop_motor_if_driving()
 
-    def clear_estop(self) -> None:
-        """Dismiss the latched e-stop. Does NOT re-arm — arm() must be called."""
+    def clear_estop(self) -> Tuple[bool, str]:
+        """Dismiss the latched e-stop. Does NOT re-arm — arm() must be called.
+
+        Physical re-arm gate (DEFECT-4): when RC state has ever been observed,
+        the latch is "latched until physical re-arm" — clear is REFUSED until an
+        RC ch3 cycle (rc_armed False->True) has been seen since the e-stop. In
+        bench mode (no RC ever observed) the two-tap browser clear remains.
+
+        Returns ``(ok, reason)``.
+        """
         with self._lock:
+            if not self.estop_latched:
+                return True, "not_latched"
+            if self._rc_ever_seen and not self._rc_rearm_since_estop:
+                # RC is the authority; require the physical ch3 re-arm cycle.
+                return False, "cycle_rc_ch3"
             self.estop_latched = False
             if self.tripped_reason == "estop":
                 self.tripped_reason = None
+            return True, "cleared"
 
     # -- inputs from the phone ---------------------------------------------
 
     def heartbeat(self, *, client_ts: Optional[float] = None,
+                  client_id: Optional[str] = None,
                   now: Optional[float] = None) -> None:
         """Liveness ping. Refreshes the deadman only while armed.
 
         After a trip the session is disarmed; heartbeats keep arriving but do
         NOT re-arm — re-arm requires an explicit ``arm`` message.
+
+        Driver lock (DEFECT-1): only the driver's heartbeat refreshes the
+        deadman; a non-driver heartbeat must not keep someone else's armed
+        session alive. RTT echo is still recorded for any client.
         """
         with self._lock:
             now = self._now() if now is None else now
             if client_ts is not None:
                 self._last_echo_ts = client_ts
+            if (client_id is not None and self._driver_id is not None
+                    and client_id != self._driver_id):
+                return
             if self.armed and not self.estop_latched:
                 self._last_hb = now
 
     def drive(self, *, left_f: float, right_f: float, seq: Optional[int] = None,
-              client_ts: Optional[float] = None, now: Optional[float] = None) -> str:
+              client_ts: Optional[float] = None, client_id: Optional[str] = None,
+              now: Optional[float] = None) -> str:
         """Apply a drive intent (also serves as a heartbeat when accepted).
 
         Stale-command guard: a command whose ``seq`` is not strictly greater than
@@ -210,12 +268,20 @@ class TeleopSession:
         ``stale_command_s`` is dropped (stale). Commands are ignored entirely
         while e-stopped or not armed.
 
+        Driver lock (DEFECT-1): a ``drive`` from a client that is not the current
+        driver is refused with ``"not_driver"``.
+
         Returns a short status string describing what happened.
         """
         with self._lock:
             now = self._now() if now is None else now
             if client_ts is not None:
                 self._last_echo_ts = client_ts
+
+            # Single-driver lock: reject before touching any guard/intent state.
+            if (client_id is not None and self._driver_id is not None
+                    and client_id != self._driver_id):
+                return "not_driver"
 
             # Ordering / staleness guards run regardless of arm state so a stale
             # packet can never be "accepted" later.
@@ -251,17 +317,50 @@ class TeleopSession:
             self.speed_level = level
             return True
 
+    # -- single-driver lock helpers (DEFECT-1) ------------------------------
+
+    def is_driver(self, client_id: Optional[str]) -> bool:
+        """True if ``client_id`` currently holds (or may take) the driver lock.
+
+        A ``None`` client id (bench / single-client) is always treated as the
+        driver. A real id is the driver only when no one else holds the lock.
+        """
+        with self._lock:
+            if client_id is None:
+                return True
+            return self._driver_id is None or self._driver_id == client_id
+
+    def release_driver(self, client_id: Optional[str]) -> None:
+        """Release the driver lock if ``client_id`` holds it (e.g. on disconnect).
+
+        Also disarms the session: the driver going away is exactly the kind of
+        event the deadman protects against, and dropping the lock without
+        disarming would leave an armed-but-ownerless session.
+        """
+        with self._lock:
+            if client_id is not None and self._driver_id == client_id:
+                self._driver_id = None
+                if self.armed:
+                    self.armed = False
+                    self.tripped_reason = "driver_left"
+                    self._intent = (0.0, 0.0)
+                    self._stop_motor_if_driving()
+
     def notify_rc_state(self, rc_armed: bool, rc_estop: bool) -> None:
         """RC authority hook. If RC is not armed or RC e-stop is active, force the
         phone session disarmed immediately — RC overrides phone state at all times.
         Safe to call from any thread; the watchdog also re-checks every tick.
         """
         with self._lock:
+            self._rc_ever_seen = True
+            # Track the ch3 re-arm cycle for the e-stop physical-clear gate.
+            self._observe_rc_rearm_edge(rc_armed)
             if (not rc_armed) or rc_estop:
                 if self.armed:
                     self.armed = False
                     self.tripped_reason = "rc_override"
                     self._intent = (0.0, 0.0)
+                    self._driver_id = None      # release the single-driver lock
                     self._stop_motor_if_driving()
 
     # -- the watchdog: server-side enforcement -----------------------------
@@ -286,10 +385,13 @@ class TeleopSession:
             rc = self._read_rc_state()
             if rc is not None:
                 rc_armed, rc_estop = rc
+                # Track the ch3 re-arm cycle for the e-stop physical-clear gate.
+                self._observe_rc_rearm_edge(rc_armed)
                 if (not rc_armed) or rc_estop:
                     if self.armed:
                         self.armed = False
                         self.tripped_reason = "rc_override"
+                        self._driver_id = None  # release the single-driver lock
                     self._stop_motor_if_driving()
                     return "rc_override"
 
@@ -308,6 +410,7 @@ class TeleopSession:
             if (now - self._last_hb) > self._deadman_s:
                 self.armed = False
                 self.tripped_reason = "deadman"
+                self._driver_id = None      # release the single-driver lock
                 self._stop_motor_if_driving()
                 return "deadman_trip"
 
@@ -348,22 +451,37 @@ class TeleopSession:
 
     # -- status -------------------------------------------------------------
 
-    def status(self, *, now: Optional[float] = None) -> dict:
+    def status(self, *, client_id: Optional[str] = None,
+               now: Optional[float] = None) -> dict:
         with self._lock:
             now = self._now() if now is None else now
             hb_age_ms = None
             if self.armed and self._last_hb > 0.0:
                 hb_age_ms = int(round((now - self._last_hb) * 1000.0))
+            rc = self._read_rc_state()
+            # Whether a browser clear_estop would be refused pending an RC ch3
+            # cycle (DEFECT-4). False in bench mode (no RC ever observed).
+            estop_clear_gated = bool(
+                self.estop_latched and self._rc_ever_seen
+                and not self._rc_rearm_since_estop
+            )
             return {
                 "armed": self.armed,
                 "estop_latched": self.estop_latched,
+                "estop_clear_gated": estop_clear_gated,
                 "speed_level": self.speed_level,
                 "speed_cap": self._caps.get(self.speed_level),
                 "tripped_reason": self.tripped_reason,
                 "deadman_ms": int(self._deadman_s * 1000),
                 "heartbeat_age_ms": hb_age_ms,
-                "rc_state": self._read_rc_state(),
+                "rc_state": rc,
                 "echo_ts": self._last_echo_ts,
+                # Single-driver lock (DEFECT-1): is THIS client the driver / can
+                # it take the lock? has_driver tells the UI someone else holds it.
+                "has_driver": self._driver_id is not None,
+                "is_driver": (client_id is None
+                              or self._driver_id is None
+                              or self._driver_id == client_id),
             }
 
     # -- internals ----------------------------------------------------------
@@ -372,10 +490,28 @@ class TeleopSession:
         if self._rc_state_provider is None:
             return None
         try:
-            return self._rc_state_provider()
+            rc = self._rc_state_provider()
         except Exception:
             logger.exception("rc_state_provider raised")
             return None
+        if rc is not None:
+            # Latch the fact that RC is the authority for this session; once seen,
+            # the e-stop physical-re-arm gate (DEFECT-4) applies.
+            self._rc_ever_seen = True
+        return rc
+
+    def _observe_rc_rearm_edge(self, rc_armed: bool) -> None:
+        """Track an RC ch3 re-arm cycle (False->True) AFTER a latched e-stop.
+
+        Called every time we read a real RC state while the e-stop is latched.
+        Must run holding ``self._lock``.
+        """
+        if not self.estop_latched:
+            return
+        if not rc_armed:
+            self._rc_saw_disarm_since_estop = True
+        elif self._rc_saw_disarm_since_estop:
+            self._rc_rearm_since_estop = True
 
     def _stop_motor_if_driving(self) -> None:
         """Emit ONE neutral command if we were driving, then stop writing.
@@ -419,22 +555,51 @@ class FileCommandSink:
         )
 
 
-def make_recorder_rc_state_provider(recorder) -> Callable[[], Optional[Tuple[bool, bool]]]:
+def make_recorder_rc_state_provider(
+    recorder, *, staleness_s: float = 1.0,
+    now_fn: Callable[[], float] = time.monotonic,
+) -> Callable[[], Optional[Tuple[bool, bool]]]:
     """Build an rc_state_provider from the OAK recorder's latest telemetry.
 
-    Returns (rc_armed, rc_estop) where rc_estop reflects the latched RC ch5
-    emergency. Returns None when telemetry is unavailable so the session does not
-    force-disarm on a transient read miss.
+    Returns ``(rc_armed, rc_estop)``:
+      * ``rc_estop`` reflects the latched RC ch5 emergency (``emergency_active``).
+      * ``rc_armed`` reflects the controller's armed state (``is_armed``).
+
+    Fail-safe semantics (DEFECT-2 / DEFECT-3):
+      * If telemetry has NEVER been seen (recorder is None, or it has not yet
+        produced a snapshot), return ``None`` — RC state is genuinely unknown, so
+        the session must not force-disarm (bench-mode behavior unchanged).
+      * Once telemetry HAS been seen, a frozen/stale object is a fault, not a
+        valid "all clear": if the newest snapshot's monotonic stamp is older than
+        ``staleness_s`` (default 1.0 s) we return ``(False, False)`` so the rc
+        gate force-disarms the teleop session. A frozen telemetry object must
+        never keep the session armable forever.
     """
+    # Closure flag: have we EVER observed a real telemetry snapshot? Once True we
+    # apply the staleness fail-safe; until then we report "unknown" (None).
+    seen: dict = {"any": False}
+
     def _provider() -> Optional[Tuple[bool, bool]]:
         if recorder is None:
             return None
         try:
             t = recorder.get_latest_telemetry()
         except Exception:
-            return None
+            # Transient read miss while telemetry has previously flowed is a
+            # fault → force-disarm rather than silently reporting "unknown".
+            return (False, False) if seen["any"] else None
         if t is None:
             return None
+        seen["any"] = True
+        # Staleness bound: a telemetry object whose monotonic stamp is older than
+        # staleness_s means the main loop has stopped updating it → fail-safe.
+        ts_mono = getattr(t, "ts_mono", 0.0)
+        try:
+            age = now_fn() - float(ts_mono)
+        except Exception:
+            age = float("inf")
+        if not ts_mono or age > staleness_s:
+            return (False, False)
         rc_armed = bool(getattr(t, "is_armed", False))
         rc_estop = bool(getattr(t, "emergency_active", False))
         return rc_armed, rc_estop
@@ -458,28 +623,118 @@ def make_recorder_battery_provider(recorder) -> Callable[[], Optional[float]]:
 
 
 # ---------------------------------------------------------------------------
+# Auth token resolution (Item F — hardening)
+# ---------------------------------------------------------------------------
+
+# Env var name and the default on-disk token path.
+TELEOP_TOKEN_ENV = "WALL_E_TELEOP_TOKEN"
+DEFAULT_TOKEN_PATH = "~/.config/wall_e/teleop_token"
+
+
+def resolve_teleop_token(
+    explicit: Optional[str] = None,
+    *,
+    token_path: str = DEFAULT_TOKEN_PATH,
+    env: Optional[dict] = None,
+) -> str:
+    """Resolve the teleop auth token. Returns "" to mean *auth disabled*.
+
+    Resolution order (Item F):
+      1. An explicit non-empty ``explicit`` argument wins (caller override).
+      2. The ``WALL_E_TELEOP_TOKEN`` env var IF IT IS SET — even when set to the
+         empty string. ``WALL_E_TELEOP_TOKEN=""`` (set-but-empty) is the
+         documented way to DISABLE auth for bench use → returns "".
+      3. Otherwise a token file (default ``~/.config/wall_e/teleop_token``),
+         auto-generated with ``secrets.token_hex(16)`` and ``chmod 600`` on first
+         use if absent.
+
+    The token VALUE is never logged or printed — only the file path is logged.
+    """
+    import os
+
+    if explicit:
+        return explicit
+
+    environ = os.environ if env is None else env
+    if TELEOP_TOKEN_ENV in environ:
+        # Set (possibly empty). Empty => auth explicitly disabled.
+        return environ[TELEOP_TOKEN_ENV]
+
+    # Env unset: fall back to the on-disk token, generating it if missing.
+    import secrets
+
+    path = Path(os.path.expanduser(token_path))
+    try:
+        if path.exists():
+            tok = path.read_text(encoding="utf-8").strip()
+            if tok:
+                logger.info("Teleop auth: using token file %s", path)
+                return tok
+        # Absent or empty: generate, persist with restrictive perms.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tok = secrets.token_hex(16)
+        path.write_text(tok, encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        logger.info("Teleop auth: generated token file %s (chmod 600)", path)
+        return tok
+    except Exception:
+        # If the filesystem is unusable, fail CLOSED with an ephemeral token so
+        # the surface is not silently left open. Never logs the value.
+        logger.exception("Teleop auth: token file %s unusable — using ephemeral token", path)
+        return secrets.token_hex(16)
+
+
+# ---------------------------------------------------------------------------
 # Flask / WebSocket adapter (thin — all enforcement lives in TeleopSession)
 # ---------------------------------------------------------------------------
 
-def register_teleop(app, session: "TeleopSession", *, token: str = "",
-                    battery_provider: Optional[Callable[[], Optional[float]]] = None) -> None:
+def register_teleop(app, session: "TeleopSession", *, token: Optional[str] = None,
+                    battery_provider: Optional[Callable[[], Optional[float]]] = None,
+                    token_path: str = DEFAULT_TOKEN_PATH) -> None:
     """Register the /drive page, the drive WebSocket, and REST fallbacks on ``app``.
 
     Additive only: it adds new routes and does not modify any existing route.
-    ``token`` (if non-empty) is required as ``?token=`` on /drive and on the WS
-    upgrade. The WS / REST handlers ONLY mutate session state — the watchdog
-    thread is what reaches the motor, so a dying handler cannot keep the robot
-    driving.
+
+    Auth (Item F): the effective token is resolved via ``resolve_teleop_token``:
+    an explicit non-empty ``token`` wins; otherwise ``WALL_E_TELEOP_TOKEN`` if set
+    (empty string = auth OFF for bench use); otherwise an auto-generated token
+    file. The token is required on ``/drive``, the WS upgrade, and the REST
+    mirror, supplied as ``?token=`` (browsers can't set WS headers) OR the
+    ``X-Teleop-Token`` header. PWA manifest/icon routes stay open.
+
+    Backward compatible: ``oak_viewer.py`` passes ``token=os.environ.get(
+    "WALL_E_TELEOP_TOKEN", "")``. A falsy passed value triggers full resolution
+    (env-or-file), so an unset env now activates the file-based token instead of
+    leaving the surface open.
+
+    The WS / REST handlers ONLY mutate session state — the watchdog thread is
+    what reaches the motor, so a dying handler cannot keep the robot driving.
     """
     from flask import Blueprint, Response, request
+
+    # Resolve the effective token. A falsy ``token`` (None or "" from the
+    # legacy oak_viewer call) defers to env/file resolution; a non-empty string
+    # is an explicit override.
+    token = resolve_teleop_token(token, token_path=token_path)
 
     bp = Blueprint("teleop", __name__)
 
     def _auth_ok() -> bool:
         if not token:
-            return True  # open on the trusted LAN (see docs/teleop.md — tranche-3 gap)
+            return True  # auth explicitly disabled (WALL_E_TELEOP_TOKEN="")
         supplied = request.args.get("token") or request.headers.get("X-Teleop-Token")
         return supplied == token
+
+    def _client_id() -> Optional[str]:
+        """Per-request client id for the single-driver lock (DEFECT-1).
+
+        REST clients pass ``?cid=`` (or ``X-Teleop-Client`` header). None means
+        "no id" → lock not enforced for that caller (bench/single-client).
+        """
+        return request.args.get("cid") or request.headers.get("X-Teleop-Client") or None
 
     def _json(obj, status=200):
         return Response(json.dumps(obj), status=status, content_type="application/json")
@@ -492,8 +747,8 @@ def register_teleop(app, session: "TeleopSession", *, token: str = "",
         except Exception:
             return None
 
-    def _status_payload():
-        st = session.status()
+    def _status_payload(client_id=None):
+        st = session.status(client_id=client_id)
         st["battery_v"] = _battery_v()
         st["server_t"] = time.time()
         return st
@@ -513,30 +768,35 @@ def register_teleop(app, session: "TeleopSession", *, token: str = "",
         if not _auth_ok():
             return _json({"error": "unauthorized"}, 401)
         p = request.get_json(silent=True) or {}
+        cid = _client_id()
         ok, reason = session.arm(rc_in_hand=bool(p.get("rc_in_hand", False)),
-                                 hold_ms=int(p.get("hold_ms", 0)))
-        return _json({"ok": ok, "reason": reason, "status": _status_payload()})
+                                 hold_ms=int(p.get("hold_ms", 0)), client_id=cid)
+        return _json({"ok": ok, "reason": reason, "status": _status_payload(cid)})
 
     @bp.route("/api/teleop/session/disarm", methods=["POST"])
     def rest_disarm():
         if not _auth_ok():
             return _json({"error": "unauthorized"}, 401)
-        session.disarm()
-        return _json({"ok": True, "status": _status_payload()})
+        cid = _client_id()
+        session.disarm(client_id=cid)
+        return _json({"ok": True, "status": _status_payload(cid)})
 
     @bp.route("/api/teleop/session/estop", methods=["POST"])
     def rest_estop():
         if not _auth_ok():
             return _json({"error": "unauthorized"}, 401)
-        session.estop()
-        return _json({"ok": True, "status": _status_payload()})
+        cid = _client_id()
+        # e-stop is accepted from ANY authenticated client — never lock out a stop.
+        session.estop(client_id=cid)
+        return _json({"ok": True, "status": _status_payload(cid)})
 
     @bp.route("/api/teleop/session/clear_estop", methods=["POST"])
     def rest_clear_estop():
         if not _auth_ok():
             return _json({"error": "unauthorized"}, 401)
-        session.clear_estop()
-        return _json({"ok": True, "status": _status_payload()})
+        cid = _client_id()
+        ok, reason = session.clear_estop()
+        return _json({"ok": ok, "reason": reason, "status": _status_payload(cid)})
 
     @bp.route("/api/teleop/session/speed", methods=["POST"])
     def rest_speed():
@@ -544,24 +804,25 @@ def register_teleop(app, session: "TeleopSession", *, token: str = "",
             return _json({"error": "unauthorized"}, 401)
         p = request.get_json(silent=True) or {}
         ok = session.set_speed(str(p.get("level", "")))
-        return _json({"ok": ok, "status": _status_payload()})
+        return _json({"ok": ok, "status": _status_payload(_client_id())})
 
     @bp.route("/api/teleop/session/drive", methods=["POST"])
     def rest_drive():
         if not _auth_ok():
             return _json({"error": "unauthorized"}, 401)
         p = request.get_json(silent=True) or {}
+        cid = _client_id()
         result = session.drive(
             left_f=float(p.get("left", 0.0)), right_f=float(p.get("right", 0.0)),
-            seq=p.get("seq"), client_ts=p.get("t"),
+            seq=p.get("seq"), client_ts=p.get("t"), client_id=cid,
         )
-        return _json({"result": result, "status": _status_payload()})
+        return _json({"result": result, "status": _status_payload(cid)})
 
     @bp.route("/api/teleop/session/status")
     def rest_status():
         if not _auth_ok():
             return _json({"error": "unauthorized"}, 401)
-        return _json(_status_payload())
+        return _json(_status_payload(_client_id()))
 
     # -- PWA assets (additive; no auth — manifest/icons are public) ----------
 
@@ -594,9 +855,12 @@ def register_teleop(app, session: "TeleopSession", *, token: str = "",
 
     @sock.route("/ws/drive")
     def ws_drive(ws):  # pragma: no cover - exercised via integration, not unit tests
+        import secrets as _secrets
         from flask import request as _req
         if token:
-            supplied = _req.args.get("token")
+            # Accept the token via ?token= (browsers can't set WS headers) OR the
+            # X-Teleop-Token header — fixes the audited WS/REST inconsistency.
+            supplied = _req.args.get("token") or _req.headers.get("X-Teleop-Token")
             if supplied != token:
                 try:
                     ws.send(json.dumps({"type": "error", "error": "unauthorized"}))
@@ -604,13 +868,21 @@ def register_teleop(app, session: "TeleopSession", *, token: str = "",
                     ws.close()
                 return
 
+        # Server-issued per-connection client id for the single-driver lock
+        # (DEFECT-1). Each WS connection is a distinct driver candidate.
+        client_id = "ws-" + _secrets.token_hex(8)
+        try:
+            ws.send(json.dumps({"type": "hello", "client_id": client_id}))
+        except Exception:
+            return
+
         stop = threading.Event()
 
         def _pump_status():
             # Push status ~5 Hz so the phone always has a fresh deadman/arm/latency view.
             while not stop.is_set():
                 try:
-                    ws.send(json.dumps({"type": "status", **_status_payload()}))
+                    ws.send(json.dumps({"type": "status", **_status_payload(client_id)}))
                 except Exception:
                     break
                 time.sleep(0.2)
@@ -626,30 +898,39 @@ def register_teleop(app, session: "TeleopSession", *, token: str = "",
                     msg = json.loads(raw)
                 except Exception:
                     continue
-                _dispatch_ws(session, msg)
+                _dispatch_ws(session, msg, client_id)
         finally:
             stop.set()
-            # Intentionally NOT disarming here: the deadman watchdog trips within
-            # 250 ms of the heartbeats stopping. Proving that path is the whole
-            # point — a killed handler must not be what stops the robot.
+            # Release the single-driver lock so the session does not stay armed
+            # without an owner once this connection goes away (DEFECT-1). This
+            # disarms via release_driver(); it does NOT replace the deadman — the
+            # watchdog still trips within 250 ms if heartbeats merely stop while a
+            # connection somehow lingers. We do not rely on this path to stop the
+            # robot; it only clears ownership.
+            try:
+                session.release_driver(client_id)
+            except Exception:
+                logger.exception("release_driver on WS close failed")
 
 
-def _dispatch_ws(session: "TeleopSession", msg: dict) -> None:
+def _dispatch_ws(session: "TeleopSession", msg: dict,
+                 client_id: Optional[str] = None) -> None:
     mtype = msg.get("type")
     if mtype == "drive":
         session.drive(
             left_f=float(msg.get("left", 0.0)), right_f=float(msg.get("right", 0.0)),
-            seq=msg.get("seq"), client_ts=msg.get("t"),
+            seq=msg.get("seq"), client_ts=msg.get("t"), client_id=client_id,
         )
     elif mtype == "hb":
-        session.heartbeat(client_ts=msg.get("t"))
+        session.heartbeat(client_ts=msg.get("t"), client_id=client_id)
     elif mtype == "arm":
         session.arm(rc_in_hand=bool(msg.get("rc_in_hand", False)),
-                    hold_ms=int(msg.get("hold_ms", 0)))
+                    hold_ms=int(msg.get("hold_ms", 0)), client_id=client_id)
     elif mtype == "disarm":
-        session.disarm()
+        session.disarm(client_id=client_id)
     elif mtype == "estop":
-        session.estop()
+        # e-stop accepted from ANY client — never lock out a stop.
+        session.estop(client_id=client_id)
     elif mtype == "clear_estop":
         session.clear_estop()
     elif mtype == "speed":
@@ -1104,14 +1385,32 @@ body{
 
 /* ---- config ---- */
 const QS       = new URLSearchParams(location.search);
-const TOKEN    = QS.get('token');
 const ARM_MS   = 520;     // >= 500 ms server minimum
 const RING_C   = 94.25;   // 2*pi*15 — ring circumference for 32x32 SVG, r=15
+
+/* ---- auth token (Item F) ----
+   Resolution: ?token= in the URL wins (and is persisted); else a previously
+   persisted token from localStorage; else a one-time prompt. An empty token
+   means the server has auth disabled (bench mode) — we send nothing. */
+function resolveToken() {
+  var t = QS.get('token');
+  if (t !== null) { try { localStorage.setItem('walle-teleop-token', t); } catch(_) {} return t; }
+  try { t = localStorage.getItem('walle-teleop-token'); } catch(_) { t = null; }
+  if (t != null) return t;
+  try {
+    t = window.prompt('Teleop token (leave blank if auth is disabled):', '');
+  } catch(_) { t = null; }
+  if (t == null) t = '';
+  try { localStorage.setItem('walle-teleop-token', t); } catch(_) {}
+  return t;
+}
+const TOKEN = resolveToken();
 
 /* ---- state ---- */
 let ws = null, connected = false;
 let rtt = null, lastSt = {}, seq = 1;
 let leftV = 0, rightV = 0;
+let clientId = null;      // server-issued single-driver id (DEFECT-1)
 
 /* ---- WebSocket ---- */
 function wsUrl() {
@@ -1123,13 +1422,15 @@ function connect() {
   ws = new WebSocket(wsUrl());
   ws.onopen  = function() { connected = true;  renderConn(); hideOverlay(); };
   ws.onclose = function() {
-    connected = false; renderConn();
+    connected = false; clientId = null; renderConn();
     showOverlay('disconnected');
     setTimeout(connect, 800);
   };
   ws.onerror = function() { try { ws.close(); } catch(_) {} };
   ws.onmessage = function(ev) {
     var m; try { m = JSON.parse(ev.data); } catch(_) { return; }
+    if (m.type === 'hello') { clientId = m.client_id; return; }
+    if (m.type === 'error') { showOverlay('unauthorized'); return; }
     if (m.type !== 'status') return;
     var wasArmed = lastSt.armed;
     lastSt = m;
@@ -1165,10 +1466,11 @@ window.addEventListener('pagehide', function() {
 
 /* ---- overlay ---- */
 function showOverlay(reason) {
-  var titles = {disconnected:'DISCONNECTED', deadman:'LINK LOST'};
+  var titles = {disconnected:'DISCONNECTED', deadman:'LINK LOST', unauthorized:'UNAUTHORIZED'};
   var subs   = {
     disconnected: 'Robot stopped · reconnecting…',
     deadman:      'Deadman tripped — robot stopped · re-arm to resume',
+    unauthorized: 'Bad or missing token — clear it and reload to re-enter',
   };
   document.getElementById('ov-title').textContent = titles[reason] || 'STOPPED';
   document.getElementById('ov-sub').textContent   = subs[reason]   || 'Robot stopped';
@@ -1211,6 +1513,18 @@ estopEl.addEventListener('pointerdown', function() {
 
 estopEl.addEventListener('click', function() {
   if (!lastSt.estop_latched) return;
+  /* DEFECT-4: when RC is present the server requires a physical RC ch3 re-arm
+     cycle before the latch can clear. Tell the operator why instead of letting
+     the two-tap silently no-op. */
+  if (lastSt.estop_clear_gated) {
+    estopEl.classList.add('dim1');
+    estopEl.textContent = 'CYCLE RC CH3 TO CLEAR';
+    if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
+    setTimeout(function() {
+      estopEl.classList.remove('dim1'); renderEstop();
+    }, 2500);
+    return;
+  }
   if (dimStep === 0) {
     dimStep = 1;
     estopEl.classList.add('dim1');
@@ -1228,7 +1542,12 @@ estopEl.addEventListener('click', function() {
 function renderEstop() {
   if (dimStep) return;
   estopEl.classList.toggle('latched', !!lastSt.estop_latched);
-  estopEl.textContent = lastSt.estop_latched ? 'E-STOP LATCHED' : 'E — STOP';
+  if (lastSt.estop_latched) {
+    estopEl.textContent = lastSt.estop_clear_gated ? 'E-STOP · CYCLE RC CH3'
+                                                   : 'E-STOP LATCHED';
+  } else {
+    estopEl.textContent = 'E — STOP';
+  }
 }
 
 /* ---- ARM button with 500 ms hold + radial progress ring ---- */
@@ -1295,10 +1614,17 @@ function renderArm() {
   if (isHolding) return;
   armEl.classList.toggle('armed', !!lastSt.armed);
   armEl.classList.remove('arming');
+  /* DEFECT-1: another client holds the single-driver lock. We are a spectator —
+     arm/drive will be rejected server-side; reflect that and block the hold. */
+  var lockedOut = (lastSt.has_driver && lastSt.is_driver === false);
   if (lastSt.armed) {
     armPending = false;
-    armEl.textContent = 'ARMED · TAP TO DISARM';
-    armEl.disabled = false;
+    armEl.textContent = lockedOut ? 'ANOTHER DRIVER ACTIVE' : 'ARMED · TAP TO DISARM';
+    armEl.disabled = !!lockedOut;
+  } else if (lockedOut) {
+    armEl.textContent = 'ANOTHER DRIVER ACTIVE';
+    armEl.disabled = true;
+    setRing(0);
   } else if (armPending) {
     armEl.textContent = 'ARMING…';
     armEl.disabled = false;

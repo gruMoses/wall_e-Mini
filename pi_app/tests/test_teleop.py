@@ -6,11 +6,17 @@ no WebSocket. They exercise the server-side enforcement directly via
 thread calls it.
 """
 
+import time
+
 import pytest
 
 from pi_app.control.mapping import CENTER_OUTPUT_VALUE
 from pi_app.io.bt_proto import floats_to_bytes
-from pi_app.web.teleop import TeleopSession
+from pi_app.web.teleop import (
+    TeleopSession,
+    make_recorder_rc_state_provider,
+    resolve_teleop_token,
+)
 
 NEUTRAL = (CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
 
@@ -300,3 +306,324 @@ def test_driving_then_stop_emits_single_neutral_then_quiet():
     s.tick(now=0.32)
     s.tick(now=0.34)
     assert len(motor.calls) == n_after_trip
+
+
+# ==========================================================================
+# DEFECT-5 — new coverage for the hardening defects.
+# ==========================================================================
+
+class FakeRecorder:
+    """Duck-typed stand-in for OakRecorder.get_latest_telemetry()."""
+
+    def __init__(self, telem=None):
+        self._t = telem
+
+    def get_latest_telemetry(self):
+        return self._t
+
+
+class FakeTelem:
+    """Minimal RecordingTelemetry duck — only the fields the provider reads."""
+
+    def __init__(self, *, is_armed=True, emergency_active=False, ts_mono=0.0):
+        self.is_armed = is_armed
+        self.emergency_active = emergency_active
+        self.ts_mono = ts_mono
+
+
+# -- (1) ch5 e-stop path end-to-end via the REAL provider -------------------
+
+def test_ch5_estop_via_real_provider_forces_disarm_on_next_tick():
+    """emergency_active=True from telemetry must flow through the real
+    make_recorder_rc_state_provider and force a session disarm/estop handling on
+    the next watchdog tick (the bug: provider read a non-existent field)."""
+    clock = {"t": 100.0}
+    rec = FakeRecorder(FakeTelem(is_armed=True, emergency_active=False, ts_mono=100.0))
+    provider = make_recorder_rc_state_provider(rec, now_fn=lambda: clock["t"])
+
+    motor = MockMotor()
+    s = TeleopSession(command_sink=motor, rc_state_provider=provider,
+                      require_rc_arm=False, now_fn=lambda: clock["t"])
+    ok, reason = s.arm(hold_ms=600)
+    assert ok, reason
+    s.drive(left_f=1.0, right_f=1.0, seq=1)
+    assert s.tick() == "driving"
+
+    # RC ch5 fires: emergency_active becomes True (fresh telemetry).
+    rec._t = FakeTelem(is_armed=True, emergency_active=True, ts_mono=100.0)
+    assert s.tick() == "rc_override"
+    assert s.armed is False
+    assert motor.last == NEUTRAL
+
+
+# -- (2) provider staleness bound -------------------------------------------
+
+def test_provider_staleness_forces_disarm():
+    """A frozen telemetry object older than 1 s makes the provider report
+    rc_armed=False, which force-disarms the session on the next tick."""
+    clock = {"t": 100.0}
+    # ts_mono matches the clock initially -> age 0 -> fresh.
+    rec = FakeRecorder(FakeTelem(is_armed=True, emergency_active=False, ts_mono=100.0))
+    provider = make_recorder_rc_state_provider(rec, now_fn=lambda: clock["t"])
+
+    motor = MockMotor()
+    s = TeleopSession(command_sink=motor, rc_state_provider=provider,
+                      require_rc_arm=False, now_fn=lambda: clock["t"])
+    ok, _ = s.arm(hold_ms=600)
+    assert ok
+    s.drive(left_f=1.0, right_f=1.0, seq=1)
+    assert s.tick() == "driving"          # telemetry is fresh -> RC armed
+
+    # Telemetry stops updating (ts_mono frozen at 100.0); the clock advances
+    # past the 1 s staleness bound.
+    clock["t"] = 101.5
+    assert provider() == (False, False)   # stale -> fail-safe
+    assert s.tick() == "rc_override"
+    assert s.armed is False
+    assert motor.last == NEUTRAL
+
+
+def test_provider_none_when_no_telemetry_source():
+    """No recorder / never-produced data -> None (bench mode unchanged)."""
+    assert make_recorder_rc_state_provider(None)() is None
+    rec = FakeRecorder(None)            # recorder present but no snapshot yet
+    assert make_recorder_rc_state_provider(rec)() is None
+
+
+def test_provider_fresh_telemetry_reports_state():
+    clock = {"t": 50.0}
+    rec = FakeRecorder(FakeTelem(is_armed=True, emergency_active=False, ts_mono=50.0))
+    provider = make_recorder_rc_state_provider(rec, now_fn=lambda: clock["t"])
+    assert provider() == (True, False)
+    rec._t = FakeTelem(is_armed=False, emergency_active=False, ts_mono=50.0)
+    assert provider() == (False, False)
+
+
+# -- (3) reverse-direction speed cap symmetry -------------------------------
+
+def test_reverse_direction_speed_cap_matches_forward_magnitude():
+    """A full-reverse stick at a given cap must clamp to the same deflection
+    magnitude (distance from neutral) as full-forward at the same cap."""
+    # Forward
+    sf, mf = make_session()
+    arm(sf, now=0.0)
+    sf.set_speed("slow")
+    sf.drive(left_f=1.0, right_f=1.0, seq=1, now=0.0)
+    sf.tick(now=0.0)
+    fwd_left, fwd_right = mf.last
+    # Reverse
+    sr, mr = make_session()
+    arm(sr, now=0.0)
+    sr.set_speed("slow")
+    sr.drive(left_f=-1.0, right_f=-1.0, seq=1, now=0.0)
+    sr.tick(now=0.0)
+    rev_left, rev_right = mr.last
+
+    # Both directions hit the cap (0.3), so the byte deflection from neutral
+    # must be equal in magnitude (forward above neutral, reverse below).
+    assert fwd_left > CENTER_OUTPUT_VALUE and rev_left < CENTER_OUTPUT_VALUE
+    assert (fwd_left - CENTER_OUTPUT_VALUE) == (CENTER_OUTPUT_VALUE - rev_left)
+    assert (fwd_right - CENTER_OUTPUT_VALUE) == (CENTER_OUTPUT_VALUE - rev_right)
+    # And it equals the direct mapping of the capped value.
+    assert (rev_left, rev_right) == floats_to_bytes(-0.3, -0.3)
+
+
+# -- (4) single-driver lock -------------------------------------------------
+
+def test_driver_lock_second_client_rejected_estop_accepted_release_on_trip():
+    s, motor = make_session()
+    # Client A completes the arm ceremony -> becomes the driver.
+    ok, reason = s.arm(hold_ms=600, client_id="A", now=0.0)
+    assert ok, reason
+    assert s.drive(left_f=1.0, right_f=1.0, seq=1, client_id="A", now=0.0) == "accepted"
+    assert s.tick(now=0.0) == "driving"
+
+    # Client B cannot drive or arm the session.
+    assert s.drive(left_f=-1.0, right_f=-1.0, seq=2, client_id="B", now=0.0) == "not_driver"
+    okB, reasonB = s.arm(hold_ms=600, client_id="B", now=0.0)
+    assert not okB and reasonB == "not_driver"
+
+    # B's e-stop IS accepted — never lock out a stop.
+    s.estop(client_id="B")
+    assert s.estop_latched is True
+    assert s.armed is False
+    assert motor.last == NEUTRAL
+
+    # The lock was released by the e-stop: after clearing, B can now arm.
+    s.clear_estop()
+    okB2, reasonB2 = s.arm(hold_ms=600, client_id="B", now=0.1)
+    assert okB2, reasonB2
+
+
+def test_driver_lock_released_after_deadman_trip():
+    s, _ = make_session()
+    ok, _ = s.arm(hold_ms=600, client_id="A", now=0.0)
+    assert ok
+    s.drive(left_f=1.0, right_f=1.0, seq=1, client_id="A", now=0.0)
+    s.tick(now=0.0)
+    # Heartbeats stop -> deadman trip releases the lock.
+    assert s.tick(now=0.3) == "deadman_trip"
+    # A different client can now take over.
+    okB, reasonB = s.arm(hold_ms=600, client_id="B", now=0.4)
+    assert okB, reasonB
+    assert s.drive(left_f=0.5, right_f=0.5, seq=2, client_id="B", now=0.4) == "accepted"
+
+
+def test_driver_lock_released_on_disconnect():
+    s, _ = make_session()
+    ok, _ = s.arm(hold_ms=600, client_id="A", now=0.0)
+    assert ok
+    s.release_driver("A")           # simulate WS close for the driver
+    assert s.armed is False         # ownerless session disarmed
+    okB, reasonB = s.arm(hold_ms=600, client_id="B", now=0.1)
+    assert okB, reasonB
+
+
+# -- (5) e-stop physical-clear gate -----------------------------------------
+
+def test_estop_clear_gate_with_rc_present():
+    """With RC available, clear is refused until an RC ch3 cycle (False->True)."""
+    rc = {"v": (True, False)}   # rc_armed, rc_estop
+    s, _ = make_session(rc_state=rc)
+    arm(s, now=0.0)
+    s.tick(now=0.0)             # provider returns non-None -> rc_ever_seen=True
+    s.estop()
+    assert s.estop_latched is True
+
+    # Tick while still RC-armed: no ch3 cycle yet -> clear refused.
+    s.tick(now=0.1)
+    ok, reason = s.clear_estop()
+    assert not ok and reason == "cycle_rc_ch3"
+    assert s.estop_latched is True
+
+    # RC ch3 goes False (disarm) then True (re-arm) -> physical re-arm observed.
+    rc["v"] = (False, False)
+    s.tick(now=0.2)
+    rc["v"] = (True, False)
+    s.tick(now=0.3)
+    ok2, reason2 = s.clear_estop()
+    assert ok2 and reason2 == "cleared"
+    assert s.estop_latched is False
+
+
+def test_estop_clear_bench_mode_two_tap_clear_still_works():
+    """No RC ever observed -> the existing browser clear works with no gate."""
+    s, _ = make_session()          # no rc_state provider
+    arm(s, now=0.0)
+    s.estop()
+    ok, reason = s.clear_estop()
+    assert ok and reason == "cleared"
+    assert s.estop_latched is False
+
+
+# -- (7) one real-thread watchdog integration test --------------------------
+
+def test_real_watchdog_thread_trips_deadman_and_disarms():
+    """Start the actual watchdog thread, arm + drive, stop sending, then assert
+    it writes neutral and disarms on its own. Uses real wall-clock time."""
+    motor = MockMotor()
+    s = TeleopSession(command_sink=motor, require_rc_arm=False)
+    s.start_watchdog()
+    try:
+        ok, reason = s.arm(hold_ms=600)
+        assert ok, reason
+        # Send a few fresh drives so the thread actually writes drive bytes.
+        for _ in range(5):
+            s.drive(left_f=1.0, right_f=1.0, seq=int(time.monotonic() * 1e6))
+            time.sleep(0.02)
+        assert s.armed is True
+        # Stop sending heartbeats; the deadman (250 ms) must trip within ~0.4 s.
+        time.sleep(0.4)
+        assert s.armed is False
+        assert s.tripped_reason == "deadman"
+        assert motor.last == NEUTRAL
+    finally:
+        s.stop_watchdog()
+
+
+# ==========================================================================
+# Auth (Item F) — token resolution + Flask route gating.
+# ==========================================================================
+
+def test_resolve_token_explicit_wins():
+    assert resolve_teleop_token("explicit-tok", env={}) == "explicit-tok"
+
+
+def test_resolve_token_env_set_empty_disables_auth(tmp_path):
+    # Env present-but-empty -> auth OFF (bench).
+    assert resolve_teleop_token(env={"WALL_E_TELEOP_TOKEN": ""}) == ""
+
+
+def test_resolve_token_env_nonempty(tmp_path):
+    assert resolve_teleop_token(env={"WALL_E_TELEOP_TOKEN": "secret"}) == "secret"
+
+
+def test_resolve_token_file_generated_when_env_unset(tmp_path):
+    tok_file = tmp_path / "teleop_token"
+    tok = resolve_teleop_token(env={}, token_path=str(tok_file))
+    assert tok and len(tok) == 32          # secrets.token_hex(16) -> 32 hex chars
+    assert tok_file.exists()
+    # chmod 600
+    import stat
+    assert (tok_file.stat().st_mode & 0o777) == 0o600
+    # Stable on second resolution.
+    assert resolve_teleop_token(env={}, token_path=str(tok_file)) == tok
+
+
+def _make_flask_app(token, tmp_path):
+    from flask import Flask
+    from pi_app.web.teleop import register_teleop
+    app = Flask(__name__)
+    motor = MockMotor()
+    s = TeleopSession(command_sink=motor, require_rc_arm=False)
+    # Force a fixed token via the env override path.
+    register_teleop(app, s, token=token,
+                    token_path=str(tmp_path / "tok"))
+    return app, s
+
+
+def test_auth_routes_gated_by_token(tmp_path):
+    app, _ = _make_flask_app("T0K", tmp_path)
+    c = app.test_client()
+    # No token -> 401 on the page, REST mirror, and status.
+    assert c.get("/drive").status_code == 401
+    assert c.get("/api/teleop/session/status").status_code == 401
+    assert c.post("/api/teleop/session/arm", json={"hold_ms": 600}).status_code == 401
+    # With ?token= -> ok.
+    assert c.get("/drive?token=T0K").status_code == 200
+    assert c.get("/api/teleop/session/status?token=T0K").status_code == 200
+    # With X-Teleop-Token header -> ok (fixes WS/REST inconsistency).
+    assert c.get("/api/teleop/session/status",
+                 headers={"X-Teleop-Token": "T0K"}).status_code == 200
+    # Wrong token -> 401.
+    assert c.get("/api/teleop/session/status?token=nope").status_code == 401
+
+
+def test_auth_pwa_routes_stay_open(tmp_path):
+    app, _ = _make_flask_app("T0K", tmp_path)
+    c = app.test_client()
+    assert c.get("/drive/manifest.json").status_code == 200
+    assert c.get("/drive/icon.svg").status_code == 200
+    assert c.get("/drive/icon-192.png").status_code == 200
+
+
+def test_auth_disabled_when_env_empty(tmp_path):
+    import os
+    prev = os.environ.get("WALL_E_TELEOP_TOKEN")
+    os.environ["WALL_E_TELEOP_TOKEN"] = ""   # set-but-empty -> auth off
+    try:
+        from flask import Flask
+        from pi_app.web.teleop import register_teleop
+        app = Flask(__name__)
+        s = TeleopSession(command_sink=MockMotor(), require_rc_arm=False)
+        # Pass falsy token (like oak_viewer's os.environ.get(..,"")) -> resolves
+        # to env-empty -> auth disabled.
+        register_teleop(app, s, token="", token_path=str(tmp_path / "tok"))
+        c = app.test_client()
+        assert c.get("/drive").status_code == 200          # open
+        assert c.get("/api/teleop/session/status").status_code == 200
+    finally:
+        if prev is None:
+            os.environ.pop("WALL_E_TELEOP_TOKEN", None)
+        else:
+            os.environ["WALL_E_TELEOP_TOKEN"] = prev

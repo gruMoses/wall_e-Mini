@@ -46,6 +46,31 @@ RC authority is enforced twice in teleop, independent of the downstream gate:
   not armed or RC e-stop is active it force-disarms the phone session.
 - `notify_rc_state()` can force-disarm synchronously from any thread.
 
+### RC ch5 e-stop path into teleop (DEFECT-2)
+The teleop session has no direct view of the RC receiver; it learns RC state
+from the OAK recorder's latest telemetry via `make_recorder_rc_state_provider`.
+The provider returns `(rc_armed, rc_estop)` where:
+- `rc_armed` ← `RecordingTelemetry.is_armed` (controller armed state), and
+- `rc_estop` ← `RecordingTelemetry.emergency_active` (the latched **RC ch5**
+  e-stop, mirrored from `controller.emergency_active`).
+
+`emergency_active` is populated in `pi_app/app/main.py` at the existing
+`RecordingTelemetry(...)` construction site from `cmd.emergency_active`. Before
+this fix the provider read a field that did not exist, so an RC ch5 e-stop never
+reached the phone session — it now force-disarms / handles the e-stop on the next
+watchdog tick.
+
+### Telemetry staleness fail-safe (DEFECT-3)
+`RecordingTelemetry.ts_mono` carries a `time.monotonic()` stamp set at
+construction. The provider fail-safes on a frozen telemetry object:
+- **Never seen any telemetry** (recorder `None`, or no snapshot yet) → returns
+  `None`: RC state is genuinely unknown, so the session is **not** force-disarmed
+  (bench-mode behavior unchanged).
+- **Has seen telemetry, but the newest is older than 1.0 s** → returns
+  `(False, False)`, which the rc gate treats as "RC not armed" and force-disarms
+  the phone session. A frozen telemetry object can never keep the session armable
+  forever.
+
 ## Deadman enforcement path (exact)
 
 1. The phone holds a WebSocket open and sends a heartbeat at 10 Hz
@@ -92,11 +117,46 @@ explicit ARM hold is always required.
 ## E-stop
 
 The UI's big red button sends `{"type":"estop"}`. Server-side this latches:
-neutral + disarm + `estop_latched = True`. While latched, drive commands are
-ignored even with fresh heartbeats, and arming is refused. The latch survives
-reconnects. Clearing requires an explicit UI dismiss (`clear_estop`) **and** a
-fresh ARM hold. This is independent of — and does not interfere with — the RC ch5
-e-stop.
+neutral + disarm + `estop_latched = True` + driver-lock released. E-stop is
+accepted from **any** authenticated client — a non-driver phone can always stop
+the robot. While latched, drive commands are ignored even with fresh heartbeats,
+and arming is refused. The latch survives reconnects. This is independent of —
+and does not interfere with — the RC ch5 e-stop.
+
+### Clearing the latch: physical re-arm gate (DEFECT-4 / spec deviation)
+The spec is "latched until physical re-arm." `clear_estop` returns `(ok, reason)`
+and behaves by whether RC state is available to the session:
+
+- **RC present** (the provider has ever delivered data): the latch is cleared
+  **only after an RC ch3 cycle** — `rc_armed` observed going **False then True**
+  *since* the e-stop fired (a physical re-arm on the transmitter). A browser-only
+  clear before that cycle is **refused** with reason `cycle_rc_ch3`; the UI shows
+  "CYCLE RC CH3 TO CLEAR" and `status.estop_clear_gated` is `true`. The ch3 edge
+  is observed by the watchdog (`tick()`) and by `notify_rc_state()`.
+- **Bench mode** (no RC state ever observed): the existing **two-tap browser
+  clear** remains — first tap shows "TAP AGAIN TO CLEAR", second sends
+  `clear_estop`, which succeeds.
+
+A cleared latch never re-arms on its own — a fresh ARM hold is always required.
+
+## Single-driver lock (DEFECT-1)
+
+Only one client may hold an armed session at a time. The WS server issues a
+per-connection `client_id` (a nonce, sent in a `{"type":"hello","client_id":…}`
+frame on connect); REST callers may pass `?cid=`/`X-Teleop-Client`. The client
+that completes the arm ceremony becomes the **driver**:
+
+- `arm` and `drive` from any **other** client are refused (`reason:"not_driver"`
+  / `result:"not_driver"`). Only the driver's `heartbeat` refreshes the deadman.
+- **`estop` is accepted from ANY client** — a stop is never locked out.
+- The lock is **released** on driver disconnect (`release_driver`, which also
+  disarms the now-ownerless session), deadman trip, `disarm`, e-stop, or RC
+  override.
+
+`status` reports `has_driver` (someone holds the lock) and a per-client
+`is_driver`. A spectator phone's UI shows "ANOTHER DRIVER ACTIVE" and disables the
+ARM hold. A `None` client id (bench / single-client) is always treated as the
+driver, so the existing single-phone and unit-test paths are unchanged.
 
 ## Speed cap
 

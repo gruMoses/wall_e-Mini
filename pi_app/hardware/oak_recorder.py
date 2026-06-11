@@ -135,6 +135,14 @@ class RecordingTelemetry:
     wp_completed: bool | None = None
     heading_offset_deg: float | None = None
     heading_offset_locked: bool | None = None
+    # ── Safety / liveness (consumed by phone-teleop rc_state_provider) ──
+    # Latched RC ch5 emergency-stop state, mirrored from the controller so the
+    # teleop session sees the real RC e-stop (it has no other view of ch5).
+    emergency_active: bool = False
+    # Monotonic timestamp (time.monotonic()) of when this snapshot was built.
+    # Lets the rc_state_provider fail-safe when telemetry stops updating: a
+    # frozen object older than the staleness bound forces teleop disarm.
+    ts_mono: float = 0.0
 
 
 # ---------------------------------------------------------------------------
