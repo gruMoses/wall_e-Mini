@@ -349,6 +349,10 @@ class OakDepthReader:
         self._imu_max_packets_per_poll = max(1, int(imu_max_packets_per_poll))
         self._pipeline_running = False
         self._pipeline_dead = False  # True when pipeline has crashed and not yet recovered
+        # USB disconnect / auto-reconnect supervisor state.
+        self._connected = False           # True while a device session is live
+        self._reconnect_count = 0         # number of recoveries since start()
+        self._last_disconnect_ts = 0.0    # monotonic ts of the most recent drop
         self._last_pipeline_loop_ts = 0.0
         self._last_depth_poll_ts = 0.0
         self._last_depth_recv_ts = 0.0
@@ -493,6 +497,9 @@ class OakDepthReader:
 
         with self._lock:
             running = bool(self._pipeline_running)
+            connected = bool(self._connected)
+            reconnect_count = self._reconnect_count
+            last_disconnect_ts = self._last_disconnect_ts
             loop_ts = self._last_pipeline_loop_ts
             depth_ts = self._last_depth_poll_ts
             depth_recv_ts = self._last_depth_recv_ts
@@ -516,6 +523,7 @@ class OakDepthReader:
         rgb_age_s = (now - rgb_ts) if rgb_ts > 0.0 else float("inf")
         depth_frame_age_s = (now - depth_state_ts) if depth_state_ts > 0.0 else float("inf")
         rgb_frame_age_s = (now - rgb_state_ts) if rgb_state_ts > 0.0 else float("inf")
+        last_disconnect_age_s = (now - last_disconnect_ts) if last_disconnect_ts > 0.0 else None
 
         loop_stale = (not running) or (loop_age_s > loop_stale_s)
         depth_stale = depth_recv_age_s > depth_stale_s
@@ -527,6 +535,10 @@ class OakDepthReader:
 
         return {
             "pipeline_running": running,
+            "connected": connected,
+            "reconnect_count": reconnect_count,
+            "last_disconnect_ts": last_disconnect_ts if last_disconnect_ts > 0.0 else None,
+            "last_disconnect_age_s": round(last_disconnect_age_s, 3) if last_disconnect_age_s is not None else None,
             "loop_age_s": round(loop_age_s, 3) if loop_age_s != float("inf") else None,
             "depth_age_s": round(depth_age_s, 3) if depth_age_s != float("inf") else None,
             "depth_recv_age_s": round(depth_recv_age_s, 3) if depth_recv_age_s != float("inf") else None,
@@ -560,6 +572,38 @@ class OakDepthReader:
         with self._lock:
             return self._pipeline_dead
 
+    # Substrings that mark a fatal device/communication failure (USB drop,
+    # XLink teardown, device closed). When a per-poll call raises one of these
+    # the whole session is unrecoverable and must be rebuilt by the supervisor.
+    _FATAL_COMM_MARKERS = (
+        "x_link",
+        "xlink",
+        "communication",
+        "device",
+        "closed",
+        "disconnect",
+        "no available",
+        "not running",
+        "usb",
+    )
+
+    @classmethod
+    def _is_fatal_comm_error(cls, exc: BaseException) -> bool:
+        """Heuristically classify an exception as a fatal device/comm failure.
+
+        depthai surfaces USB drops as plain RuntimeError with messages like
+        "Communication exception - possible device error/misconfiguration" or
+        "X_LINK_ERROR". We treat any such message (or an explicitly-named
+        device/comm error class) as fatal so the supervisor rebuilds the device.
+        Non-fatal, frame-level glitches keep their existing swallow-and-continue
+        behaviour inside the individual _poll_* methods.
+        """
+        name = exc.__class__.__name__.lower()
+        if "xlink" in name or "communication" in name:
+            return True
+        msg = str(exc).lower()
+        return any(marker in msg for marker in cls._FATAL_COMM_MARKERS)
+
     @staticmethod
     def _format_err(prefix: str, exc: Exception) -> str:
         msg = str(exc).strip()
@@ -589,7 +633,21 @@ class OakDepthReader:
 
     # -- Pipeline Construction & Run (depthai v3 API) -----------------------
 
+    # Reconnect backoff schedule (seconds): quick first retries, then steady
+    # 10 s polling for the device to re-enumerate. The final value repeats.
+    _RECONNECT_BACKOFF_S = (2.0, 5.0, 10.0)
+
     def _run_pipeline(self) -> None:
+        """Supervisor loop: owns one device session at a time and re-establishes
+        it after a USB disconnect / re-enumeration without a service restart.
+
+        A "session" is build-pipeline -> open-device -> run poll loops. When the
+        OAK USB device drops mid-run a queue ``get`` raises an X_LINK /
+        communication error; ``_run_pipeline_once`` detects that, closes the
+        device defensively, and returns. This loop then marks health as
+        disconnected, backs off (interruptibly), optionally waits for the device
+        to re-enumerate, and rebuilds — repeating until ``stop()`` is called.
+        """
         try:
             import depthai as dai
             import numpy as np
@@ -597,25 +655,88 @@ class OakDepthReader:
             logger.error("depthai or numpy not installed -- OAK-D reader cannot start")
             return
 
-        backoff_s = 1.0
-        max_backoff_s = 30.0
+        attempt = 0  # consecutive failed/ended sessions since last clean run
         while not self._stop_event.is_set():
+            session_connected = False
             try:
-                self._run_pipeline_once(dai, np)
+                # Returns True if the device session actually opened (ran the
+                # poll loop) before ending; False if the build/open failed.
+                session_connected = bool(self._run_pipeline_once(dai, np))
             except Exception:
-                logger.exception("OAK-D pipeline crashed -- will retry in %.1fs", backoff_s)
+                logger.exception("OAK-D pipeline crashed -- will retry")
             if self._stop_event.is_set():
                 break
+
+            # The session has ended (fault or device drop). Mark disconnected so
+            # consumers stop trusting depth, and count a reconnect attempt iff a
+            # previously-live device went away (not a build failure on a missing
+            # camera). We do NOT touch _depth_state.timestamp here: its age must
+            # keep growing while the device is down so the staleness fail-safe in
+            # compute_throttle_scale() stops autonomous motion.
+            now = time.monotonic()
             with self._lock:
                 self._pipeline_dead = True
                 self._pipeline_running = False
-            logger.warning("OAK-D pipeline recovery: waiting %.1fs before retry", backoff_s)
-            self._stop_event.wait(timeout=backoff_s)
-            backoff_s = min(backoff_s * 2.0, max_backoff_s)
+                self._connected = False
+                self._last_disconnect_ts = now
+                if session_connected:
+                    self._reconnect_count += 1
+
+            # A live device that just dropped restarts the fast 2s->5s->10s ramp;
+            # consecutive build/open failures (device truly absent) keep climbing
+            # toward the steady 10s poll for re-enumeration.
+            if session_connected:
+                attempt = 0
+            backoff_s = self._RECONNECT_BACKOFF_S[
+                min(attempt, len(self._RECONNECT_BACKOFF_S) - 1)
+            ]
+            attempt += 1
+            logger.warning(
+                "OAK-D reconnect: device session ended (connected=%s); "
+                "retry in %.1fs (reconnects=%d)",
+                session_connected, backoff_s, self._reconnect_count,
+            )
+            # Interruptible backoff sleep — stop() fires the event and we exit
+            # promptly instead of finishing the full backoff window.
+            if self._stop_event.wait(timeout=backoff_s):
+                break
+            # Optionally wait for the device to re-enumerate before rebuilding so
+            # we don't burn cycles building a pipeline against an absent device.
+            # Bounded so a permanently-missing device still loops (and so a test
+            # without the helper present is unaffected).
+            self._wait_for_device(timeout_s=backoff_s)
         with self._lock:
             self._pipeline_dead = False
+            self._connected = False
 
-    def _run_pipeline_once(self, dai, np) -> None:
+    def _wait_for_device(self, timeout_s: float) -> bool:
+        """Poll the availability helper until a device appears or timeout/stop.
+
+        Best-effort: any error in the helper is swallowed and treated as
+        "unknown / proceed", so a missing or mocked-out ``detect()`` never blocks
+        the supervisor. Returns True if a device was seen, else False.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while not self._stop_event.is_set():
+            try:
+                if self.detect():
+                    return True
+            except Exception:
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            if self._stop_event.wait(timeout=0.25):
+                return False
+        return False
+
+    def _run_pipeline_once(self, dai, np) -> bool:
+        """Build + open one device session and run the poll loops.
+
+        Returns True if the device session actually opened and ran the poll loop
+        (i.e. a live device went away or stop() was requested), False if the
+        build/open failed before the device was ever live. The supervisor uses
+        this to decide whether an ended session counts as a reconnect.
+        """
 
         try:
             pipeline = dai.Pipeline()
@@ -869,6 +990,7 @@ class OakDepthReader:
             self._device_ready.set()
             with self._lock:
                 self._pipeline_running = True
+                self._connected = True
                 self._last_pipeline_loop_ts = time.monotonic()
                 self._last_pipeline_error_msg = ""
 
@@ -876,8 +998,11 @@ class OakDepthReader:
             logger.exception("Failed to build/start OAK-D pipeline")
             with self._lock:
                 self._pipeline_running = False
+                self._connected = False
                 self._last_pipeline_error_msg = "pipeline_start_failed"
-            return
+            # Device never became live — report "not connected" so the
+            # supervisor backs off without counting a reconnect.
+            return False
 
         try:
             next_imu_poll = time.monotonic()
@@ -906,10 +1031,20 @@ class OakDepthReader:
                     next_imu_poll = now
                 time.sleep(1.0 / self._obs_cfg.update_rate_hz)
         except Exception as e:
-            logger.exception("OAK-D pipeline error")
+            # A fatal device/communication error (USB drop, XLink teardown) ends
+            # the session; the supervisor will close, back off, and rebuild. Any
+            # other escaped error is logged the same way — either way the session
+            # is over. We deliberately do NOT refresh _depth_state.timestamp, so
+            # its age keeps growing and the staleness fail-safe stops motion.
+            if self._is_fatal_comm_error(e):
+                logger.warning("OAK-D device communication lost: %s", e)
+            else:
+                logger.exception("OAK-D pipeline error")
             with self._lock:
                 self._last_pipeline_error_msg = self._format_err("pipeline_loop", e)
         finally:
+            # Defensive close — swallow any teardown error from an already-dead
+            # device so the supervisor can always proceed to rebuild.
             try:
                 pipeline.stop()
             except Exception:
@@ -917,8 +1052,13 @@ class OakDepthReader:
             self._device = None
             with self._lock:
                 self._pipeline_running = False
+                self._connected = False
                 self._recording_queues = None
             self._device_ready.clear()
+        # The device session opened and ran (then ended via drop or stop()).
+        # Report connected=True so the supervisor counts this as a reconnect
+        # cycle (unless stop() was requested, which it checks separately).
+        return True
 
     # -- Hand-tracking pipeline helpers -----------------------------------------
 
@@ -1030,6 +1170,8 @@ class OakDepthReader:
         except Exception as e:
             with self._lock:
                 self._last_rgb_error_msg = self._format_err("poll_hand_rgb", e)
+            if self._is_fatal_comm_error(e):
+                raise
             logger.warning("Hand poll error", exc_info=True)
 
     # -- Depth / detection / RGB / IMU polling --------------------------------
@@ -1219,6 +1361,11 @@ class OakDepthReader:
         except Exception as e:
             with self._lock:
                 self._last_depth_error_msg = self._format_err("poll_depth", e)
+            # A fatal device/comm failure (USB drop) must end the session so the
+            # supervisor rebuilds — re-raise it. Frame-level glitches stay
+            # swallowed so a single bad frame never tears the pipeline down.
+            if self._is_fatal_comm_error(e):
+                raise
             logger.debug("Depth poll error", exc_info=True)
 
     def _get_label_name(self, label: int) -> str:
@@ -1557,6 +1704,8 @@ class OakDepthReader:
         except Exception as e:
             with self._lock:
                 self._last_detection_error_msg = self._format_err("poll_detections", e)
+            if self._is_fatal_comm_error(e):
+                raise
             logger.debug("Detection poll error", exc_info=True)
 
     def _poll_rgb(self, rgb_q) -> None:
@@ -1574,6 +1723,8 @@ class OakDepthReader:
         except Exception as e:
             with self._lock:
                 self._last_rgb_error_msg = self._format_err("poll_rgb", e)
+            if self._is_fatal_comm_error(e):
+                raise
             logger.debug("RGB poll error", exc_info=True)
 
     def _poll_imu(self, imu_q) -> None:
@@ -1688,7 +1839,12 @@ class OakDepthReader:
                             m.cadence_avg_s += (dt - m.cadence_avg_s) / (n + 1)
                         m.cadence_samples += 1
                     self._imu_prev_consumed_ts = sample_ts
-        except Exception:
+        except Exception as e:
+            # A fatal device/comm failure ends the session — propagate so the
+            # supervisor rebuilds. Non-fatal errors keep the existing
+            # count-and-warn behaviour below.
+            if self._is_fatal_comm_error(e):
+                raise
             now = time.monotonic()
             warn_summary = None
             with self._lock:
