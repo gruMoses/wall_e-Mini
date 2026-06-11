@@ -163,8 +163,7 @@ class ObstacleAvoidanceConfig:
     stale_timeout_s: float = 0.5
     stale_policy: str = "stop"   # fail-safe: stop when depth data is stale
     manual_stale_throttle_scale: float = 0.10  # MANUAL mode: slow (not stop) when depth is stale
-    safety_stop_radius_m: float = 0.8  # YOLO "stop" tier detections within this radius force scale=0
-    yolo_safety_enabled: bool = True   # feed live YOLO detections into the person/animal stop tier each tick
+    safety_stop_radius_m: float = 0.8  # YOLO "stop" tier detections within this radius force min_distance->0 (applied in oak_depth depth poll)
 
 
 @dataclass(frozen=True)

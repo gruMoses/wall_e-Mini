@@ -974,25 +974,21 @@ class OakDepthReader:
                 else:
                     corridor_p5_mm = float(np.percentile(valid_depths, 5))
 
-            # Safety-tier override: YOLO "stop" class detections (persons,
-            # animals) force the effective obstacle distance down regardless
-            # of what the depth corridor reports.
+            # Canonical YOLO person/animal stop tier — see
+            # _apply_safety_tier_override. A "stop"-tier detection within
+            # safety_stop_radius_m forces the effective obstacle distance to 0,
+            # regardless of what the depth corridor reports.
             safety_stop_radius = float(getattr(self._obs_cfg, "safety_stop_radius_m", 0.8))
-            effective_min_mm = corridor_p5_mm
             with self._lock:
                 all_dets = list(self._all_dets_state.detections)
-            for det in all_dets:
-                if det.safety_tier == "stop" and det.z_m > 0:
-                    det_mm = det.z_m * 1000.0
-                    if det.z_m < safety_stop_radius:
-                        effective_min_mm = 0.0
-                        logger.info(
-                            "Safety STOP: %s at %.2fm (< %.1fm radius)",
-                            det.label_name, det.z_m, safety_stop_radius,
-                        )
-                        break
-                    elif det_mm < effective_min_mm:
-                        effective_min_mm = det_mm
+            effective_min_mm, _stop_det = self._apply_safety_tier_override(
+                all_dets, corridor_p5_mm, safety_stop_radius
+            )
+            if _stop_det is not None:
+                logger.info(
+                    "Safety STOP: %s at %.2fm (< %.1fm radius)",
+                    _stop_det.label_name, _stop_det.z_m, safety_stop_radius,
+                )
 
             if effective_min_mm == float("inf"):
                 # No corridor obstacle AND no safety-tier trigger
@@ -1066,6 +1062,36 @@ class OakDepthReader:
         if label in det_cfg.slow_class_ids:
             return "slow"
         return "log"
+
+    @staticmethod
+    def _apply_safety_tier_override(detections, corridor_p5_mm: float,
+                                    safety_stop_radius_m: float):
+        """Canonical YOLO person/animal stop tier (pure, hardware-free).
+
+        Lowers the effective forward obstacle distance (mm) for "stop"-tier
+        detections:
+          * a stop-tier detection within ``safety_stop_radius_m`` forces a hard
+            stop — returns (0.0, that detection);
+          * a more-distant stop-tier detection nearer than the corridor reading
+            pulls the effective distance down to it.
+
+        The returned distance is what poll_depth stores as ``min_distance_m``,
+        so it flows through get_min_distance() ->
+        ObstacleAvoidanceController.compute_throttle_scale(); 0.0 mm yields
+        throttle scale 0.0 (full stop). This is the single, canonical stop tier.
+
+        Returns (effective_min_mm, stop_det) where ``stop_det`` is the detection
+        that forced the hard stop, else ``None``.
+        """
+        effective_min_mm = corridor_p5_mm
+        for det in detections:
+            if getattr(det, "safety_tier", "") == "stop" and getattr(det, "z_m", 0) > 0:
+                if det.z_m < safety_stop_radius_m:
+                    return 0.0, det
+                det_mm = det.z_m * 1000.0
+                if det_mm < effective_min_mm:
+                    effective_min_mm = det_mm
+        return effective_min_mm, None
 
     @staticmethod
     def _parse_yolo_tensor(
