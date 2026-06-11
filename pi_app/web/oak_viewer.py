@@ -1397,6 +1397,7 @@ class OakWebViewer:
         self._motor_driver = motor_driver
         self._imu_reader = imu_reader
         self._thread: threading.Thread | None = None
+        self._teleop_session = None  # set in _run once the Flask app exists
 
     def start(self) -> None:
         if Flask is None:
@@ -1452,6 +1453,26 @@ class OakWebViewer:
                 logger.info("Waypoint nav UI registered at /navigate")
             except Exception:
                 logger.exception("Waypoint nav UI failed to load — skipping")
+
+            try:
+                import os
+                from pi_app.web.teleop import (
+                    TeleopSession, FileCommandSink, register_teleop,
+                    make_recorder_rc_state_provider, make_recorder_battery_provider,
+                )
+                self._teleop_session = TeleopSession(
+                    command_sink=FileCommandSink(),
+                    rc_state_provider=make_recorder_rc_state_provider(self._recorder),
+                )
+                register_teleop(
+                    app, self._teleop_session,
+                    token=os.environ.get("WALL_E_TELEOP_TOKEN", ""),
+                    battery_provider=make_recorder_battery_provider(self._recorder),
+                )
+                self._teleop_session.start_watchdog()
+                logger.info("Fail-safe teleop registered at /drive (deadman watchdog running)")
+            except Exception:
+                logger.exception("Teleop /drive failed to load — skipping")
 
             app.run(
                 host=self._config.host,
