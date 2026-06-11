@@ -582,6 +582,9 @@ class FollowMeController:
         output_hz = float(getattr(config, "follow_output_rate_hz", 15.0))
         self._output_interval_s = 1.0 / max(1.0, output_hz)
         self._last_output_time: float = 0.0
+        # Separate from _last_output_time: tracks the previous compute() call so
+        # PID dt reflects the vision-frame cadence, not the 15Hz output hold.
+        self._last_compute_time: float = 0.0
         self._cached_left: int = NEUTRAL
         self._cached_right: int = NEUTRAL
         self._prev_target_present: bool = False  # for transition detection
@@ -794,10 +797,15 @@ class FollowMeController:
                 self._trail_rejected_speed_count = self._trail.rejected_speed_count
 
         # ── Full control computation (full rate) ──────────────────────────────
-        # dt for PID and safety is time since last compute(), not last output.
-        dt = now - self._last_output_time if self._last_output_time > 0.0 else (
+        # dt for PID and safety is time since the last compute() CALL (the full
+        # vision-frame cadence), NOT the last emitted output. The 15Hz output
+        # hold keeps its own timing via _last_output_time further below; using
+        # that here made PID derivative terms see alternating dt of ~0 and
+        # ~66ms at 30fps (compute fires every frame, output only every other).
+        dt = now - self._last_compute_time if self._last_compute_time > 0.0 else (
             1.0 / max(1.0, float(getattr(self._cfg, "follow_output_rate_hz", 15.0)))
         )
+        self._last_compute_time = now
 
         # True only when there is a live detection this frame (not stale persistence data).
         fresh_detection = bool(filtered)
