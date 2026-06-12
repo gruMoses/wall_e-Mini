@@ -1,0 +1,286 @@
+<!-- @dsCard group="Brand" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WALL-E Drive — Design Brief</title>
+<style>
+:root{
+  --bg:#080a0f;--s1:#111318;--s2:#1a1d27;--bd:#252836;
+  --blue:#2563eb;--green:#10b981;--red:#ef4444;--amber:#f59e0b;
+  --text:#f1f5f9;--t2:#94a3b8;--t3:#475569;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;background:var(--bg);color:var(--text);
+  font:400 14px/1.6 -apple-system,"SF Pro Text",system-ui,sans-serif;
+  padding:24px 20px 48px;}
+h1{font-size:22px;font-weight:800;letter-spacing:.04em;margin:0 0 4px;}
+.subtitle{color:var(--t2);font-size:12px;letter-spacing:.08em;margin-bottom:32px;}
+h2{font-size:15px;font-weight:700;letter-spacing:.06em;color:var(--blue);
+   border-bottom:1px solid var(--bd);padding-bottom:6px;margin:28px 0 12px;}
+h3{font-size:13px;font-weight:700;color:var(--t2);margin:16px 0 6px;letter-spacing:.04em;}
+p,li{color:var(--t2);font-size:13px;line-height:1.65;}
+ul,ol{padding-left:20px;margin:6px 0 12px;}
+li{margin-bottom:4px;}
+.chip-row{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 14px;}
+.chip{font-size:11px;font-weight:700;letter-spacing:.06em;
+  border:1px solid var(--bd);border-radius:6px;padding:3px 9px;
+  background:var(--s2);color:var(--t2);}
+.chip.blue{background:rgba(37,99,235,.13);border-color:var(--blue);color:var(--blue);}
+.chip.green{background:rgba(16,185,129,.13);border-color:var(--green);color:var(--green);}
+.chip.red{background:rgba(239,68,68,.13);border-color:var(--red);color:var(--red);}
+.chip.amber{border-color:var(--amber);color:var(--amber);}
+table{width:100%;border-collapse:collapse;font-size:12px;margin:10px 0 18px;}
+th{text-align:left;font-size:10px;letter-spacing:.08em;color:var(--t3);
+   border-bottom:1px solid var(--bd);padding:6px 8px;}
+td{padding:7px 8px;border-bottom:1px solid rgba(37,42,54,.7);vertical-align:top;color:var(--t2);}
+td:first-child{color:var(--text);font-weight:700;white-space:nowrap;}
+.constraint-box{
+  border:1.5px solid var(--red);border-radius:10px;
+  background:rgba(239,68,68,.06);padding:14px 16px;margin:14px 0;
+}
+.constraint-box h3{color:var(--red);margin:0 0 10px;}
+.constraint-box li{color:var(--text);}
+.token-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin:10px 0 18px;}
+.swatch{border-radius:8px;overflow:hidden;border:1px solid var(--bd);}
+.swatch-color{height:40px;}
+.swatch-label{background:var(--s2);padding:5px 8px;font-size:10px;font-weight:700;color:var(--t2);letter-spacing:.06em;}
+.swatch-hex{font-size:9px;color:var(--t3);}
+.note{background:var(--s1);border-left:3px solid var(--blue);
+  border-radius:0 8px 8px 0;padding:10px 14px;margin:12px 0;font-size:12px;color:var(--t2);}
+code{font-family:monospace;font-size:12px;background:var(--s2);
+  border:1px solid var(--bd);border-radius:4px;padding:1px 5px;color:var(--text);}
+</style>
+</head>
+<body>
+
+<h1>WALL-E Drive — Phone Teleop UI</h1>
+<div class="subtitle">DESIGN BRIEF &nbsp;&middot;&nbsp; claude.ai/design source document &nbsp;&middot;&nbsp; Live source: pi_app/web/teleop.py _DRIVE_HTML</div>
+
+<h2>What Is This Screen?</h2>
+<p>
+  A fail-safe phone teleoperation UI for <strong>WALL-E Mini</strong>, a 40&thinsp;kg electric garden wagon
+  with twin rubber tracks driven by two VESC motor controllers over CAN bus.
+  The phone browser is the only human control surface during outdoor use. The operator
+  holds the phone in one hand, typically in direct sunlight, possibly wearing work gloves,
+  with the other hand free. The connection is plain Wi-Fi (LAN, no cloud path).
+</p>
+<p>
+  The UI is a <strong>dark, portrait-only, full-screen PWA</strong> (Add-to-Home-Screen on iOS/Android).
+  All controls must be thumb-reachable in a single-handed grip. The visual hierarchy enforces
+  safety priority: E-STOP is largest and most prominent, ARM is secondary, the joystick is
+  the primary driving interface.
+</p>
+
+<div class="note">
+  The server runs a 250&thinsp;ms deadman watchdog. If the phone drops Wi-Fi or the browser tab
+  hides, the robot stops automatically — the UI is a remote control for a real outdoor robot,
+  not a game.
+</div>
+
+<h2>Component Inventory</h2>
+
+<h3>HUD Chip Row</h3>
+<p>Two rows of status chips at the top of the screen. First row: connection dot + LINK UP/DOWN label, RTT chip, ARM state chip. Second row: BATT voltage, CAP (speed cap %), DM (deadman heartbeat age), RC state.</p>
+<table>
+  <tr><th>Chip</th><th>States</th><th>Visual Class</th></tr>
+  <tr><td>Connection dot</td><td>connecting (grey) / live (green pulsing) / dead (red)</td><td><code>.dot</code> + <code>.live</code> / <code>.dead</code></td></tr>
+  <tr><td>RTT</td><td>— (no data) / &lt;120ms (neutral) / &ge;120ms (warn amber)</td><td><code>.chip</code> / <code>.chip.warn</code></td></tr>
+  <tr><td>ARM</td><td>DISARMED (neutral) / ARMED (green ok) / trip reason (red bad blinking)</td><td><code>.chip</code> / <code>.chip.ok</code> / <code>.chip.bad</code></td></tr>
+  <tr><td>BATT</td><td>— / voltage V (neutral) / &lt;21V (warn amber)</td><td><code>.chip</code> / <code>.chip.warn</code></td></tr>
+  <tr><td>CAP</td><td>— / CAP 30% / CAP 60% / CAP 100%</td><td><code>.chip</code> (neutral only)</td></tr>
+  <tr><td>DM (deadman)</td><td>— (disarmed) / HB Nms (neutral / warn at &gt;70% of 250ms window)</td><td><code>.chip</code> / <code>.chip.warn</code></td></tr>
+  <tr><td>RC</td><td>— / RC ARMED (green) / RC DISARMD (neutral) / RC ESTOP (red bad)</td><td><code>.chip.ok</code> / <code>.chip</code> / <code>.chip.bad</code></td></tr>
+</table>
+
+<h3>Camera Panel (collapsible)</h3>
+<p>Hidden until server reports <code>camera_available=true</code>. Toggle button above a 4:3 live JPEG stream via WebSocket. Shows fps and staleness hint overlay when active.</p>
+<table>
+  <tr><th>State</th><th>Visual</th></tr>
+  <tr><td>Panel hidden</td><td>Entire <code>.cam-panel</code> not displayed</td></tr>
+  <tr><td>CAM OFF</td><td>Button styled neutral; image wrap hidden</td></tr>
+  <tr><td>CAM ON</td><td>Button styled blue (<code>.cam-btn.on</code>); 4:3 image visible; fps hint bottom-right</td></tr>
+  <tr><td>Stale feed</td><td>Hint shows "stale Xs" when last frame &gt;2s ago</td></tr>
+</table>
+
+<h3>Speed Segmented Control</h3>
+<p>Three-segment pill: SLOW / NORMAL / FAST. Only one active at a time. Active segment is solid blue with shadow. Sends <code>speed</code> WS message on tap.</p>
+<div class="chip-row">
+  <span class="chip">SLOW (30% cap)</span>
+  <span class="chip">NORMAL (60% cap)</span>
+  <span class="chip">FAST (100% cap)</span>
+</div>
+
+<h3>E-STOP Button</h3>
+<p>Full-width, 56px tall, always visible. Largest touch target on the screen. Sends an immediate server-side latched stop on <strong>pointerdown</strong> (not click) — no hold required.</p>
+<table>
+  <tr><th>State</th><th>Label</th><th>Visual</th></tr>
+  <tr><td>Idle</td><td>E — STOP</td><td>Solid red background, white text, red shadow</td></tr>
+  <tr><td>Latched</td><td>E-STOP LATCHED</td><td>White background, red text + red ring; pulsing <code>latch</code> animation</td></tr>
+  <tr><td>Clear-gated (RC present, ch3 not cycled)</td><td>E-STOP · CYCLE RC CH3</td><td>Latched style; tap shows "CYCLE RC CH3 TO CLEAR" in dim state for 2.5s</td></tr>
+  <tr><td>First clear tap (bench/no RC)</td><td>TAP AGAIN TO CLEAR</td><td>Dim style (<code>.dim1</code>): rgba red bg, red border, white text; 3s timeout</td></tr>
+</table>
+
+<h3>ARM Button</h3>
+<p>Press-and-hold 520ms to arm. A radial SVG progress ring (30&times;30px, top-right corner of button) animates during the hold. Disarms on single tap when armed.</p>
+<table>
+  <tr><th>State</th><th>Label</th><th>Visual</th></tr>
+  <tr><td>Idle</td><td>HOLD TO ARM</td><td>Dark background, muted border/text</td></tr>
+  <tr><td>Holding</td><td>HOLD…</td><td>Green border + tint (<code>.arming</code>); ring animates 0→1</td></tr>
+  <tr><td>Arming (sent, awaiting server confirm)</td><td>ARMING…</td><td>Ring full; no armed class yet</td></tr>
+  <tr><td>Armed</td><td>ARMED · TAP TO DISARM</td><td>Green bg tint + border + shadow (<code>.armed</code>); ring resets</td></tr>
+  <tr><td>E-STOP latched</td><td>CLEAR E-STOP FIRST</td><td>Disabled (opacity .38)</td></tr>
+  <tr><td>Another driver active</td><td>ANOTHER DRIVER ACTIVE</td><td>Disabled</td></tr>
+</table>
+<p>Alongside the ARM button: a small "RC in hand" checkbox — when checked the arm ceremony bypasses the RC-armed requirement.</p>
+
+<h3>Joystick Pad (single arcade-mix)</h3>
+<p>One centered 2D arcade joystick pad. Size: <code>min(57vw, 340px)</code> square. A draggable knob (62px circle) spring-returns to centre on pointer release via CSS transition. Crosshair guides (1px lines) mark the centre axes. Client-side arcade mix: <code>left = throttle + STEER_GAIN*steer</code>, <code>right = throttle - STEER_GAIN*steer</code> with <code>STEER_GAIN = 0.8</code>. Both tracks clamped to [-1, 1].</p>
+<table>
+  <tr><th>State</th><th>Visual</th></tr>
+  <tr><td>Centered / idle</td><td>Knob centred; border neutral (<code>var(--bd)</code>); no direction class</td></tr>
+  <tr><td>Forward deflection</td><td>Border blue tint (<code>.fwd</code>); knob moves up+left/right; knob ring blue</td></tr>
+  <tr><td>Reverse deflection</td><td>Border red tint (<code>.rev</code>); knob moves down; knob ring red</td></tr>
+  <tr><td>Dragging</td><td>Knob has <code>.drag</code> — CSS spring transition removed for immediate follow</td></tr>
+</table>
+<p>Label below pad: <code>↑ FWD / REV ↓ &nbsp;&nbsp; ← STEER →</code></p>
+
+<h3>Disconnect / Deadman Overlay</h3>
+<p>Full-screen modal: fixed inset 0, z-index 100, dark blur backdrop. Appears on WS disconnect, deadman trip, or auth failure. Hidden by default. Requires explicit "DISMISS" button tap — cannot be dismissed by reconnection alone (deadman trip case).</p>
+<table>
+  <tr><th>Reason</th><th>Title</th><th>Subtitle</th></tr>
+  <tr><td>disconnected</td><td>DISCONNECTED</td><td>Robot stopped · reconnecting…</td></tr>
+  <tr><td>deadman</td><td>LINK LOST</td><td>Deadman tripped — robot stopped · re-arm to resume</td></tr>
+  <tr><td>unauthorized</td><td>UNAUTHORIZED</td><td>Bad or missing token — clear it and reload to re-enter</td></tr>
+</table>
+
+<h2>Arcade Mix Note</h2>
+<p>
+  The UI presents a single 2D joystick to the operator. The <strong>client-side arcade mix</strong> converts
+  (X, Y) axes into left/right tank track commands before sending over WebSocket:
+</p>
+<div class="note">
+  <code>throttle = -stickY</code> &nbsp; (stick up = forward = positive throttle)<br>
+  <code>left&nbsp; = clamp(throttle + 0.8 &times; stickX, -1, 1)</code><br>
+  <code>right = clamp(throttle &minus; 0.8 &times; stickX, -1, 1)</code>
+</div>
+<p>
+  <code>STEER_GAIN = 0.8</code> is a constant in the JS. The server then applies the
+  active speed cap (0.3 / 0.6 / 1.0) server-side before writing motor bytes.
+  Any redesign must preserve this client-side mixing — the server expects left/right
+  track values, not X/Y joystick axes.
+</p>
+
+<h2>Design Tokens (Current Baseline)</h2>
+
+<div class="token-grid">
+  <div class="swatch">
+    <div class="swatch-color" style="background:#080a0f"></div>
+    <div class="swatch-label">--bg<br><span class="swatch-hex">#080a0f</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#111318"></div>
+    <div class="swatch-label">--s1<br><span class="swatch-hex">#111318</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#1a1d27"></div>
+    <div class="swatch-label">--s2<br><span class="swatch-hex">#1a1d27</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#252836"></div>
+    <div class="swatch-label">--bd<br><span class="swatch-hex">#252836</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#2563eb"></div>
+    <div class="swatch-label">--blue<br><span class="swatch-hex">#2563eb</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#10b981"></div>
+    <div class="swatch-label">--green<br><span class="swatch-hex">#10b981</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#ef4444"></div>
+    <div class="swatch-label">--red<br><span class="swatch-hex">#ef4444</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#f59e0b"></div>
+    <div class="swatch-label">--amber<br><span class="swatch-hex">#f59e0b</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#f1f5f9"></div>
+    <div class="swatch-label">--text<br><span class="swatch-hex">#f1f5f9</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#94a3b8"></div>
+    <div class="swatch-label">--t2<br><span class="swatch-hex">#94a3b8</span></div>
+  </div>
+  <div class="swatch">
+    <div class="swatch-color" style="background:#475569"></div>
+    <div class="swatch-label">--t3<br><span class="swatch-hex">#475569</span></div>
+  </div>
+</div>
+
+<h3>Typography</h3>
+<p>Single typeface stack: <code>700 13px/1 -apple-system,"SF Pro Display",system-ui,sans-serif</code> — bold throughout.
+  Most text is uppercase with wide letter-spacing (0.05–0.14em). No body-weight text in the UI.</p>
+
+<h3>Radii &amp; Spacing</h3>
+<div class="chip-row">
+  <span class="chip">pad: 18px</span>
+  <span class="chip">estop: 14px</span>
+  <span class="chip">arm-btn: 10px</span>
+  <span class="chip">chip: 6px</span>
+  <span class="chip">seg: 7px</span>
+  <span class="chip">spd-seg: 10px</span>
+  <span class="chip">pknob: 50% (circle)</span>
+</div>
+
+<div class="constraint-box">
+  <h3>HARD CONSTRAINTS — Safety Affordances (Must Be Preserved)</h3>
+  <p style="color:var(--t2);font-size:12px;margin:0 0 10px;">These are not stylistic preferences. They exist because this is a real outdoor robot.
+  Violating any of them in a redesign creates a safety regression.</p>
+  <ol>
+    <li><strong>ARM requires a visible ~520ms hold affordance.</strong> The server enforces &ge;500ms.
+        The radial progress ring (or equivalent animated feedback) must clearly communicate to the operator
+        that they must sustain a deliberate hold — accidental taps must not arm the robot.</li>
+    <li><strong>E-STOP must be the largest, most reachable control and must visually latch.</strong>
+        It must be full-width (or the visual equivalent of maximum reachability), min 56px tall, always
+        visible, and its latched state must be unambiguously distinct from idle
+        (currently: inverted colour scheme + pulsing animation).</li>
+    <li><strong>The disconnect/deadman overlay must be full-screen, blocking, and require explicit dismissal.</strong>
+        It must not auto-dismiss on reconnect alone — the operator must consciously acknowledge a deadman trip
+        before being able to re-arm. Z-index must block all controls beneath it.</li>
+    <li><strong>All controls must be thumb-reachable in portrait one-handed operation with minimum 44px touch targets.</strong>
+        The joystick pad, E-STOP, ARM, and speed control must all be reachable without repositioning the grip.
+        The E-STOP must be reachable even with gloved hands / reduced dexterity.</li>
+    <li><strong>Pointer Events + spring-return behaviour must be preserved.</strong>
+        The joystick uses <code>pointerdown</code>/<code>pointermove</code>/<code>pointerup</code> with
+        <code>setPointerCapture</code> for correct multi-touch handling. The spring-return CSS transition
+        (cubic-bezier(.34,1.56,.64,1), 220ms) is a safety feature: lifting the thumb stops the robot.
+        E-STOP fires on <code>pointerdown</code> (not click) for minimum latency.</li>
+    <li><strong>State must remain legible in direct sunlight (contrast budget).</strong>
+        The dark theme is intentional for outdoor use — an OLED/dark-mode phone in sunlight has
+        better contrast than a washed-out light background. Any restyle must maintain sufficient
+        contrast ratios: active/armed states vs. idle states must be distinguishable at arm's length
+        in bright sunlight. The red E-STOP must remain immediately identifiable.</li>
+  </ol>
+</div>
+
+<h2>Restyle Guidance</h2>
+<p>
+  The current baseline is functional but visually minimal. A restyle may:
+  change the colour palette (preserving semantic colour roles: red=danger, green=armed/ok, blue=selected/active, amber=warn),
+  improve typography hierarchy, update border-radius / shadow / glassmorphism style,
+  add better iconography, or reflow the layout within the portrait phone form factor.
+</p>
+<p>
+  The restyle <strong>must be ported back into the <code>_DRIVE_HTML</code> inline string</strong>
+  in <code>pi_app/web/teleop.py</code>. There is no build step — all CSS and JS must be inline.
+  No external CDN dependencies. No frameworks. The file is served directly from a Flask Blueprint
+  via <code>return Response(_DRIVE_HTML, content_type="text/html")</code>.
+</p>
+
+</body>
+</html>

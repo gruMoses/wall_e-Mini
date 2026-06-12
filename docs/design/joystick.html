@@ -1,0 +1,113 @@
+<!-- @dsCard group="Components" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Joystick Pad — WALL-E Drive</title>
+<style>
+:root{
+  --bg:#080a0f;--s1:#111318;--s2:#1a1d27;--bd:#252836;
+  --blue:#2563eb;
+  --red:#ef4444;
+  --text:#f1f5f9;--t2:#94a3b8;--t3:#475569;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box;-webkit-user-select:none;user-select:none;}
+html,body{margin:0;background:var(--bg);color:var(--text);
+  font:700 13px/1 -apple-system,"SF Pro Display",system-ui,sans-serif;
+  padding:28px 20px 36px;}
+.card-title{font-size:10px;letter-spacing:.14em;color:var(--t3);margin-bottom:24px;}
+.states{display:flex;flex-direction:column;gap:28px;}
+.state-label{font-size:9px;letter-spacing:.12em;color:var(--t3);margin-bottom:10px;text-transform:uppercase;}
+
+/* ---- pad (copied from source, fixed 220px for card display) ---- */
+.sticks{display:flex;flex-direction:column;align-items:center;}
+.slbl{text-align:center;font-size:9px;font-weight:700;color:var(--t3);letter-spacing:.14em;margin-top:7px;}
+.pad{
+  width:220px;height:220px;
+  position:relative;overflow:hidden;
+  background:var(--s1);border:1px solid var(--bd);
+  border-radius:18px;
+  box-shadow:inset 0 2px 12px rgba(0,0,0,.5);
+  transition:border-color .15s,box-shadow .15s;
+}
+/* crosshair guides */
+.pad::before{
+  content:'';position:absolute;top:8px;bottom:8px;left:50%;width:1px;
+  background:var(--bd);pointer-events:none;transform:translateX(-50%);
+}
+.pad::after{
+  content:'';position:absolute;left:8px;right:8px;top:50%;height:1px;
+  background:var(--bd);pointer-events:none;
+}
+.pad.fwd{border-color:rgba(37,99,235,.45);box-shadow:inset 0 2px 12px rgba(0,0,0,.5),0 0 0 1px rgba(37,99,235,.12);}
+.pad.rev{border-color:rgba(239,68,68,.45);box-shadow:inset 0 2px 12px rgba(0,0,0,.5),0 0 0 1px rgba(239,68,68,.12);}
+.pknob{
+  position:absolute;width:62px;height:62px;border-radius:50%;
+  background:radial-gradient(circle at 38% 32%,#3c4263,#1a1d27);
+  border:1.5px solid #3a3f52;
+  box-shadow:0 4px 14px rgba(0,0,0,.65),0 0 0 1px rgba(255,255,255,.04);
+  transform:translate(-50%,-50%);
+  left:50%;top:50%;
+  pointer-events:none;
+}
+.pknob::before{
+  content:'';position:absolute;
+  width:10px;height:10px;border-radius:50%;
+  background:rgba(255,255,255,.07);
+  top:10px;left:50%;transform:translateX(-50%);
+}
+.pknob::after{
+  content:'';position:absolute;inset:-4px;
+  border-radius:50%;border:2px solid transparent;transition:border-color .12s;
+}
+.pad.fwd .pknob::after{border-color:rgba(37,99,235,.5);}
+.pad.rev .pknob::after{border-color:rgba(239,68,68,.5);}
+</style>
+</head>
+<body>
+
+<div class="card-title">ARCADE JOYSTICK PAD — STATES</div>
+
+<div class="states">
+
+  <!-- Centered / idle -->
+  <div>
+    <div class="state-label">Centered — neutral (spring-returned)</div>
+    <div class="sticks">
+      <div class="pad">
+        <div class="pknob" style="left:50%;top:50%;"></div>
+      </div>
+      <div class="slbl">↑ FWD / REV ↓ &nbsp;&nbsp; ← STEER →</div>
+    </div>
+  </div>
+
+  <!-- Forward-left deflection -->
+  <div>
+    <div class="state-label">Forward + steer left (~65% fwd, ~30% left) — .fwd border blue</div>
+    <div class="sticks">
+      <!-- knob travels ±38% of pad size; 220px pad → ±83.6px from centre -->
+      <!-- x=-0.30 → left = 50 + (-0.30)*38 = 38.6%; y=-0.65 → top = 50 + (-0.65)*38 = 25.3% -->
+      <div class="pad fwd">
+        <div class="pknob" style="left:38.6%;top:25.3%;"></div>
+      </div>
+      <div class="slbl">↑ FWD / REV ↓ &nbsp;&nbsp; ← STEER →</div>
+    </div>
+  </div>
+
+  <!-- Reverse -->
+  <div>
+    <div class="state-label">Reverse, centred steer — .rev border red</div>
+    <div class="sticks">
+      <!-- y=0.70 → top = 50 + 0.70*38 = 76.6% -->
+      <div class="pad rev">
+        <div class="pknob" style="left:50%;top:76.6%;"></div>
+      </div>
+      <div class="slbl">↑ FWD / REV ↓ &nbsp;&nbsp; ← STEER →</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

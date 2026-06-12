@@ -1,0 +1,96 @@
+<!-- @dsCard group="Components" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Overlay — WALL-E Drive</title>
+<style>
+:root{
+  --bg:#080a0f;--s1:#111318;--s2:#1a1d27;--bd:#252836;
+  --red:#ef4444;--red-md:rgba(239,68,68,.32);
+  --amber:#f59e0b;
+  --text:#f1f5f9;--t2:#94a3b8;--t3:#475569;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box;-webkit-user-select:none;user-select:none;}
+html,body{margin:0;background:var(--bg);color:var(--text);
+  font:700 13px/1 -apple-system,"SF Pro Display",system-ui,sans-serif;
+  padding:28px 20px 36px;}
+.card-title{font-size:10px;letter-spacing:.14em;color:var(--t3);margin-bottom:24px;}
+.states{display:flex;flex-direction:column;gap:24px;}
+.state-label{font-size:9px;letter-spacing:.12em;color:var(--t3);margin-bottom:10px;text-transform:uppercase;}
+
+/* ---- overlay (copied from source, rendered as contained card) ---- */
+.ov-card{
+  border-radius:16px;
+  border:1px solid var(--bd);
+  background:rgba(8,10,15,.94);
+  /* note: real overlay uses backdrop-filter:blur(14px) over the full screen */
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:13px;
+  padding:36px 24px 32px;
+}
+.ov-icon{font-size:58px;line-height:1;animation:blink 1.4s ease-in-out infinite;}
+.ov-icon.static{animation:none;}
+.ov-title{font-size:24px;font-weight:800;color:var(--red);letter-spacing:.06em;}
+.ov-title.amber{color:var(--amber);}
+.ov-sub{font-size:12px;color:var(--t2);text-align:center;max-width:270px;line-height:1.5;}
+.ov-btn{
+  margin-top:8px;padding:13px 44px;
+  border:1.5px solid var(--bd);border-radius:12px;
+  background:var(--s2);color:var(--text);
+  font:700 14px/1 inherit;letter-spacing:.08em;
+  transition:background .12s;
+}
+.ov-btn:active{background:var(--s1);}
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:.55;}}
+
+.note{font-size:10px;color:var(--t3);letter-spacing:.04em;margin-top:4px;text-align:center;}
+</style>
+</head>
+<body>
+
+<div class="card-title">DISCONNECT / DEADMAN OVERLAY — ALL REASONS</div>
+
+<div class="states">
+
+  <!-- Disconnected -->
+  <div>
+    <div class="state-label">Disconnected (WS closed — auto-reconnect in progress)</div>
+    <div class="ov-card">
+      <div class="ov-icon">&#9888;</div>
+      <div class="ov-title">DISCONNECTED</div>
+      <div class="ov-sub">Robot stopped &middot; reconnecting&hellip;</div>
+      <button class="ov-btn">DISMISS</button>
+    </div>
+    <div class="note">Full screen in production: fixed inset 0, z-index 100, backdrop-filter blur(14px)</div>
+  </div>
+
+  <!-- Deadman trip -->
+  <div>
+    <div class="state-label">Deadman tripped (&gt;250ms without heartbeat while armed)</div>
+    <div class="ov-card">
+      <div class="ov-icon">&#9888;</div>
+      <div class="ov-title">LINK LOST</div>
+      <div class="ov-sub">Deadman tripped &mdash; robot stopped &middot; re-arm to resume</div>
+      <button class="ov-btn">DISMISS</button>
+    </div>
+    <div class="note">Requires explicit DISMISS — does not auto-clear on reconnect</div>
+  </div>
+
+  <!-- Unauthorized -->
+  <div>
+    <div class="state-label">Unauthorized (bad or missing token)</div>
+    <div class="ov-card">
+      <div class="ov-icon static">&#128274;</div>
+      <div class="ov-title amber">UNAUTHORIZED</div>
+      <div class="ov-sub">Bad or missing token &mdash; clear it and reload to re-enter</div>
+      <button class="ov-btn">DISMISS</button>
+    </div>
+    <div class="note">No auto-reconnect in this state — requires page reload after clearing token</div>
+  </div>
+
+</div>
+</body>
+</html>

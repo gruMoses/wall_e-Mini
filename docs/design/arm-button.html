@@ -1,0 +1,138 @@
+<!-- @dsCard group="Components" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ARM Button — WALL-E Drive</title>
+<style>
+:root{
+  --bg:#080a0f;--s1:#111318;--s2:#1a1d27;--bd:#252836;
+  --blue:#2563eb;--blue-lo:rgba(37,99,235,.13);--blue-md:rgba(37,99,235,.32);
+  --green:#10b981;--green-lo:rgba(16,185,129,.13);--green-md:rgba(16,185,129,.3);
+  --red:#ef4444;--red-lo:rgba(239,68,68,.13);
+  --amber:#f59e0b;
+  --text:#f1f5f9;--t2:#94a3b8;--t3:#475569;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box;-webkit-user-select:none;user-select:none;}
+html,body{margin:0;background:var(--bg);color:var(--text);
+  font:700 13px/1 -apple-system,"SF Pro Display",system-ui,sans-serif;
+  padding:28px 20px 36px;}
+.card-title{font-size:10px;letter-spacing:.14em;color:var(--t3);margin-bottom:24px;}
+.states{display:flex;flex-direction:column;gap:22px;}
+.state-label{font-size:9px;letter-spacing:.12em;color:var(--t3);margin-bottom:8px;text-transform:uppercase;}
+
+/* ---- arm row (copied from source) ---- */
+.arm-row{display:flex;align-items:center;gap:10px;}
+.arm-outer{flex:1;position:relative;}
+.arm-btn{
+  width:100%;height:44px;border-radius:10px;
+  border:1.5px solid var(--bd);background:var(--s2);
+  color:var(--t2);font:700 12px/1 inherit;letter-spacing:.07em;
+  transition:background .15s,color .15s,border-color .15s,box-shadow .15s;
+}
+.arm-btn.arming{border-color:var(--green);color:var(--green);background:rgba(16,185,129,.05);}
+.arm-btn.armed{background:var(--green-lo);border-color:var(--green);color:var(--green);box-shadow:0 2px 14px var(--green-lo);}
+.arm-btn:disabled{opacity:.38;pointer-events:none;}
+/* radial progress ring */
+.arm-ring{
+  position:absolute;top:-7px;right:-7px;
+  width:30px;height:30px;pointer-events:none;overflow:visible;
+}
+.r-bg{fill:none;stroke:var(--bd);stroke-width:2.5;}
+.r-fg{
+  fill:none;stroke:var(--green);stroke-width:2.5;
+  stroke-linecap:round;
+  stroke-dasharray:94.25;stroke-dashoffset:94.25;
+}
+.rc-lbl{
+  display:flex;align-items:center;gap:6px;
+  font-size:11px;color:var(--t2);flex-shrink:0;
+}
+.rc-lbl input{width:16px;height:16px;accent-color:var(--blue);}
+</style>
+</head>
+<body>
+
+<div class="card-title">ARM BUTTON — THREE STATES</div>
+
+<div class="states">
+
+  <!-- State 1: Idle -->
+  <div>
+    <div class="state-label">State 1 — Idle (hold to arm)</div>
+    <div class="arm-row">
+      <div class="arm-outer">
+        <button class="arm-btn">HOLD TO ARM</button>
+        <svg class="arm-ring" viewBox="0 0 32 32" aria-hidden="true">
+          <circle class="r-bg" cx="16" cy="16" r="15"/>
+          <circle class="r-fg" cx="16" cy="16" r="15" transform="rotate(-90 16 16)" style="stroke-dashoffset:94.25"/>
+        </svg>
+      </div>
+      <label class="rc-lbl">
+        <input type="checkbox">
+        <span>RC in hand</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- State 2: Holding (520ms progress) -->
+  <div>
+    <div class="state-label">State 2 — Holding (~60% through 520ms window)</div>
+    <div class="arm-row">
+      <div class="arm-outer">
+        <button class="arm-btn arming">HOLD…</button>
+        <!-- ring at ~60% filled: offset = 94.25 * (1 - 0.60) = 37.70 -->
+        <svg class="arm-ring" viewBox="0 0 32 32" aria-hidden="true">
+          <circle class="r-bg" cx="16" cy="16" r="15"/>
+          <circle class="r-fg" cx="16" cy="16" r="15" transform="rotate(-90 16 16)" style="stroke-dashoffset:37.70"/>
+        </svg>
+      </div>
+      <label class="rc-lbl">
+        <input type="checkbox">
+        <span>RC in hand</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- State 3: Armed -->
+  <div>
+    <div class="state-label">State 3 — Armed (tap to disarm)</div>
+    <div class="arm-row">
+      <div class="arm-outer">
+        <button class="arm-btn armed">ARMED · TAP TO DISARM</button>
+        <!-- ring full when armed -->
+        <svg class="arm-ring" viewBox="0 0 32 32" aria-hidden="true">
+          <circle class="r-bg" cx="16" cy="16" r="15"/>
+          <circle class="r-fg" cx="16" cy="16" r="15" transform="rotate(-90 16 16)" style="stroke-dashoffset:0"/>
+        </svg>
+      </div>
+      <label class="rc-lbl">
+        <input type="checkbox">
+        <span>RC in hand</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- State 4: Disabled (E-STOP latched) -->
+  <div>
+    <div class="state-label">State 4 — Disabled (E-STOP latched)</div>
+    <div class="arm-row">
+      <div class="arm-outer">
+        <button class="arm-btn" disabled>CLEAR E-STOP FIRST</button>
+        <svg class="arm-ring" viewBox="0 0 32 32" aria-hidden="true">
+          <circle class="r-bg" cx="16" cy="16" r="15"/>
+          <circle class="r-fg" cx="16" cy="16" r="15" transform="rotate(-90 16 16)" style="stroke-dashoffset:94.25"/>
+        </svg>
+      </div>
+      <label class="rc-lbl">
+        <input type="checkbox">
+        <span>RC in hand</span>
+      </label>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
