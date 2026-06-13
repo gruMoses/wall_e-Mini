@@ -650,6 +650,10 @@ class FollowMeController:
         self._actual_left_rpm: int | None = None
         self._actual_right_rpm: int | None = None
         self._actual_speed_mps: float | None = None
+        self._actual_left_current_a: float | None = None
+        self._actual_right_current_a: float | None = None
+        self._actual_left_temp_c: float | None = None
+        self._actual_right_temp_c: float | None = None
         self._last_slip_active: bool = False
         # Consecutive-tick counter for the slip "going straight" guard. Evaluated
         # on the EMITTED/commanded steer; slip may only act once it persists.
@@ -760,15 +764,25 @@ class FollowMeController:
         left_rpm: int | None,
         right_rpm: int | None,
         actual_speed_mps: float | None,
+        left_current_a: float | None = None,
+        right_current_a: float | None = None,
+        left_temp_c: float | None = None,
+        right_temp_c: float | None = None,
     ) -> None:
         """Feed VESC telemetry for closed-loop speed control and slip detection.
 
         Called by controller.py in FOLLOW_ME mode before each compute() call.
         Passing all-None gracefully disables closed-loop / slip features.
+        The current/temp kwargs are optional for backward compatibility with
+        existing callers and tests that do not supply them.
         """
         self._actual_left_rpm = left_rpm
         self._actual_right_rpm = right_rpm
         self._actual_speed_mps = actual_speed_mps
+        self._actual_left_current_a = left_current_a
+        self._actual_right_current_a = right_current_a
+        self._actual_left_temp_c = left_temp_c
+        self._actual_right_temp_c = right_temp_c
 
     # ── Public API: main compute ─────────────────────────────────────────────
 
@@ -1052,6 +1066,16 @@ class FollowMeController:
                 # the 2026-06-13 slip runaway took a live RPM bench to diagnose.
                 "rpm_l": self._actual_left_rpm,
                 "rpm_r": self._actual_right_rpm,
+                # Motor phase current (A) per side — distinguishes over-current
+                # cutout from thermal shutdown when reviewing a post-mortem log.
+                "cur_l": round(self._actual_left_current_a, 2) if self._actual_left_current_a is not None else None,
+                "cur_r": round(self._actual_right_current_a, 2) if self._actual_right_current_a is not None else None,
+                # MOSFET (FET) temperature (°C) per side. Motor temp is parsed by
+                # the VESC driver (STATUS_4) but not surfaced on VescTelemetry;
+                # duty_cycle is also parsed (STATUS) but not on VescTelemetry —
+                # both require a vesc.py change to expose (out of scope here).
+                "tfet_l": round(self._actual_left_temp_c, 1) if self._actual_left_temp_c is not None else None,
+                "tfet_r": round(self._actual_right_temp_c, 1) if self._actual_right_temp_c is not None else None,
             }
             self._recorder_file.write(json.dumps(record) + "\n")
 

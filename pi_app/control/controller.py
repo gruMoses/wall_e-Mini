@@ -172,6 +172,10 @@ class Controller:
         self._actual_left_rpm: Optional[int] = None
         self._actual_right_rpm: Optional[int] = None
         self._actual_speed_mps: Optional[float] = None
+        self._actual_left_current_a: Optional[float] = None
+        self._actual_right_current_a: Optional[float] = None
+        self._actual_left_temp_c: Optional[float] = None
+        self._actual_right_temp_c: Optional[float] = None
         self._vesc_rx_frame_count: int = 0
         self._vesc_rx_parse_error_count: int = 0
         self._vesc_rx_recv_error_count: int = 0
@@ -428,6 +432,10 @@ class Controller:
                 left_rpm=self._actual_left_rpm,
                 right_rpm=self._actual_right_rpm,
                 actual_speed_mps=self._actual_speed_mps,
+                left_current_a=self._actual_left_current_a,
+                right_current_a=self._actual_right_current_a,
+                left_temp_c=self._actual_left_temp_c,
+                right_temp_c=self._actual_right_temp_c,
             )
             detections = self._person_detections or []
             left, right = self._follow_me.compute(detections)
@@ -470,6 +478,10 @@ class Controller:
                 self._telem_last_valid = mono_now
                 self._actual_left_rpm = _telem.left_rpm
                 self._actual_right_rpm = _telem.right_rpm
+                self._actual_left_current_a = getattr(_telem, "left_current_a", None)
+                self._actual_right_current_a = getattr(_telem, "right_current_a", None)
+                self._actual_left_temp_c = getattr(_telem, "left_temp_c", None)
+                self._actual_right_temp_c = getattr(_telem, "right_temp_c", None)
                 # Convert average eRPM to wheel speed (m/s)
                 _lr, _rr = _telem.left_rpm, _telem.right_rpm
                 _valid_rpms = [abs(r) for r in (_lr, _rr) if r is not None]
@@ -506,6 +518,10 @@ class Controller:
                 self._actual_left_rpm = None
                 self._actual_right_rpm = None
                 self._actual_speed_mps = None
+                self._actual_left_current_a = None
+                self._actual_right_current_a = None
+                self._actual_left_temp_c = None
+                self._actual_right_temp_c = None
             if isinstance(_rx_health, dict):
                 self._vesc_rx_frame_count = int(_rx_health.get("rx_frame_count", self._vesc_rx_frame_count))
                 self._vesc_rx_parse_error_count = int(

@@ -704,5 +704,113 @@ class TestRecorderHonestyFields(unittest.TestCase):
         self.assertGreaterEqual(emitted_count, 1)
 
 
+class TestRecorderCurrentTempFields(unittest.TestCase):
+    """Flight recorder: cur_l/cur_r (motor current A) and tfet_l/tfet_r (FET temp C)."""
+
+    def _make(self, **overrides) -> FollowMeController:
+        cfg = FollowMeConfig(**overrides)
+        return FollowMeController(cfg)
+
+    def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
+                bbox=(0.4, 0.3, 0.6, 0.8)) -> PersonDetection:
+        return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence, bbox=bbox)
+
+    def _run_with_telem(self, left_current_a=None, right_current_a=None,
+                        left_temp_c=None, right_temp_c=None,
+                        left_rpm=None, right_rpm=None):
+        """Run one compute tick with the given telemetry and return the parsed record."""
+        fm = self._make()
+        fm.update_telemetry(
+            left_rpm=left_rpm,
+            right_rpm=right_rpm,
+            actual_speed_mps=None,
+            left_current_a=left_current_a,
+            right_current_a=right_current_a,
+            left_temp_c=left_temp_c,
+            right_temp_c=right_temp_c,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("pi_app.control.follow_me.os.makedirs"):
+                with patch("pi_app.control.follow_me.time.time", return_value=3_000_000.0):
+                    _real_open = open
+
+                    def fake_open(path, *args, **kwargs):
+                        if "fm_trials" in str(path):
+                            return _real_open(os.path.join(tmp, "trial.jsonl"), *args, **kwargs)
+                        return _real_open(path, *args, **kwargs)
+
+                    with patch("builtins.open", side_effect=fake_open):
+                        fm.compute([self._person()])
+                        fm.stop_recorder()
+
+            with open(os.path.join(tmp, "trial.jsonl")) as fh:
+                return json.loads(fh.readline())
+
+    def test_current_and_temp_fields_present_with_values(self):
+        """cur_l/cur_r/tfet_l/tfet_r appear in the record and carry correct values
+        when current and temp telemetry are fed via update_telemetry."""
+        rec = self._run_with_telem(
+            left_current_a=12.34,
+            right_current_a=11.56,
+            left_temp_c=43.7,
+            right_temp_c=44.2,
+        )
+        self.assertIn("cur_l", rec)
+        self.assertIn("cur_r", rec)
+        self.assertIn("tfet_l", rec)
+        self.assertIn("tfet_r", rec)
+        self.assertAlmostEqual(rec["cur_l"], 12.34, places=2)
+        self.assertAlmostEqual(rec["cur_r"], 11.56, places=2)
+        self.assertAlmostEqual(rec["tfet_l"], 43.7, places=1)
+        self.assertAlmostEqual(rec["tfet_r"], 44.2, places=1)
+
+    def test_current_and_temp_fields_none_when_no_telemetry(self):
+        """cur_l/cur_r/tfet_l/tfet_r are None when update_telemetry is not called
+        (i.e., when telemetry is unavailable)."""
+        rec = self._run_with_telem()  # all defaults → None
+        self.assertIn("cur_l", rec)
+        self.assertIn("cur_r", rec)
+        self.assertIn("tfet_l", rec)
+        self.assertIn("tfet_r", rec)
+        self.assertIsNone(rec["cur_l"])
+        self.assertIsNone(rec["cur_r"])
+        self.assertIsNone(rec["tfet_l"])
+        self.assertIsNone(rec["tfet_r"])
+
+    def test_existing_rpm_fields_unchanged(self):
+        """rpm_l/rpm_r still appear with correct values alongside the new fields."""
+        rec = self._run_with_telem(
+            left_rpm=1500,
+            right_rpm=1480,
+            left_current_a=9.0,
+            right_current_a=8.5,
+            left_temp_c=38.0,
+            right_temp_c=39.5,
+        )
+        self.assertIn("rpm_l", rec)
+        self.assertIn("rpm_r", rec)
+        self.assertEqual(rec["rpm_l"], 1500)
+        self.assertEqual(rec["rpm_r"], 1480)
+
+    def test_legacy_fields_still_present(self):
+        """All fields fm_score.py depends on remain in the record after adding new ones."""
+        required = {"t", "x_raw", "x_filt", "x_err", "steer", "speed", "mode",
+                    "track_id", "depth", "conf", "rpm_l", "rpm_r"}
+        rec = self._run_with_telem(left_current_a=5.0, right_current_a=5.0,
+                                   left_temp_c=30.0, right_temp_c=30.0)
+        for field in required:
+            self.assertIn(field, rec, f"legacy field '{field}' missing from record")
+
+    def test_update_telemetry_backward_compat(self):
+        """Callers that omit the new kwargs (old call-site signature) still work."""
+        fm = self._make()
+        # Old-style call — no current/temp kwargs
+        fm.update_telemetry(left_rpm=100, right_rpm=100, actual_speed_mps=0.5)
+        self.assertIsNone(fm._actual_left_current_a)
+        self.assertIsNone(fm._actual_right_current_a)
+        self.assertIsNone(fm._actual_left_temp_c)
+        self.assertIsNone(fm._actual_right_temp_c)
+
+
 if __name__ == "__main__":
     unittest.main()
