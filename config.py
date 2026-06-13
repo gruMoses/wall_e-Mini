@@ -234,7 +234,15 @@ class FollowMeConfig:
     # throttle is reduced and a small steer feed-forward is injected.
     slip_threshold_rpm: float = 200.0       # eRPM differential to declare slip
     slip_throttle_reduction: float = 0.15   # throttle scale-back fraction (0–1)
-    slip_feedforward_gain: float = 0.02     # steer correction per eRPM differential (bytes/RPM)
+    # DISABLED 2026-06-13: zeroed after a Follow-Me steer runaway. VESC RPM
+    # telemetry went live this day (was always 0), activating slip comp for the
+    # first time. The steer feed-forward is positive feedback on a skid-steer
+    # robot — any turn creates an RPM differential, which injects more steer,
+    # which increases the differential — so it pinned steer to the ±max and lost
+    # the target. Throttle-reduction half left active. Re-enable only with a
+    # commanded-vs-actual slip detector (not raw rpm_diff). See fm_trials
+    # 1781382327 and the steer=25-on-direct-ticks signature.
+    slip_feedforward_gain: float = 0.0      # steer correction per eRPM differential (bytes/RPM)
 
     # ── Motor output rate ─────────────────────────────────────────────────────
     follow_output_rate_hz: float = 15.0  # motor commands at this Hz, decoupled from 30 fps vision
