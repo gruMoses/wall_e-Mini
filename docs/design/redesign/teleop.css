@@ -1,0 +1,346 @@
+/* ============================================================
+   WALL-E Drive — redesign stylesheet
+   Base structural rules + two theme scopes:
+     .tv-deck      — Direction A · FLIGHT DECK (warm graphite panel plates)
+     .tv-avionics  — Direction B · AVIONICS (cold near-black, brackets, mono numerals)
+   All system fonts. Semantic roles preserved:
+   red=danger · green=armed/ok · blue=selected/active · amber=warn
+   ============================================================ */
+
+/* ---------- screen shell ---------- */
+.tscreen{
+  position:relative;height:100%;display:flex;flex-direction:column;overflow:hidden;
+  background:var(--bg);color:var(--text);
+  font:700 13px/1 -apple-system,"SF Pro Display",Roboto,system-ui,sans-serif;
+  -webkit-tap-highlight-color:transparent;
+}
+.tscreen *,.tscreen *::before,.tscreen *::after{
+  box-sizing:border-box;-webkit-user-select:none;user-select:none;
+  -webkit-tap-highlight-color:transparent;
+}
+.tscreen button{cursor:pointer;font-family:inherit;}
+
+/* ---------- HUD ---------- */
+.t-hud{
+  background:var(--s1);border-bottom:1px solid var(--bd);
+  padding:10px 14px 10px;flex-shrink:0;
+}
+.t-linkrow{display:flex;align-items:center;gap:7px;}
+.t-sp{flex:1;}
+.t-dot{width:9px;height:9px;border-radius:50%;background:var(--t3);flex-shrink:0;transition:background .3s;}
+.t-dot.live{background:var(--green);box-shadow:0 0 0 3px var(--green-lo);animation:t-hbp 1.2s ease-in-out infinite;}
+.t-dot.dead{background:var(--red);box-shadow:0 0 0 3px var(--red-lo);}
+.t-lnk{font-size:10px;letter-spacing:.12em;color:var(--t2);}
+.t-lnk.live{color:var(--green);}
+.t-lnk.dead{color:var(--red);}
+
+.t-cambtn{
+  border:1px solid var(--bd);border-radius:var(--r-chip);
+  background:var(--s2);color:var(--t3);
+  font:800 9px/1 inherit;letter-spacing:.12em;
+  padding:6px 11px;display:flex;align-items:center;gap:6px;
+  transition:color .15s,border-color .15s,background .15s;
+}
+.t-cambtn .cd{width:6px;height:6px;border-radius:50%;background:var(--t3);}
+.t-cambtn.on{border-color:var(--blue);color:var(--blue);background:var(--blue-lo);}
+.t-cambtn.on .cd{background:var(--blue);box-shadow:0 0 6px var(--blue);}
+
+/* chips — compact density */
+.t-chips{display:flex;gap:6px;margin-top:9px;}
+.t-chip{
+  flex:1;text-align:center;font-size:10px;letter-spacing:.05em;
+  border:1px solid var(--bd);border-radius:var(--r-chip);
+  padding:6px 4px;background:var(--s2);color:var(--t2);white-space:nowrap;
+  transition:all .2s;
+}
+.t-chip.ok{background:var(--green-lo);border-color:var(--green);color:var(--green);}
+.t-chip.warn{border-color:var(--amber);color:var(--amber);}
+.t-chip.bad{background:var(--red-lo);border-color:var(--red);color:var(--red);animation:t-blink .9s infinite;}
+
+/* cells — roomy density (instrument cluster) */
+.t-cells{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:10px;}
+.t-cell{
+  border:1px solid var(--bd);background:var(--s2);border-radius:var(--r-chip);
+  padding:8px 9px 7px;display:flex;flex-direction:column;gap:5px;min-width:0;
+  transition:all .2s;
+}
+.t-cell .lab{font-size:8px;letter-spacing:.16em;color:var(--t3);}
+.t-cell .val{font-size:14px;letter-spacing:.02em;color:var(--text);white-space:nowrap;overflow:hidden;}
+.t-cell.ok{border-color:var(--green);background:var(--green-lo);}
+.t-cell.ok .val,.t-cell.ok .lab{color:var(--green);}
+.t-cell.warn{border-color:var(--amber);}
+.t-cell.warn .val{color:var(--amber);}
+.t-cell.bad{border-color:var(--red);background:var(--red-lo);animation:t-blink .9s infinite;}
+.t-cell.bad .val,.t-cell.bad .lab{color:var(--red);}
+
+/* ---------- camera panel ---------- */
+.t-cam{
+  margin:9px 12px 0;flex-shrink:0;position:relative;overflow:hidden;
+  height:202px;border:1px solid var(--bd);border-radius:var(--r-panel);
+  background:repeating-linear-gradient(45deg,var(--s1) 0 16px,var(--s2) 16px 32px);
+}
+.t-cam .ph{
+  position:absolute;inset:0;display:flex;flex-direction:column;gap:5px;
+  align-items:center;justify-content:center;
+  font:500 10px/1.5 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace;
+  color:var(--t3);letter-spacing:.08em;text-align:center;
+}
+.t-cam .fps{
+  position:absolute;right:8px;bottom:8px;
+  font:700 9px/1 inherit;letter-spacing:.08em;color:var(--t2);
+  background:rgba(0,0,0,.5);padding:4px 8px;border-radius:5px;
+}
+
+/* ---------- drive zone (joystick bottom-anchored) ---------- */
+.t-drive{
+  flex:1;min-height:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:flex-end;
+  padding:8px 12px 2px;gap:7px;
+}
+.t-padrow{
+  flex:1;min-height:120px;max-height:330px;width:100%;
+  display:flex;align-items:stretch;justify-content:center;gap:13px;
+}
+.t-pad{
+  height:100%;aspect-ratio:1/1;max-width:310px;
+  position:relative;overflow:hidden;flex-shrink:1;
+  background:var(--s1);border:1px solid var(--bd);border-radius:var(--r-pad);
+  box-shadow:inset 0 2px 14px rgba(0,0,0,.55);
+  touch-action:none;
+  transition:border-color .15s;
+}
+.t-pad::before{
+  content:'';position:absolute;top:9px;bottom:9px;left:50%;width:1px;
+  background:var(--bd);pointer-events:none;transform:translateX(-50%);
+}
+.t-pad::after{
+  content:'';position:absolute;left:9px;right:9px;top:50%;height:1px;
+  background:var(--bd);pointer-events:none;
+}
+.t-guide{
+  position:absolute;left:50%;top:50%;width:62%;height:62%;
+  transform:translate(-50%,-50%);border-radius:50%;
+  border:1px solid var(--bd);opacity:.55;pointer-events:none;
+}
+.t-pad.fwd{border-color:var(--blue-bd);}
+.t-pad.rev{border-color:var(--red-bd);}
+.t-c{position:absolute;width:14px;height:14px;border:1.5px solid var(--bd);pointer-events:none;display:none;}
+.t-c.tl{top:6px;left:6px;border-right:none;border-bottom:none;}
+.t-c.tr{top:6px;right:6px;border-left:none;border-bottom:none;}
+.t-c.bl{bottom:6px;left:6px;border-right:none;border-top:none;}
+.t-c.br{bottom:6px;right:6px;border-left:none;border-top:none;}
+
+.t-knob{
+  position:absolute;width:64px;height:64px;border-radius:50%;
+  transform:translate(-50%,-50%);pointer-events:none;
+}
+.t-knob.spring{
+  transition:left .22s cubic-bezier(.34,1.56,.64,1),top .22s cubic-bezier(.34,1.56,.64,1);
+}
+.t-slbl{
+  text-align:center;font-size:9px;font-weight:800;flex-shrink:0;
+  color:var(--t3);letter-spacing:.18em;
+}
+
+/* track gauges */
+.t-gauge{display:flex;flex-direction:column;align-items:center;gap:6px;flex-shrink:0;}
+.t-gbar{
+  flex:1;width:15px;position:relative;overflow:hidden;
+  background:var(--s1);border:1px solid var(--bd);border-radius:8px;
+}
+.t-gbar::after{
+  content:'';position:absolute;left:2px;right:2px;top:50%;height:1px;
+  background:var(--t3);opacity:.6;
+}
+.t-gfill{position:absolute;left:2.5px;right:2.5px;border-radius:4px;transition:height .1s linear;}
+.t-gfill.pos{bottom:50%;background:var(--green);box-shadow:0 0 8px var(--green-lo);}
+.t-gfill.neg{top:50%;background:var(--red);box-shadow:0 0 8px var(--red-lo);}
+.t-glab{font-size:9px;font-weight:800;color:var(--t3);letter-spacing:.1em;}
+
+/* ---------- speed segmented ---------- */
+.t-seg{
+  display:flex;flex-shrink:0;margin:7px 12px 0;
+  background:var(--s1);border:1px solid var(--bd);
+  border-radius:var(--r-seg);padding:3px;gap:3px;
+}
+.t-seg button{
+  flex:1;padding:11px 2px;border:none;border-radius:calc(var(--r-seg) - 3px);
+  background:transparent;color:var(--t3);
+  font:800 10px/1 inherit;letter-spacing:.14em;
+  transition:background .14s,color .14s,box-shadow .14s;
+}
+.t-seg button.on{background:var(--blue);color:#fff;box-shadow:0 2px 12px var(--blue-md);}
+
+/* ---------- ARM row ---------- */
+.t-armrow{display:flex;align-items:center;gap:11px;padding:9px 12px 0;flex-shrink:0;}
+.t-armouter{flex:1;position:relative;}
+.t-arm{
+  width:100%;height:48px;border-radius:var(--r-arm);
+  border:1.5px solid var(--bd);background:var(--s2);
+  color:var(--t2);font:800 12px/1 inherit;letter-spacing:.09em;
+  transition:background .15s,color .15s,border-color .15s,box-shadow .15s;
+  touch-action:none;
+}
+.t-arm.arming{border-color:var(--green);color:var(--green);background:rgba(16,185,129,.05);}
+.t-arm.armed{
+  background:var(--green-lo);border-color:var(--green);color:var(--green);
+  box-shadow:0 2px 16px var(--green-lo);
+}
+.t-arm:disabled{opacity:.38;pointer-events:none;}
+.t-ring{
+  position:absolute;top:-8px;right:-8px;width:32px;height:32px;
+  pointer-events:none;overflow:visible;
+}
+.t-ring .r-bg{fill:none;stroke:var(--bd);stroke-width:2.5;}
+.t-ring .r-fg{fill:none;stroke:var(--green);stroke-width:2.5;stroke-linecap:round;stroke-dasharray:94.25;}
+.t-rc{display:flex;align-items:center;gap:7px;font-size:10px;font-weight:700;color:var(--t2);flex-shrink:0;letter-spacing:.04em;}
+.t-rc input{width:18px;height:18px;accent-color:var(--blue);}
+
+/* ---------- E-STOP ---------- */
+.t-estopwrap{padding:10px 12px 12px;flex-shrink:0;}
+.t-estop{
+  width:100%;height:62px;border:none;border-radius:var(--r-estop);
+  background:var(--red);color:#fff;
+  font:900 18px/1 inherit;letter-spacing:.18em;
+  box-shadow:0 4px 26px var(--red-md),0 2px 4px rgba(0,0,0,.4);
+  position:relative;overflow:hidden;
+  transition:transform .08s,box-shadow .08s;
+  touch-action:none;
+}
+.t-estop:active{transform:scaleY(.96);box-shadow:0 2px 12px var(--red-md);}
+.t-estop.latched{
+  background:var(--latch-bg,#fff);color:var(--red);
+  box-shadow:0 0 0 3px var(--red),0 4px 22px var(--red-md);
+  animation:t-latch 1.1s ease-in-out infinite;
+}
+.t-estop.dim1{
+  background:var(--red-lo);color:#fff;
+  border:2px solid var(--red);box-shadow:none;animation:none;
+}
+
+/* ---------- overlay ---------- */
+.t-ov{
+  position:absolute;inset:0;z-index:100;
+  background:rgba(4,6,10,.86);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:14px;padding:24px;text-align:center;
+}
+.t-ov .ic{font-size:52px;line-height:1;animation:t-blink 1.4s ease-in-out infinite;}
+.t-ov .ti{font-size:24px;font-weight:900;color:var(--red);letter-spacing:.1em;}
+.t-ov .su{font-size:12px;font-weight:700;color:var(--t2);line-height:1.55;max-width:250px;letter-spacing:.03em;}
+.t-ov button{
+  margin-top:8px;padding:15px 48px;
+  border:1.5px solid var(--bd);border-radius:12px;
+  background:var(--s2);color:var(--text);
+  font:800 13px/1 inherit;letter-spacing:.12em;
+}
+
+/* ---------- keyframes ---------- */
+@keyframes t-hbp{
+  0%,100%{opacity:1;box-shadow:0 0 0 3px var(--green-lo);}
+  50%{opacity:.72;box-shadow:0 0 0 6px transparent;}
+}
+@keyframes t-blink{0%,100%{opacity:1;}50%{opacity:.55;}}
+@keyframes t-latch{
+  0%,100%{box-shadow:0 0 0 3px var(--red),0 4px 22px var(--red-md);}
+  50%{box-shadow:0 0 0 7px var(--red),0 6px 32px var(--red-md);}
+}
+
+/* ============================================================
+   DIRECTION A — FLIGHT DECK
+   Warm graphite panel plates, machined knob, hazard texture E-STOP
+   ============================================================ */
+.tv-deck{
+  --bg:#0b0c0f;--s1:#14161b;--s2:#1c1f25;--bd:#2c303a;
+  --blue:#3b82f6;--blue-lo:rgba(59,130,246,.13);--blue-md:rgba(59,130,246,.35);--blue-bd:rgba(59,130,246,.55);
+  --green:#10b981;--green-lo:rgba(16,185,129,.16);
+  --red:#e5484d;--red-lo:rgba(229,72,77,.16);--red-md:rgba(229,72,77,.38);--red-bd:rgba(229,72,77,.55);
+  --amber:#f5a623;
+  --text:#eef0f3;--t2:#9aa3ae;--t3:#5d656f;
+  --r-panel:8px;--r-pad:14px;--r-seg:9px;--r-arm:9px;--r-estop:12px;--r-chip:5px;
+}
+.tv-deck .t-hud{
+  background:linear-gradient(#171a20,#121419);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035),0 1px 0 rgba(0,0,0,.5);
+}
+/* hazard strips on E-STOP top & bottom edges */
+.tv-deck .t-estop::before{
+  content:'';position:absolute;left:0;right:0;top:0;height:7px;
+  background:repeating-linear-gradient(-45deg,rgba(0,0,0,.32) 0 9px,transparent 9px 18px);
+  pointer-events:none;
+}
+.tv-deck .t-estop::after{
+  content:'';position:absolute;left:0;right:0;bottom:0;height:7px;
+  background:repeating-linear-gradient(-45deg,rgba(0,0,0,.32) 0 9px,transparent 9px 18px);
+  pointer-events:none;
+}
+.tv-deck .t-estop.latched::before,.tv-deck .t-estop.latched::after,
+.tv-deck .t-estop.dim1::before,.tv-deck .t-estop.dim1::after{display:none;}
+/* machined knob with knurled ring */
+.tv-deck .t-knob{
+  background:radial-gradient(circle at 36% 30%,#454c5b,#181b21 72%);
+  border:2px solid #3a414f;
+  box-shadow:0 5px 16px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,255,255,.09);
+}
+.tv-deck .t-knob::before{
+  content:'';position:absolute;inset:6px;border-radius:50%;
+  border:1.5px dashed rgba(255,255,255,.14);
+}
+.tv-deck .t-knob::after{
+  content:'';position:absolute;inset:-4px;border-radius:50%;
+  border:2px solid transparent;transition:border-color .12s;
+}
+.tv-deck .t-pad.fwd .t-knob::after{border-color:var(--blue-bd);}
+.tv-deck .t-pad.rev .t-knob::after{border-color:var(--red-bd);}
+
+/* ============================================================
+   DIRECTION B — AVIONICS
+   Cold near-black, corner brackets, octagonal E-STOP, mono numerals
+   ============================================================ */
+.tv-avionics{
+  --bg:#04070c;--s1:#0a101a;--s2:#0f1726;--bd:#1e2c44;
+  --blue:#4da3ff;--blue-lo:rgba(77,163,255,.12);--blue-md:rgba(77,163,255,.32);--blue-bd:rgba(77,163,255,.6);
+  --green:#2dd4a0;--green-lo:rgba(45,212,160,.14);
+  --red:#ff4d57;--red-lo:rgba(255,77,87,.15);--red-md:rgba(255,77,87,.34);--red-bd:rgba(255,77,87,.6);
+  --amber:#ffc24b;
+  --text:#e9f1fb;--t2:#8da4bd;--t3:#475a73;
+  --latch-bg:#eaf3ff;
+  --r-panel:6px;--r-pad:10px;--r-seg:7px;--r-arm:7px;--r-estop:10px;--r-chip:4px;
+  --mono:ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace;
+}
+.tv-avionics .num{font-family:var(--mono);font-weight:600;letter-spacing:0;}
+.tv-avionics .t-chip,.tv-avionics .t-cell{background:transparent;}
+.tv-avionics .t-chip.ok,.tv-avionics .t-cell.ok{background:var(--green-lo);}
+.tv-avionics .t-chip.bad,.tv-avionics .t-cell.bad{background:var(--red-lo);}
+.tv-avionics .t-hud{background:linear-gradient(rgba(77,163,255,.04),transparent),var(--s1);}
+.tv-avionics .t-c{display:block;}
+.tv-avionics .t-pad{box-shadow:inset 0 2px 18px rgba(0,0,0,.6),inset 0 0 50px rgba(77,163,255,.03);}
+.tv-avionics .t-pad.fwd{box-shadow:inset 0 2px 18px rgba(0,0,0,.6),0 0 0 1px var(--blue-lo),0 0 18px rgba(77,163,255,.1);}
+.tv-avionics .t-pad.rev{box-shadow:inset 0 2px 18px rgba(0,0,0,.6),0 0 0 1px var(--red-lo),0 0 18px rgba(255,77,87,.1);}
+/* octagonal stop-sign E-STOP */
+.tv-avionics .t-estopwrap{filter:drop-shadow(0 4px 18px var(--red-md));}
+.tv-avionics .t-estop{
+  border-radius:0;
+  clip-path:polygon(16px 0,calc(100% - 16px) 0,100% 16px,100% calc(100% - 16px),calc(100% - 16px) 100%,16px 100%,0 calc(100% - 16px),0 16px);
+  box-shadow:none;
+}
+.tv-avionics .t-estop.latched{animation:t-blink 1.1s ease-in-out infinite;}
+/* reticle knob */
+.tv-avionics .t-knob{
+  background:radial-gradient(circle at 50% 42%,#17233a,#0b1322 74%);
+  border:1.5px solid #2c4263;
+  box-shadow:0 4px 14px rgba(0,0,0,.65);
+}
+.tv-avionics .t-knob::before{
+  content:'';position:absolute;left:50%;top:50%;width:8px;height:8px;
+  border-radius:50%;background:var(--blue);opacity:.8;
+  transform:translate(-50%,-50%);box-shadow:0 0 10px var(--blue);
+  transition:background .12s,box-shadow .12s;
+}
+.tv-avionics .t-knob::after{
+  content:'';position:absolute;inset:-4px;border-radius:50%;
+  border:1.5px solid rgba(77,163,255,.28);transition:border-color .12s;
+}
+.tv-avionics .t-pad.fwd .t-knob::after{border-color:var(--blue-bd);}
+.tv-avionics .t-pad.rev .t-knob::after{border-color:var(--red-bd);}
+.tv-avionics .t-pad.rev .t-knob::before{background:var(--red);box-shadow:0 0 10px var(--red);}

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WALL-E Drive — Android Redesign</title>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="teleop.css">
+<style>
+:root{color-scheme:dark;}
+html,body{margin:0;background:#202126;color:#e8e9ec;
+  font:400 14px/1.6 -apple-system,"SF Pro Text",Roboto,system-ui,sans-serif;}
+.page{max-width:1060px;margin:0 auto;padding:36px 28px 56px;}
+.page-h1{font-size:21px;font-weight:800;letter-spacing:.05em;margin:0 0 4px;}
+.page-sub{font-size:12px;color:#9a9da6;letter-spacing:.06em;margin:0 0 18px;}
+.page-notes{
+  font-size:12px;color:#9a9da6;line-height:1.7;max-width:760px;
+  border:1px solid #34363e;border-radius:10px;background:#26272d;
+  padding:12px 16px;margin:0 0 32px;
+}
+.page-notes strong{color:#cfd1d8;font-weight:700;}
+.frames{display:flex;gap:48px;justify-content:center;flex-wrap:wrap;align-items:flex-start;}
+.frame-col{display:flex;flex-direction:column;gap:14px;align-items:center;}
+.frame-label{font-size:11px;font-weight:800;letter-spacing:.16em;color:#cfd1d8;}
+.frame-label .dim{color:#74767f;font-weight:700;}
+.next-steps{
+  margin:40px auto 0;max-width:760px;
+  font-size:12px;color:#9a9da6;line-height:1.7;
+}
+.next-steps h2{font-size:12px;font-weight:800;letter-spacing:.12em;color:#cfd1d8;margin:0 0 6px;}
+.next-steps ul{margin:0;padding-left:18px;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="frames/android-frame.jsx"></script>
+<script type="text/babel" src="frames/tweaks-panel.jsx"></script>
+<script type="text/babel" src="teleop-app.jsx"></script>
+
+<script type="text/babel">
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "density": "compact",
+  "simState": "Nominal"
+}/*EDITMODE-END*/;
+
+const SIM_MAP = {
+  "Nominal": "nominal",
+  "E-STOP latched": "estop-latched",
+  "Disconnected": "disconnected",
+  "Low battery": "low-battery"
+};
+
+function App() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const simState = SIM_MAP[t.simState] || "nominal";
+
+  return (
+    <div className="page">
+      <h1 className="page-h1">WALL-E DRIVE — PHONE TELEOP REDESIGN</h1>
+      <p className="page-sub">TWO INDUSTRIAL / COCKPIT DIRECTIONS · FULLY INTERACTIVE · ANDROID FRAME · SYSTEM FONTS ONLY</p>
+      <div className="page-notes">
+        <strong>What's preserved (safety constraints from SPEC):</strong> 520&thinsp;ms hold-to-arm with progress ring ·
+        E-STOP largest control, latching, fires on pointerdown · spring-return joystick with pointer capture ·
+        client-side arcade mix (gain 0.8) · sunlight-grade contrast.
+        <strong> What's new:</strong> E-STOP moved to the very bottom (closest to the thumb), joystick bottom-anchored,
+        live L/R track gauges flanking the pad, camera toggle in the HUD header. Everything is inline-portable CSS/JS — no frameworks needed for the production port.
+        <strong> Try it:</strong> drag the stick, hold ARM, tap E-STOP twice to latch/clear, toggle CAM. Tweaks: HUD density + simulated states.
+      </div>
+
+      <div className="frames">
+        <div className="frame-col" data-screen-label="Direction A — Flight Deck">
+          <div className="frame-label">A · FLIGHT DECK <span className="dim">— panel plates, machined knob, hazard E-STOP</span></div>
+          <AndroidDevice dark width={412} height={892}>
+            <TeleopScreen variant="deck" density={t.density} simState={simState} />
+          </AndroidDevice>
+        </div>
+        <div className="frame-col" data-screen-label="Direction B — Avionics">
+          <div className="frame-label">B · AVIONICS <span className="dim">— brackets, mono numerals, octagonal E-STOP</span></div>
+          <AndroidDevice dark width={412} height={892}>
+            <TeleopScreen variant="avionics" density={t.density} simState={simState} />
+          </AndroidDevice>
+        </div>
+      </div>
+
+      <div className="next-steps">
+        <h2>NEXT STEPS</h2>
+        <ul>
+          <li>Pick a direction (or mix: e.g. Flight Deck surfaces + Avionics octagonal E-STOP) and I'll fold it into one final screen.</li>
+          <li>Then I can produce a port-ready single-file HTML matching the <code>_DRIVE_HTML</code> inline-string constraints (vanilla JS, no React).</li>
+          <li>States not yet drawn: RC-gated E-STOP clear ("CYCLE RC CH3"), another-driver-active, unauthorized overlay.</li>
+        </ul>
+      </div>
+
+      <TweaksPanel>
+        <TweakSection label="HUD" />
+        <TweakRadio label="Density" value={t.density} options={["compact", "roomy"]}
+                    onChange={(v) => setTweak("density", v)} />
+        <TweakSection label="Simulation" />
+        <TweakSelect label="State" value={t.simState}
+                     options={["Nominal", "E-STOP latched", "Disconnected", "Low battery"]}
+                     onChange={(v) => setTweak("simState", v)} />
+      </TweaksPanel>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

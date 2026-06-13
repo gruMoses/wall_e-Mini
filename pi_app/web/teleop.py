@@ -1202,13 +1202,20 @@ _DRIVE_HTML = r"""<!DOCTYPE html>
 <link rel="apple-touch-icon" href="/drive/icon.svg">
 <title>WALL-E Drive</title>
 <style>
+/* ============================================================
+   WALL-E Drive — FLIGHT DECK (Direction A) skin.
+   Tokens flattened from the designer's .tv-deck scope: warm graphite
+   panel plates, machined knurled knob, hazard-stripe E-STOP.
+   Semantic roles: red=danger · green=armed/ok · blue=selected · amber=warn
+   ============================================================ */
 :root{
-  --bg:#080a0f;--s1:#111318;--s2:#1a1d27;--bd:#252836;
-  --blue:#2563eb;--blue-lo:rgba(37,99,235,.13);--blue-md:rgba(37,99,235,.32);
-  --green:#10b981;--green-lo:rgba(16,185,129,.13);--green-md:rgba(16,185,129,.3);
-  --red:#ef4444;--red-lo:rgba(239,68,68,.13);--red-md:rgba(239,68,68,.32);
-  --amber:#f59e0b;
-  --text:#f1f5f9;--t2:#94a3b8;--t3:#475569;
+  --bg:#0b0c0f;--s1:#14161b;--s2:#1c1f25;--bd:#2c303a;
+  --blue:#3b82f6;--blue-lo:rgba(59,130,246,.13);--blue-md:rgba(59,130,246,.35);--blue-bd:rgba(59,130,246,.55);
+  --green:#10b981;--green-lo:rgba(16,185,129,.16);--green-md:rgba(16,185,129,.3);
+  --red:#e5484d;--red-lo:rgba(229,72,77,.16);--red-md:rgba(229,72,77,.38);--red-bd:rgba(229,72,77,.55);
+  --amber:#f5a623;
+  --text:#eef0f3;--t2:#9aa3ae;--t3:#5d656f;
+  --r-panel:8px;--r-pad:14px;--r-seg:9px;--r-arm:9px;--r-estop:12px;--r-chip:5px;
   color-scheme:dark;
 }
 *,*::before,*::after{
@@ -1219,30 +1226,31 @@ _DRIVE_HTML = r"""<!DOCTYPE html>
 html,body{margin:0;height:100%;overflow:hidden;}
 body{
   background:var(--bg);color:var(--text);
-  font:700 13px/1 -apple-system,"SF Pro Display",system-ui,sans-serif;
+  font:700 13px/1 -apple-system,"SF Pro Display",Roboto,system-ui,sans-serif;
   display:flex;flex-direction:column;
   padding-top:env(safe-area-inset-top);
   padding-bottom:env(safe-area-inset-bottom);
   padding-left:env(safe-area-inset-left);
   padding-right:env(safe-area-inset-right);
 }
-/* ---- overlay ---- */
+button{cursor:pointer;font-family:inherit;}
+/* ---- overlay (disconnect / deadman / unauthorized) ---- */
 #overlay{
   position:fixed;inset:0;z-index:100;
-  background:rgba(8,10,15,.94);
+  background:rgba(4,6,10,.92);
   backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
   display:flex;flex-direction:column;
-  align-items:center;justify-content:center;gap:13px;
+  align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;
 }
 #overlay.hidden{display:none;}
-.ov-icon{font-size:58px;line-height:1;animation:blink 1.4s ease-in-out infinite;}
-.ov-title{font-size:24px;font-weight:800;color:var(--red);letter-spacing:.06em;}
-.ov-sub{font-size:12px;color:var(--t2);text-align:center;max-width:270px;line-height:1.5;}
+.ov-icon{font-size:54px;line-height:1;animation:blink 1.4s ease-in-out infinite;}
+.ov-title{font-size:24px;font-weight:900;color:var(--red);letter-spacing:.1em;}
+.ov-sub{font-size:12px;font-weight:700;color:var(--t2);text-align:center;max-width:270px;line-height:1.55;letter-spacing:.03em;}
 .ov-btn{
-  margin-top:8px;padding:13px 44px;
+  margin-top:8px;padding:15px 48px;
   border:1.5px solid var(--bd);border-radius:12px;
   background:var(--s2);color:var(--text);
-  font:inherit;font-size:14px;letter-spacing:.08em;
+  font:800 13px/1 inherit;letter-spacing:.12em;
   transition:background .12s;
 }
 .ov-btn:active{background:var(--s1);}
@@ -1261,84 +1269,164 @@ body{
 }
 /* ---- HUD ---- */
 .hud{
-  background:var(--s1);border-bottom:1px solid var(--bd);
-  padding:8px 14px;flex-shrink:0;
+  background:linear-gradient(#171a20,#121419);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035),0 1px 0 rgba(0,0,0,.5);
+  border-bottom:1px solid var(--bd);
+  padding:10px 14px;flex-shrink:0;
 }
-.hud-r{display:flex;align-items:center;gap:6px;}
-.hud-r+.hud-r{margin-top:5px;}
+.hud-r{display:flex;align-items:center;gap:7px;}
+.hud-r+.hud-r{margin-top:9px;}
 .sp{flex:1;}
 .dot{
-  width:8px;height:8px;border-radius:50%;background:var(--t3);flex-shrink:0;
+  width:9px;height:9px;border-radius:50%;background:var(--t3);flex-shrink:0;
   transition:background .3s,box-shadow .3s;
 }
-.dot.live{background:var(--green);box-shadow:0 0 0 3px rgba(16,185,129,.18);animation:hbp 1.2s ease-in-out infinite;}
-.dot.dead{background:var(--red);box-shadow:0 0 0 3px rgba(239,68,68,.18);}
-.lnk{font-size:10px;letter-spacing:.06em;color:var(--t2);transition:color .3s;}
+.dot.live{background:var(--green);box-shadow:0 0 0 3px var(--green-lo);animation:hbp 1.2s ease-in-out infinite;}
+.dot.dead{background:var(--red);box-shadow:0 0 0 3px var(--red-lo);}
+.lnk{font-size:10px;letter-spacing:.12em;color:var(--t2);transition:color .3s;}
 .lnk.live{color:var(--green);}.lnk.dead{color:var(--red);}
+/* CAM toggle lives in the HUD header (right side) */
+.cam-btn{
+  border:1px solid var(--bd);border-radius:var(--r-chip);
+  background:var(--s2);color:var(--t3);
+  font:800 9px/1 inherit;letter-spacing:.12em;
+  padding:8px 11px;display:flex;align-items:center;gap:6px;flex-shrink:0;
+  transition:color .15s,border-color .15s,background .15s;
+}
+.cam-btn .cd{width:6px;height:6px;border-radius:50%;background:var(--t3);transition:background .15s,box-shadow .15s;}
+.cam-btn.on{border-color:var(--blue);color:var(--blue);background:var(--blue-lo);}
+.cam-btn.on .cd{background:var(--blue);box-shadow:0 0 6px var(--blue);}
+.cam-btn:disabled{opacity:.35;pointer-events:none;}
+/* compact HUD chips — even fill, flex row */
 .chip{
-  font-size:10px;letter-spacing:.05em;
-  border:1px solid var(--bd);border-radius:6px;
-  padding:3px 7px;background:var(--s2);color:var(--t2);white-space:nowrap;
+  flex:1;text-align:center;font-size:10px;letter-spacing:.05em;
+  border:1px solid var(--bd);border-radius:var(--r-chip);
+  padding:6px 4px;background:var(--s2);color:var(--t2);white-space:nowrap;
   transition:all .2s;
 }
 .chip.ok{background:var(--green-lo);border-color:var(--green);color:var(--green);}
 .chip.warn{border-color:var(--amber);color:var(--amber);}
 .chip.bad{background:var(--red-lo);border-color:var(--red);color:var(--red);animation:blink .9s infinite;}
-/* ---- speed seg ---- */
+/* ---- camera panel (below HUD when CAM on) ---- */
+.cam-panel{
+  flex-shrink:0;padding:0 12px;margin-top:9px;display:none;
+}
+.cam-panel.visible{display:block;}
+.cam-img-wrap{
+  position:relative;width:100%;
+  background:#000;border-radius:var(--r-panel);overflow:hidden;
+  border:1px solid var(--bd);
+  aspect-ratio:4/3;
+}
+.cam-img-wrap img{
+  width:100%;height:100%;object-fit:contain;display:block;
+}
+.cam-hint{
+  position:absolute;right:8px;bottom:8px;
+  font:700 9px/1 inherit;letter-spacing:.08em;color:var(--t2);
+  background:rgba(0,0,0,.5);padding:4px 8px;border-radius:5px;
+  pointer-events:none;
+}
+/* ---- drive zone (joystick bottom-anchored, gauges flanking) ---- */
+.sticks{
+  flex:1;min-height:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:flex-end;
+  padding:8px 12px 2px;gap:7px;
+}
+.padrow{
+  flex:1;min-height:120px;max-height:330px;width:100%;
+  display:flex;align-items:stretch;justify-content:center;gap:13px;
+}
+.pad{
+  height:100%;aspect-ratio:1/1;max-width:310px;
+  position:relative;overflow:hidden;flex-shrink:1;
+  background:var(--s1);border:1px solid var(--bd);border-radius:var(--r-pad);
+  box-shadow:inset 0 2px 14px rgba(0,0,0,.55);
+  touch-action:none;
+  transition:border-color .15s;
+}
+.pad::before{
+  content:'';position:absolute;top:9px;bottom:9px;left:50%;width:1px;
+  background:var(--bd);pointer-events:none;transform:translateX(-50%);
+}
+.pad::after{
+  content:'';position:absolute;left:9px;right:9px;top:50%;height:1px;
+  background:var(--bd);pointer-events:none;
+}
+.pad-guide{
+  position:absolute;left:50%;top:50%;width:62%;height:62%;
+  transform:translate(-50%,-50%);border-radius:50%;
+  border:1px solid var(--bd);opacity:.55;pointer-events:none;
+}
+.pad.fwd{border-color:var(--blue-bd);}
+.pad.rev{border-color:var(--red-bd);}
+.pknob{
+  position:absolute;width:64px;height:64px;border-radius:50%;
+  background:radial-gradient(circle at 36% 30%,#454c5b,#181b21 72%);
+  border:2px solid #3a414f;
+  box-shadow:0 5px 16px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,255,255,.09);
+  transform:translate(-50%,-50%);
+  left:50%;top:50%;
+  pointer-events:none;
+  transition:left .22s cubic-bezier(.34,1.56,.64,1),top .22s cubic-bezier(.34,1.56,.64,1);
+}
+/* machined knurled inset ring */
+.pknob::before{
+  content:'';position:absolute;inset:6px;border-radius:50%;
+  border:1.5px dashed rgba(255,255,255,.14);
+}
+.pknob::after{
+  content:'';position:absolute;inset:-4px;
+  border-radius:50%;border:2px solid transparent;transition:border-color .12s;
+}
+.pad.fwd .pknob::after{border-color:var(--blue-bd);}
+.pad.rev .pknob::after{border-color:var(--red-bd);}
+.pknob.drag{transition:none;}
+.slbl{text-align:center;font-size:9px;font-weight:800;color:var(--t3);letter-spacing:.18em;flex-shrink:0;}
+/* live L/R track gauges (presentational mirror of trackL/trackR) */
+.gauge{display:flex;flex-direction:column;align-items:center;gap:6px;flex-shrink:0;}
+.gbar{
+  flex:1;width:15px;position:relative;overflow:hidden;
+  background:var(--s1);border:1px solid var(--bd);border-radius:8px;
+}
+.gbar::after{
+  content:'';position:absolute;left:2px;right:2px;top:50%;height:1px;
+  background:var(--t3);opacity:.6;
+}
+.gfill{position:absolute;left:2.5px;right:2.5px;border-radius:4px;transition:height .1s linear;height:0;}
+.gfill.pos{bottom:50%;top:auto;background:var(--green);box-shadow:0 0 8px var(--green-lo);}
+.gfill.neg{top:50%;bottom:auto;background:var(--red);box-shadow:0 0 8px var(--red-lo);}
+.glab{font-size:9px;font-weight:800;color:var(--t3);letter-spacing:.1em;}
+/* ---- speed segmented ---- */
 .spd-seg{
-  display:flex;flex-shrink:0;
-  margin:7px 12px 0;
+  display:flex;flex-shrink:0;margin:7px 12px 0;
   background:var(--s1);border:1px solid var(--bd);
-  border-radius:10px;padding:3px;gap:2px;
+  border-radius:var(--r-seg);padding:3px;gap:3px;
 }
 .seg{
-  flex:1;padding:8px 2px;border:none;border-radius:7px;
+  flex:1;padding:11px 2px;border:none;border-radius:calc(var(--r-seg) - 3px);
   background:transparent;color:var(--t3);
-  font:700 10px/1 inherit;letter-spacing:.1em;
+  font:800 10px/1 inherit;letter-spacing:.14em;
   transition:background .14s,color .14s,box-shadow .14s;
 }
-.seg.on{background:var(--blue);color:#fff;box-shadow:0 2px 10px var(--blue-md);}
-/* ---- e-stop ---- */
-.estop-wrap{padding:8px 12px 4px;flex-shrink:0;}
-.estop{
-  width:100%;height:56px;border:none;border-radius:14px;
-  background:var(--red);color:#fff;
-  font:800 17px/1 inherit;letter-spacing:.14em;
-  box-shadow:0 4px 22px var(--red-md),0 2px 4px rgba(0,0,0,.4);
-  transition:transform .08s,box-shadow .08s;
-  position:relative;overflow:hidden;
-}
-.estop::after{
-  content:'';position:absolute;inset:0;
-  background:rgba(255,255,255,0);transition:background .1s;
-}
-.estop:active{transform:scaleY(.96);box-shadow:0 2px 10px var(--red-md);}
-.estop:active::after{background:rgba(255,255,255,.08);}
-.estop.latched{
-  background:#fff;color:var(--red);
-  box-shadow:0 0 0 3px var(--red),0 4px 22px var(--red-md);
-  animation:latch 1.1s ease-in-out infinite;
-}
-.estop.dim1{
-  background:rgba(239,68,68,.15);color:#fff;
-  border:2px solid var(--red);box-shadow:none;animation:none;
-}
+.seg.on{background:var(--blue);color:#fff;box-shadow:0 2px 12px var(--blue-md);}
 /* ---- arm row ---- */
-.arm-row{display:flex;align-items:center;gap:10px;padding:6px 12px;flex-shrink:0;}
+.arm-row{display:flex;align-items:center;gap:11px;padding:9px 12px 0;flex-shrink:0;}
 .arm-outer{flex:1;position:relative;}
 .arm-btn{
-  width:100%;height:44px;border-radius:10px;
+  width:100%;height:48px;border-radius:var(--r-arm);
   border:1.5px solid var(--bd);background:var(--s2);
-  color:var(--t2);font:700 12px/1 inherit;letter-spacing:.07em;
+  color:var(--t2);font:800 12px/1 inherit;letter-spacing:.09em;
   transition:background .15s,color .15s,border-color .15s,box-shadow .15s;
+  touch-action:none;
 }
 .arm-btn.arming{border-color:var(--green);color:var(--green);background:rgba(16,185,129,.05);}
-.arm-btn.armed{background:var(--green-lo);border-color:var(--green);color:var(--green);box-shadow:0 2px 14px var(--green-lo);}
+.arm-btn.armed{background:var(--green-lo);border-color:var(--green);color:var(--green);box-shadow:0 2px 16px var(--green-lo);}
 .arm-btn:disabled{opacity:.38;pointer-events:none;}
 /* radial progress ring */
 .arm-ring{
-  position:absolute;top:-7px;right:-7px;
-  width:30px;height:30px;pointer-events:none;overflow:visible;
+  position:absolute;top:-8px;right:-8px;
+  width:32px;height:32px;pointer-events:none;overflow:visible;
 }
 .r-bg{fill:none;stroke:var(--bd);stroke-width:2.5;}
 .r-fg{
@@ -1347,110 +1435,68 @@ body{
   stroke-dasharray:94.25;stroke-dashoffset:94.25;
 }
 .rc-lbl{
-  display:flex;align-items:center;gap:6px;
-  font-size:11px;color:var(--t2);flex-shrink:0;
+  display:flex;align-items:center;gap:7px;
+  font-size:10px;font-weight:700;color:var(--t2);flex-shrink:0;letter-spacing:.04em;
   cursor:pointer;touch-action:manipulation;
 }
-.rc-lbl input{width:16px;height:16px;accent-color:var(--blue);cursor:pointer;}
-/* ---- sticks ---- */
-.sticks{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px 12px 8px;min-height:0;}
-.slbl{text-align:center;font-size:9px;font-weight:700;color:var(--t3);letter-spacing:.14em;flex-shrink:0;margin-top:5px;}
-.pad{
-  /* single centered pad: ~57% of viewport width, capped at 340px, square */
-  width:min(57vw,340px);height:min(57vw,340px);
+.rc-lbl input{width:18px;height:18px;accent-color:var(--blue);cursor:pointer;}
+/* ---- e-stop (bottom-most, largest, hazard-striped) ---- */
+.estop-wrap{padding:10px 12px 12px;flex-shrink:0;}
+.estop{
+  width:100%;height:62px;border:none;border-radius:var(--r-estop);
+  background:var(--red);color:#fff;
+  font:900 18px/1 inherit;letter-spacing:.18em;
+  box-shadow:0 4px 26px var(--red-md),0 2px 4px rgba(0,0,0,.4);
+  transition:transform .08s,box-shadow .08s;
   position:relative;overflow:hidden;
-  background:var(--s1);border:1px solid var(--bd);
-  border-radius:18px;touch-action:none;
-  box-shadow:inset 0 2px 12px rgba(0,0,0,.5);
-  transition:border-color .15s,box-shadow .15s;
-  flex-shrink:0;
+  touch-action:none;
 }
-/* crosshair guides */
-.pad::before{
-  content:'';position:absolute;top:8px;bottom:8px;left:50%;width:1px;
-  background:var(--bd);pointer-events:none;transform:translateX(-50%);
-}
-.pad::after{
-  content:'';position:absolute;left:8px;right:8px;top:50%;height:1px;
-  background:var(--bd);pointer-events:none;
-}
-.pad.fwd{border-color:rgba(37,99,235,.45);box-shadow:inset 0 2px 12px rgba(0,0,0,.5),0 0 0 1px rgba(37,99,235,.12);}
-.pad.rev{border-color:rgba(239,68,68,.45);box-shadow:inset 0 2px 12px rgba(0,0,0,.5),0 0 0 1px rgba(239,68,68,.12);}
-.pknob{
-  position:absolute;width:62px;height:62px;border-radius:50%;
-  background:radial-gradient(circle at 38% 32%,#3c4263,#1a1d27);
-  border:1.5px solid #3a3f52;
-  box-shadow:0 4px 14px rgba(0,0,0,.65),0 0 0 1px rgba(255,255,255,.04);
-  transform:translate(-50%,-50%);
-  left:50%;top:50%;
+/* hazard strips on top & bottom edges */
+.estop::before{
+  content:'';position:absolute;left:0;right:0;top:0;height:7px;
+  background:repeating-linear-gradient(-45deg,rgba(0,0,0,.32) 0 9px,transparent 9px 18px);
   pointer-events:none;
-  transition:left .22s cubic-bezier(.34,1.56,.64,1),top .22s cubic-bezier(.34,1.56,.64,1);
 }
-.pknob::before{
-  content:'';position:absolute;
-  width:10px;height:10px;border-radius:50%;
-  background:rgba(255,255,255,.07);
-  top:10px;left:50%;transform:translateX(-50%);
+.estop::after{
+  content:'';position:absolute;left:0;right:0;bottom:0;height:7px;
+  background:repeating-linear-gradient(-45deg,rgba(0,0,0,.32) 0 9px,transparent 9px 18px);
+  pointer-events:none;
 }
-.pknob::after{
-  content:'';position:absolute;inset:-4px;
-  border-radius:50%;border:2px solid transparent;transition:border-color .12s;
+.estop:active{transform:scaleY(.96);box-shadow:0 2px 12px var(--red-md);}
+.estop.latched{
+  background:#fff;color:var(--red);
+  box-shadow:0 0 0 3px var(--red),0 4px 22px var(--red-md);
+  animation:latch 1.1s ease-in-out infinite;
 }
-.pad.fwd .pknob::after{border-color:rgba(37,99,235,.5);}
-.pad.rev .pknob::after{border-color:rgba(239,68,68,.5);}
-.pknob.drag{transition:none;}
+.estop.latched::before,.estop.latched::after,
+.estop.dim1::before,.estop.dim1::after{display:none;}
+.estop.dim1{
+  background:var(--red-lo);color:#fff;
+  border:2px solid var(--red);box-shadow:none;animation:none;
+}
 /* ---- keyframes ---- */
 @keyframes blink{0%,100%{opacity:1;}50%{opacity:.55;}}
 @keyframes hbp{
-  0%,100%{opacity:1;box-shadow:0 0 0 3px rgba(16,185,129,.18);}
-  50%{opacity:.7;box-shadow:0 0 0 5px rgba(16,185,129,.07);}
+  0%,100%{opacity:1;box-shadow:0 0 0 3px var(--green-lo);}
+  50%{opacity:.72;box-shadow:0 0 0 6px transparent;}
 }
 @keyframes latch{
   0%,100%{box-shadow:0 0 0 3px var(--red),0 4px 22px var(--red-md);}
-  50%{box-shadow:0 0 0 6px var(--red),0 6px 30px var(--red-md);}
+  50%{box-shadow:0 0 0 7px var(--red),0 6px 32px var(--red-md);}
 }
-/* ---- camera panel ---- */
-.cam-panel{
-  flex-shrink:0;padding:0 12px 4px;display:none;
-}
-.cam-panel.visible{display:block;}
-.cam-img-wrap{
-  position:relative;width:100%;
-  background:#000;border-radius:10px;overflow:hidden;
-  border:1px solid var(--bd);
-  aspect-ratio:4/3;
-}
-.cam-img-wrap img{
-  width:100%;height:100%;object-fit:contain;display:block;
-}
-.cam-hint{
-  position:absolute;bottom:4px;right:6px;
-  font-size:9px;color:rgba(255,255,255,.55);
-  pointer-events:none;
-}
-.cam-btn{
-  display:block;width:100%;height:34px;margin-bottom:4px;
-  border:1.5px solid var(--bd);border-radius:8px;
-  background:var(--s2);color:var(--t2);
-  font:700 10px/1 inherit;letter-spacing:.1em;
-  transition:background .15s,border-color .15s,color .15s;
-}
-.cam-btn.on{
-  background:var(--blue-lo);border-color:var(--blue);color:var(--blue);
-}
-.cam-btn:disabled{opacity:.35;pointer-events:none;}
 /* ---- landscape compact ---- */
 @media(orientation:landscape)and(max-height:480px){
-  .hud{padding:4px 14px;}
+  .hud{padding:5px 14px;}
   .hud-r+.hud-r{display:none;}
+  .cam-panel{margin-top:5px;padding:0 8px;}
   .spd-seg{margin:4px 12px 0;}
-  .seg{padding:6px 2px;font-size:9px;}
-  .estop-wrap{padding:4px 12px;}
-  .estop{height:44px;font-size:14px;}
-  .arm-row{padding:3px 12px;}
-  .arm-btn{height:36px;}
-  .sticks{padding:4px 12px 5px;gap:4px;}
-  .cam-panel{padding:0 8px 2px;}
+  .seg{padding:7px 2px;font-size:9px;}
+  .estop-wrap{padding:5px 12px;}
+  .estop{height:46px;font-size:15px;}
+  .arm-row{padding:4px 12px 0;}
+  .arm-btn{height:38px;}
+  .sticks{padding:4px 12px 2px;gap:4px;}
+  .padrow{min-height:90px;}
 }
 </style>
 </head>
@@ -1470,30 +1516,51 @@ body{
   <button id="a2hs-dismiss">&#x2715;</button>
 </div>
 
-<!-- HUD -->
+<!-- HUD — link status + CAM toggle in header, compact chip rows below -->
 <div class="hud">
   <div class="hud-r">
     <div class="dot" id="dot"></div>
     <span class="lnk" id="lnklbl">CONNECTING</span>
     <div class="sp"></div>
-    <span class="chip" id="c-rtt">RTT &mdash;</span>
-    <span class="chip" id="c-arm">DISARMED</span>
+    <button class="cam-btn" id="cam-btn"><span class="cd"></span><span>CAM OFF</span></button>
   </div>
   <div class="hud-r">
+    <span class="chip" id="c-rtt">RTT &mdash;</span>
+    <span class="chip" id="c-arm">DISARMED</span>
     <span class="chip" id="c-batt">BATT &mdash;</span>
+  </div>
+  <div class="hud-r">
     <span class="chip" id="c-cap">CAP &mdash;</span>
     <span class="chip" id="c-dm">DM &mdash;</span>
     <span class="chip" id="c-rc">RC &mdash;</span>
   </div>
 </div>
 
-<!-- Camera panel (above speed/arm/sticks; hidden by default) -->
+<!-- Camera panel (below HUD; hidden until CAM on + camera_available) -->
 <div class="cam-panel" id="cam-panel">
-  <button class="cam-btn" id="cam-btn">CAM OFF</button>
   <div class="cam-img-wrap" id="cam-wrap" style="display:none">
     <img id="cam-img" alt="camera feed">
     <span class="cam-hint" id="cam-hint"></span>
   </div>
+</div>
+
+<!-- Drive zone — joystick bottom-anchored, live L/R track gauges flanking -->
+<div class="sticks">
+  <div class="padrow">
+    <div class="gauge">
+      <div class="gbar"><div class="gfill pos" id="gfillL"></div></div>
+      <span class="glab">L</span>
+    </div>
+    <div class="pad" id="padS">
+      <div class="pad-guide"></div>
+      <div class="pknob" id="knobS"></div>
+    </div>
+    <div class="gauge">
+      <div class="gbar"><div class="gfill pos" id="gfillR"></div></div>
+      <span class="glab">R</span>
+    </div>
+  </div>
+  <div class="slbl">↑ FWD / REV ↓ &nbsp;&nbsp; ← STEER →</div>
 </div>
 
 <!-- Speed segmented control -->
@@ -1503,12 +1570,7 @@ body{
   <button class="seg"    data-l="fast">FAST</button>
 </div>
 
-<!-- E-STOP -->
-<div class="estop-wrap">
-  <button class="estop" id="estop">E &mdash; STOP</button>
-</div>
-
-<!-- ARM -->
+<!-- ARM row -->
 <div class="arm-row">
   <div class="arm-outer">
     <button class="arm-btn" id="arm-btn">HOLD TO ARM</button>
@@ -1523,12 +1585,9 @@ body{
   </label>
 </div>
 
-<!-- Joystick — single arcade-mix stick, centered -->
-<div class="sticks">
-  <div class="pad" id="padS">
-    <div class="pknob" id="knobS"></div>
-  </div>
-  <div class="slbl">↑ FWD / REV ↓ &nbsp;&nbsp; ← STEER →</div>
+<!-- E-STOP — bottom-most, largest control, nearest the thumb -->
+<div class="estop-wrap">
+  <button class="estop" id="estop">E &mdash; STOP</button>
 </div>
 
 <script>
@@ -1573,6 +1632,24 @@ function applyArcadeMix() {
   var steer    = stickX;
   leftV  = clamp(throttle + STEER_GAIN * steer, -1, 1);
   rightV = clamp(throttle - STEER_GAIN * steer, -1, 1);
+  paintGauges();
+}
+
+/* ---- live L/R track gauges — presentational mirror of the commanded
+   trackL/trackR (leftV/rightV). They read zero unless the session is
+   actually armed, not e-stopped, and the link is up — i.e. they reflect
+   what is being SENT, not raw stick deflection. ---- */
+var gfillL = null, gfillR = null;  // resolved after DOM parse (below script start)
+function setGauge(el, v) {
+  if (!el) return;
+  var mag = Math.min(1, Math.abs(v));
+  el.className = 'gfill ' + (v >= 0 ? 'pos' : 'neg');
+  el.style.height = (mag * 50).toFixed(1) + '%';
+}
+function paintGauges() {
+  var live = !!lastSt.armed && !lastSt.estop_latched && connected;
+  setGauge(gfillL, live ? leftV  : 0);
+  setGauge(gfillR, live ? rightV : 0);
 }
 
 /* ---- WebSocket ---- */
@@ -1828,6 +1905,7 @@ function bindStick(padId, knobId) {
     knob.style.left = '50%';
     knob.style.top  = '50%';
     pad.classList.remove('fwd', 'rev');
+    paintGauges();
   }
 
   pad.addEventListener('pointerdown', function(e) {
@@ -1858,7 +1936,10 @@ function bindStick(padId, knobId) {
   pad.addEventListener('pointerleave',  end);
 }
 
+gfillL = document.getElementById('gfillL');
+gfillR = document.getElementById('gfillR');
 bindStick('padS', 'knobS');
+paintGauges();
 
 /* ---- HUD render ---- */
 function renderConn() {
@@ -1867,6 +1948,7 @@ function renderConn() {
   d.className = 'dot ' + (connected ? 'live' : 'dead');
   l.className = 'lnk ' + (connected ? 'live' : 'dead');
   l.textContent = connected ? 'LINK UP' : 'LINK DOWN';
+  if (gfillL) paintGauges();
 }
 
 function renderAll() {
@@ -1930,6 +2012,7 @@ function renderAll() {
 
   renderArm();
   renderEstop();
+  paintGauges();
 }
 
 /* ---- camera feed ---- */
@@ -1944,6 +2027,7 @@ var camAvail    = false;  // populated from status.camera_available
 
 var camPanel = document.getElementById('cam-panel');
 var camBtn   = document.getElementById('cam-btn');
+var camBtnLbl= camBtn.querySelector('span:last-child');  // text span (preserve .cd dot)
 var camWrap  = document.getElementById('cam-wrap');
 var camImg   = document.getElementById('cam-img');
 var camHint  = document.getElementById('cam-hint');
@@ -2010,11 +2094,13 @@ function renderCamHint() {
 setInterval(renderCamHint, 500);
 
 function renderCamBtn() {
-  /* Show/hide the whole camera panel based on availability from server status */
-  camPanel.classList.toggle('visible', camAvail);
+  /* CAM toggle lives in the HUD header now; the panel below holds only the
+     feed, so show it only while actually streaming (CAM on + available). The
+     toggle stays enabled whenever the camera is available from server status. */
+  camPanel.classList.toggle('visible', camAvail && camOn);
   camBtn.disabled = !camAvail;
   camBtn.classList.toggle('on', camOn);
-  camBtn.textContent = camOn ? 'CAM ON' : 'CAM OFF';
+  camBtnLbl.textContent = camOn ? 'CAM ON' : 'CAM OFF';
 }
 
 camBtn.addEventListener('click', function() {
