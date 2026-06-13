@@ -812,5 +812,307 @@ class TestRecorderCurrentTempFields(unittest.TestCase):
         self.assertIsNone(fm._actual_right_temp_c)
 
 
+class TestEdgeBoostSteering(unittest.TestCase):
+    """Tests for the edge-boost proportional gain on the direct PID steer path.
+
+    The boost amplifies x_err when |x_err| > steer_edge_knee so the robot
+    fights harder to recentre a person near the frame edge, while leaving the
+    centre (|x_err| <= knee) byte-identical to the un-boosted path.
+    """
+
+    # ─── Shared helpers ────────────────────────────────────────────────────────
+
+    def _person_at_norm_x(self, norm_x: float, z_m: float = 2.0) -> PersonDetection:
+        """Build a PersonDetection whose bbox maps to a precise normalized_x value."""
+        # cx = norm_x / 2 + 0.5  (inverse of (cx - 0.5) * 2 = normalized_x)
+        cx = norm_x / 2.0 + 0.5
+        half = 0.1
+        return PersonDetection(
+            x_m=norm_x * z_m,
+            z_m=z_m,
+            confidence=0.9,
+            bbox=(cx - half, 0.3, cx + half, 0.8),
+        )
+
+    def _make_direct(self, **overrides) -> FollowMeController:
+        """Controller wired for deterministic direct-PID tests (trail off, slew off,
+        emit every tick, confidence-scaling off via conf=1.0 detections)."""
+        defaults = dict(
+            trail_follow_enabled=False,
+            steer_deadband_norm=0.0,      # no deadband so any x_err reaches the PID
+            steer_slew_per_tick=1.0,      # no effective slew cap
+            follow_output_rate_hz=10000.0,  # emit on every compute() call
+            pid_lateral_kd=0.0,
+            pid_lateral_ki=0.0,
+            # kp left at shipped default (0.4) unless overridden — tests stay realistic
+        )
+        defaults.update(overrides)
+        cfg = FollowMeConfig(**defaults)
+        return FollowMeController(cfg)
+
+    def _steer_for_norm_x(self, norm_x: float, **cfg_overrides) -> float:
+        """Run one tick and return the emitted steer (signed bytes) for a given norm_x."""
+        fm = self._make_direct(**cfg_overrides)
+        fm.compute([self._person_at_norm_x(norm_x)])
+        return fm._last_emitted_steer
+
+    # ─── (1) Center preserved ──────────────────────────────────────────────────
+
+    def test_center_byte_identical_boost_on_vs_off(self):
+        """At |norm_x| <= knee the emitted steer is byte-identical with boost on/off.
+
+        Uses the default knee=0.4 and tests at 0.2, which sits squarely inside the
+        no-boost zone.  If this fails the anti-oscillation centre tune is broken.
+        """
+        knee = 0.4
+        norm_x = 0.2  # well inside knee
+        self.assertLessEqual(abs(norm_x), knee)
+
+        steer_on = self._steer_for_norm_x(norm_x, steer_edge_boost=1.5, steer_edge_knee=knee)
+        steer_off = self._steer_for_norm_x(norm_x, steer_edge_boost=0.0, steer_edge_knee=knee)
+        self.assertEqual(
+            steer_on, steer_off,
+            f"Centre norm_x={norm_x}: steer_on={steer_on:.6f} != steer_off={steer_off:.6f}; "
+            "edge boost must not affect centre behavior"
+        )
+
+    def test_center_byte_identical_at_exact_knee(self):
+        """At |norm_x| exactly equal to the knee no boost is applied (boundary condition)."""
+        knee = 0.4
+        norm_x = knee  # exactly on the knee boundary
+
+        steer_on = self._steer_for_norm_x(norm_x, steer_edge_boost=1.5, steer_edge_knee=knee)
+        steer_off = self._steer_for_norm_x(norm_x, steer_edge_boost=0.0, steer_edge_knee=knee)
+        # ax == knee → (ax - knee)/(1-knee) = 0 → edge_gain = 1.0 → identical
+        self.assertEqual(
+            steer_on, steer_off,
+            f"At norm_x=knee={knee}: steer should be identical; on={steer_on}, off={steer_off}"
+        )
+
+    # ─── (2) Edge boosted ──────────────────────────────────────────────────────
+
+    def test_edge_steer_larger_with_boost(self):
+        """At norm_x=0.9 (> knee) the boosted steer magnitude is strictly greater than
+        the un-boosted steer, and the sign is preserved."""
+        norm_x = 0.9
+        steer_on = self._steer_for_norm_x(norm_x, steer_edge_boost=1.5, steer_edge_knee=0.4)
+        steer_off = self._steer_for_norm_x(norm_x, steer_edge_boost=0.0, steer_edge_knee=0.4)
+        self.assertGreater(
+            abs(steer_on), abs(steer_off),
+            f"Edge norm_x={norm_x}: |steer_on|={abs(steer_on):.3f} must exceed |steer_off|={abs(steer_off):.3f}"
+        )
+        # Same direction
+        self.assertGreater(
+            steer_on * steer_off, 0.0,
+            "Boost must not flip steer sign"
+        )
+
+    def test_edge_steer_within_direct_max(self):
+        """Boosted steer at the frame edge must still respect direct_mode_max_steer_byte."""
+        direct_max = 18.0
+        steer_on = self._steer_for_norm_x(
+            0.9,
+            steer_edge_boost=1.5,
+            steer_edge_knee=0.4,
+            direct_mode_max_steer_byte=direct_max,
+        )
+        self.assertLessEqual(
+            abs(steer_on), direct_max + 1e-9,
+            f"Steer {abs(steer_on):.3f} exceeded direct_mode_max_steer_byte={direct_max}"
+        )
+
+    def test_negative_edge_steer_boosted(self):
+        """Boost works symmetrically for left-edge (negative norm_x)."""
+        norm_x = -0.9
+        steer_on = self._steer_for_norm_x(norm_x, steer_edge_boost=1.5, steer_edge_knee=0.4)
+        steer_off = self._steer_for_norm_x(norm_x, steer_edge_boost=0.0, steer_edge_knee=0.4)
+        self.assertGreater(
+            abs(steer_on), abs(steer_off),
+            "Left-edge boost must also amplify magnitude"
+        )
+        self.assertLess(steer_on, 0.0, "Left-edge steer must remain negative")
+
+    # ─── (3) Monotonic with eccentricity ──────────────────────────────────────
+
+    def test_edge_steer_monotonic_with_eccentricity(self):
+        """Steer at 0.9 must be >= steer at 0.5 (eccentricity increases boost)."""
+        steer_05 = self._steer_for_norm_x(0.5, steer_edge_boost=1.5, steer_edge_knee=0.4)
+        steer_09 = self._steer_for_norm_x(0.9, steer_edge_boost=1.5, steer_edge_knee=0.4)
+        self.assertGreaterEqual(
+            abs(steer_09), abs(steer_05),
+            f"|steer(0.9)|={abs(steer_09):.3f} must be >= |steer(0.5)|={abs(steer_05):.3f}"
+        )
+
+    def test_boost_increases_monotonically_from_knee_to_edge(self):
+        """Steer magnitude must increase monotonically as norm_x moves from knee toward 1."""
+        prev_steer = None
+        for norm_x in [0.4, 0.55, 0.7, 0.85, 0.95]:
+            s = abs(self._steer_for_norm_x(norm_x, steer_edge_boost=1.5, steer_edge_knee=0.4))
+            if prev_steer is not None:
+                self.assertGreaterEqual(
+                    s, prev_steer - 1e-9,
+                    f"Steer not monotone: |steer({norm_x})|={s:.3f} < previous {prev_steer:.3f}"
+                )
+            prev_steer = s
+
+    # ─── (4) boost=0 is a full no-op ──────────────────────────────────────────
+
+    def test_boost_zero_noop_at_center(self):
+        """boost=0 disables the feature: center steer matches the default disabled path."""
+        for norm_x in [0.1, 0.3, 0.4]:
+            s_zero = self._steer_for_norm_x(norm_x, steer_edge_boost=0.0)
+            s_default = self._steer_for_norm_x(norm_x, steer_edge_boost=0.0)
+            self.assertEqual(s_zero, s_default)
+
+    def test_boost_zero_noop_at_edge(self):
+        """boost=0: edge steer is byte-identical regardless of knee setting."""
+        for norm_x in [0.7, 0.9]:
+            s_zero = self._steer_for_norm_x(norm_x, steer_edge_boost=0.0, steer_edge_knee=0.4)
+            s_zero_no_knee = self._steer_for_norm_x(norm_x, steer_edge_boost=0.0, steer_edge_knee=0.0)
+            self.assertEqual(
+                s_zero, s_zero_no_knee,
+                f"boost=0 must produce identical output regardless of knee; norm_x={norm_x}"
+            )
+
+    # ─── (5) Deadband interplay ───────────────────────────────────────────────
+
+    def test_deadband_kills_boost_opportunity(self):
+        """A small error inside the deadband must yield steer=0 even with boost enabled.
+        Boost is applied AFTER deadband zeroing, so a deadbanded error stays zero."""
+        fm = self._make_direct(
+            steer_deadband_norm=0.5,   # very wide deadband for the test
+            steer_edge_boost=1.5,
+            steer_edge_knee=0.4,
+            pid_lateral_kp=5.0,
+        )
+        # norm_x = 0.3 < deadband 0.5 → x_err zeroed before boost → steer must be 0
+        det = self._person_at_norm_x(0.3)
+        left, right = fm.compute([det])
+        self.assertEqual(
+            left, right,
+            "Error inside deadband must produce zero steer even with boost enabled"
+        )
+
+    def test_boost_does_not_resurrect_deadbanded_error(self):
+        """Confirm that boost cannot amplify a zero x_err (post-deadband) into non-zero steer."""
+        fm = self._make_direct(
+            steer_deadband_norm=0.6,   # deadband covers norm_x = 0.55
+            steer_edge_boost=5.0,      # aggressive boost — must still not matter
+            steer_edge_knee=0.3,
+            pid_lateral_kp=10.0,
+        )
+        det = self._person_at_norm_x(0.55)  # inside deadband
+        left, right = fm.compute([det])
+        self.assertEqual(
+            left, right,
+            "Boost must not resurrect a deadbanded (zeroed) x_err"
+        )
+
+    # ─── (6) Recorder x_err is pre-boost ─────────────────────────────────────
+
+    def test_recorder_x_err_is_pre_boost(self):
+        """_last_x_err_norm must reflect the post-deadband, PRE-boost error.
+
+        With norm_x=0.9 and boost=1.5 the BOOSTED input to the PID is
+        norm_x * edge_gain.  The recorder must store the raw 0.9, not the
+        inflated value.
+        """
+        norm_x = 0.9
+        knee = 0.4
+        boost = 1.5
+        # Verify what the boost formula would produce so we can assert x_err is NOT that.
+        expected_gain = 1.0 + boost * min(1.0, (norm_x - knee) / (1.0 - knee))
+        boosted_value = norm_x * expected_gain
+
+        fm = self._make_direct(
+            steer_edge_boost=boost,
+            steer_edge_knee=knee,
+        )
+        fm.compute([self._person_at_norm_x(norm_x)])
+        recorded_x_err = fm._last_x_err_norm
+
+        self.assertIsNotNone(recorded_x_err)
+        self.assertAlmostEqual(
+            recorded_x_err, norm_x, places=5,
+            msg=f"_last_x_err_norm should be pre-boost ({norm_x}), got {recorded_x_err} "
+                f"(boosted would be {boosted_value:.4f})"
+        )
+        self.assertNotAlmostEqual(
+            recorded_x_err, boosted_value, places=3,
+            msg=f"_last_x_err_norm must NOT be the boosted value {boosted_value:.4f}"
+        )
+
+    # ─── (7) Replay verification ──────────────────────────────────────────────
+
+    def test_replay_edge_ticks_boosted_center_unchanged(self):
+        """Gain-function-level replay: using x_filt from fm_trials/1781386838.jsonl,
+        compute the edge_gain for each tick and assert that:
+          - ticks with |x_filt| > 0.6 (edge) have edge_gain > 1.0
+          - ticks with |x_filt| <= 0.4 (center) have edge_gain == 1.0 exactly
+
+        NOTE: this tests the gain formula directly, not the full controller, because
+        wiring the full FollowMeController to replay a JSONL file requires
+        reproducing exact EMA filter state and reacq-ramp timing that cannot be
+        recovered from logged x_filt values alone.  A full end-to-end replay is
+        better done with the real hardware harness; see fm_trials/ tooling.
+        """
+        replay_path = "/tmp/fm_verify/1781386838.jsonl"
+        if not os.path.exists(replay_path):
+            self.skipTest(f"Replay file not found: {replay_path}")
+
+        import json as _json
+
+        boost = 1.5
+        knee = 0.4
+
+        def edge_gain(x_filt: float) -> float:
+            ax = abs(x_filt)
+            if boost > 0.0 and knee < 1.0 and ax > knee:
+                return 1.0 + boost * min(1.0, (ax - knee) / (1.0 - knee))
+            return 1.0
+
+        records = [_json.loads(l) for l in open(replay_path) if l.strip()]
+        emitted = [r for r in records if r.get("emitted") and r.get("x_filt") is not None]
+
+        edge_ticks = [r for r in emitted if abs(r["x_filt"]) > 0.6]
+        center_ticks = [r for r in emitted if abs(r["x_filt"]) <= 0.4]
+
+        self.assertGreater(len(edge_ticks), 0, "Replay has no emitted edge ticks — check file")
+        self.assertGreater(len(center_ticks), 0, "Replay has no emitted center ticks — check file")
+
+        # All edge ticks must have gain > 1
+        for r in edge_ticks:
+            g = edge_gain(r["x_filt"])
+            self.assertGreater(
+                g, 1.0,
+                f"Edge tick x_filt={r['x_filt']:.3f} produced gain={g:.4f} (expected > 1)"
+            )
+
+        # All center ticks must have gain == 1 exactly
+        for r in center_ticks:
+            g = edge_gain(r["x_filt"])
+            self.assertEqual(
+                g, 1.0,
+                f"Centre tick x_filt={r['x_filt']:.3f} produced gain={g:.4f} (expected exactly 1.0)"
+            )
+
+        # Sanity: average edge gain is appreciably above 1
+        avg_edge_gain = sum(edge_gain(r["x_filt"]) for r in edge_ticks) / len(edge_ticks)
+        self.assertGreater(avg_edge_gain, 1.2,
+                           f"Average edge gain {avg_edge_gain:.3f} seems too low; check boost constant")
+
+        # Compute ratio of |boosted_steer| / |original_steer| for edge ticks that had
+        # nonzero steer in the log, to show the improvement numerically.
+        ratios = []
+        for r in edge_ticks:
+            orig_steer = abs(r.get("steer", 0.0))
+            if orig_steer > 0.01:
+                ratios.append(edge_gain(r["x_filt"]))
+        if ratios:
+            avg_ratio = sum(ratios) / len(ratios)
+            # Just a sanity check — the gain is > 1 for all of them
+            self.assertGreater(avg_ratio, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

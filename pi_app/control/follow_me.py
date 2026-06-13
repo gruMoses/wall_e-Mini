@@ -1208,7 +1208,19 @@ class FollowMeController:
         deadband = float(self._tunable("steer_deadband_norm"))
         if abs(x_err) < deadband:
             x_err = 0.0
+        # Record the post-deadband, PRE-boost error so the recorder's x_err
+        # field keeps its original meaning (raw lateral error, not amplified).
         self._last_x_err_norm = x_err
+        # Edge-boost: amplify the PID input proportionally as the person drifts
+        # toward the frame edge (|x_err| > knee).  Center (|x_err| <= knee) is
+        # byte-identical to the un-boosted path (edge_gain is exactly 1.0 there).
+        # boost=0 disables the feature entirely.
+        knee = float(getattr(self._cfg, "steer_edge_knee", 0.4))
+        boost = float(getattr(self._cfg, "steer_edge_boost", 1.5))
+        ax = abs(x_err)
+        if boost > 0.0 and knee < 1.0 and ax > knee:
+            edge_gain = 1.0 + boost * min(1.0, (ax - knee) / (1.0 - knee))
+            x_err = x_err * edge_gain
         steer = self._steering.compute(x_err, dt)
         # Cap direct-mode steering lower than the global max; close-range detections
         # are noisier and a full-gain correction causes overshoot.  Also scale back

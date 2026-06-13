@@ -324,6 +324,17 @@ class FollowMeConfig:
     steer_deadband_norm: float = 0.04   # |x_err| below this → treat error as 0 (suppresses gait-wobble chasing; ~2-3% frame width)
     steer_slew_per_tick: float = 0.1    # max steer change per 15 Hz output tick, as fraction of max_steer_offset_byte
 
+    # ── Edge-boost steering gain (direct PID path only) ───────────────────────
+    # Amplifies the PID input proportionally as the person drifts toward the
+    # frame edge, so the robot fights harder to recentre before losing the lock.
+    # Only the DIRECT path is affected; trail pursuit is unchanged.
+    # Gain formula: edge_gain = 1 + boost * clamp01((|x_err| - knee) / (1 - knee))
+    # At |x_err| <= knee  → edge_gain = 1.0  (center behavior byte-identical)
+    # At |x_err| = 1.0    → edge_gain = 1 + boost
+    # Set boost=0.0 to disable entirely (full no-op, back-compat).
+    steer_edge_boost: float = 1.5   # extra proportional gain at the frame edge (0 disables; error x(1+boost) at |x|=1)
+    steer_edge_knee: float = 0.4    # |normalized_x| below this gets NO boost (preserves gentle, anti-wobble center)
+
     # ── Re-acquisition / search / mode-switch timing ─────────────────────────
     reacq_slew_window_s: float = 0.5           # ramp steer from 0 → full over this window after a detection dropout
     search_mode_delay_s: float = 1.5           # wait this long after trail exhaustion before entering search mode
