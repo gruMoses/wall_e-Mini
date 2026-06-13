@@ -239,41 +239,246 @@ class TargetTracker:
 
     Persistence: after the camera stops seeing the target, the last known
     state is held for up to ``persistence_s`` seconds before returning None.
+
+    Sticky lock (defends against impostors that YOLO misclassifies as people):
+      * SWITCH GRACE — a committed target momentarily absent from this frame's
+        candidates is HELD (coast, not-fresh) for ``switch_grace_s`` rather than
+        switching to a closer candidate.
+      * ACQUIRE FLOOR — a NEW lock requires confidence >= ``acquire_confidence``
+        (higher than the per-frame base filter). A committed target stays
+        followed even if its confidence later drops below the floor.
+      * SUSTAINED ACQUISITION — after a prior lock is lost, a challenger must
+        qualify for ``acquire_min_frames`` consecutive frames before commit.
     """
 
-    def __init__(self, ema_alpha: float, persistence_s: float) -> None:
+    # Positional-continuity tolerance (normalized_x units, -1..+1) for matching a
+    # None-id committed target to a candidate. ~0.30 ≈ 15% of frame width each
+    # side: tight enough that a chicken offset from the person does not match.
+    _NONE_ID_MATCH_NORM: float = 0.30
+
+    def __init__(
+        self,
+        ema_alpha: float,
+        persistence_s: float,
+        switch_grace_s: float = 1.5,
+        acquire_confidence: float = 0.65,
+        acquire_min_frames: int = 3,
+    ) -> None:
         self._alpha = ema_alpha
         self._persistence_s = persistence_s
+        # Sticky-lock knobs (see FollowMeConfig). These only activate on dropouts
+        # or new/competing candidates — a continuously-tracked target never trips
+        # any of them, so default single-person behaviour is byte-identical.
+        self._switch_grace_s = switch_grace_s
+        self._acquire_confidence = acquire_confidence
+        self._acquire_min_frames = max(1, int(acquire_min_frames))
         self._state: _TargetState | None = None
         self._fresh_raw_x_norm: float | None = None  # raw (pre-EMA) normalized_x of this tick's selected detection
+        # Pending-challenger state for SUSTAINED ACQUISITION. A new candidate must
+        # qualify for _acquire_min_frames consecutive frames before it is committed.
+        # Keyed by track_id when present; for id=None we track positional continuity.
+        self._pending_id: int | None = None
+        self._pending_x: float | None = None       # last normalized_x of a None-id pending candidate
+        self._pending_count: int = 0
+        # Has the tracker ever committed a lock since the last reset()? The sustain
+        # gate (and the grace hold, which presupposes a prior lock) only defend
+        # AFTER an initial lock — i.e. on dropouts / re-acquisition / competing
+        # impostors. The very first cold-start acquisition is immediate (subject
+        # only to the confidence floor), so default single-person behaviour is
+        # byte-identical: a continuously-tracked person never trips sustain/grace.
+        self._has_committed: bool = False
 
     def update(
         self,
         candidates: list[_FilteredDetection],
         now: float,
     ) -> _TargetState | None:
-        """Update tracker; return current state or None when target is lost."""
-        if candidates:
-            best = self._select(candidates)
-            self._fresh_raw_x_norm = best.normalized_x
-            self._apply_ema(best, now)
-        else:
+        """Update tracker; return current state or None when target is lost.
+
+        Sticky-lock state machine:
+          * COMMITTED   — we hold a _state and it is present in this frame's
+                          candidates (id match, or positional continuity for a
+                          None-id target) → follow it normally (fresh).
+          * GRACE-HOLD  — committed target momentarily ABSENT and NO other
+                          candidate clears the acquire floor → HOLD it within
+                          _switch_grace_s (coast, signal not-fresh); do NOT switch
+                          to an untrusted impostor (the conf-0.54 chicken).
+                          last_seen is NOT refreshed so grace + persistence age out.
+          * HAND-OFF    — committed target absent but a *different* candidate
+                          clears the acquire floor → adopt the closest such
+                          qualifier immediately (a trusted replacement; this also
+                          preserves the legitimate id-switch / depth reseed).
+          * ACQUIRING   — no committed target (or committed lost beyond grace): a
+                          challenger must clear _acquire_confidence and (after a
+                          prior lock) sustain for _acquire_min_frames consecutive
+                          frames before commit. Until then return None / coast. A
+                          pure cold start acquires the closest qualifier at once,
+                          so default single-person behaviour is unchanged.
+        """
+        if not candidates:
+            # Zero-candidate path is unchanged: rely on the existing persistence
+            # window. Grace is specifically the "candidates exist but not mine" case.
             self._fresh_raw_x_norm = None
-            # No fresh detection — check persistence window
+            self._reset_pending()
             if self._state is None:
                 return None
             if (now - self._state.last_seen_time) > self._persistence_s:
                 return None
-            # Return stale state; caller sees it and can handle gracefully
-        return self._state
+            # Return stale state; caller sees not-fresh and decays it.
+            return self._state
 
-    def _select(self, candidates: list[_FilteredDetection]) -> _FilteredDetection:
-        """Pick target: prefer last known track_id, else take closest by depth."""
-        if self._state is not None and self._state.track_id is not None:
+        # ── Is our committed target present in this frame? ───────────────────
+        # A target is "committed" once we hold any _state (id'd OR None-id). For
+        # an id'd target, presence = exact track_id match. For a None-id target
+        # (parse paths without tracklet ids) we use POSITIONAL continuity: the
+        # candidate nearest in normalized_x to the held position, within
+        # _NONE_ID_MATCH_NORM. This is what makes case (a) safe — a closer chicken
+        # at a different x does NOT count as "my target", so we grace-hold the
+        # person instead of switching. (Legacy None-id tracking just took the
+        # closest by depth, which is exactly the case-(a) failure.)
+        committed = self._state is not None
+        committed_present = False
+        committed_det: _FilteredDetection | None = None
+        if committed and self._state.track_id is not None:
             for c in candidates:
                 if c.track_id == self._state.track_id:
-                    return c
-        return min(candidates, key=lambda d: d.depth_m)
+                    committed_present = True
+                    committed_det = c
+                    break
+        elif committed:  # None-id committed target → positional continuity
+            nearest = min(
+                candidates,
+                key=lambda d: abs(d.normalized_x - self._state.normalized_x),
+            )
+            if abs(nearest.normalized_x - self._state.normalized_x) <= self._NONE_ID_MATCH_NORM:
+                committed_present = True
+                committed_det = nearest
+
+        if committed_present:
+            # COMMITTED → follow it. An already-committed target is trusted even
+            # if its confidence dropped below the acquire floor (Layer-1's 0.45
+            # base filter already gated it). This is the normal single-person path.
+            self._reset_pending()
+            self._fresh_raw_x_norm = committed_det.normalized_x
+            self._apply_ema(committed_det, now)
+            return self._state
+
+        if committed:
+            # Committed target is ABSENT from this frame's candidates. Decide
+            # between a GRACE-HOLD and a trusted hand-off.
+            #
+            # GRACE-HOLD (the case-(a) fix): if no other candidate clears the
+            # ACQUIRE FLOOR, every alternative is an untrusted impostor (the
+            # chicken at conf 0.54). HOLD the committed target — do NOT switch —
+            # while within grace, signalling not-fresh so the caller decays
+            # steer/speed. Do not refresh last_seen_time; let grace and the
+            # persistence window age naturally.
+            #
+            # TRUSTED HAND-OFF: if a *different* candidate DOES clear the acquire
+            # floor, it is a trustworthy target taking over (e.g. a distinct,
+            # high-confidence id'd person). The committed target has vanished and
+            # a trusted replacement is the only/closest qualifier, so we let the
+            # ACQUIRING path adopt it rather than coast blindly. (This is also the
+            # legitimate target-switch the depth-reseed path depends on — we never
+            # hold against a target we actually trust.)
+            within_grace = (now - self._state.last_seen_time) <= self._switch_grace_s
+            qualifying = [
+                c for c in candidates if c.confidence >= self._acquire_confidence
+            ]
+            if within_grace and not qualifying:
+                self._fresh_raw_x_norm = None  # not fresh → caller decays steer/speed
+                self._reset_pending()
+                return self._state
+            if within_grace and qualifying:
+                # TRUSTED HAND-OFF within grace: the committed target vanished and
+                # a floor-clearing replacement is present. Adopt the closest such
+                # qualifier immediately (no sustain) — we only sustain-gate
+                # acquisitions from a fully-lost state, not a direct hand-off to a
+                # trusted target. Closest-by-depth among qualifiers, as elsewhere.
+                best = min(qualifying, key=lambda d: d.depth_m)
+                self._fresh_raw_x_norm = best.normalized_x
+                self._apply_ema(best, now)
+                self._has_committed = True
+                self._reset_pending()
+                return self._state
+            # Grace expired → the committed target is truly lost. Drop the lock and
+            # fall through to sustain-gated ACQUIRING (re-acquisition after loss).
+            self._state = None
+
+        # ── ACQUIRING ─────────────────────────────────────────────────────────
+        # No committed target. Require a NEW target to clear the higher acquire
+        # floor; if the tracker has locked before (re-acquisition after a loss),
+        # also require it to sustain for _acquire_min_frames consecutive frames.
+        acquired = self._acquire(candidates, now)
+        if acquired is None:
+            # Nothing qualifies (or still sustaining) → stay lost, coast.
+            self._fresh_raw_x_norm = None
+            return self._state  # None here (committed cleared above / never set)
+        self._fresh_raw_x_norm = acquired.normalized_x
+        self._apply_ema(acquired, now)
+        self._has_committed = True
+        self._reset_pending()
+        return self._state
+
+    def _acquire(
+        self, candidates: list[_FilteredDetection], now: float
+    ) -> _FilteredDetection | None:
+        """ACQUISITION with a confidence floor + (post-loss) sustain.
+
+        Among candidates clearing _acquire_confidence, pick the closest by depth.
+
+        Cold start (never committed since reset): acquire that candidate
+        immediately — default single-person behaviour is unchanged. The base
+        detection_confidence=0.45 filter (Layer 1) plus this 0.65 floor are the
+        only gates on the initial lock.
+
+        Re-acquisition (we have committed before and lost the target): the chosen
+        challenger must remain the closest qualifier for _acquire_min_frames
+        consecutive frames before it is returned (committed). This filters
+        flickering high-conf impostor blips (the chicken in case (b)).
+
+        Returns the winning detection on the commit frame, else None (coast/lost).
+        """
+        qualifying = [c for c in candidates if c.confidence >= self._acquire_confidence]
+        if not qualifying:
+            # No candidate clears the floor — do not grab a low-conf chicken.
+            self._reset_pending()
+            return None
+
+        best = min(qualifying, key=lambda d: d.depth_m)
+
+        if not self._has_committed:
+            # Cold start: immediate lock (no sustain), preserving legacy behaviour.
+            return best
+
+        # Continuity check: is `best` the same challenger we were counting?
+        # Track by track_id when present; for id=None track positional continuity
+        # (the closest qualifier must stay near where it was last frame).
+        if best.track_id is not None:
+            same = (best.track_id == self._pending_id)
+        else:
+            same = (
+                self._pending_id is None
+                and self._pending_x is not None
+                and abs(best.normalized_x - self._pending_x) <= 0.25
+            )
+
+        if same:
+            self._pending_count += 1
+        else:
+            # New challenger — start the sustain counter at 1.
+            self._pending_id = best.track_id
+            self._pending_count = 1
+        self._pending_x = best.normalized_x
+
+        if self._pending_count >= self._acquire_min_frames:
+            return best
+        return None
+
+    def _reset_pending(self) -> None:
+        self._pending_id = None
+        self._pending_x = None
+        self._pending_count = 0
 
     def _apply_ema(self, det: _FilteredDetection, now: float) -> None:
         if self._state is None:
@@ -295,6 +500,8 @@ class TargetTracker:
     def reset(self) -> None:
         self._state = None
         self._fresh_raw_x_norm = None
+        self._has_committed = False
+        self._reset_pending()
 
     @property
     def last_seen_time(self) -> float:
@@ -559,6 +766,9 @@ class FollowMeController:
         self._tracker = TargetTracker(
             ema_alpha=getattr(config, "target_ema_alpha", 0.35),
             persistence_s=getattr(config, "target_persistence_s", 1.0),
+            switch_grace_s=getattr(config, "target_switch_grace_s", 1.5),
+            acquire_confidence=getattr(config, "target_acquire_confidence", 0.65),
+            acquire_min_frames=int(getattr(config, "target_acquire_min_frames", 3)),
         )
 
         # ── Layer 3: Steering (PID) ──────────────────────────────────────────
@@ -819,14 +1029,26 @@ class FollowMeController:
             self._last_target_x = target.x_m    # metres, used by trail bias
             self._last_target_track_id = target.track_id
             self._last_target_confidence = target.confidence
-            if filtered:
+            # Only mark "actively tracking" / refresh the valid-time when the
+            # tracker COMMITTED to a fresh detection this frame. During a
+            # grace-hold the held state is present (target_present) but no fresh
+            # detection was selected (fresh_raw_x_norm is None), so we must not
+            # extend the coasting window or seed the trail off a frame we did not
+            # actually see the target. (Old code gated on `filtered`, which was
+            # equivalent before sticky-lock since a non-empty filtered list always
+            # produced a fresh selection.)
+            if self._tracker.fresh_raw_x_norm is not None:
                 self._tracking = True
                 self._last_valid_time = now
         else:
             self._tracking = False
 
         # ── Trail breadcrumbs (full rate — accurate path needs every point) ───
-        if self._trail_enabled and self._trail is not None and filtered and target_present:
+        # Gate on a FRESH commit, not raw `filtered`: during a grace-hold candidates
+        # exist (`filtered` non-empty) but the held target's coords are stale, so we
+        # must not seed the trail off them. fresh_raw_x_norm is None on hold/coast.
+        if (self._trail_enabled and self._trail is not None
+                and self._tracker.fresh_raw_x_norm is not None and target_present):
             odom = self._pick_odometry()
             if odom is not None:
                 wx, wy = odom.camera_to_world(target.x_m, target.depth_m)
@@ -858,8 +1080,14 @@ class FollowMeController:
         )
         self._last_compute_time = now
 
-        # True only when there is a live detection this frame (not stale persistence data).
-        fresh_detection = bool(filtered)
+        # True only when the tracker COMMITTED to a fresh detection this frame —
+        # i.e. it followed the committed target or acquired a new one. During a
+        # grace-hold (committed target absent, coasting) or an ACQUIRING frame
+        # (challenger not yet sustained), the tracker sets fresh_raw_x_norm=None
+        # so this is False and the persistence-decay path runs. Previously this
+        # was bool(filtered), which the new sticky logic would mis-mark fresh when
+        # candidates (e.g. a chicken) exist but the tracker did not select one.
+        fresh_detection = self._tracker.fresh_raw_x_norm is not None
 
         if not target_present:
             self._prev_fresh_detection = False

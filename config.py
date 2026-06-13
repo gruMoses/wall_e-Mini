@@ -188,6 +188,21 @@ class FollowMeConfig:
     # ── Layer 2: Target tracker ───────────────────────────────────────────────
     target_ema_alpha: float = 0.5        # EMA smoothing on normalized horizontal offset (0=heavy, 1=none)
     target_persistence_s: float = 2.0   # hold last known position this long before declaring target lost
+    # Sticky-target-lock knobs (defend against misclassified intruders, e.g. a
+    # chicken YOLO labels "person"). Plain config — intentionally NOT autotuned.
+    # SWITCH GRACE: when the committed target is momentarily absent from this
+    # frame's candidates, HOLD it (coast, signal not-fresh) for this long instead
+    # of switching to a different/closer candidate. Only after grace expires may a
+    # new target be acquired.
+    target_switch_grace_s: float = 1.5
+    # ACQUIRE FLOOR: acquiring a NEW target requires confidence >= this (a higher
+    # bar than the per-frame detection_confidence=0.45 filter). An already-committed
+    # target stays followed even if its confidence later drops below this.
+    target_acquire_confidence: float = 0.65
+    # SUSTAINED ACQUISITION: a challenger must qualify (>= acquire_confidence) for
+    # this many consecutive frames before it becomes the committed target. Filters
+    # flickering high-conf blips.
+    target_acquire_min_frames: int = 3
 
     # ── Host-side tracklet layer (IoU + constant-velocity Kalman) ─────────────
     # Assigns stable track_ids to person detections on parse paths that the OAK

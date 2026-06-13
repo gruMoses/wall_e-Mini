@@ -6,7 +6,13 @@ import unittest
 from unittest.mock import patch
 
 from config import FollowMeConfig
-from pi_app.control.follow_me import FollowMeController, PersonDetection, NEUTRAL
+from pi_app.control.follow_me import (
+    FollowMeController,
+    PersonDetection,
+    NEUTRAL,
+    TargetTracker,
+    _FilteredDetection,
+)
 
 
 class TestFollowMeController(unittest.TestCase):
@@ -1112,6 +1118,192 @@ class TestEdgeBoostSteering(unittest.TestCase):
             avg_ratio = sum(ratios) / len(ratios)
             # Just a sanity check — the gain is > 1 for all of them
             self.assertGreater(avg_ratio, 1.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sticky target lock (TargetTracker) — defends against an impostor that YOLO
+# misclassifies as a person. Modelled on the real fm_trials/1781387997 run where
+# the robot locked onto a CHICKEN (conf 0.54–0.92) the moment the person blinked.
+#
+# NOTE ON REPLAY: the recorder logs only the CHOSEN target per tick, not the full
+# candidate list, so 1781387997.jsonl cannot be replayed through TargetTracker.
+# These tests reconstruct cases (a) and (b) with SYNTHETIC candidate lists that
+# mirror the logged confidence / depth / x values (person id=1 ~conf 0.8; chicken
+# conf 0.54 rising to 0.92; chicken closer in depth, offset to an edge x).
+# ─────────────────────────────────────────────────────────────────────────────
+class TestStickyTargetLock(unittest.TestCase):
+
+    GRACE = 1.5
+    ACQ_CONF = 0.65
+    MIN_FRAMES = 3
+
+    def _tracker(self) -> TargetTracker:
+        # ema_alpha=1.0 → no smoothing, so raw selections are easy to assert.
+        return TargetTracker(
+            ema_alpha=1.0,
+            persistence_s=2.0,
+            switch_grace_s=self.GRACE,
+            acquire_confidence=self.ACQ_CONF,
+            acquire_min_frames=self.MIN_FRAMES,
+        )
+
+    def _det(self, normalized_x=0.0, depth_m=2.0, confidence=0.9, track_id=None):
+        return _FilteredDetection(
+            normalized_x=normalized_x,
+            x_m=normalized_x,  # value irrelevant to selection here
+            depth_m=depth_m,
+            confidence=confidence,
+            bbox=(0.4, 0.3, 0.6, 0.8),
+            track_id=track_id,
+        )
+
+    # ── Case (a): committed person blinks out, closer LOW-CONF chicken present ──
+    def test_case_a_grace_holds_committed_against_closer_chicken(self):
+        trk = self._tracker()
+        t = 100.0
+        # Commit to the person id=1 at x=-0.1, depth 2.5m (cold start → immediate).
+        person = self._det(normalized_x=-0.1, depth_m=2.5, confidence=0.82, track_id=1)
+        st = trk.update([person], now=t)
+        self.assertIsNotNone(st)
+        self.assertEqual(st.track_id, 1)
+
+        # Next frame (0.1s later, within grace): person GONE, only a closer chicken
+        # (id=None, conf 0.54, depth 1.4m, edge x=+0.7). Must HOLD id=1, not switch.
+        chicken = self._det(normalized_x=0.7, depth_m=1.4, confidence=0.54, track_id=None)
+        held = trk.update([chicken], now=t + 0.1)
+        self.assertIsNotNone(held)
+        self.assertEqual(held.track_id, 1, "must hold committed person, not the chicken")
+        # Not fresh during a grace-hold → caller's persistence-decay runs.
+        self.assertIsNone(trk.fresh_raw_x_norm)
+        # Held position is the person's, NOT the chicken's edge x.
+        self.assertAlmostEqual(held.normalized_x, -0.1, places=6)
+
+    def test_case_a_after_grace_lowconf_chicken_not_acquired(self):
+        trk = self._tracker()
+        t = 100.0
+        trk.update([self._det(normalized_x=-0.1, depth_m=2.5, confidence=0.82, track_id=1)], now=t)
+        chicken = self._det(normalized_x=0.7, depth_m=1.4, confidence=0.54, track_id=None)
+        # Past the grace window with the same sub-floor chicken → no acquisition.
+        out = trk.update([chicken], now=t + self.GRACE + 0.5)
+        self.assertIsNone(out, "sub-floor chicken (0.54 < 0.65) must never be acquired")
+        self.assertIsNone(trk.fresh_raw_x_norm)
+
+    # ── Case (b): person fully lost, then a rising-conf chicken vs a real person ─
+    def test_case_b_rising_chicken_never_acquired_below_floor(self):
+        trk = self._tracker()
+        t = 100.0
+        trk.update([self._det(depth_m=2.5, confidence=0.82, track_id=1)], now=t)
+        # Person fully lost: empty frames past persistence (2.0s) + grace.
+        t2 = t + 5.0
+        trk.update([], now=t2)
+        # Chicken (id=18) appears closest, conf rising 0.56→0.64 — all below floor.
+        confs = [0.56, 0.58, 0.60, 0.62, 0.64]
+        out = None
+        for i, c in enumerate(confs):
+            out = trk.update(
+                [self._det(normalized_x=0.6, depth_m=1.3, confidence=c, track_id=18)],
+                now=t2 + 0.5 + i * 0.1,
+            )
+        self.assertIsNone(out, "chicken below 0.65 floor must never be acquired")
+
+    def test_case_b_real_person_acquired_exactly_after_min_frames(self):
+        trk = self._tracker()
+        t = 100.0
+        trk.update([self._det(depth_m=2.5, confidence=0.82, track_id=1)], now=t)
+        t2 = t + 5.0
+        trk.update([], now=t2)  # person fully lost (beyond grace + persistence)
+
+        # A genuine person (id=7, conf 0.8) appears and is sustained. Because the
+        # tracker has committed before, re-acquisition is sustain-gated: must NOT
+        # acquire before the MIN_FRAMES-th qualifying frame.
+        new_person = self._det(normalized_x=0.2, depth_m=3.0, confidence=0.8, track_id=7)
+        results = []
+        for i in range(self.MIN_FRAMES + 1):
+            results.append(trk.update([new_person], now=t2 + 1.0 + i * 0.1))
+        # Frames 1..MIN_FRAMES-1 coast (None); committed exactly on the MIN_FRAMES-th.
+        for i in range(self.MIN_FRAMES - 1):
+            self.assertIsNone(results[i], f"must not acquire before frame {self.MIN_FRAMES}")
+        self.assertIsNotNone(results[self.MIN_FRAMES - 1], "acquire on the Nth frame")
+        self.assertEqual(results[self.MIN_FRAMES - 1].track_id, 7)
+
+    # ── Committed target trusted even when its confidence later drops ───────────
+    def test_committed_target_followed_when_conf_drops_below_floor(self):
+        trk = self._tracker()
+        t = 100.0
+        trk.update([self._det(depth_m=2.0, confidence=0.9, track_id=1)], now=t)
+        # Same id=1 still present but conf fell to 0.50 (< 0.65 floor) — still 0.45+
+        # so Layer-1 passes it. Tracked = trusted: must keep following it, fresh.
+        st = trk.update([self._det(depth_m=2.0, confidence=0.50, track_id=1)], now=t + 0.1)
+        self.assertIsNotNone(st)
+        self.assertEqual(st.track_id, 1)
+        self.assertIsNotNone(trk.fresh_raw_x_norm, "committed follow is a fresh frame")
+
+    # ── Regression: continuous single person → identical selection/EMA ──────────
+    def test_continuous_single_person_unchanged_vs_legacy(self):
+        """Drive both a legacy-style tracker (no sticky knobs) and the new one
+        with the SAME continuous single-person stream; assert identical state."""
+        legacy = TargetTracker(ema_alpha=0.5, persistence_s=2.0,
+                               switch_grace_s=0.0,
+                               acquire_confidence=0.0,
+                               acquire_min_frames=1)  # knobs disabled
+        sticky = TargetTracker(ema_alpha=0.5, persistence_s=2.0,
+                               switch_grace_s=self.GRACE,
+                               acquire_confidence=self.ACQ_CONF,
+                               acquire_min_frames=self.MIN_FRAMES)
+        t = 100.0
+        xs = [0.0, 0.2, -0.1, 0.3, -0.2, 0.15, 0.05, -0.05, 0.25, -0.15]
+        for i, x in enumerate(xs):
+            det = self._det(normalized_x=x, depth_m=2.0 + 0.05 * i,
+                            confidence=0.9, track_id=1)
+            now = t + i * 0.1
+            ls = legacy.update([det], now)
+            ss = sticky.update([det], now)
+            self.assertIsNotNone(ss)
+            # Selection + EMA are byte-identical to the legacy path.
+            self.assertAlmostEqual(ls.normalized_x, ss.normalized_x, places=9,
+                                   msg=f"frame {i}: EMA diverged")
+            self.assertEqual(ls.track_id, ss.track_id)
+            self.assertEqual(ls.depth_m, ss.depth_m)
+            # And every tracked frame is fresh (no grace/sustain interference).
+            self.assertIsNotNone(sticky.fresh_raw_x_norm)
+
+
+class TestStickyLockComputeIntegration(unittest.TestCase):
+    """compute()-level: the fresh_detection derivation change (now keyed off
+    tracker.fresh_raw_x_norm instead of bool(filtered)) did not break the normal
+    multi-frame follow — every tracked frame is still fresh."""
+
+    def _make(self, **overrides) -> FollowMeController:
+        return FollowMeController(FollowMeConfig(**overrides))
+
+    def _person(self, x_m=0.0, z_m=3.0, confidence=0.9,
+                bbox=(0.45, 0.3, 0.55, 0.8), track_id=1) -> PersonDetection:
+        return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence,
+                               bbox=bbox, track_id=track_id)
+
+    def test_normal_follow_marks_each_tracked_frame_fresh(self):
+        fm = self._make(follow_distance_m=1.5, max_follow_speed_byte=80)
+        for _ in range(6):
+            fm.compute([self._person()])
+            # The tracker committed a fresh detection every tracked frame.
+            self.assertIsNotNone(fm._tracker.fresh_raw_x_norm)
+            self.assertTrue(fm.get_status()["follow_me_tracking"])
+
+    def test_grace_hold_frame_is_not_fresh(self):
+        """Lock a person, then a single frame with ONLY a sub-floor chicken at a
+        different position: the controller must NOT mark it a fresh detection
+        (so persistence-decay runs) and must NOT switch the tracked id."""
+        fm = self._make()
+        fm.compute([self._person(track_id=1)])
+        self.assertEqual(fm.get_status()["follow_me_target_track_id"], 1)
+        # Chicken: low conf 0.54, edge bbox, closer — must be ignored (grace-hold).
+        chicken = PersonDetection(x_m=2.0, z_m=1.3, confidence=0.54,
+                                  bbox=(0.85, 0.3, 1.0, 0.8), track_id=None)
+        fm.compute([chicken])
+        self.assertIsNone(fm._tracker.fresh_raw_x_norm,
+                          "grace-hold frame must not be fresh")
+        self.assertEqual(fm.get_status()["follow_me_target_track_id"], 1,
+                         "must not switch to the chicken")
 
 
 if __name__ == "__main__":
