@@ -10,6 +10,8 @@ Coverage:
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 import types
@@ -172,19 +174,32 @@ class TestSlipDetection(unittest.TestCase):
         self.assertFalse(fm.get_status()["follow_me_slip_active"])
 
     def test_slip_detected_on_large_rpm_differential(self):
-        """Slip declared when |left_rpm - right_rpm| > threshold while straight."""
+        """Slip declared when actual−expected differential > threshold while
+        commanded straight (and the straight guard has persisted).
+
+        Persistence guard: the new detector requires the emitted/commanded steer
+        to read "straight" for slip_straight_persist_ticks consecutive ticks; we
+        set that to 1 here so a single compute() can trigger. Person is centred so
+        the commanded steer stays ~0 (expected_diff ~0) and slip_diff == raw diff.
+        """
         fm = _make_fm(
+            slip_compensation_enabled=True,
             slip_threshold_rpm=200.0,
             slip_throttle_reduction=0.15,
             slip_feedforward_gain=0.02,
+            slip_straight_persist_ticks=1,
         )
         fm.update_telemetry(left_rpm=1000, right_rpm=500, actual_speed_mps=0.3)
         fm.compute([_person()])
         self.assertTrue(fm.get_status()["follow_me_slip_active"])
 
     def test_no_slip_when_differential_below_threshold(self):
-        """No slip when RPM difference is within threshold."""
-        fm = _make_fm(slip_threshold_rpm=600.0)
+        """No slip when the actual−expected differential is within threshold."""
+        fm = _make_fm(
+            slip_compensation_enabled=True,
+            slip_threshold_rpm=600.0,
+            slip_straight_persist_ticks=1,
+        )
         fm.update_telemetry(left_rpm=1000, right_rpm=850, actual_speed_mps=0.3)
         fm.compute([_person()])
         self.assertFalse(fm.get_status()["follow_me_slip_active"])
@@ -197,8 +212,10 @@ class TestSlipDetection(unittest.TestCase):
         frame regardless of person position).
         """
         fm = _make_fm(
+            slip_compensation_enabled=True,
             slip_threshold_rpm=50.0,  # low threshold — would normally trigger
             slip_throttle_reduction=0.5,
+            slip_straight_persist_ticks=1,
         )
         fm.update_telemetry(left_rpm=800, right_rpm=600, actual_speed_mps=0.3)
         # Prime tracker so the reacq ramp is not active this call
@@ -206,20 +223,31 @@ class TestSlipDetection(unittest.TestCase):
         fm._reacq_time = 0.0
         # Provide a strongly off-centre person to force large steer output (≥5 bytes)
         det = _person(x_m=2.0, z_m=3.0, bbox=(0.75, 0.3, 0.95, 0.8))
+        # Seed the emitted/commanded steer so the straight guard sees a turn. The
+        # new guard reads _last_emitted_steer (the prior command), not this tick's
+        # raw PID value — so a genuine commanded turn must keep the guard disengaged.
+        fm._last_emitted_steer = 15.0
         fm.compute([det])
-        # With large steer the slip guard (abs(steer) < 5.0) suppresses the flag
+        # With a commanded turn the straight guard (abs(emitted) < 5.0) is False,
+        # so slip never fires.
         self.assertFalse(fm.get_status()["follow_me_slip_active"])
 
     def test_slip_reduces_speed_output(self):
         """When slip fires, the effective speed output must be ≤ the un-slipped value."""
-        fm_no_slip = _make_fm(slip_threshold_rpm=9999.0)
+        fm_no_slip = _make_fm(
+            slip_compensation_enabled=True,
+            slip_threshold_rpm=9999.0,
+            slip_straight_persist_ticks=1,
+        )
         fm_no_slip.update_telemetry(left_rpm=1000, right_rpm=400, actual_speed_mps=0.3)
         l0, r0 = fm_no_slip.compute([_person()])
 
         fm_slip = _make_fm(
+            slip_compensation_enabled=True,
             slip_threshold_rpm=200.0,
             slip_throttle_reduction=0.20,
             slip_feedforward_gain=0.0,  # isolate throttle effect
+            slip_straight_persist_ticks=1,
         )
         fm_slip.update_telemetry(left_rpm=1000, right_rpm=400, actual_speed_mps=0.3)
         l1, r1 = fm_slip.compute([_person()])
@@ -241,6 +269,316 @@ class TestSlipDetection(unittest.TestCase):
         fm.update_telemetry(left_rpm=500, right_rpm=500, actual_speed_mps=0.42)
         fm.compute([_person()])
         self.assertAlmostEqual(fm.get_status()["follow_me_actual_speed_mps"], 0.42)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2b. Rewritten slip compensator: off-switch, anti-runaway, genuine-slip
+# ─────────────────────────────────────────────────────────────────────────────
+
+DIRECT_CAP = 18.0          # FollowMeConfig.direct_mode_max_steer_byte default
+GLOBAL_MAX_STEER = 25.0    # FollowMeConfig.max_steer_offset_byte default
+
+
+class TestSlipCompensatorRewrite(unittest.TestCase):
+    """Direct unit tests on _apply_slip_compensation — the algorithm in isolation.
+
+    Calling the helper directly lets us drive commanded steer / rpm exactly and
+    iterate ticks, which the full compute() pipeline (with reacq ramps, slew caps,
+    depth filters) would otherwise obscure.
+    """
+
+    # ── (a) Disabled default is a TRUE no-op for ANY rpm input ───────────────
+
+    def test_disabled_is_pure_noop_for_any_rpm(self):
+        """With slip_compensation_enabled=False (the default), the function returns
+        speed and steer UNCHANGED for any rpm differential — no throttle reduction,
+        no steer term."""
+        fm = _make_fm()  # default: slip_compensation_enabled=False
+        self.assertFalse(fm._cfg.slip_compensation_enabled)
+        cases = [
+            (None, None), (0, 0), (500, 500), (1000, 0), (0, 1000),
+            (5000, -5000), (1200, 350), (-800, 800),
+        ]
+        for lr, rr in cases:
+            fm.update_telemetry(left_rpm=lr, right_rpm=rr, actual_speed_mps=0.5)
+            # Even with a huge actual differential and a commanded "straight" steer,
+            # nothing changes when disabled.
+            fm._last_emitted_steer = 0.0
+            for _ in range(5):  # iterate to be sure persistence can't sneak in
+                speed_out, steer_out = fm._apply_slip_compensation(60.0, 3.0)
+                self.assertEqual(speed_out, 60.0, f"speed changed for rpm={lr},{rr}")
+                self.assertEqual(steer_out, 3.0, f"steer changed for rpm={lr},{rr}")
+                self.assertFalse(fm.get_status()["follow_me_slip_active"])
+
+    # ── (b) REGRESSION: the recorded failure pattern must NOT run away ───────
+
+    def test_regression_commanded_turn_large_diff_no_runaway(self):
+        """Failure pattern: a commanded turn produces a large ACTUAL rpm differential
+        on a skid-steer robot. The OLD detector read raw rpm_diff as slip and injected
+        steer that grew the differential → pinned steer to ±max (25). The NEW detector
+        cancels the commanded component (expected_diff), so a commanded turn nets ~0
+        slip_diff: no steer injected, and the total can never exceed the direct cap.
+        """
+        # Enable + give it a non-zero gain so that IF it (wrongly) fired it would
+        # try to inject steer — proving the runaway is structurally gone.
+        fm = _make_fm(
+            slip_compensation_enabled=True,
+            slip_threshold_rpm=200.0,
+            slip_feedforward_gain=0.05,
+            slip_cmd_diff_per_byte=40.0,
+            slip_straight_persist_ticks=3,
+        )
+        # Commanded steer is a real turn (12 bytes). On a skid-steer robot that turn
+        # itself creates ~ k_cmd*12 = 480 eRPM differential. Simulate the actual diff
+        # tracking the command (left spins faster for a right turn).
+        fm._last_emitted_steer = 12.0
+        commanded_steer = 12.0
+        left_rpm, right_rpm = 980, 500   # actual diff = 480 ≈ expected for a 12-byte turn
+        fm.update_telemetry(left_rpm=left_rpm, right_rpm=right_rpm, actual_speed_mps=0.4)
+
+        steer_in = commanded_steer
+        prev_steer = steer_in
+        for _ in range(30):  # iterate far beyond the persistence window
+            _, steer_out = fm._apply_slip_compensation(60.0, steer_in)
+            # Never injects escalating steer: output must not climb past the
+            # direct cap, and must not monotonically ramp toward the global max.
+            self.assertLessEqual(abs(steer_out), DIRECT_CAP + 1e-6,
+                                 "slip pushed steer past the direct cap")
+            self.assertLess(abs(steer_out), GLOBAL_MAX_STEER,
+                            "slip approached the global max — runaway not prevented")
+            # No positive-feedback growth: a commanded turn nets ~0 slip_diff, so
+            # the steer is not amplified tick over tick.
+            self.assertLessEqual(abs(steer_out), abs(prev_steer) + 1e-6,
+                                 "steer grew tick-over-tick (positive feedback)")
+            prev_steer = steer_out
+            steer_in = steer_out  # feed back as if the next tick's command
+
+    def test_regression_near_straight_small_steer_with_turn_diff(self):
+        """Near-straight small commanded steer while a LARGE actual rpm differential
+        exists (as during a turn that the command is just beginning). Even enabled
+        with a gain, the emitted steer must stay within the direct cap."""
+        fm = _make_fm(
+            slip_compensation_enabled=True,
+            slip_threshold_rpm=200.0,
+            slip_feedforward_gain=0.05,
+            slip_cmd_diff_per_byte=40.0,
+            slip_straight_persist_ticks=3,
+        )
+        # Small commanded steer (3 bytes, under the 5-byte straight guard) but a
+        # large actual differential from a developing turn.
+        fm._last_emitted_steer = 3.0
+        fm.update_telemetry(left_rpm=1200, right_rpm=300, actual_speed_mps=0.4)
+        steer_in = 3.0
+        worst = 0.0
+        for _ in range(30):
+            _, steer_out = fm._apply_slip_compensation(60.0, steer_in)
+            worst = max(worst, abs(steer_out))
+            steer_in = steer_out
+        self.assertLessEqual(worst, DIRECT_CAP + 1e-6,
+                             f"emitted steer exceeded direct cap (worst={worst})")
+
+    # ── (c) Genuine slip IS detected when enabled ────────────────────────────
+
+    def test_genuine_slip_detected_when_enabled(self):
+        """Commanded straight (expected_diff≈0) with a large ACTUAL differential is a
+        real slip and IS detected: slip_active True and throttle reduced."""
+        fm = _make_fm(
+            slip_compensation_enabled=True,
+            slip_threshold_rpm=200.0,
+            slip_throttle_reduction=0.20,
+            slip_feedforward_gain=0.02,
+            slip_cmd_diff_per_byte=40.0,
+            slip_straight_persist_ticks=3,
+        )
+        fm._last_emitted_steer = 0.0  # commanded straight
+        fm.update_telemetry(left_rpm=1000, right_rpm=300, actual_speed_mps=0.4)
+        speed_out = steer_out = None
+        # Iterate to satisfy the 3-tick straight-persistence guard.
+        for _ in range(4):
+            speed_out, steer_out = fm._apply_slip_compensation(60.0, 0.0)
+        self.assertTrue(fm.get_status()["follow_me_slip_active"],
+                        "genuine slip (commanded straight, large diff) not detected")
+        self.assertLess(speed_out, 60.0, "throttle not reduced on genuine slip")
+        # A small bounded steer correction may be injected, but never past the cap.
+        self.assertLessEqual(abs(steer_out), DIRECT_CAP + 1e-6)
+
+    def test_genuine_slip_requires_persistence(self):
+        """The straight guard must persist N ticks before slip can act — a single
+        tick never triggers (transient immunity)."""
+        fm = _make_fm(
+            slip_compensation_enabled=True,
+            slip_threshold_rpm=200.0,
+            slip_straight_persist_ticks=3,
+        )
+        fm._last_emitted_steer = 0.0
+        fm.update_telemetry(left_rpm=1000, right_rpm=300, actual_speed_mps=0.4)
+        # First two ticks: guard not yet persisted → no slip.
+        fm._apply_slip_compensation(60.0, 0.0)
+        self.assertFalse(fm.get_status()["follow_me_slip_active"])
+        fm._apply_slip_compensation(60.0, 0.0)
+        self.assertFalse(fm.get_status()["follow_me_slip_active"])
+        # Third tick reaches the threshold.
+        fm._apply_slip_compensation(60.0, 0.0)
+        self.assertTrue(fm.get_status()["follow_me_slip_active"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2c. Replay of the recorded runaway (fm_verify/1781382327.jsonl)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FAILURE_REPLAY = "/tmp/fm_verify/1781382327.jsonl"
+
+
+class TestRecordedRunawayReplay(unittest.TestCase):
+    """Replay the recorded failure trace.
+
+    NOTE: the recorded JSONL predates the recorder honesty fix and does NOT carry
+    per-tick RPM fields, so the exact left/right eRPM that drove the original slip
+    cannot be wired back through the full controller. Per the task's stated
+    fallback, we assert at the _apply_slip_compensation level instead: we replay
+    the recorded steer/speed timeline and, for every recorded tick, synthesize a
+    LARGE actual rpm differential (the worst case the live telemetry could have
+    presented during a turn) and confirm the SHIPPED defaults (slip disabled) leave
+    every command byte-identical, and that even force-enabled the compensator never
+    ramps steer toward the global max.
+    """
+
+    def _load(self):
+        if not os.path.exists(_FAILURE_REPLAY):
+            self.skipTest(f"recorded failure file not present: {_FAILURE_REPLAY}")
+        recs = []
+        with open(_FAILURE_REPLAY) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    recs.append(json.loads(line))
+        return recs
+
+    def test_shipped_defaults_slip_is_noop_over_replay(self):
+        """With shipped defaults (slip disabled), feeding the recorded steer/speed
+        through _apply_slip_compensation with a large synthetic rpm differential
+        leaves every (speed, steer) byte-identical — no slip modification at all."""
+        recs = self._load()
+        fm = _make_fm()  # shipped defaults: slip_compensation_enabled=False
+        # Worst-case actual differential on every tick.
+        fm.update_telemetry(left_rpm=2000, right_rpm=-2000, actual_speed_mps=0.5)
+        n = 0
+        for r in recs:
+            steer = float(r["steer"])
+            speed = float(r["speed"])
+            fm._last_emitted_steer = steer
+            speed_out, steer_out = fm._apply_slip_compensation(speed, steer)
+            self.assertEqual(speed_out, speed)
+            self.assertEqual(steer_out, steer)
+            self.assertFalse(fm.get_status()["follow_me_slip_active"])
+            n += 1
+        self.assertGreater(n, 100, "replay file unexpectedly short")
+
+    def test_replay_slip_never_amplifies_steer_even_if_enabled(self):
+        """Replay the recorded steer timeline with the NEW detector force-enabled and
+        a gain, synthesizing the actual rpm differential that a commanded turn would
+        produce (the exact case that fooled the old raw-diff detector).
+
+        The original runaway came from slip INJECTING steer that grew the rpm
+        differential it reacted to, pinning steer to the global max (25) while
+        mode=='direct'. Note the recorded `steer` values themselves are already
+        contaminated by that bug (they hit 25), so we cannot assert on their
+        absolute value. Instead we assert the property that breaks the runaway:
+        the new compensator NEVER amplifies steer (output magnitude ≤ input), and
+        whenever it actually fires it clamps the result to the direct cap. With the
+        old code, the same commanded-turn differential would have driven steer_out
+        well above its input, monotonically toward ±max.
+        """
+        recs = self._load()
+        fm = _make_fm(
+            slip_compensation_enabled=True,
+            slip_threshold_rpm=200.0,
+            slip_feedforward_gain=0.05,
+            slip_cmd_diff_per_byte=40.0,
+            slip_straight_persist_ticks=3,
+        )
+        k_cmd = fm._cfg.slip_cmd_diff_per_byte
+        fired_any = False
+        for r in recs:
+            steer = float(r["steer"])
+            speed = float(r["speed"])
+            fm._last_emitted_steer = steer
+            # Synthesize the actual differential a commanded turn of this steer
+            # produces (plus modest residual noise). The new detector cancels the
+            # commanded component, so a commanded turn is not read as slip.
+            actual_diff = k_cmd * steer + 60.0
+            left = int(round(actual_diff / 2))
+            right = int(round(-actual_diff / 2))
+            fm.update_telemetry(left_rpm=left, right_rpm=right, actual_speed_mps=0.5)
+            _, steer_out = fm._apply_slip_compensation(speed, steer)
+            # Anti-runaway invariant: slip never amplifies the steer it was given.
+            self.assertLessEqual(abs(steer_out), abs(steer) + 1e-6,
+                                 f"slip amplified steer {steer} -> {steer_out}")
+            if fm.get_status()["follow_me_slip_active"]:
+                fired_any = True
+                # When it does fire, the output is bounded by the direct cap.
+                self.assertLessEqual(abs(steer_out), DIRECT_CAP + 1e-6)
+        # The synthetic differential mirrors the command, so on this turn-dominated
+        # trace the commanded component is cancelled and slip should essentially
+        # never declare a runaway-inducing event. (fired_any may be False — that is
+        # the correct, non-runaway outcome; we only require the invariants above.)
+        _ = fired_any
+
+    def test_controller_replay_no_runaway_with_shipped_defaults(self):
+        """Feed the recorded x_raw/depth sequence through a real FollowMeController
+        with the SHIPPED defaults (slip disabled) and confirm the emitted steer
+        never reaches the global ±max and shows no monotonic ramp-to-25 runaway.
+
+        The recorded file carries no RPM, so with slip disabled the controller's
+        slip stage is a no-op regardless; this exercises the direct/steering path
+        end-to-end on the real position trace and proves it alone never produces
+        the 25-on-direct signature.
+        """
+        recs = self._load()
+        fm = _make_fm()  # shipped defaults
+        # No telemetry → slip path is doubly inert (disabled AND no rpm).
+        fm.update_telemetry(left_rpm=None, right_rpm=None, actual_speed_mps=None)
+
+        max_abs_steer = 0.0
+        ramp_run = 0          # consecutive ticks of |steer| >= global max
+        worst_ramp_run = 0
+        fed = 0
+        for r in recs:
+            x_raw = r.get("x_raw")
+            depth = r.get("depth")
+            conf = r.get("conf")
+            if x_raw is None or depth is None:
+                # Lost/persistence tick in the recording — feed no detections so the
+                # controller exercises its real lost-target handling.
+                fm.compute([])
+                ramp_run = 0
+                continue
+            cx = 0.5 + float(x_raw) / 2.0  # invert normalized_x = (cx-0.5)*2
+            half = 0.05
+            bbox = (cx - half, 0.3, cx + half, 0.8)
+            det = PersonDetection(
+                x_m=float(x_raw) * 2.0,  # rough lateral metres; sign/scale only
+                z_m=float(depth),
+                confidence=float(conf) if conf is not None else 0.9,
+                bbox=bbox,
+            )
+            fm.compute([det])
+            fed += 1
+            emitted = abs(fm._last_slew_capped_steer)
+            max_abs_steer = max(max_abs_steer, emitted)
+            if emitted >= GLOBAL_MAX_STEER - 1e-6:
+                ramp_run += 1
+                worst_ramp_run = max(worst_ramp_run, ramp_run)
+            else:
+                ramp_run = 0
+
+        self.assertGreater(fed, 50, "replay fed too few fresh detections")
+        # No tick may sit at the global ±max (the runaway pinned steer to 25).
+        self.assertLess(max_abs_steer, GLOBAL_MAX_STEER,
+                        f"emitted steer reached the global max ({max_abs_steer})")
+        # And certainly no sustained ramp held at the max.
+        self.assertEqual(worst_ramp_run, 0,
+                         "emitted steer held at the global max across consecutive ticks (runaway)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

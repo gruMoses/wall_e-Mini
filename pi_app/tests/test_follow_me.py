@@ -551,5 +551,158 @@ class TestRecorder(unittest.TestCase):
                               f"Legacy field '{field}' must still be present in records")
 
 
+class TestRecorderHonestyFields(unittest.TestCase):
+    """Recorder honesty additions: steer_want, steer_src, slip_active, emitted.
+
+    Drives the controller through a fresh tick, a persistence/decay tick, and a
+    true lost tick with a controllable monotonic clock, capturing every JSONL
+    record, and asserts the new per-tick fields are present and correct while the
+    legacy keys (which fm_score.py parses) are unchanged.
+    """
+
+    def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
+                bbox=(0.4, 0.3, 0.6, 0.8)) -> PersonDetection:
+        return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence, bbox=bbox)
+
+    def _run_sequence(self, steps):
+        """Run a list of (detections, monotonic_time) steps through one controller
+        and return the list of parsed JSONL records (one per compute call).
+
+        Trail following is disabled so steer_src is deterministically "direct" on
+        fresh ticks (no odometry is wired in these unit tests anyway).
+        """
+        cfg = FollowMeConfig(trail_follow_enabled=False)
+        fm = FollowMeController(cfg)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("pi_app.control.follow_me.os.makedirs"):
+                with patch("pi_app.control.follow_me.time.time", return_value=2_000_000.0):
+                    _real_open = open
+
+                    def fake_open(path, *args, **kwargs):
+                        if "fm_trials" in str(path):
+                            return _real_open(os.path.join(tmp, "trial.jsonl"),
+                                              *args, **kwargs)
+                        return _real_open(path, *args, **kwargs)
+
+                    clock = {"t": 0.0}
+
+                    def fake_mono():
+                        return clock["t"]
+
+                    with patch("builtins.open", side_effect=fake_open):
+                        with patch("pi_app.control.follow_me.time.monotonic",
+                                   side_effect=fake_mono):
+                            for dets, t in steps:
+                                clock["t"] = t
+                                fm.compute(dets)
+                    fm.stop_recorder()
+
+            with open(os.path.join(tmp, "trial.jsonl")) as fh:
+                return [json.loads(line) for line in fh if line.strip()]
+
+    def test_new_fields_present_and_typed(self):
+        """Every record carries steer_want (number), steer_src (str), slip_active
+        (bool), emitted (bool) — alongside the unchanged legacy keys."""
+        recs = self._run_sequence([
+            ([self._person()], 0.0),
+            ([self._person()], 0.07),
+        ])
+        self.assertGreaterEqual(len(recs), 2)
+        legacy = {"t", "x_raw", "x_filt", "x_err", "steer", "speed", "mode",
+                  "track_id", "depth", "conf", "is_armed", "left_byte", "right_byte"}
+        for rec in recs:
+            for k in legacy:
+                self.assertIn(k, rec, f"legacy key '{k}' missing")
+            self.assertIn("steer_want", rec)
+            self.assertIn("steer_src", rec)
+            self.assertIn("slip_active", rec)
+            self.assertIn("emitted", rec)
+            self.assertIsInstance(rec["steer_want"], (int, float))
+            self.assertIsInstance(rec["steer_src"], str)
+            self.assertIsInstance(rec["slip_active"], bool)
+            self.assertIsInstance(rec["emitted"], bool)
+            # mode keeps its legacy vocabulary for fm_score.py.
+            self.assertIn(rec["mode"], {"direct", "pp", "search", "lost"})
+
+    def test_fresh_tick_steer_src_direct(self):
+        """A fresh detection (trail disabled) records steer_src == 'direct' and a
+        steer_want equal to the pre-slip/pre-slew steer the branch produced."""
+        recs = self._run_sequence([
+            # Prime two fresh ticks so the reacq ramp is past and a real steer forms.
+            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 0.0),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 0.5),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 1.5),
+        ])
+        fresh = recs[-1]
+        self.assertEqual(fresh["steer_src"], "direct")
+        self.assertFalse(fresh["slip_active"])  # no rpm telemetry → slip inert
+        # An off-centre person yields a non-zero steer want toward the person.
+        self.assertNotEqual(fresh["steer_want"], 0.0)
+
+    def test_persistence_tick_steer_src_persist(self):
+        """After a fresh detection, an empty-detection tick within the persistence
+        window (target still held, not fresh) records steer_src == 'persist' —
+        distinct from a true lost tick."""
+        recs = self._run_sequence([
+            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 0.0),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 0.5),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 1.0),
+            # Empty detections at t=1.2: within target_persistence_s (2.0) of last
+            # fresh (1.0), so the tracker holds the target → persistence/decay tick.
+            ([], 1.2),
+        ])
+        persist = recs[-1]
+        self.assertEqual(persist["steer_src"], "persist")
+        # mode still reports the pursuit mode (direct), not "lost", on a hold tick.
+        self.assertEqual(persist["mode"], "direct")
+
+    def test_lost_tick_steer_src_lost(self):
+        """Empty detections past the full persistence/timeout window record
+        steer_src == 'lost' and mode == 'lost'."""
+        recs = self._run_sequence([
+            ([self._person()], 0.0),
+            ([self._person()], 0.5),
+            # Empty far beyond target_persistence_s (2.0) and lost_target_timeout_s
+            # (3.5): tracker returns None → true lost.
+            ([], 10.0),
+            ([], 10.07),
+        ])
+        lost = recs[-1]
+        self.assertEqual(lost["steer_src"], "lost")
+        self.assertEqual(lost["mode"], "lost")
+
+    def test_emitted_true_only_on_output_gate_ticks(self):
+        """emitted is True only when the 15 Hz output gate actually fires. Vision
+        ticks that arrive faster than the output interval and merely hold the last
+        command record emitted == False."""
+        # output interval is 1/15 ≈ 0.0667 s. Feed ticks 0.02 s apart so most are
+        # held. First tick always emits (last_output_time<=0).
+        steps = [([self._person()], i * 0.02) for i in range(8)]
+        recs = self._run_sequence(steps)
+        self.assertEqual(len(recs), 8)
+        self.assertTrue(recs[0]["emitted"], "first tick must emit")
+        # At 0.02 s spacing, the gate (0.0667 s) fires roughly every ~4th tick, so
+        # there must be a mix of emitted True and False.
+        flags = [r["emitted"] for r in recs]
+        self.assertIn(True, flags)
+        self.assertIn(False, flags, "fast-held vision ticks must record emitted=False")
+        # The held ticks (emitted False) carry the SAME final steer as the last
+        # emitted tick (the double-print the new fields disambiguate).
+        for i in range(1, len(recs)):
+            if not recs[i]["emitted"]:
+                self.assertEqual(recs[i]["steer"], recs[i - 1]["steer"],
+                                 "held tick steer must equal the previous tick's")
+
+    def test_emitted_ticks_dedupe_matches_command_rate(self):
+        """Filtering emitted==True dedupes the vision-rate stream down to roughly
+        the output-gate rate (fewer emitted ticks than total ticks)."""
+        steps = [([self._person()], i * 0.02) for i in range(12)]
+        recs = self._run_sequence(steps)
+        emitted_count = sum(1 for r in recs if r["emitted"])
+        self.assertLess(emitted_count, len(recs),
+                        "every tick emitted — output gate not deduping")
+        self.assertGreaterEqual(emitted_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

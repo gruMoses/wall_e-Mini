@@ -651,6 +651,17 @@ class FollowMeController:
         self._actual_right_rpm: int | None = None
         self._actual_speed_mps: float | None = None
         self._last_slip_active: bool = False
+        # Consecutive-tick counter for the slip "going straight" guard. Evaluated
+        # on the EMITTED/commanded steer; slip may only act once it persists.
+        self._slip_straight_ticks: int = 0
+
+        # ── Recorder "what the controller wanted" state (per-tick honesty) ────
+        # steer the branch produced THIS tick BEFORE slip-comp and BEFORE the slew
+        # cap, the branch label that produced it, whether slip modified this tick,
+        # and whether this tick passed the 15 Hz output gate.
+        self._last_steer_want: float = 0.0
+        self._last_steer_src: str = "lost"
+        self._last_emitted_flag: bool = False
 
         # ── Trail-following subsystems (Pure Pursuit — preserved) ────────────
         self._trail_enabled = bool(getattr(config, "trail_follow_enabled", False))
@@ -839,6 +850,17 @@ class FollowMeController:
         if not target_present:
             self._prev_fresh_detection = False
             left, right = self._handle_lost_target(now)
+            # Recorder honesty: what the lost-target handler wanted this tick,
+            # and which branch produced it. _handle_lost_target sets
+            # _pursuit_mode to "trail"/"search" while coasting, or resets to
+            # "direct" on full timeout (commands neutral). Map to a recorder src.
+            self._last_steer_want = self._last_steer_offset
+            if self._tracking and self._pursuit_mode == "trail":
+                self._last_steer_src = "trail"
+            elif self._tracking and self._pursuit_mode == "search":
+                self._last_steer_src = "search"
+            else:
+                self._last_steer_src = "lost"
         else:
             # Layer 4: Speed (closed-loop when VESC telemetry is available)
             speed = self._speed.compute(
@@ -875,6 +897,11 @@ class FollowMeController:
                 self._steer_decay_factor = decay
                 self._steer_hold_active = decay > 0.0
                 self._last_fresh_detection = False
+                # Recorder: this is a persistence-hold/decay tick — the controller
+                # is coasting on the last fresh steer (decayed), not a fresh PID
+                # result and not a true lost/search. Distinguish it explicitly.
+                self._last_steer_want = steer
+                self._last_steer_src = "persist"
             else:
                 self._steer_decay_factor = 1.0
                 self._steer_hold_active = False
@@ -882,6 +909,13 @@ class FollowMeController:
                 if not self._prev_fresh_detection:
                     self._reacq_time = now  # mark reacquisition start
                 steer = self._compute_steering(target, speed, dt, now)
+                # Recorder: fresh tick — record the branch's raw steer BEFORE the
+                # reacq ramp, slip-comp, and slew cap, and which path produced it.
+                # _compute_steering sets _pursuit_mode to "trail" or "direct".
+                self._last_steer_want = steer
+                self._last_steer_src = (
+                    "trail" if self._pursuit_mode == "trail" else "direct"
+                )
                 # Ramp steer 0 → full over reacq_slew_window_s after a dropout to
                 # prevent the spike on the first frames after reacquisition.
                 # Skip the ramp on first-ever detection (no prior steer to spike from).
@@ -917,9 +951,17 @@ class FollowMeController:
         state_changed = target_present != self._prev_target_present
         self._prev_target_present = target_present
 
-        if (self._last_output_time <= 0.0
-                or dt_output >= self._output_interval_s
-                or state_changed):
+        emitted_this_tick = (
+            self._last_output_time <= 0.0
+            or dt_output >= self._output_interval_s
+            or state_changed
+        )
+        # Recorder honesty: True only on ticks that actually pass the 15 Hz output
+        # gate (update motors). Held/duplicate vision ticks record emitted=False so
+        # analysis can filter emitted==true to dedupe the ~32 Hz vision rate down to
+        # the real 15 Hz command stream.
+        self._last_emitted_flag = emitted_this_tick
+        if emitted_this_tick:
             if target_present:
                 # Steer slew cap: limit change per output tick to avoid step-inputs
                 # caused by PID spikes. Cap is (steer_slew_per_tick * max_byte) bytes.
@@ -991,6 +1033,25 @@ class FollowMeController:
                 "is_armed": self._is_armed,
                 "left_byte": left_byte,
                 "right_byte": right_byte,
+                # ── Recorder honesty additions (do not rename existing keys) ────
+                # What the controller WANTED this tick: the branch's raw steer
+                # before slip-comp and before the slew cap.
+                "steer_want": round(self._last_steer_want, 3),
+                # Which branch actually produced steer_want this tick.
+                # "direct"|"trail"|"search"|"persist"|"lost" — distinguishes a
+                # persistence hold/decay from a true lost/search (the old "mode"
+                # collapsed both). "mode" keeps its legacy values for fm_score.py.
+                "steer_src": self._last_steer_src,
+                # Did slip comp actually modify speed/steer this tick.
+                "slip_active": bool(self._last_slip_active),
+                # Did THIS tick pass the 15 Hz output gate (update motors) vs a
+                # held/duplicate vision tick. Filter emitted==true to dedupe.
+                "emitted": bool(self._last_emitted_flag),
+                # Actual VESC eRPM per side (None when telemetry unavailable).
+                # Without these, wheel-slip can't be confirmed from a recording —
+                # the 2026-06-13 slip runaway took a live RPM bench to diagnose.
+                "rpm_l": self._actual_left_rpm,
+                "rpm_r": self._actual_right_rpm,
             }
             self._recorder_file.write(json.dumps(record) + "\n")
 
@@ -1140,33 +1201,89 @@ class FollowMeController:
         speed: float,
         steer: float,
     ) -> tuple[float, float]:
-        """Detect wheel slip and compensate.
+        """Detect wheel slip from a COMMANDED-vs-ACTUAL rpm differential and,
+        only when genuinely slipping while commanded straight, reduce throttle
+        and inject a small, hard-bounded steer feed-forward.
 
-        When |left_rpm − right_rpm| exceeds the configured threshold while the
-        robot is commanded straight, throttle is reduced and a small steer
-        feed-forward is injected to counteract the drift direction.
+        Hard off-switch: when ``slip_compensation_enabled`` is False (the shipped
+        default) this is a TRUE no-op — it returns (speed, steer) unchanged with
+        no throttle reduction and no steer term. Behavior is then byte-identical
+        to running with no slip stage at all.
+
+        Anti-feedback design (why this can't run away on a skid-steer robot):
+          * Detection is on ``slip_diff = actual_rpm_diff − expected_diff`` where
+            ``expected_diff = slip_cmd_diff_per_byte * commanded_steer``. Because a
+            commanded turn raises ``expected_diff`` in lockstep with the actual
+            differential it produces, a deliberate turn nets to ~0 slip_diff and is
+            NOT read as slip. The old code acted on the raw ``actual_rpm_diff`` and
+            so treated every turn as slip → positive feedback.
+          * The "going straight" guard is evaluated on the EMITTED/commanded steer
+            (``_last_emitted_steer``), not the pre-correction PID value, and must
+            persist for ``slip_straight_persist_ticks`` consecutive ticks. So a
+            transient never triggers, and the guard disengages the instant real
+            turning begins.
+          * Any steer feed-forward is clamped to ``slip_max_steer_byte`` (a small
+            dedicated cap), and the TOTAL post-slip steer is re-clamped to the
+            direct cap ``direct_mode_max_steer_byte`` — slip can never push the
+            emitted steer past the direct cap, let alone to the global ±max.
+          * No term is a function that increases the differential it reacts to: the
+            feed-forward is driven by slip_diff (which a turn cancels), not by the
+            raw differential.
 
         No-op when RPM telemetry is unavailable.
         """
+        # 1. Hard off-switch — true no-op, not even throttle reduction.
+        if not bool(getattr(self._cfg, "slip_compensation_enabled", False)):
+            self._last_slip_active = False
+            self._slip_straight_ticks = 0
+            return speed, steer
+
         left_rpm = self._actual_left_rpm
         right_rpm = self._actual_right_rpm
         if left_rpm is None or right_rpm is None:
             self._last_slip_active = False
+            self._slip_straight_ticks = 0
             return speed, steer
 
-        threshold = float(getattr(self._cfg, "slip_threshold_rpm", 200.0))
-        is_straight = abs(steer) < 5.0 and speed > 0.0
-        rpm_diff = abs(left_rpm - right_rpm)
+        # 2. Persistent "going straight" guard on the EMITTED/commanded steer.
+        #    _last_emitted_steer is the steer actually sent at the last 15 Hz
+        #    output gate — the true command, not this tick's raw PID value.
+        commanded_steer = self._last_emitted_steer
+        is_straight = abs(commanded_steer) < 5.0 and speed > 0.0
+        if is_straight:
+            self._slip_straight_ticks += 1
+        else:
+            self._slip_straight_ticks = 0
+        persist_n = int(getattr(self._cfg, "slip_straight_persist_ticks", 3))
+        straight_persisted = self._slip_straight_ticks >= persist_n
 
-        if rpm_diff > threshold and is_straight:
+        # 3. Commanded-vs-actual slip estimate.
+        actual_rpm_diff = float(left_rpm - right_rpm)
+        k_cmd = float(getattr(self._cfg, "slip_cmd_diff_per_byte", 40.0))
+        expected_diff = k_cmd * commanded_steer          # rough proportional model
+        slip_diff = actual_rpm_diff - expected_diff      # residual after cancelling command
+
+        threshold = float(getattr(self._cfg, "slip_threshold_rpm", 200.0))
+
+        if abs(slip_diff) > threshold and straight_persisted:
+            # 4. Throttle reduction on detected real slip.
             reduction = float(getattr(self._cfg, "slip_throttle_reduction", 0.15))
             speed = speed * (1.0 - reduction)
-            # Positive diff (left > right) means left wheel is spinning faster →
-            # robot drifting right → inject a small right-turn correction (positive steer)
-            ff_gain = float(getattr(self._cfg, "slip_feedforward_gain", 0.02))
-            steer_correction = (left_rpm - right_rpm) * ff_gain
-            max_s = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
-            steer = max(-max_s, min(max_s, steer + steer_correction))
+
+            # 5. Bounded steer feed-forward. Positive slip_diff (left spinning
+            #    faster than commanded) → robot drifting right → small right-turn
+            #    (positive steer) correction. Driven by slip_diff (a turn cancels
+            #    it), never by the raw differential, so it cannot self-amplify.
+            ff_gain = float(getattr(self._cfg, "slip_feedforward_gain", 0.0))
+            slip_max = float(getattr(self._cfg, "slip_max_steer_byte", 12.0))
+            steer_correction = slip_diff * ff_gain
+            steer_correction = max(-slip_max, min(slip_max, steer_correction))
+            steer = steer + steer_correction
+
+            # 6. TOTAL post-slip steer clamped to the direct cap — slip can never
+            #    push the emitted steer past it (and thus never near the global ±max).
+            direct_max = float(getattr(self._cfg, "direct_mode_max_steer_byte", 18.0))
+            steer = max(-direct_max, min(direct_max, steer))
             self._last_slip_active = True
         else:
             self._last_slip_active = False
@@ -1384,6 +1501,10 @@ class FollowMeController:
         self._last_emitted_steer = 0.0
         self._last_x_err_norm = None
         self._last_slew_capped_steer = 0.0
+        self._slip_straight_ticks = 0
+        self._last_steer_want = 0.0
+        self._last_steer_src = "lost"
+        self._last_emitted_flag = False
 
     # ── Status / telemetry ───────────────────────────────────────────────────
 

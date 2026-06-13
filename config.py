@@ -230,19 +230,46 @@ class FollowMeConfig:
     speed_integral_limit: float = 50.0   # anti-windup clamp (m/s accumulated)
 
     # ── Slip detection & compensation ─────────────────────────────────────────
-    # When |left_rpm − right_rpm| exceeds threshold while commanded straight,
-    # throttle is reduced and a small steer feed-forward is injected.
-    slip_threshold_rpm: float = 200.0       # eRPM differential to declare slip
-    slip_throttle_reduction: float = 0.15   # throttle scale-back fraction (0–1)
+    # Hard off-switch. When False the slip compensator is a TRUE no-op: it returns
+    # (speed, steer) unchanged — no throttle reduction, no steer feed-forward. This
+    # is the shipped default after the 2026-06-13 runaway (below) so robot behavior
+    # is byte-identical with slip out of the picture. Flip to True only after Kevin
+    # tunes the commanded-vs-actual detector on hardware.
+    slip_compensation_enabled: bool = False
+    # Detection now compares the ACTUAL rpm differential against the differential
+    # the EMITTED steer command should have produced (commanded-vs-actual), instead
+    # of acting on raw |left_rpm − right_rpm|. On a skid-steer robot every turn
+    # creates an rpm differential, so the old raw-diff test read a commanded turn as
+    # "slip" and injected more steer → bigger differential → runaway. The new test
+    # subtracts the commanded differential, so a deliberate turn no longer registers.
+    slip_threshold_rpm: float = 200.0       # |slip_diff| (actual−expected) eRPM to declare slip
+    slip_throttle_reduction: float = 0.15   # throttle scale-back fraction (0–1), gated by enable flag
+    # Rough proportional model mapping emitted steer (bytes) → expected L−R eRPM
+    # differential: expected_diff = slip_cmd_diff_per_byte * commanded_steer. It is
+    # deliberately crude — its only job is to cancel the commanded component so a
+    # turn isn't mistaken for slip. Calibrate on hardware; over-estimating is safe
+    # (it just makes the detector less sensitive), under-estimating less so.
+    slip_cmd_diff_per_byte: float = 40.0
+    # The "going straight" guard must hold for this many consecutive ticks (on the
+    # EMITTED/commanded steer, not the pre-correction PID value) before slip can
+    # act — so a transient never triggers and the guard releases the instant a real
+    # turn begins.
+    slip_straight_persist_ticks: int = 3
+    # Dedicated ceiling for any slip steer feed-forward, well below the global
+    # ±max_steer_offset_byte (25) and at/under the direct cap (18). The TOTAL
+    # post-slip steer is additionally clamped to direct_mode_max_steer_byte so slip
+    # can never push the emitted steer past the direct cap.
+    slip_max_steer_byte: float = 12.0
     # DISABLED 2026-06-13: zeroed after a Follow-Me steer runaway. VESC RPM
     # telemetry went live this day (was always 0), activating slip comp for the
-    # first time. The steer feed-forward is positive feedback on a skid-steer
-    # robot — any turn creates an RPM differential, which injects more steer,
-    # which increases the differential — so it pinned steer to the ±max and lost
-    # the target. Throttle-reduction half left active. Re-enable only with a
-    # commanded-vs-actual slip detector (not raw rpm_diff). See fm_trials
-    # 1781382327 and the steer=25-on-direct-ticks signature.
-    slip_feedforward_gain: float = 0.0      # steer correction per eRPM differential (bytes/RPM)
+    # first time. The OLD steer feed-forward was positive feedback on a skid-steer
+    # robot — any turn creates an RPM differential, which injected more steer,
+    # which increased the differential — so it pinned steer to the ±max and lost
+    # the target. The detector was rewritten to commanded-vs-actual (above) and the
+    # whole compensator gated behind slip_compensation_enabled (default False).
+    # This gain stays meaningful (slip steer term = slip_diff * gain) but irrelevant
+    # while disabled. See fm_trials 1781382327 and the steer=25-on-direct signature.
+    slip_feedforward_gain: float = 0.0      # steer correction per eRPM slip_diff (bytes/RPM)
 
     # ── Motor output rate ─────────────────────────────────────────────────────
     follow_output_rate_hz: float = 15.0  # motor commands at this Hz, decoupled from 30 fps vision
