@@ -184,6 +184,16 @@ class FollowMeConfig:
 
     # ── Layer 1: Detection filter ─────────────────────────────────────────────
     min_bbox_area: float = 0.0015        # minimum bbox area (fraction of frame); rejects tiny far detections
+    # Geometric rejection rules — tuned from video analysis of a real follow-me run where
+    # YOLO (conf 0.90-0.92) boxed a vertical sliver of the tracked person at the extreme
+    # right frame edge (xmin 0.90-0.94, width 0.06-0.10) after they were lost, causing
+    # spurious re-acquisition.  Legitimate person detections in that recording never
+    # exceeded xmin 0.60 and were wider (≥ 0.10) and tall (implied_h 1.68–3.02 m).
+    # Set any value to 0 (or ≤ 0) to disable that individual check.
+    detect_edge_margin: float = 0.15       # reject xmin > (1-margin) or xmax < margin; 0 = disabled
+    detect_min_bbox_width: float = 0.09   # reject normalized bbox width < this; 0 = disabled
+    detect_min_person_height_m: float = 1.20  # reject implied physical height < this (m); 0 = disabled
+    detect_camera_vfov_deg: float = 65.3  # OAK-D Lite RGB vfov: 2*atan((240/320)*tan(81°/2))=65.3°
 
     # ── Layer 2: Target tracker ───────────────────────────────────────────────
     target_ema_alpha: float = 0.5        # EMA smoothing on normalized horizontal offset (0=heavy, 1=none)

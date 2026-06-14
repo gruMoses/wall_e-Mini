@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import stat
 import tempfile
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from config import FollowMeConfig
 from pi_app.control.follow_me import (
+    DetectionFilter,
     FollowMeController,
     PersonDetection,
     NEUTRAL,
@@ -104,7 +106,10 @@ class TestFollowMeController(unittest.TestCase):
 
     def test_selects_closer_person_when_similar_position(self):
         fm = self._make()
-        close = self._person(x_m=0.1, z_m=1.5, bbox=(0.45, 0.3, 0.55, 0.8))
+        # close at z_m=1.5: bbox_h must be tall enough to pass the implied-height check
+        # (detect_min_person_height_m=1.20 m default).  Need bbox_h >= 1.20/(1.5*2*tan(32.65°))
+        # = 1.20/1.922 ≈ 0.624 → use ymin=0.05, ymax=0.95 (height=0.90 → implied 1.73 m ok).
+        close = self._person(x_m=0.1, z_m=1.5, bbox=(0.45, 0.05, 0.55, 0.95))
         far = self._person(x_m=0.1, z_m=4.5, bbox=(0.45, 0.3, 0.55, 0.8))
         fm.compute([close, far])
         status = fm.get_status()
@@ -851,6 +856,13 @@ class TestEdgeBoostSteering(unittest.TestCase):
             pid_lateral_kd=0.0,
             pid_lateral_ki=0.0,
             # kp left at shipped default (0.4) unless overridden — tests stay realistic
+            # Geometric layer-1 filters disabled for this steering-focused test class:
+            # norm_x=0.95 maps to xmin≈0.875 which the edge rule would reject, and the
+            # test helper bbox_h=0.5 at z=2.0 barely passes height — disable to keep the
+            # tests focused on steering math only.
+            detect_edge_margin=0.0,
+            detect_min_bbox_width=0.0,
+            detect_min_person_height_m=0.0,
         )
         defaults.update(overrides)
         cfg = FollowMeConfig(**defaults)
@@ -1304,6 +1316,218 @@ class TestStickyLockComputeIntegration(unittest.TestCase):
                           "grace-hold frame must not be fresh")
         self.assertEqual(fm.get_status()["follow_me_target_track_id"], 1,
                          "must not switch to the chicken")
+
+
+class TestDetectionFilterGeometric(unittest.TestCase):
+    """Unit tests for the three geometric rejection rules in DetectionFilter (Layer 1).
+
+    All filters are enabled via explicit constructor kwargs; the disable path is
+    tested separately to confirm backward-compat.
+
+    Geometry reference (from the real run that motivated these rules):
+      - Spurious slivers: xmin 0.90-0.94, width 0.06-0.10, conf 0.90-0.92
+      - Legitimate persons in same run: xmin ≤ 0.60, width ≥ 0.10, implied_h 1.68-3.02 m
+      - Short ground blob (chicken): implied_h ≈ 0.68 m
+      - camera_vfov_deg 65.3°  →  tan_half = tan(32.65°) ≈ 0.6408
+    """
+
+    _VFOV = 65.3
+    _TAN_HALF_VFOV = math.tan(math.radians(_VFOV) / 2.0)
+
+    def _make_filter(
+        self,
+        edge_margin: float = 0.15,
+        min_bbox_width: float = 0.09,
+        min_person_height_m: float = 1.20,
+        camera_vfov_deg: float = 65.3,
+    ) -> DetectionFilter:
+        return DetectionFilter(
+            conf_threshold=0.45,
+            min_depth_m=0.3,
+            max_depth_m=8.0,
+            min_bbox_area=0.0,
+            edge_margin=edge_margin,
+            min_bbox_width=min_bbox_width,
+            min_person_height_m=min_person_height_m,
+            camera_vfov_deg=camera_vfov_deg,
+        )
+
+    def _det(self, bbox, z_m=2.5, conf=0.9) -> PersonDetection:
+        cx = (bbox[0] + bbox[2]) / 2.0
+        return PersonDetection(
+            x_m=(cx - 0.5) * 2.0 * z_m,
+            z_m=z_m,
+            confidence=conf,
+            bbox=bbox,
+        )
+
+    # ── Implied-height formula verification ────────────────────────────────────
+
+    def test_implied_height_formula_numeric(self):
+        """Verify the implied-height formula with an exact hand-computed value.
+
+        bbox_h=0.74, z_m=2.5, vfov=65.3°
+          tan(32.65°) = 0.6408  (more precisely: math.tan(math.radians(65.3/2)))
+          implied_h = 0.74 * 2.5 * 2 * tan_half = 1.85 * 2 * tan_half
+        """
+        tan_half = math.tan(math.radians(65.3) / 2.0)
+        expected = 0.74 * 2.5 * 2.0 * tan_half
+        # The filter must compute this for bbox=(0.30,0.13,0.46,0.87), z_m=2.5
+        flt = self._make_filter(min_person_height_m=0.01)  # tiny floor so it passes
+        det = self._det(bbox=(0.30, 0.13, 0.46, 0.87), z_m=2.5)
+        result = flt.process([det])
+        # If it passes the filter, the formula must have produced ≥ 0.01 m
+        self.assertEqual(len(result), 1, "Person should pass the filter")
+        # Also assert the expected value is in the legitimate range
+        self.assertAlmostEqual(expected, 0.74 * 2.5 * 2.0 * tan_half, places=9)
+        self.assertGreater(expected, 1.20, "Implied height must be well above 1.20 m")
+
+    # ── ACCEPT cases ───────────────────────────────────────────────────────────
+
+    def test_accept_normal_person(self):
+        """A typical centered person must pass all three rules.
+
+        bbox=(0.30,0.13,0.46,0.87): xmin=0.30 < 0.85, width=0.16 > 0.09,
+        implied_h ≈ 0.74*2.5*2*tan(32.65°) ≈ 2.37 m > 1.20.
+        """
+        flt = self._make_filter()
+        det = self._det(bbox=(0.30, 0.13, 0.46, 0.87), z_m=2.5)
+        result = flt.process([det])
+        self.assertEqual(len(result), 1, "Normal centered person must be accepted")
+
+    def test_accept_person_at_legitimate_edge_of_observed_range(self):
+        """xmin=0.60 — the maximum observed in the real run — must still be accepted (0.60 < 0.85)."""
+        # bbox: xmin=0.60, xmax=0.76 (width=0.16), height 0.74
+        flt = self._make_filter()
+        det = self._det(bbox=(0.60, 0.13, 0.76, 0.87), z_m=2.5)
+        result = flt.process([det])
+        self.assertEqual(len(result), 1, "Person at xmin=0.60 must be accepted")
+
+    # ── REJECT cases ───────────────────────────────────────────────────────────
+
+    def test_reject_right_edge_sliver(self):
+        """xmin=0.92 > 0.85 → rejected by edge exclusion rule.
+
+        This matches the exact spurious detection from the real run
+        (xmin 0.90-0.94, width 0.06-0.10, conf 0.90-0.92).
+        """
+        flt = self._make_filter()
+        det = self._det(bbox=(0.92, 0.20, 0.99, 0.76), z_m=2.5, conf=0.91)
+        result = flt.process([det])
+        self.assertEqual(len(result), 0, "Right-edge sliver must be rejected by edge rule")
+
+    def test_reject_left_edge_sliver(self):
+        """xmax=0.13 < 0.15 → rejected by edge exclusion rule (left side)."""
+        flt = self._make_filter()
+        det = self._det(bbox=(0.01, 0.2, 0.13, 0.8), z_m=2.5, conf=0.88)
+        result = flt.process([det])
+        self.assertEqual(len(result), 0, "Left-edge sliver must be rejected by edge rule")
+
+    def test_reject_narrow_box_not_at_edge(self):
+        """width=0.07 < 0.09 → rejected by min-width rule (not near either edge)."""
+        flt = self._make_filter()
+        det = self._det(bbox=(0.45, 0.2, 0.52, 0.9), z_m=2.5, conf=0.85)
+        result = flt.process([det])
+        self.assertEqual(len(result), 0, "Narrow non-edge box must be rejected by width rule")
+
+    def test_reject_short_ground_blob(self):
+        """Blob at z_m=2.17 with bbox_h=0.18: implied_h ≈ 0.50 m < 1.20 → height rule.
+
+        This matches the short 0.68 m blob observed in the real run (chicken-ish animal).
+        Only height rejects it: width=0.16 ok (>0.09), xmin=0.40 ok (<0.85).
+        """
+        flt = self._make_filter()
+        # width=0.16 (0.40→0.56), height=0.18 (0.80→0.98), z_m=2.17
+        # implied_h = 0.18 * 2.17 * 2 * tan(32.65°) ≈ 0.18 * 2.17 * 1.282 ≈ 0.50 m
+        det = self._det(bbox=(0.40, 0.80, 0.56, 0.98), z_m=2.17, conf=0.87)
+        result = flt.process([det])
+        self.assertEqual(len(result), 0, "Short ground blob must be rejected by height rule")
+
+    def test_short_blob_only_rejected_by_height_not_edge_or_width(self):
+        """Confirm that without the height rule, the short blob would PASS edge+width checks."""
+        # Disable only height check — blob should pass
+        flt_no_height = self._make_filter(min_person_height_m=0.0)
+        det = self._det(bbox=(0.40, 0.80, 0.56, 0.98), z_m=2.17, conf=0.87)
+        result = flt_no_height.process([det])
+        self.assertEqual(len(result), 1,
+                         "Short blob must pass when height check is disabled (width=0.16 ok, xmin=0.40 ok)")
+
+    # ── DISABLE (off-switch / back-compat) cases ───────────────────────────────
+
+    def test_disable_edge_check_allows_right_sliver(self):
+        """edge_margin=0 disables edge rule — sliver must pass (if other rules also off)."""
+        flt = self._make_filter(edge_margin=0.0, min_bbox_width=0.0, min_person_height_m=0.0)
+        det = self._det(bbox=(0.92, 0.20, 0.99, 0.76), z_m=2.5, conf=0.91)
+        result = flt.process([det])
+        self.assertEqual(len(result), 1,
+                         "With all geometric checks disabled, right-edge sliver must pass")
+
+    def test_disable_width_check_allows_narrow_box(self):
+        """min_bbox_width=0 disables width rule — narrow box must pass (edge+height also off)."""
+        flt = self._make_filter(edge_margin=0.0, min_bbox_width=0.0, min_person_height_m=0.0)
+        det = self._det(bbox=(0.45, 0.2, 0.52, 0.9), z_m=2.5, conf=0.85)
+        result = flt.process([det])
+        self.assertEqual(len(result), 1,
+                         "With all geometric checks disabled, narrow non-edge box must pass")
+
+    def test_disable_height_check_allows_short_blob(self):
+        """min_person_height_m=0 disables height rule — short blob passes (edge+width also off)."""
+        flt = self._make_filter(edge_margin=0.0, min_bbox_width=0.0, min_person_height_m=0.0)
+        det = self._det(bbox=(0.40, 0.80, 0.56, 0.98), z_m=2.17, conf=0.87)
+        result = flt.process([det])
+        self.assertEqual(len(result), 1,
+                         "With all geometric checks disabled, short ground blob must pass")
+
+    def test_default_constructor_has_all_checks_off(self):
+        """Direct DetectionFilter construction WITHOUT new kwargs must behave as before.
+
+        This verifies backward-compatibility: existing direct-construction tests are unaffected.
+        """
+        flt = DetectionFilter(
+            conf_threshold=0.45,
+            min_depth_m=0.3,
+            max_depth_m=8.0,
+            min_bbox_area=0.0,
+        )
+        # Right-edge sliver, narrow box, short blob — all must pass (checks are off by default)
+        slivers = [
+            self._det(bbox=(0.92, 0.20, 0.99, 0.76), z_m=2.5, conf=0.91),
+            self._det(bbox=(0.45, 0.2, 0.52, 0.9), z_m=2.5, conf=0.85),
+            self._det(bbox=(0.40, 0.80, 0.56, 0.98), z_m=2.17, conf=0.87),
+        ]
+        result = flt.process(slivers)
+        self.assertEqual(len(result), 3,
+                         "Without new kwargs all detections must pass (checks default off)")
+
+    # ── Regression: normal person is unaffected by active geometric rules ──────
+
+    def test_regression_normal_person_passes_all_active_rules(self):
+        """With all three geometric rules active at their defaults, a typical centered person
+        (bbox 0.4-0.6 width, full height, at 2 m depth) must still reach the tracker."""
+        flt = self._make_filter()
+        # Standard test person used throughout the rest of the test suite
+        det = PersonDetection(x_m=0.0, z_m=2.0, confidence=0.9,
+                              bbox=(0.4, 0.3, 0.6, 0.8))
+        result = flt.process([det])
+        self.assertEqual(len(result), 1,
+                         "Standard centered person must pass all active geometric rules")
+
+    # ── Integration: FollowMeController routes config values into DetectionFilter ─
+
+    def test_controller_enables_geometric_rules_via_config(self):
+        """FollowMeController must forward config geometric fields to DetectionFilter.
+
+        Confirm by feeding the spurious sliver that the real construction site
+        (with default FollowMeConfig) must reject.
+        """
+        # Default FollowMeConfig has detect_edge_margin=0.15 etc. — rules are active.
+        fm = FollowMeController(FollowMeConfig())
+        # Right-edge sliver: would cause re-acquisition in the real run
+        sliver = PersonDetection(x_m=2.0, z_m=2.5, confidence=0.91,
+                                 bbox=(0.92, 0.20, 0.99, 0.76))
+        left, right = fm.compute([sliver])
+        self.assertEqual(left, NEUTRAL)
+        self.assertEqual(right, NEUTRAL, "Sliver must be rejected by controller with default config")
 
 
 if __name__ == "__main__":

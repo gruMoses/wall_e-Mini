@@ -107,11 +107,19 @@ class DetectionFilter:
         min_depth_m: float,
         max_depth_m: float,
         min_bbox_area: float,
+        edge_margin: float = 0.0,
+        min_bbox_width: float = 0.0,
+        min_person_height_m: float = 0.0,
+        camera_vfov_deg: float = 65.3,
     ) -> None:
         self._conf = conf_threshold
         self._min_depth = min_depth_m
         self._max_depth = max_depth_m
         self._min_area = min_bbox_area
+        self._edge_margin = edge_margin
+        self._min_bbox_width = min_bbox_width
+        self._min_person_height_m = min_person_height_m
+        self._camera_vfov_deg = camera_vfov_deg
 
     def process(self, raw: list[PersonDetection]) -> list[_FilteredDetection]:
         """Return validated and normalised detections."""
@@ -124,6 +132,24 @@ class DetectionFilter:
             area = (det.bbox[2] - det.bbox[0]) * (det.bbox[3] - det.bbox[1])
             if area < self._min_area:
                 continue
+            # ── Geometric rejection rules (each disabled when its threshold is ≤ 0) ──
+            # Rule 1: Edge exclusion — reject sliver detections jammed against the frame edge.
+            if self._edge_margin > 0:
+                if det.bbox[0] > (1.0 - self._edge_margin) or det.bbox[2] < self._edge_margin:
+                    continue
+            # Rule 2: Minimum width — reject too-narrow boxes regardless of edge position.
+            if self._min_bbox_width > 0:
+                width = det.bbox[2] - det.bbox[0]
+                if width < self._min_bbox_width:
+                    continue
+            # Rule 3: Minimum implied physical height — reject short ground blobs (animals).
+            if self._min_person_height_m > 0:
+                bbox_h = det.bbox[3] - det.bbox[1]
+                implied_h_m = bbox_h * det.z_m * 2.0 * math.tan(
+                    math.radians(self._camera_vfov_deg) / 2.0
+                )
+                if implied_h_m < self._min_person_height_m:
+                    continue
             cx = (det.bbox[0] + det.bbox[2]) * 0.5
             normalized_x = (cx - 0.5) * 2.0  # map [0, 1] → [-1, +1]
             out.append(_FilteredDetection(
@@ -754,6 +780,10 @@ class FollowMeController:
             min_depth_m=config.min_distance_m,
             max_depth_m=config.max_distance_m,
             min_bbox_area=getattr(config, "min_bbox_area", 0.0015),
+            edge_margin=getattr(config, "detect_edge_margin", 0.0),
+            min_bbox_width=getattr(config, "detect_min_bbox_width", 0.0),
+            min_person_height_m=getattr(config, "detect_min_person_height_m", 0.0),
+            camera_vfov_deg=getattr(config, "detect_camera_vfov_deg", 65.3),
         )
 
         # ── Depth EMA filter (between raw depth and speed/mode logic) ────
