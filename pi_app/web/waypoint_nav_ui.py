@@ -2337,6 +2337,8 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
     def skip_waypoint():
         if controller is None:
             return _json_resp({"ok": False, "error": "no controller"}, 503)
+        if _teleop_estopped():
+            return _json_resp({"ok": False, "error": "teleop session e-stop latched"}, 409)
         try:
             nav = controller._waypoint_nav
             if nav is None:

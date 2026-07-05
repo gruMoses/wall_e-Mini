@@ -1308,7 +1308,7 @@ class OakWebViewer:
                     motor_driver=self._motor_driver,
                     imu_reader=self._imu_reader,
                 )
-                bp = create_calibration_blueprint(cal_mgr)
+                bp = create_calibration_blueprint(cal_mgr, estop_check=self._session_estopped)
                 app.register_blueprint(bp)
                 logger.info("Calibration wizard registered at /calibrate")
             except Exception:

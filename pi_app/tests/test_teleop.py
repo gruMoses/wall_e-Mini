@@ -946,6 +946,35 @@ def test_nav_go_refuses_409_while_session_estop_latched():
     assert "e-stop" in r.get_json()["error"].lower()
 
 
+def test_nav_skip_refuses_409_while_session_estop_latched():
+    from pi_app.web.waypoint_nav_ui import create_nav_blueprint
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.register_blueprint(
+        create_nav_blueprint(controller=object(), estop_check=lambda: True)
+    )
+    c = app.test_client()
+    r = c.post("/api/nav/skip")
+    assert r.status_code == 409
+    assert "e-stop" in r.get_json()["error"].lower()
+
+
+def test_nav_skip_not_gated_when_estop_check_false():
+    from pi_app.web.waypoint_nav_ui import create_nav_blueprint
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.register_blueprint(
+        create_nav_blueprint(controller=object(), estop_check=lambda: False)
+    )
+    c = app.test_client()
+    r = c.post("/api/nav/skip")
+    # Not gated by e-stop; falls through to whatever object() lacking
+    # _waypoint_nav produces (an AttributeError -> 500), not a 409.
+    assert r.status_code != 409
+
+
 def test_nav_start_and_go_unaffected_when_estop_check_omitted():
     """No estop_check passed (None default) — the 503 'no controller' path
     still fires for a bare object() controller with no _waypoint_nav, proving
