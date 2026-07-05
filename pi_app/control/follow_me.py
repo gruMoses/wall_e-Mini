@@ -894,6 +894,10 @@ class FollowMeController:
         self._actual_right_current_a: float | None = None
         self._actual_left_temp_c: float | None = None
         self._actual_right_temp_c: float | None = None
+        # Charger inhibit state injected from controller.py each tick (2026-06-13
+        # motor-cutout bug — surfaced here so the FM trial JSONL can show whether
+        # a stop mid-chase was the charger inhibit, not a follow-me control bug.
+        self._charger_inhibit: bool = False
         self._last_slip_active: bool = False
         # Consecutive-tick counter for the slip "going straight" guard. Evaluated
         # on the EMITTED/commanded steer; slip may only act once it persists.
@@ -1008,6 +1012,7 @@ class FollowMeController:
         right_current_a: float | None = None,
         left_temp_c: float | None = None,
         right_temp_c: float | None = None,
+        charger_inhibit: bool = False,
     ) -> None:
         """Feed VESC telemetry for closed-loop speed control and slip detection.
 
@@ -1015,6 +1020,10 @@ class FollowMeController:
         Passing all-None gracefully disables closed-loop / slip features.
         The current/temp kwargs are optional for backward compatibility with
         existing callers and tests that do not supply them.
+
+        ``charger_inhibit`` mirrors controller._charger_inhibit so the per-tick
+        FM trial recorder can show it (2026-06-13 motor-cutout bug: a stop
+        mid-chase looked like a follow-me bug until charger_inhibit was found).
         """
         self._actual_left_rpm = left_rpm
         self._actual_right_rpm = right_rpm
@@ -1023,6 +1032,7 @@ class FollowMeController:
         self._actual_right_current_a = right_current_a
         self._actual_left_temp_c = left_temp_c
         self._actual_right_temp_c = right_temp_c
+        self._charger_inhibit = bool(charger_inhibit)
 
     # ── Public API: main compute ─────────────────────────────────────────────
 
@@ -1334,6 +1344,10 @@ class FollowMeController:
                 # both require a vesc.py change to expose (out of scope here).
                 "tfet_l": round(self._actual_left_temp_c, 1) if self._actual_left_temp_c is not None else None,
                 "tfet_r": round(self._actual_right_temp_c, 1) if self._actual_right_temp_c is not None else None,
+                # BMS charger inhibit state this tick — a stop mid-chase can now be
+                # attributed to this instead of mistaken for a follow-me control bug
+                # (2026-06-13 field incident: debounced in bms.is_charging(), see there).
+                "charger_inhibit": self._charger_inhibit,
             }
             self._recorder_file.write(json.dumps(record) + "\n")
 

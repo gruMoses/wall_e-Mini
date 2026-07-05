@@ -116,6 +116,10 @@ class RecordingTelemetry:
     bms_connected: bool | None = None
     bms_charging: bool | None = None
     bms_discharge_fet_on: bool | None = None
+    # Controller charger_inhibit state this tick (2026-06-13 motor-cutout bug —
+    # this was surfaced nowhere before, so a mid-drive stop looked like a
+    # follow-me/obstacle bug instead of the real charger-inhibit cause).
+    charger_inhibit: bool | None = None
     imu_heading_deg: float | None = None
     vesc_left_rpm: int | None = None
     vesc_right_rpm: int | None = None

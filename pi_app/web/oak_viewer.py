@@ -1151,6 +1151,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "motor_left": t.motor_left,
                     "motor_right": t.motor_right,
                     "is_armed": t.is_armed,
+                    "charger_inhibit": t.charger_inhibit,
                     "num_persons": len(t.person_detections),
                     "recording_state": recorder.recording_state if recorder is not None else "disabled",
                     "follow_tracking": t.follow_tracking,
