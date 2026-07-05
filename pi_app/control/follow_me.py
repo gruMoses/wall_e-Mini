@@ -779,36 +779,36 @@ class FollowMeController:
             conf_threshold=config.detection_confidence,
             min_depth_m=config.min_distance_m,
             max_depth_m=config.max_distance_m,
-            min_bbox_area=getattr(config, "min_bbox_area", 0.0015),
-            edge_margin=getattr(config, "detect_edge_margin", 0.0),
-            min_bbox_width=getattr(config, "detect_min_bbox_width", 0.0),
-            min_person_height_m=getattr(config, "detect_min_person_height_m", 0.0),
-            camera_vfov_deg=getattr(config, "detect_camera_vfov_deg", 65.3),
+            min_bbox_area=config.min_bbox_area,
+            edge_margin=config.detect_edge_margin,
+            min_bbox_width=config.detect_min_bbox_width,
+            min_person_height_m=config.detect_min_person_height_m,
+            camera_vfov_deg=config.detect_camera_vfov_deg,
         )
 
         # ── Depth EMA filter (between raw depth and speed/mode logic) ────
         self._depth_filter = DepthFilter(
-            alpha=float(getattr(config, 'depth_ema_alpha', 0.35)),
-            max_velocity_mps=float(getattr(config, 'depth_max_velocity_mps', 5.0)),
+            alpha=float(config.depth_ema_alpha),
+            max_velocity_mps=float(config.depth_max_velocity_mps),
         )
 
         # ── Layer 2: Target tracker ──────────────────────────────────────────
         self._tracker = TargetTracker(
-            ema_alpha=getattr(config, "target_ema_alpha", 0.35),
-            persistence_s=getattr(config, "target_persistence_s", 1.0),
-            switch_grace_s=getattr(config, "target_switch_grace_s", 1.5),
-            acquire_confidence=getattr(config, "target_acquire_confidence", 0.65),
-            acquire_min_frames=int(getattr(config, "target_acquire_min_frames", 3)),
+            ema_alpha=config.target_ema_alpha,
+            persistence_s=config.target_persistence_s,
+            switch_grace_s=config.target_switch_grace_s,
+            acquire_confidence=config.target_acquire_confidence,
+            acquire_min_frames=int(config.target_acquire_min_frames),
         )
 
         # ── Layer 3: Steering (PID) ──────────────────────────────────────────
-        max_steer = float(getattr(config, "max_steer_offset_byte", 25.0))
+        max_steer = float(config.max_steer_offset_byte)
         self._steering = SteeringLayer(
             pid=PIDController(
-                kp=getattr(config, "pid_lateral_kp", 1.8),
-                ki=getattr(config, "pid_lateral_ki", 0.2),
-                kd=getattr(config, "pid_lateral_kd", 0.7),
-                integral_limit=getattr(config, "pid_lateral_integral_limit", 0.5),
+                kp=config.pid_lateral_kp,
+                ki=config.pid_lateral_ki,
+                kd=config.pid_lateral_kd,
+                integral_limit=config.pid_lateral_integral_limit,
                 output_limit=1.0,  # normalised; SteeringLayer scales to bytes
             ),
             max_steer_byte=max_steer,
@@ -816,17 +816,17 @@ class FollowMeController:
 
         # ── Layer 4: Speed (depth-based, closed-loop when telemetry available) ──
         max_speed = float(config.max_follow_speed_byte)
-        max_speed_err = float(getattr(config, "max_speed_error_m", 2.5))
-        _speed_scale = float(getattr(config, "trail_speed_scale_mps_per_byte", 0.0075))
+        max_speed_err = float(config.max_speed_error_m)
+        _speed_scale = float(config.trail_speed_scale_mps_per_byte)
         _velocity_pid = PIDController(
-            kp=float(getattr(config, "speed_kp", 0.8)),
-            ki=float(getattr(config, "speed_ki", 0.2)),
-            kd=float(getattr(config, "speed_kd", 0.05)),
-            integral_limit=float(getattr(config, "speed_integral_limit", 50.0)),
+            kp=float(config.speed_kp),
+            ki=float(config.speed_ki),
+            kd=float(config.speed_kd),
+            integral_limit=float(config.speed_integral_limit),
         )
         self._speed = SpeedLayer(
             target_dist_m=config.follow_distance_m,
-            dead_zone_m=float(getattr(config, "speed_dead_zone_m", 0.2)),
+            dead_zone_m=float(config.speed_dead_zone_m),
             speed_gain=max_speed / max(max_speed_err, 0.1),
             min_dist_m=config.min_distance_m,
             max_speed_byte=max_speed,
@@ -837,13 +837,13 @@ class FollowMeController:
         # ── Layer 5: Safety ──────────────────────────────────────────────────
         self._safety = SafetyLayer(
             max_speed_byte=max_speed,
-            max_accel_bps=float(getattr(config, "max_speed_accel_byte_per_s", 150.0)),
+            max_accel_bps=float(config.max_speed_accel_byte_per_s),
         )
 
         # ── Motor output rate limiting ───────────────────────────────────────
         # Computation (PID, trail, steering) always runs at full call rate.
         # Only the emitted motor bytes are held at follow_output_rate_hz.
-        output_hz = float(getattr(config, "follow_output_rate_hz", 15.0))
+        output_hz = float(config.follow_output_rate_hz)
         self._output_interval_s = 1.0 / max(1.0, output_hz)
         self._last_output_time: float = 0.0
         # Separate from _last_output_time: tracks the previous compute() call so
@@ -912,7 +912,7 @@ class FollowMeController:
         self._last_emitted_flag: bool = False
 
         # ── Trail-following subsystems (Pure Pursuit — preserved) ────────────
-        self._trail_enabled = bool(getattr(config, "trail_follow_enabled", False))
+        self._trail_enabled = bool(config.trail_follow_enabled)
         self._last_pursuit_mode: str = "direct"
         self._odometry: DeadReckonOdometry | None = None
         self._gps_odom: GpsOdometry | None = None
@@ -938,37 +938,41 @@ class FollowMeController:
 
         if self._trail_enabled:
             self._odometry = DeadReckonOdometry(
-                speed_scale=getattr(config, "trail_speed_scale_mps_per_byte", 0.0016)
+                speed_scale=config.trail_speed_scale_mps_per_byte
             )
             self._gps_odom = GpsOdometry(GpsOdometryConfig(
-                cog_min_speed_mps=getattr(config, "gps_cog_min_speed_mps", 0.5),
-                heading_alpha=getattr(config, "gps_heading_alpha", 0.85),
-                cog_min_delta_m=getattr(config, "gps_cog_min_delta_m", 0.05),
+                cog_min_speed_mps=config.gps_cog_min_speed_mps,
+                heading_alpha=config.gps_heading_alpha,
+                cog_min_delta_m=config.gps_cog_min_delta_m,
             ))
             self._trail = TrailManager(TrailConfig(
-                max_trail_points=getattr(config, "trail_max_points", 100),
-                min_spacing_m=getattr(config, "trail_min_spacing_m", 0.3),
-                max_age_s=getattr(config, "trail_max_age_s", 30.0),
-                consume_radius_m=getattr(config, "trail_consume_radius_m", 0.4),
-                max_step_m=getattr(config, "trail_max_step_m", 1.2),
-                max_speed_mps=getattr(config, "trail_max_speed_mps", 2.5),
-                smoothing_enabled=getattr(config, "trail_smoothing_enabled", True),
-                smoothing_window=getattr(config, "trail_smoothing_window", 5),
-                smoothing_poly_order=getattr(config, "trail_smoothing_poly_order", 2),
+                max_trail_points=config.trail_max_points,
+                min_spacing_m=config.trail_min_spacing_m,
+                max_age_s=config.trail_max_age_s,
+                consume_radius_m=config.trail_consume_radius_m,
+                max_step_m=config.trail_max_step_m,
+                max_speed_mps=config.trail_max_speed_mps,
+                smoothing_enabled=config.trail_smoothing_enabled,
+                smoothing_window=config.trail_smoothing_window,
+                smoothing_poly_order=config.trail_smoothing_poly_order,
             ))
             self._pursuit = PurePursuitController(PursuitConfig(
-                lookahead_time_s=getattr(config, "pursuit_lookahead_time_s", 0.8),
-                lookahead_min_m=getattr(config, "pursuit_lookahead_min_m", 0.5),
-                lookahead_max_m=getattr(config, "pursuit_lookahead_max_m", 2.5),
-                speed_scale_mps_per_byte=getattr(config, "trail_speed_scale_mps_per_byte", 0.0016),
-                wheelbase_m=getattr(config, "pursuit_wheelbase_m", 0.28),
-                max_steer_byte=float(getattr(config, "max_steer_offset_byte", 15.0)),
+                lookahead_time_s=config.pursuit_lookahead_time_s,
+                lookahead_min_m=config.pursuit_lookahead_min_m,
+                lookahead_max_m=config.pursuit_lookahead_max_m,
+                speed_scale_mps_per_byte=config.trail_speed_scale_mps_per_byte,
+                wheelbase_m=config.pursuit_wheelbase_m,
+                # Was a phantom fallback of 15.0 here vs 25.0 everywhere else
+                # max_steer_offset_byte is read — now reads the single real
+                # field directly so trail-pursuit steer shares the same cap
+                # as every other consumer.
+                max_steer_byte=float(config.max_steer_offset_byte),
                 max_speed_byte=max_speed,
-                curvature_scaling_enabled=getattr(config, "pursuit_curvature_scaling_enabled", True),
-                curvature_alpha=getattr(config, "pursuit_curvature_alpha", 5.0),
-                min_speed_byte=float(getattr(config, "pursuit_min_speed_byte", 15.0)),
-                lookahead_curvature_points=getattr(config, "pursuit_lookahead_curvature_points", 5),
-                max_accel_byte_per_s=float(getattr(config, "pursuit_max_accel_byte_per_s", 50.0)),
+                curvature_scaling_enabled=config.pursuit_curvature_scaling_enabled,
+                curvature_alpha=config.pursuit_curvature_alpha,
+                min_speed_byte=float(config.pursuit_min_speed_byte),
+                lookahead_curvature_points=config.pursuit_lookahead_curvature_points,
+                max_accel_byte_per_s=float(config.pursuit_max_accel_byte_per_s),
             ))
 
     # ── Public API: odometry feeds ───────────────────────────────────────────
@@ -1116,7 +1120,7 @@ class FollowMeController:
         # that here made PID derivative terms see alternating dt of ~0 and
         # ~66ms at 30fps (compute fires every frame, output only every other).
         dt = now - self._last_compute_time if self._last_compute_time > 0.0 else (
-            1.0 / max(1.0, float(getattr(self._cfg, "follow_output_rate_hz", 15.0)))
+            1.0 / max(1.0, float(self._cfg.follow_output_rate_hz))
         )
         self._last_compute_time = now
 
@@ -1131,7 +1135,12 @@ class FollowMeController:
 
         if not target_present:
             self._prev_fresh_detection = False
-            left, right = self._handle_lost_target(now)
+            # _handle_lost_target returns pre-mix (speed, steer) — NOT motor
+            # bytes. It also sets self._last_speed_offset / _last_steer_offset
+            # as a side effect (mirroring the target-present branch below), so
+            # the emission gate can apply the SAME steer slew cap + mixing to
+            # every branch (tracking, persist, lost, search) uniformly.
+            self._last_speed_offset, self._last_steer_offset = self._handle_lost_target(now)
             # Recorder honesty: what the lost-target handler wanted this tick,
             # and which branch produced it. _handle_lost_target sets
             # _pursuit_mode to "trail"/"search" while coasting, or resets to
@@ -1158,7 +1167,7 @@ class FollowMeController:
             # so the robot continues turning during brief occlusions instead of driving straight.
             if not fresh_detection:
                 elapsed_since_fresh = now - self._last_fresh_steer_time
-                hold_decay_s = float(getattr(self._cfg, "steer_hold_decay_s", 1.0))
+                hold_decay_s = float(self._cfg.steer_hold_decay_s)
                 # Speed-aware: at higher commanded speed decay faster (more dangerous to drive blind fast).
                 # effective_decay = decay_s * max(0.3, 1.0 - speed_factor) where speed_factor ∈ [0, 1].
                 max_speed = float(self._cfg.max_follow_speed_byte)
@@ -1166,7 +1175,7 @@ class FollowMeController:
                 effective_decay_s = hold_decay_s * max(0.3, 1.0 - speed_factor)
                 decay = max(0.0, 1.0 - elapsed_since_fresh / effective_decay_s) if effective_decay_s > 0.0 else 0.0
                 # Clamp held steer to 70% of max during decay — prevents full-lock blind turns.
-                max_s = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
+                max_s = float(self._cfg.max_steer_offset_byte)
                 clamped_last_steer = max(-0.7 * max_s, min(0.7 * max_s, self._last_fresh_steer))
                 steer = clamped_last_steer * decay
                 # Decay SPEED on the same profile as steer. Previously speed kept
@@ -1202,7 +1211,7 @@ class FollowMeController:
                 # prevent the spike on the first frames after reacquisition.
                 # Skip the ramp on first-ever detection (no prior steer to spike from).
                 reacq_window = max(
-                    float(getattr(self._cfg, "reacq_slew_window_s", 0.5)), 0.05
+                    float(self._cfg.reacq_slew_window_s), 0.05
                 )
                 if self._reacq_time > 0.0 and self._last_fresh_steer_time > 0.0:
                     reacq_elapsed = now - self._reacq_time
@@ -1221,9 +1230,9 @@ class FollowMeController:
 
             self._last_speed_offset = speed
             self._last_steer_offset = steer
-            # Mixing is deferred into the rate-limit gate so the slew cap can
-            # be applied on the pre-mix steer value at the emission rate.
-            left = right = NEUTRAL  # placeholders; overwritten inside gate when target present
+            # Mixing is deferred into the rate-limit gate (below) so the slew
+            # cap can be applied uniformly to self._last_steer_offset — the
+            # same code path the lost/search branch above now also feeds.
 
         # ── Rate-limit motor OUTPUT only ──────────────────────────────────────
         # Always emit immediately on first call or state transition (target
@@ -1244,20 +1253,22 @@ class FollowMeController:
         # the real 15 Hz command stream.
         self._last_emitted_flag = emitted_this_tick
         if emitted_this_tick:
-            if target_present:
-                # Steer slew cap: limit change per output tick to avoid step-inputs
-                # caused by PID spikes. Cap is (steer_slew_per_tick * max_byte) bytes.
-                max_steer = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
-                slew_limit = float(self._tunable("steer_slew_per_tick")) * max_steer
-                slew_capped = max(
-                    self._last_emitted_steer - slew_limit,
-                    min(self._last_emitted_steer + slew_limit, self._last_steer_offset),
-                )
-                self._last_emitted_steer = slew_capped
-                self._last_slew_capped_steer = slew_capped
-                left, right = _mix_commands(self._last_speed_offset, slew_capped)
-            else:
-                self._last_emitted_steer = 0.0
+            # Steer slew cap: limit change per output tick to avoid step-inputs
+            # caused by PID spikes OR by a lost/search-mode mode transition.
+            # Applied uniformly across EVERY branch (tracking, persist, lost,
+            # search) so _last_emitted_steer is always a continuous, truthful
+            # record of the last commanded steer — reacquisition after a lost/
+            # search spell slews from that real value, never from a false 0.
+            # Cap is (steer_slew_per_tick * max_byte) bytes.
+            max_steer = float(self._cfg.max_steer_offset_byte)
+            slew_limit = float(self._tunable("steer_slew_per_tick")) * max_steer
+            slew_capped = max(
+                self._last_emitted_steer - slew_limit,
+                min(self._last_emitted_steer + slew_limit, self._last_steer_offset),
+            )
+            self._last_emitted_steer = slew_capped
+            self._last_slew_capped_steer = slew_capped
+            left, right = _mix_commands(self._last_speed_offset, slew_capped)
             self._cache_output((left, right), now)
 
         # ── Per-tick trial recorder ───────────────────────────────────────────
@@ -1410,7 +1421,7 @@ class FollowMeController:
         """
         self._last_x_err_norm = None  # trail path never populates this; direct path overwrites below
         odom = self._pick_odometry()
-        mode_dwell_s = float(getattr(self._cfg, "mode_switch_dwell_s", 0.5))
+        mode_dwell_s = float(self._cfg.mode_switch_dwell_s)
 
         if (
             self._trail_enabled
@@ -1420,9 +1431,9 @@ class FollowMeController:
         ):
             trail_pts = self._trail.get_smoothed_trail()
             self._trail_length = len(trail_pts)
-            min_pts = int(getattr(self._cfg, "min_trail_points_for_pursuit", 2))
-            direct_dist = float(getattr(self._cfg, "direct_pursuit_distance_m", 2.0))
-            direct_lat = float(getattr(self._cfg, "direct_pursuit_lateral_m", 0.3))
+            min_pts = int(self._cfg.min_trail_points_for_pursuit)
+            direct_dist = float(self._cfg.direct_pursuit_distance_m)
+            direct_lat = float(self._cfg.direct_pursuit_lateral_m)
 
             time_in_mode = now - self._last_mode_switch_time
             if self._last_pursuit_mode == "trail":
@@ -1461,11 +1472,11 @@ class FollowMeController:
                     # Person-position bias: blend live detection position into
                     # trail pursuit steering so the robot doesn't ignore where
                     # the person actually is when they drift laterally.
-                    bias_w = float(getattr(self._cfg, "trail_person_bias_weight", 0.35))
+                    bias_w = float(self._cfg.trail_person_bias_weight)
                     if bias_w > 0.0:
                         direct_steer = self._steering.compute(target.normalized_x, dt)
                         steer = steer * (1.0 - bias_w) + direct_steer * bias_w
-                        clamp_s = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
+                        clamp_s = float(self._cfg.max_steer_offset_byte)
                         steer = max(-clamp_s, min(clamp_s, steer))
                     return steer
 
@@ -1487,8 +1498,8 @@ class FollowMeController:
         # toward the frame edge (|x_err| > knee).  Center (|x_err| <= knee) is
         # byte-identical to the un-boosted path (edge_gain is exactly 1.0 there).
         # boost=0 disables the feature entirely.
-        knee = float(getattr(self._cfg, "steer_edge_knee", 0.4))
-        boost = float(getattr(self._cfg, "steer_edge_boost", 1.5))
+        knee = float(self._cfg.steer_edge_knee)
+        boost = float(self._cfg.steer_edge_boost)
         ax = abs(x_err)
         if boost > 0.0 and knee < 1.0 and ax > knee:
             edge_gain = 1.0 + boost * min(1.0, (ax - knee) / (1.0 - knee))
@@ -1498,7 +1509,7 @@ class FollowMeController:
         # are noisier and a full-gain correction causes overshoot.  Also scale back
         # proportionally when confidence is below 0.6 to prevent spikes on uncertain
         # detections (common when the person nearly fills the frame).
-        direct_max = float(getattr(self._cfg, "direct_mode_max_steer_byte", 18.0))
+        direct_max = float(self._cfg.direct_mode_max_steer_byte)
         steer = max(-direct_max, min(direct_max, steer))
         if target.confidence < 0.6:
             steer *= target.confidence / 0.6
@@ -1541,7 +1552,7 @@ class FollowMeController:
         No-op when RPM telemetry is unavailable.
         """
         # 1. Hard off-switch — true no-op, not even throttle reduction.
-        if not bool(getattr(self._cfg, "slip_compensation_enabled", False)):
+        if not bool(self._cfg.slip_compensation_enabled):
             self._last_slip_active = False
             self._slip_straight_ticks = 0
             return speed, steer
@@ -1562,51 +1573,54 @@ class FollowMeController:
             self._slip_straight_ticks += 1
         else:
             self._slip_straight_ticks = 0
-        persist_n = int(getattr(self._cfg, "slip_straight_persist_ticks", 3))
+        persist_n = int(self._cfg.slip_straight_persist_ticks)
         straight_persisted = self._slip_straight_ticks >= persist_n
 
         # 3. Commanded-vs-actual slip estimate.
         actual_rpm_diff = float(left_rpm - right_rpm)
-        k_cmd = float(getattr(self._cfg, "slip_cmd_diff_per_byte", 40.0))
+        k_cmd = float(self._cfg.slip_cmd_diff_per_byte)
         expected_diff = k_cmd * commanded_steer          # rough proportional model
         slip_diff = actual_rpm_diff - expected_diff      # residual after cancelling command
 
-        threshold = float(getattr(self._cfg, "slip_threshold_rpm", 200.0))
+        threshold = float(self._cfg.slip_threshold_rpm)
 
         if abs(slip_diff) > threshold and straight_persisted:
             # 4. Throttle reduction on detected real slip.
-            reduction = float(getattr(self._cfg, "slip_throttle_reduction", 0.15))
+            reduction = float(self._cfg.slip_throttle_reduction)
             speed = speed * (1.0 - reduction)
 
             # 5. Bounded steer feed-forward. Positive slip_diff (left spinning
             #    faster than commanded) → robot drifting right → small right-turn
             #    (positive steer) correction. Driven by slip_diff (a turn cancels
             #    it), never by the raw differential, so it cannot self-amplify.
-            ff_gain = float(getattr(self._cfg, "slip_feedforward_gain", 0.0))
-            slip_max = float(getattr(self._cfg, "slip_max_steer_byte", 12.0))
+            ff_gain = float(self._cfg.slip_feedforward_gain)
+            slip_max = float(self._cfg.slip_max_steer_byte)
             steer_correction = slip_diff * ff_gain
             steer_correction = max(-slip_max, min(slip_max, steer_correction))
             steer = steer + steer_correction
 
             # 6. TOTAL post-slip steer clamped to the direct cap — slip can never
             #    push the emitted steer past it (and thus never near the global ±max).
-            direct_max = float(getattr(self._cfg, "direct_mode_max_steer_byte", 18.0))
+            direct_max = float(self._cfg.direct_mode_max_steer_byte)
             steer = max(-direct_max, min(direct_max, steer))
             self._last_slip_active = True
         else:
             self._last_slip_active = False
         return speed, steer
 
-    def _handle_lost_target(self, now: float) -> tuple[int, int]:
-        """Handle absence of detections: trail pursuit → search → stop."""
+    def _handle_lost_target(self, now: float) -> tuple[float, float]:
+        """Handle absence of detections: trail pursuit → search → stop.
+
+        Returns (speed_offset, steer_offset) — pre-mix, pre-slew-cap — NOT
+        motor bytes. Mixing and the steer slew cap are applied uniformly for
+        every branch (tracking, persist, lost, search) by the emission gate in
+        compute(), so a lost/search steer request can never step-jump past the
+        same per-tick cap that governs tracking-mode steering.
+        """
         elapsed = now - self._last_valid_time
 
         if self._last_valid_time > 0.0:
-            trail_max_s = float(getattr(
-                self._cfg,
-                "lost_target_trail_pursuit_max_s",
-                self._cfg.lost_target_timeout_s,
-            ))
+            trail_max_s = float(self._cfg.lost_target_trail_pursuit_max_s)
             odom = self._pick_odometry()
 
             # ── Blind trail pursuit ──────────────────────────────────────────
@@ -1633,7 +1647,7 @@ class FollowMeController:
                 self._trail_distance_m = self._trail.trail_distance()
                 self._trail_rejected_jump_count = self._trail.rejected_jump_count
                 self._trail_rejected_speed_count = self._trail.rejected_speed_count
-                min_pts = int(getattr(self._cfg, "min_trail_points_for_pursuit", 2))
+                min_pts = int(self._cfg.min_trail_points_for_pursuit)
 
                 if len(trail_pts) >= min_pts:
                     pose = odom.pose
@@ -1664,9 +1678,8 @@ class FollowMeController:
                         pose, trail_pts, fwd,
                         curvatures=curvatures, now=now,
                     )
-                    search_delay_s = float(getattr(self._cfg, "search_mode_delay_s", 1.5))
-                    trail_exhausted_threshold = int(getattr(
-                        self._cfg, "trail_exhausted_remaining", 3))
+                    search_delay_s = float(self._cfg.search_mode_delay_s)
+                    trail_exhausted_threshold = int(self._cfg.trail_exhausted_remaining)
 
                     last_pt = trail_pts[-1]
                     near_trail_end = math.hypot(
@@ -1714,20 +1727,20 @@ class FollowMeController:
                         # to anticipate the turn they were making.
                         last_x = self._last_target_x or 0.0
                         if abs(last_x) > 0.3:
-                            bias_gain = float(getattr(self._cfg, "lost_steer_bias_gain", 3.0))
+                            bias_gain = float(self._cfg.lost_steer_bias_gain)
                             time_factor = min(elapsed / max(search_delay_s, 0.1), 1.5)
                             steer_bias = last_x * bias_gain * time_factor
-                            max_s = float(getattr(self._cfg, "max_steer_offset_byte", 25.0))
+                            max_s = float(self._cfg.max_steer_offset_byte)
                             steer = max(-max_s, min(max_s, steer + steer_bias))
 
                         self._last_steer_offset = steer
                         self._last_speed_offset = fwd
-                        return _mix_commands(fwd, steer)
+                        return fwd, steer
 
             # ── Gentle search rotation ────────────────────────────────────────
             if elapsed < trail_max_s:
                 self._pursuit_mode = "search"
-                search_steer = float(getattr(self._cfg, "search_steer_cap_byte", 30.0))
+                search_steer = float(self._cfg.search_steer_cap_byte)
 
                 # Fix 3: derive search direction from trail tangent (Kevin's actual
                 # direction of travel) rather than last observed lateral offset.
@@ -1762,11 +1775,11 @@ class FollowMeController:
                 fwd = 0.0
                 self._last_steer_offset = steer
                 self._last_speed_offset = fwd
-                return _mix_commands(fwd, steer)
+                return fwd, steer
 
         # ── Full timeout — stop and reset everything ──────────────────────────
         self._reset_tracking_state()
-        return NEUTRAL, NEUTRAL
+        return 0.0, 0.0
 
     def _reset_tracking_state(self) -> None:
         """Reset all tracking state after a full target-loss timeout."""
@@ -1914,7 +1927,7 @@ class FollowMeController:
             follow_mode = "TRAIL_EXHAUSTED"
         elif (self._last_valid_time > 0.0
               and (now - self._last_valid_time)
-              < float(getattr(self._cfg, "lost_target_trail_pursuit_max_s", 8.0))):
+              < float(self._cfg.lost_target_trail_pursuit_max_s)):
             follow_mode = "LOST_BLIND_TRAIL"
         else:
             follow_mode = "IDLE"
@@ -1960,8 +1973,7 @@ class FollowMeController:
             "hysteresis_max": 3,
             "extrapolation_active": self._trail_extrapolated,
             "extrapolation_count": self._trail_extrapolation_count,
-            "consume_radius_m": float(getattr(
-                self._cfg, "trail_consume_radius_m", 0.4)),
+            "consume_radius_m": float(self._cfg.trail_consume_radius_m),
         }
         if self._trail_enabled:
             status["trail_length"] = self._trail_length
