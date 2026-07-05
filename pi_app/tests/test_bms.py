@@ -65,6 +65,8 @@ class _BmsCfg:
     bms_poll_interval_s: float = 0.05
     bms_timeout_s: float = 30.0
     charger_inhibit_enabled: bool = True
+    charge_detect_min_current_a: float = 2.0
+    charge_detect_min_consecutive_polls: int = 2
 
 
 # ---------------------------------------------------------------------------
@@ -257,18 +259,41 @@ class TestDalyParsing(unittest.TestCase):
 
 class TestIsCharging(unittest.TestCase):
 
-    def _service(self, charger_inhibit_enabled=True, timeout_s=30.0) -> BmsService:
+    def _service(self, charger_inhibit_enabled=True, timeout_s=30.0,
+                 min_current_a=2.0, min_consecutive_polls=2) -> BmsService:
         cfg = _BmsCfg(
             charger_inhibit_enabled=charger_inhibit_enabled,
             bms_timeout_s=timeout_s,
+            charge_detect_min_current_a=min_current_a,
+            charge_detect_min_consecutive_polls=min_consecutive_polls,
         )
         return BmsService(cfg)
 
+    def _simulate_poll(self, svc: BmsService, charge_fet_on, pack_current_a) -> None:
+        """Feed one synthetic poll result through the same debounce bookkeeping
+        _do_poll() performs, without going through the real BLE/asyncio path.
+        Mirrors the logic in BmsService._do_poll so these unit tests stay in
+        sync with the production debounce behaviour.
+        """
+        min_current = svc._cfg.charge_detect_min_current_a
+        min_polls = max(1, int(svc._cfg.charge_detect_min_consecutive_polls))
+        looks_like_charging = bool(
+            charge_fet_on and pack_current_a is not None and pack_current_a > min_current
+        )
+        with svc._lock:
+            svc._state = BmsState(charge_fet_on=charge_fet_on, pack_current_a=pack_current_a)
+            if looks_like_charging:
+                svc._consecutive_charge_polls += 1
+            else:
+                svc._consecutive_charge_polls = 0
+            svc._confirmed_charging = svc._consecutive_charge_polls >= min_polls
+        svc._last_success_monotonic = time.monotonic()
+
     def test_false_when_inhibit_disabled(self):
         svc = self._service(charger_inhibit_enabled=False)
-        # Even if we inject a charging state, inhibit is disabled
-        svc._state = BmsState(charge_fet_on=True, pack_current_a=5.0)
-        svc._last_success_monotonic = time.monotonic()
+        # Even with a confirmed charging streak, inhibit is disabled entirely.
+        self._simulate_poll(svc, True, 5.0)
+        self._simulate_poll(svc, True, 5.0)
         self.assertFalse(svc.is_charging())
 
     def test_false_before_first_poll(self):
@@ -280,41 +305,82 @@ class TestIsCharging(unittest.TestCase):
     def test_false_when_data_stale(self):
         """Fail-open: return False if last poll was > bms_timeout_s ago."""
         svc = self._service(timeout_s=5.0)
-        svc._state = BmsState(charge_fet_on=True, pack_current_a=5.0)
+        self._simulate_poll(svc, True, 5.0)
+        self._simulate_poll(svc, True, 5.0)
         # Pretend last success was 10 seconds ago (> timeout_s=5)
         svc._last_success_monotonic = time.monotonic() - 10.0
         self.assertFalse(svc.is_charging())
 
-    def test_true_when_charge_fet_on_and_positive_current(self):
+    def test_true_when_charge_fet_on_and_positive_current_sustained(self):
+        """Real charging: current above threshold on >=2 consecutive polls confirms."""
         svc = self._service()
-        svc._state = BmsState(charge_fet_on=True, pack_current_a=3.5)
-        svc._last_success_monotonic = time.monotonic()
+        self._simulate_poll(svc, True, 3.5)
+        self._simulate_poll(svc, True, 3.5)
         self.assertTrue(svc.is_charging())
+
+    def test_single_poll_blip_does_not_confirm_charging(self):
+        """CONFIRMED BUG regression: a single +current blip (e.g. +1.3A regen/noise
+        while driving at full speed in FOLLOW_ME, 2026-06-13 field incident) must
+        NOT trip is_charging() on its own — only a sustained streak may.
+        """
+        svc = self._service(min_current_a=2.0, min_consecutive_polls=2)
+        # One-off spurious positive-current sample, charge FET happens to read on.
+        self._simulate_poll(svc, True, 1.3)
+        self.assertFalse(svc.is_charging())
+        # Followed by the pack going back to discharging — streak resets, never latches.
+        self._simulate_poll(svc, True, -50.0)
+        self.assertFalse(svc.is_charging())
 
     def test_false_when_charge_fet_on_but_zero_current(self):
         """FET on but no current → standby, not charging."""
         svc = self._service()
-        svc._state = BmsState(charge_fet_on=True, pack_current_a=0.0)
-        svc._last_success_monotonic = time.monotonic()
+        self._simulate_poll(svc, True, 0.0)
+        self._simulate_poll(svc, True, 0.0)
         self.assertFalse(svc.is_charging())
 
     def test_false_when_charge_fet_on_but_discharging(self):
         svc = self._service()
-        svc._state = BmsState(charge_fet_on=True, pack_current_a=-2.0)
-        svc._last_success_monotonic = time.monotonic()
+        self._simulate_poll(svc, True, -2.0)
+        self._simulate_poll(svc, True, -2.0)
         self.assertFalse(svc.is_charging())
 
     def test_false_when_charge_fet_off(self):
         svc = self._service()
-        svc._state = BmsState(charge_fet_on=False, pack_current_a=5.0)
-        svc._last_success_monotonic = time.monotonic()
+        # Even sustained high "current" reading doesn't count without the FET on.
+        self._simulate_poll(svc, False, 5.0)
+        self._simulate_poll(svc, False, 5.0)
         self.assertFalse(svc.is_charging())
+
+    def test_false_when_current_at_or_below_threshold(self):
+        """Current must exceed the threshold strictly, not just meet it."""
+        svc = self._service(min_current_a=2.0)
+        self._simulate_poll(svc, True, 2.0)
+        self._simulate_poll(svc, True, 2.0)
+        self.assertFalse(svc.is_charging())
+
+    def test_immediate_false_on_any_non_charging_poll(self):
+        """The debounce only delays the ON transition; OFF is immediate even
+        mid-streak — a real charger disconnect must not stay latched.
+        """
+        svc = self._service(min_consecutive_polls=3)
+        self._simulate_poll(svc, True, 5.0)
+        self._simulate_poll(svc, True, 5.0)
+        # Streak not yet long enough to confirm (needs 3)
+        self.assertFalse(svc.is_charging())
+        # One non-charging-looking poll breaks the streak entirely
+        self._simulate_poll(svc, True, 0.0)
+        self.assertFalse(svc.is_charging())
+        self._simulate_poll(svc, True, 5.0)
+        self._simulate_poll(svc, True, 5.0)
+        self.assertFalse(svc.is_charging())  # only 2 of 3 again
+        self._simulate_poll(svc, True, 5.0)
+        self.assertTrue(svc.is_charging())  # now 3 consecutive — confirmed
 
     def test_clears_after_timeout(self):
         """Charging → BMS drops → should revert to False after timeout."""
         svc = self._service(timeout_s=2.0)
-        svc._state = BmsState(charge_fet_on=True, pack_current_a=3.0)
-        svc._last_success_monotonic = time.monotonic()
+        self._simulate_poll(svc, True, 3.0)
+        self._simulate_poll(svc, True, 3.0)
 
         # Immediately after last success: still charging
         self.assertTrue(svc.is_charging())
@@ -322,6 +388,65 @@ class TestIsCharging(unittest.TestCase):
         # Simulate no poll for > timeout
         svc._last_success_monotonic = time.monotonic() - 3.0
         self.assertFalse(svc.is_charging())
+
+
+# ---------------------------------------------------------------------------
+# Integration test: debounce driven through the real _do_poll() parsing path
+# ---------------------------------------------------------------------------
+
+class TestChargeDetectDebounceIntegration(unittest.TestCase):
+    """Drive the debounce through the actual _do_poll() BLE-response parser
+    (not the _simulate_poll shortcut above) so the SOC-payload current
+    decoding and the debounce counter are both exercised together — this is
+    the closest unit-level proxy for the real 2026-06-13 field poll sequence.
+    """
+
+    def _poll_once(self, svc: BmsService, current_raw: int, charge_fet_on: bool) -> None:
+        async def run():
+            buf = bytearray()
+            event = asyncio.Event()
+            _cmd_to_name = {v: k for k, v in _DALY_CMD.items()}
+            responses = {
+                "soc": _make_daly_response(0x90, _soc_payload(current_raw=current_raw)),
+                "mosfet_status": _make_daly_response(
+                    0x93, _mosfet_payload(charge_on=charge_fet_on, discharge_on=True)
+                ),
+            }
+
+            async def fake_write(char, data, response=False):
+                name = _cmd_to_name.get(bytes(data))
+                if name and name in responses:
+                    buf.clear()
+                    buf.extend(responses[name])
+                    event.set()
+
+            client = MagicMock()
+            client.write_gatt_char = fake_write
+            await svc._do_poll(client, "fake-char", buf, event)
+
+        asyncio.run(run())
+
+    def test_single_blip_via_real_poll_path_does_not_confirm(self):
+        """current_raw=30013 → (30013-30000)*0.1 = +1.3A, matching the field log."""
+        cfg = _BmsCfg(charge_detect_min_current_a=2.0, charge_detect_min_consecutive_polls=2)
+        svc = BmsService(cfg)
+
+        self._poll_once(svc, current_raw=30013, charge_fet_on=True)  # +1.3A blip
+        self.assertAlmostEqual(svc.get_state().pack_current_a, 1.3, places=1)
+        self.assertFalse(svc.is_charging())
+
+        # Pack goes back to a normal discharging reading — never latches.
+        self._poll_once(svc, current_raw=29000, charge_fet_on=True)  # -100A discharging
+        self.assertFalse(svc.is_charging())
+
+    def test_sustained_charging_via_real_poll_path_confirms(self):
+        cfg = _BmsCfg(charge_detect_min_current_a=2.0, charge_detect_min_consecutive_polls=2)
+        svc = BmsService(cfg)
+
+        self._poll_once(svc, current_raw=30100, charge_fet_on=True)  # +10A
+        self.assertFalse(svc.is_charging())  # only 1 poll so far
+        self._poll_once(svc, current_raw=30100, charge_fet_on=True)  # +10A again
+        self.assertTrue(svc.is_charging())  # 2 consecutive — confirmed
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +635,16 @@ class TestControllerChargerInhibit(unittest.TestCase):
         self.assertTrue(telem.get("charger_inhibit"))
 
     def test_charger_inhibit_cleared_allows_motion(self):
-        """Clearing the charger inhibit flag restores normal operation."""
+        """Clearing the charger inhibit flag restores normal operation.
+
+        NOTE: charger_inhibit is now ALWAYS present in the telemetry dict
+        (previously it only appeared while inhibiting — see 2026-06-13
+        motor-cutout bug writeup — meaning downstream consumers had no way to
+        ever see or log the RELEASED state). The contract changed from
+        "key absent means not inhibiting" to "key present, value reflects
+        current state" so visibility work (run log / SSE / FM recorder) has
+        something to read every tick.
+        """
         ctrl = self.Controller()
         ctrl.set_charger_inhibit(True)
         ctrl.set_charger_inhibit(False)
@@ -518,7 +652,8 @@ class TestControllerChargerInhibit(unittest.TestCase):
         rc = self._make_rc()
         cmd, _, telem = ctrl.process(rc)
 
-        self.assertNotIn("charger_inhibit", telem)
+        self.assertIn("charger_inhibit", telem)
+        self.assertFalse(telem.get("charger_inhibit"))
 
     def test_fail_open_no_bms(self):
         """With no BMS configured, charger_inhibit stays False (fail-open)."""
@@ -527,6 +662,44 @@ class TestControllerChargerInhibit(unittest.TestCase):
         rc = self._make_rc()
         _, _, telem = ctrl.process(rc)
         self.assertFalse(telem.get("charger_inhibit", False))
+
+    def test_charger_inhibit_present_by_default(self):
+        """charger_inhibit must reach the telemetry dict on every tick, even
+        when it has never been engaged (visibility fix — previously the key
+        was entirely absent unless inhibit was True, so the run log / SSE /
+        FM recorder had nothing to show for the RELEASED / never-engaged state).
+        """
+        ctrl = self.Controller()
+        rc = self._make_rc()
+        _, _, telem = ctrl.process(rc)
+        self.assertIn("charger_inhibit", telem)
+        self.assertFalse(telem["charger_inhibit"])
+
+    def test_engage_transition_logs_one_line(self):
+        """ENGAGE must log exactly one journald-visible line with the
+        triggering current + charge_fet context (charger_inhibit was
+        previously logged NOWHERE, which is why the field bug took a log
+        deep-dive instead of a grep to diagnose).
+        """
+        ctrl = self.Controller()
+        with self.assertLogs("pi_app.control.controller", level="WARNING") as log_ctx:
+            ctrl.set_charger_inhibit(True, bms_current_a=1.3, charge_fet_on=True)
+        engage_lines = [r for r in log_ctx.output if "ENGAGED" in r]
+        self.assertEqual(len(engage_lines), 1)
+        self.assertIn("1.3", engage_lines[0])
+
+        # Calling again with the same value must NOT re-log (only transitions do).
+        with self.assertRaises(AssertionError):
+            with self.assertLogs("pi_app.control.controller", level="WARNING"):
+                ctrl.set_charger_inhibit(True, bms_current_a=1.3, charge_fet_on=True)
+
+    def test_release_transition_logs_one_line(self):
+        ctrl = self.Controller()
+        ctrl.set_charger_inhibit(True, bms_current_a=5.0, charge_fet_on=True)
+        with self.assertLogs("pi_app.control.controller", level="WARNING") as log_ctx:
+            ctrl.set_charger_inhibit(False, bms_current_a=-2.0, charge_fet_on=True)
+        release_lines = [r for r in log_ctx.output if "RELEASED" in r]
+        self.assertEqual(len(release_lines), 1)
 
 
 if __name__ == "__main__":

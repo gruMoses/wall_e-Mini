@@ -520,7 +520,12 @@ def run() -> None:
             # Update charger inhibit from BMS (fail-open: False when BMS unreachable).
             # Also force inhibit when the discharge FET safety timeout has fired.
             if bms_service is not None:
-                controller.set_charger_inhibit(bms_service.is_charging() or _bms_safety_stopped)
+                _bms_st_for_inhibit = bms_service.get_state()
+                controller.set_charger_inhibit(
+                    bms_service.is_charging() or _bms_safety_stopped,
+                    bms_current_a=_bms_st_for_inhibit.pack_current_a if _bms_st_for_inhibit else None,
+                    charge_fet_on=_bms_st_for_inhibit.charge_fet_on if _bms_st_for_inhibit else None,
+                )
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
             # Snapshot IMU status early in loop and retain last-good values for telemetry
             # so brief status fetch hiccups do not blank heading in the UI.
@@ -646,6 +651,7 @@ def run() -> None:
                         bms_connected=(bms_state.connected if bms_state is not None else None),
                         bms_charging=bms_charging,
                         bms_discharge_fet_on=(bms_state.discharge_fet_on if bms_state is not None else None),
+                        charger_inhibit=telem.get("charger_inhibit"),
                         vesc_left_rpm=telem.get("vesc_left_rpm"),
                         vesc_right_rpm=telem.get("vesc_right_rpm"),
                         vesc_actual_speed_mps=telem.get("vesc_actual_speed_mps"),
@@ -840,6 +846,7 @@ def run() -> None:
                         "ts_iso": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
                         "src": src,
                         "mode": telem.get("mode", "MANUAL"),
+                        "charger_inhibit": telem.get("charger_inhibit", False),
                         "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
                         "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
                         "imu": imu_status if imu_status else None,

@@ -501,6 +501,13 @@ class BmsConfig:
     bms_fet_grace_period_s: float = 20.0
     # After grace period, if discharge_fet_on stays False for this many seconds, force neutral
     bms_fet_safety_timeout_s: float = 2.0
+    # Charge-detect debounce (2026-06-13 field bug): a momentary regen/noise blip on
+    # pack_current_a (e.g. +1.3A while driving at full speed) must NOT be mistaken for
+    # a real charger. Require current above this threshold, sustained across
+    # charge_detect_min_consecutive_polls consecutive successful polls, before
+    # is_charging() reports True and the controller inhibits drive.
+    charge_detect_min_current_a: float = 2.0
+    charge_detect_min_consecutive_polls: int = 2
 
 
 @dataclass(frozen=True)

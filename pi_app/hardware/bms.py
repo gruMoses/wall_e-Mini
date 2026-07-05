@@ -8,6 +8,11 @@ Fail-open charger inhibit: if the BMS has been unreachable for longer than
 bms_timeout_s, is_charging() returns False so a lost BLE link never bricks
 the robot.
 
+Charge-detect debounce: is_charging() only reports True once pack current has
+read above charge_detect_min_current_a for charge_detect_min_consecutive_polls
+consecutive polls, so a single spurious positive-current sample (regen/noise
+blip while driving) cannot latch a false charger-inhibit and stop the robot.
+
 References:
   - bms_scan.py at repo root for the Daly wire protocol
   - config.BmsConfig for tunable parameters
@@ -142,6 +147,17 @@ class BmsService:
         self._poll_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         # Monotonic timestamp of the last successful poll (0.0 = never polled)
         self._last_success_monotonic: float = 0.0
+        # Charge-detect debounce: number of consecutive successful polls that
+        # have read pack current above charge_detect_min_current_a with the
+        # charge FET on. Reset to 0 on any non-charging-looking poll. Guarded
+        # by self._lock alongside self._state (mutated on the BMS poll thread,
+        # read from is_charging() on the main control-loop thread).
+        self._consecutive_charge_polls: int = 0
+        # Debounced verdict: True only once _consecutive_charge_polls has
+        # reached charge_detect_min_consecutive_polls. This is what
+        # is_charging() reports (subject to the fail-open checks below) —
+        # a single spurious positive-current sample can no longer trip it.
+        self._confirmed_charging: bool = False
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -177,9 +193,20 @@ class BmsService:
             return copy.copy(self._state)
 
     def is_charging(self) -> bool:
-        """Return True when the BMS positively reports active charging.
+        """Return True only once the BMS has *confirmed* active charging.
 
-        Charging is defined as: charge FET enabled AND pack current > 0 A.
+        Charging is defined as: charge FET enabled AND pack current above
+        ``charge_detect_min_current_a``, sustained across at least
+        ``charge_detect_min_consecutive_polls`` consecutive successful polls.
+
+        This debounce exists because a single momentary positive-current
+        sample (regen / measurement noise on a near-full pack) is NOT a
+        charger being connected — see the 2026-06-13 field incident where a
+        one-off +1.3A blip during a full-speed FOLLOW_ME chase latched
+        charger_inhibit for a full ~8s poll interval and stopped the robot
+        dead. Any single non-charging-looking poll immediately resets the
+        streak (and thus this returns False right away) — the debounce only
+        delays the ON transition, never the OFF transition.
 
         Fail-open behaviour: if the BMS has been unreachable for longer than
         ``bms_timeout_s``, or has never been polled, this returns False so a
@@ -194,13 +221,7 @@ class BmsService:
             return False
 
         with self._lock:
-            state = self._state
-
-        return bool(
-            state.charge_fet_on
-            and state.pack_current_a is not None
-            and state.pack_current_a > 0.0
-        )
+            return self._confirmed_charging
 
     # ------------------------------------------------------------------ #
     # Background asyncio loop
@@ -381,8 +402,26 @@ class BmsService:
         if new.error_flags:
             logger.error("BMS protection flags active: %s", ", ".join(new.error_flags))
 
+        # Charge-detect debounce: this poll "looks like charging" only when the
+        # charge FET is on AND pack current exceeds the noise-rejecting
+        # threshold. A single blip (e.g. +1.3A regen while driving) fails this
+        # check and immediately resets the streak to 0, so is_charging() drops
+        # back to False right away — only the ON transition is delayed.
+        min_current = float(getattr(self._cfg, "charge_detect_min_current_a", 2.0))
+        min_polls = max(1, int(getattr(self._cfg, "charge_detect_min_consecutive_polls", 2)))
+        poll_looks_like_charging = bool(
+            new.charge_fet_on
+            and new.pack_current_a is not None
+            and new.pack_current_a > min_current
+        )
+
         with self._lock:
             self._state = new
+            if poll_looks_like_charging:
+                self._consecutive_charge_polls += 1
+            else:
+                self._consecutive_charge_polls = 0
+            self._confirmed_charging = self._consecutive_charge_polls >= min_polls
         self._last_success_monotonic = time.monotonic()
 
     # ------------------------------------------------------------------ #

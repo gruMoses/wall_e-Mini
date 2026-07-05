@@ -207,12 +207,30 @@ class Controller:
         """Feed latest reading from RtkGpsReader."""
         self._gps_reading = reading
 
-    def set_charger_inhibit(self, inhibit: bool) -> None:
+    def set_charger_inhibit(
+        self,
+        inhibit: bool,
+        bms_current_a: Optional[float] = None,
+        charge_fet_on: Optional[bool] = None,
+    ) -> None:
         """Set or clear the charger inhibit flag.
 
         When True, process() will output neutral and stop the motors regardless
         of RC/BT commands.  Call with False when the BMS is unreachable (fail-open).
+
+        ``bms_current_a`` / ``charge_fet_on`` are optional context for the one-line
+        ENGAGE/RELEASE transition log below — charger_inhibit was previously logged
+        NOWHERE, which is why the 2026-06-13 motor-cutout incident took a field-log
+        deep-dive to root-cause instead of a grep.
         """
+        inhibit = bool(inhibit)
+        if inhibit != self._charger_inhibit:
+            _logger.warning(
+                "charger_inhibit %s — bms_current_a=%s charge_fet_on=%s",
+                "ENGAGED (motors forced neutral)" if inhibit else "RELEASED",
+                bms_current_a,
+                charge_fet_on,
+            )
         self._charger_inhibit = inhibit
 
     def _follow_me_target_present(self) -> bool:
@@ -436,6 +454,7 @@ class Controller:
                 right_current_a=self._actual_right_current_a,
                 left_temp_c=self._actual_left_temp_c,
                 right_temp_c=self._actual_right_temp_c,
+                charger_inhibit=self._charger_inhibit,
             )
             detections = self._person_detections or []
             left, right = self._follow_me.compute(detections)
@@ -593,7 +612,11 @@ class Controller:
         # Initialize telemetry before any event handler can write to it.
         # (Previously this dict was created further down, so the
         # FOLLOW_ME_ENTERED-with-no-target branch raised UnboundLocalError.)
-        telemetry: dict = {}
+        # charger_inhibit is always present (not just on engage) so consumers
+        # (run log, SSE, FM trial JSONL) can see the RELEASED state too —
+        # previously it only appeared in the dict while inhibiting, so nothing
+        # downstream could ever log/see the transition (2026-06-13 field bug).
+        telemetry: dict = {"charger_inhibit": self._charger_inhibit}
 
         # Calibration early-return — now AFTER update_safety so safety is
         # always enforced. The wizard issues drive commands directly, so
@@ -931,11 +954,12 @@ class Controller:
             telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
             telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
         elif self._charger_inhibit:
-            # Charger connected: refuse all drive commands regardless of RC input.
+            # Charger connected (debounced — see bms.is_charging()): refuse all
+            # drive commands regardless of RC input. telemetry["charger_inhibit"]
+            # is already True here (set unconditionally above from self._charger_inhibit).
             left = right = CENTER_OUTPUT_VALUE
             self._motor.stop()
             self._reset_slew_state(mono_now)
-            telemetry["charger_inhibit"] = True
             telemetry["slew_out_left"] = left
             telemetry["slew_out_right"] = right
             telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
