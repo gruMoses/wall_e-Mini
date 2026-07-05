@@ -89,6 +89,14 @@ class VescTelemetry:
     can_rx_recv_error_count: int = 0
     can_rx_reopen_count: int = 0
     can_rx_last_frame_age_s: Optional[float] = None
+    # Per-motor STATUS(9)/RPM frame age — lets a consumer detect ONE motor
+    # going silent even while the other keeps transmitting (see get_telemetry()).
+    left_status_age_s: Optional[float] = None
+    right_status_age_s: Optional[float] = None
+    # False if the background RX thread has died (e.g. an unhandled exception
+    # escaped _rx_loop). Telemetry can look "fresh" for a while after that
+    # because get_telemetry() only reports frame age, not thread liveness.
+    rx_thread_alive: Optional[bool] = None
 
 
 class VescCanDriver:
@@ -230,6 +238,7 @@ class VescCanDriver:
             rv = r.voltage_v
             readings = [v for v in (lv, rv) if v is not None]
             voltage = max(readings) if readings else None
+            now = time.monotonic()
             telem = VescTelemetry(
                 left_rpm=l.rpm,
                 right_rpm=r.rpm,
@@ -239,6 +248,8 @@ class VescCanDriver:
                 right_temp_c=r.temp_fet_c,
                 voltage_v=voltage,
                 timestamp=max(l.last_status_s, r.last_status_s),
+                left_status_age_s=(now - l.last_status_s) if l.last_status_s > 0.0 else None,
+                right_status_age_s=(now - r.last_status_s) if r.last_status_s > 0.0 else None,
             )
             telem.can_send_alert = self._send_fail_alert
             telem.can_send_fail_count = self._send_fail_count
@@ -251,12 +262,16 @@ class VescCanDriver:
                 if self._rx_last_frame_s > 0.0
                 else None
             )
-            return telem
+        # Thread liveness is independent of _telem_lock (it's a plain
+        # threading.Thread reference, not telemetry state).
+        _rx_thread = self._rx_thread
+        telem.rx_thread_alive = _rx_thread.is_alive() if _rx_thread is not None else None
+        return telem
 
     def get_rx_health(self) -> dict:
         """Return CAN RX health counters for diagnostics/telemetry UI."""
         with self._telem_lock:
-            return {
+            health = {
                 "rx_frame_count": int(self._rx_frame_count),
                 "rx_status_count": int(self._rx_status_count),
                 "rx_status4_count": int(self._rx_status4_count),
@@ -270,6 +285,9 @@ class VescCanDriver:
                     else None
                 ),
             }
+        _rx_thread = self._rx_thread
+        health["rx_thread_alive"] = _rx_thread.is_alive() if _rx_thread is not None else None
+        return health
 
     # ──────────────────────────────────────────────────────────────────────────
     # Background CAN RX loop
@@ -307,23 +325,32 @@ class VescCanDriver:
                 continue
 
             if msg is None:
-                now = time.monotonic()
-                with self._telem_lock:
-                    last_frame_s = self._rx_last_frame_s
-                    last_reopen_s = self._rx_last_reopen_s
-                if (
-                    last_frame_s > 0.0
-                    and (now - last_frame_s) > 1.0
-                    and (now - last_reopen_s) > 1.0
-                ):
-                    logger.warning(
-                        "VESC CAN RX stale for %.2fs on %s; reopening bus",
-                        now - last_frame_s,
-                        self._channel,
-                    )
+                try:
+                    now = time.monotonic()
+                    with self._telem_lock:
+                        last_frame_s = self._rx_last_frame_s
+                        last_reopen_s = self._rx_last_reopen_s
+                    if (
+                        last_frame_s > 0.0
+                        and (now - last_frame_s) > 1.0
+                        and (now - last_reopen_s) > 1.0
+                    ):
+                        logger.warning(
+                            "VESC CAN RX stale for %.2fs on %s; reopening bus",
+                            now - last_frame_s,
+                            self._channel,
+                        )
+                        with self._telem_lock:
+                            self._rx_reopen_count += 1
+                            self._rx_last_reopen_s = now
+                        self._close_bus()
+                except Exception as exc:
+                    # This block must never be allowed to kill the daemon RX
+                    # thread silently (see rx_thread_alive below) — contain it
+                    # the same way every sibling block in this loop is contained.
+                    logger.warning("VESC CAN RX stale-check error on %s: %s", self._channel, exc)
                     with self._telem_lock:
                         self._rx_reopen_count += 1
-                        self._rx_last_reopen_s = now
                     self._close_bus()
                 continue
 
@@ -522,7 +549,30 @@ class VescCanDriver:
         try:
             with self._bus_lock:
                 self._ensure_bus()
-        except RuntimeError:
+        except Exception as exc:
+            # RuntimeError (python-can missing) or a SocketCAN OSError/CanError
+            # from Bus() construction — either way this must never escape to
+            # the caller (set_tracks -> Controller.process -> the unguarded
+            # main loop). Close/reset the bus and count it like a send failure
+            # so callers see it in can_send_alert/can_send_fail_count.
+            now = time.monotonic()
+            with self._telem_lock:
+                self._send_fail_count += 1
+                self._send_fail_consecutive += 1
+                if self._send_fail_first_ts == 0.0:
+                    self._send_fail_first_ts = now
+                self._send_fail_last_ts = now
+                if (self._send_fail_consecutive >= self._SEND_FAIL_THRESHOLD
+                        and (now - self._send_fail_first_ts) <= self._SEND_FAIL_WINDOW_S):
+                    if not self._send_fail_alert:
+                        self._send_fail_alert = True
+                        logger.warning(
+                            'VESC CAN send alert: %d consecutive failures in %.1fs - %s',
+                            self._send_fail_consecutive,
+                            now - self._send_fail_first_ts,
+                            exc,
+                        )
+            self._close_bus()
             return
 
         try:

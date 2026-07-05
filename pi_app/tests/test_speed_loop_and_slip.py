@@ -740,5 +740,157 @@ class TestControllerTelemetryFallback(unittest.TestCase):
         self.assertIn("vesc_actual_speed_mps", telem)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Wave 2: frozen-RPM (per-motor staleness) open-loop fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestControllerFrozenRpmFallback(unittest.TestCase):
+    """Reproduces the Wave-2 bug: VescCanDriver.get_telemetry() never returns
+    None again once any motor has ever reported RPM (its per-motor rpm field
+    is never reset). A dead RX thread or one silent VESC then freezes stale
+    numbers that get_telemetry() keeps presenting as fresh, making the old
+    `elif get_telemetry() is None` fallback dead code. The fix must instead
+    key off left_status_age_s/right_status_age_s (per-motor STATUS(9) frame
+    age) — these tests mock a driver that behaves like the real one: never
+    returns None, but ages one motor's status timestamp."""
+
+    class _FrozenMotor:
+        """Mimics the real VescCanDriver bug: get_telemetry() always returns
+        non-None once rpm has been seen, but per-motor status age can go
+        stale independently for one motor."""
+
+        def __init__(self):
+            self.left_age = 0.0
+            self.right_age = 0.0
+            self.rx_thread_alive = True
+
+        def set_tracks(self, l, r):
+            pass
+
+        def stop(self):
+            pass
+
+        def get_telemetry(self):
+            class T:
+                pass
+            t = T()
+            t.left_rpm = 500       # frozen — never reset, exactly like the real bug
+            t.right_rpm = 480
+            t.left_current_a = 3.0
+            t.right_current_a = 3.0
+            t.left_temp_c = 40.0
+            t.right_temp_c = 40.0
+            t.voltage_v = 24.0
+            t.timestamp = time.monotonic()
+            t.left_status_age_s = self.left_age
+            t.right_status_age_s = self.right_age
+            t.rx_thread_alive = self.rx_thread_alive
+            return t
+
+    def _rc(self):
+        return _arm_rc()
+
+    def test_fresh_both_motors_stays_closed_loop(self):
+        """Sanity check: with both motors fresh, RPMs pass through unchanged."""
+        motor = self._FrozenMotor()
+        motor.left_age = 0.05
+        motor.right_age = 0.05
+        ctrl = Controller(motor_driver=motor)
+        ctrl._telem_last_poll = 0.0
+        _, _, telem = ctrl.process(self._rc(), now_epoch_s=time.time())
+        self.assertEqual(telem.get("vesc_left_rpm"), 500)
+        self.assertEqual(telem.get("vesc_right_rpm"), 480)
+
+    def test_frozen_left_motor_triggers_open_loop_fallback(self):
+        """Left motor's status age > 0.5s (frozen) while right stays fresh and
+        get_telemetry() keeps returning non-None (as the real driver does).
+        The controller must still clear both RPMs to force open-loop —
+        proving the per-motor age check, not the old None-check, now drives
+        the fallback."""
+        motor = self._FrozenMotor()
+        motor.left_age = 0.05
+        motor.right_age = 0.05
+        ctrl = Controller(motor_driver=motor)
+        ctrl._telem_last_poll = 0.0
+        ctrl.process(self._rc(), now_epoch_s=time.time())
+        self.assertEqual(ctrl._actual_left_rpm, 500)  # closed-loop while fresh
+
+        # Left motor goes stale (RX died for that VESC / CAN id stopped
+        # transmitting) while right keeps reporting fresh frames and
+        # get_telemetry() is STILL non-None the whole time.
+        motor.left_age = 0.8
+        motor.right_age = 0.05
+        ctrl._telem_last_poll = 0.0
+        with self.assertLogs("pi_app.control.controller", level="WARNING") as cm:
+            ctrl.process(self._rc(), now_epoch_s=time.time())
+        self.assertTrue(any("stale" in msg.lower() for msg in cm.output))
+        self.assertIsNone(ctrl._actual_left_rpm)
+        self.assertIsNone(ctrl._actual_right_rpm)
+        self.assertIsNone(ctrl._actual_speed_mps)
+
+    def test_frozen_right_motor_triggers_open_loop_fallback(self):
+        """Same scenario, mirrored onto the right motor."""
+        motor = self._FrozenMotor()
+        motor.left_age = 0.05
+        motor.right_age = 0.9
+        ctrl = Controller(motor_driver=motor)
+        ctrl._telem_last_poll = 0.0
+        with self.assertLogs("pi_app.control.controller", level="WARNING"):
+            ctrl.process(self._rc(), now_epoch_s=time.time())
+        self.assertIsNone(ctrl._actual_left_rpm)
+        self.assertIsNone(ctrl._actual_right_rpm)
+
+    def test_rx_thread_dead_triggers_open_loop_fallback_even_if_ages_fresh(self):
+        """If the RX thread itself died, ages can look deceptively fresh
+        (frozen at whatever they were before death) — rx_thread_alive=False
+        must independently force the fallback."""
+        motor = self._FrozenMotor()
+        motor.left_age = 0.05
+        motor.right_age = 0.05
+        motor.rx_thread_alive = False
+        ctrl = Controller(motor_driver=motor)
+        ctrl._telem_last_poll = 0.0
+        with self.assertLogs("pi_app.control.controller", level="WARNING") as cm:
+            ctrl.process(self._rc(), now_epoch_s=time.time())
+        self.assertTrue(any("rx thread is dead" in msg.lower() for msg in cm.output))
+        self.assertIsNone(ctrl._actual_left_rpm)
+        self.assertIsNone(ctrl._actual_right_rpm)
+
+    def test_recovers_to_closed_loop_after_motor_unfreezes(self):
+        """Once the stale motor starts reporting fresh frames again, the
+        controller must resume closed-loop control (no permanent latch)."""
+        motor = self._FrozenMotor()
+        motor.left_age = 0.8
+        motor.right_age = 0.05
+        ctrl = Controller(motor_driver=motor)
+        ctrl._telem_last_poll = 0.0
+        ctrl.process(self._rc(), now_epoch_s=time.time())
+        self.assertIsNone(ctrl._actual_left_rpm)
+
+        motor.left_age = 0.02
+        ctrl._telem_last_poll = 0.0
+        ctrl.process(self._rc(), now_epoch_s=time.time())
+        self.assertEqual(ctrl._actual_left_rpm, 500)
+        self.assertEqual(ctrl._actual_right_rpm, 480)
+
+    def test_downstream_follow_me_sees_none_not_stale_numbers(self):
+        """The whole point of the fix: follow_me's slip detector must
+        actually receive None (and no-op) instead of trusting frozen RPMs
+        forever, which is what made the old None-check dead code dangerous."""
+        motor = self._FrozenMotor()
+        motor.left_age = 0.8
+        motor.right_age = 0.05
+
+        cfg = FollowMeConfig(slip_compensation_enabled=True)
+        fm = FollowMeController(cfg)
+        ctrl = Controller(motor_driver=motor, follow_me=fm)
+        ctrl._telem_last_poll = 0.0
+        ctrl.process(self._rc(), now_epoch_s=time.time())
+
+        # Controller must have propagated None into follow_me, not the frozen 500/480.
+        self.assertIsNone(fm._actual_left_rpm)
+        self.assertIsNone(fm._actual_right_rpm)
+
+
 if __name__ == "__main__":
     unittest.main()
