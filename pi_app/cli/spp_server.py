@@ -131,7 +131,18 @@ def run_server() -> int:
                             left_byte, right_byte = ints_to_bytes(cmd.left_i, cmd.right_i)
                             print(f"V2 DEBUG: Converted {cmd.left_i},{cmd.right_i} -> {left_byte},{right_byte}", flush=True)
 
-                            # Write latest command to shared file for Wall-E app
+                            # Write latest command to shared file for Wall-E app.
+                            #
+                            # NOTE: this is a THIRD, uncoordinated writer of
+                            # /tmp/wall_e_bt_latest.json — alongside the /drive
+                            # TeleopSession watchdog (pi_app/web/teleop.py, the
+                            # sole session-gated writer with deadman/lock/e-stop)
+                            # and main.py's 600ms freshness read. This SPP path
+                            # has no arming ceremony, no e-stop, no deadman of
+                            # its own beyond file staleness. Left as-is (BT
+                            # bench-test path, not addressed by this hardening
+                            # pass) — do not add a fourth writer without also
+                            # reconciling this one.
                             try:
                                 shared_data = {
                                     "left_byte": left_byte,
@@ -157,7 +168,8 @@ def run_server() -> int:
                             left_byte, right_byte = floats_to_bytes(left_f, right_f)
                             print(f"V1 DEBUG: Converted {left_f},{right_f} -> {left_byte},{right_byte}", flush=True)
 
-                            # Write latest command to shared file for Wall-E app
+                            # Write latest command to shared file for Wall-E app.
+                            # Same third-writer caveat as the V2 path above.
                             try:
                                 shared_data = {
                                     "left_byte": left_byte,

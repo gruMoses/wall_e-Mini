@@ -25,11 +25,15 @@ physically cannot move the robot unless RC keeps it armed. We do not change that
 This module is purely an additional, *tighter* fail-safe ON TOP of that existing
 file channel:
 
-  * The existing ``/api/teleop`` endpoint writes the same override file with a
-    600 ms freshness window. That is a crude deadman (fall back to RC after
+  * The legacy ``/api/teleop`` endpoint used to write the same override file
+    with a 600 ms freshness window — a crude deadman (fall back to RC after
     600 ms) with no arming ceremony, no e-stop latch, no speed cap, no stale
-    guard, and no explicit re-arm. We leave it untouched but supersede it for
-    the ``/drive`` page.
+    guard, and no explicit re-arm, on the SAME unauth Flask app and routing
+    around every guard below. It has since been retired (410 Gone in
+    ``oak_viewer.py``) because it shared this module's override file with no
+    coordination — last-writer-wins let it fight ``/drive`` or drive
+    unsupervised under a latched ``/drive`` e-stop. Use ``/drive`` or the REST
+    mirror below instead.
   * ``TeleopSession`` owns a 250 ms server-side deadman, an arming ceremony, a
     latched e-stop, a speed cap, and a stale-command guard.
   * The **watchdog thread is the sole writer** to the command sink. The WS / REST
@@ -537,8 +541,11 @@ class TeleopSession:
 class FileCommandSink:
     """Writes ``/tmp/wall_e_bt_latest.json`` in the schema ``main.py`` consumes.
 
-    Same file + schema as the existing ``/api/teleop`` endpoint, so this rides
-    the already-audited RC-gated override path rather than touching the motor.
+    Same file + schema as the now-retired ``/api/teleop`` endpoint used to
+    write, so this rides the already-audited RC-gated override path rather
+    than touching the motor. This is now the sole session-gated writer; see
+    the module docstring for the other (uncoordinated) writers that remain:
+    ``pi_app/cli/spp_server.py``.
     """
 
     def __init__(self, path: str = "/tmp/wall_e_bt_latest.json") -> None:

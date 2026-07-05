@@ -90,6 +90,56 @@ class TestCalibrationArmGate(unittest.TestCase):
         mgr.cancel()  # stop the worker thread (no IMU → it finishes anyway)
 
 
+def _make_client_with_estop(controller, estop_check):
+    app = flask.Flask(__name__)
+    mgr = CalibrationManager(controller=controller, motor_driver=FakeMotor())
+    app.register_blueprint(
+        create_calibration_blueprint(mgr, estop_check=estop_check)
+    )
+    return app.test_client(), mgr
+
+
+class TestCalibrationEstopGate(unittest.TestCase):
+    """/api/cal/start must ALSO refuse (409) while the /drive TeleopSession
+    e-stop is latched — calibration drives the motors directly."""
+
+    def test_estop_latched_start_returns_409_even_when_armed(self):
+        # Armed rover, but session e-stop latched -> 409, never runs.
+        client, mgr = _make_client_with_estop(
+            FakeController(armed=True), estop_check=lambda: True
+        )
+        resp = client.post("/api/cal/start", json={"tool": "heading_pid"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("e-stop", resp.get_json()["error"].lower())
+        self.assertEqual(mgr.state, "IDLE")  # never entered RUNNING
+
+    def test_estop_check_false_still_allows_armed_start(self):
+        client, mgr = _make_client_with_estop(
+            FakeController(armed=True), estop_check=lambda: False
+        )
+        resp = client.post("/api/cal/start", json={"tool": "heading_pid"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["status"], "started")
+        mgr.cancel()
+
+    def test_estop_check_omitted_is_backward_compatible(self):
+        # No estop_check passed (None default) — armed start works as before.
+        client, mgr = _make_client(FakeController(armed=True))
+        resp = client.post("/api/cal/start", json={"tool": "heading_pid"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["status"], "started")
+        mgr.cancel()
+
+    def test_estop_gate_takes_precedence_over_arm_gate(self):
+        # Disarmed AND e-stopped: the e-stop check fires first -> 409, not 400.
+        client, mgr = _make_client_with_estop(
+            FakeController(armed=False), estop_check=lambda: True
+        )
+        resp = client.post("/api/cal/start", json={"tool": "heading_pid"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(mgr.state, "IDLE")
+
+
 class TestCalibrationAbort(unittest.TestCase):
     def _mgr(self, **kw):
         return CalibrationManager(controller=FakeController(**kw), motor_driver=FakeMotor())

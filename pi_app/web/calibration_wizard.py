@@ -669,8 +669,25 @@ _TOOL_DEFS = [
 ]
 
 
-def create_calibration_blueprint(cal_manager: CalibrationManager) -> Blueprint:
+def create_calibration_blueprint(cal_manager: CalibrationManager,
+                                 estop_check=None) -> Blueprint:
+    """Create the calibration Flask blueprint.
+
+    ``estop_check``: optional zero-arg callable returning True while the
+    /drive TeleopSession's e-stop is latched. Calibration drives the motors
+    directly, so ``/api/cal/start`` refuses with 409 while latched — on top of
+    the existing arm-gate. ``None`` (the default) means "no session gate" —
+    unchanged prior behavior.
+    """
     bp = Blueprint("calibration", __name__)
+
+    def _teleop_estopped() -> bool:
+        if estop_check is None:
+            return False
+        try:
+            return bool(estop_check())
+        except Exception:
+            return False
 
     @bp.route("/calibrate")
     def cal_index():
@@ -689,6 +706,11 @@ def create_calibration_blueprint(cal_manager: CalibrationManager) -> Blueprint:
         body = request.get_json(force=True, silent=True) or {}
         tool = body.get("tool", "")
         params = body.get("params", {})
+        # Safety gate: calibration drives the motors directly, so refuse to
+        # start while the /drive TeleopSession e-stop is latched — a driver who
+        # just hit e-stop must not have a calibration run start moving motors.
+        if _teleop_estopped():
+            return _json_resp({"error": "teleop session e-stop latched"}, 409)
         # Safety gate: calibration drives the motors directly, so refuse to
         # start unless the rover is armed (RC ch3 high). Returns 400 so the
         # UI can surface a clear instruction.
