@@ -491,5 +491,162 @@ class TestTelemetryApi(unittest.TestCase):
         self.assertAlmostEqual(d.get_temperature("right"), 55.0, places=1)
 
 
+class TestPerMotorStaleness(unittest.TestCase):
+    """Wave 2: get_telemetry() must expose per-motor STATUS(9) frame age so a
+    consumer can detect ONE motor going silent even while the other motor's
+    traffic keeps get_telemetry() returning non-None."""
+
+    def _driver(self) -> VescCanDriver:
+        d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg())
+        d._bus = _FakeBus()
+        return d
+
+    def test_status_age_none_before_any_frame(self):
+        d = self._driver()
+        # Right motor has reported; left never has -> get_telemetry() is non-None
+        # (aggregate rpm check) but left_status_age_s must stay None.
+        d._parse_status("right", _status_frame(1, 500, 1.0, 0.1).data, time.monotonic())
+        telem = d.get_telemetry()
+        self.assertIsNotNone(telem)
+        self.assertIsNone(telem.left_status_age_s)
+        self.assertIsNotNone(telem.right_status_age_s)
+
+    def test_status_age_populated_for_both_motors(self):
+        d = self._driver()
+        now = time.monotonic()
+        d._parse_status("left", _status_frame(2, 1000, 1.0, 0.1).data, now)
+        d._parse_status("right", _status_frame(1, 900, 1.0, 0.1).data, now)
+        telem = d.get_telemetry()
+        self.assertIsNotNone(telem.left_status_age_s)
+        self.assertIsNotNone(telem.right_status_age_s)
+        self.assertGreaterEqual(telem.left_status_age_s, 0.0)
+        self.assertGreaterEqual(telem.right_status_age_s, 0.0)
+
+    def test_one_motor_frozen_shows_larger_age_than_fresh_motor(self):
+        """Core bug scenario: right motor keeps transmitting; left froze a
+        while ago. get_telemetry() must NOT return None (old bug), but the
+        per-motor ages must clearly distinguish stale left from fresh right."""
+        d = self._driver()
+        stale_time = time.monotonic() - 2.0  # left's last frame was 2s ago
+        d._parse_status("left", _status_frame(2, 1234, 1.0, 0.1).data, stale_time)
+        d._parse_status("right", _status_frame(1, 900, 1.0, 0.1).data, time.monotonic())
+        telem = d.get_telemetry()
+        self.assertIsNotNone(telem)  # aggregate check still passes (old behavior)
+        self.assertGreaterEqual(telem.left_status_age_s, 1.9)
+        self.assertLess(telem.right_status_age_s, 0.5)
+
+    def test_rx_thread_alive_true_when_running(self):
+        d = self._driver()
+        d.start()
+        try:
+            d._parse_status("left", _status_frame(2, 100, 0.0, 0.0).data, time.monotonic())
+            telem = d.get_telemetry()
+            self.assertTrue(telem.rx_thread_alive)
+            health = d.get_rx_health()
+            self.assertTrue(health["rx_thread_alive"])
+        finally:
+            d.shutdown()
+
+    def test_rx_thread_alive_none_when_never_started(self):
+        d = self._driver()
+        d._parse_status("left", _status_frame(2, 100, 0.0, 0.0).data, time.monotonic())
+        telem = d.get_telemetry()
+        self.assertIsNone(telem.rx_thread_alive)
+
+
+class TestEnsureBusExceptionContainment(unittest.TestCase):
+    """Wave 2: _ensure_bus() failures (SocketCAN OSError/CanError, not just
+    RuntimeError) must never escape _send_rpm -> set_tracks -> the caller.
+    Previously only RuntimeError was caught, so a real bus-open failure would
+    propagate all the way to the unguarded main loop and kill the process."""
+
+    def test_os_error_in_ensure_bus_does_not_propagate_from_send_rpm(self):
+        d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg())
+        with patch.object(d, "_ensure_bus", side_effect=OSError("SocketCAN: no such device")):
+            try:
+                d._send_rpm(d._left_id, 500)
+            except Exception as exc:  # pragma: no cover - failure path
+                self.fail(f"_send_rpm must contain _ensure_bus OSError, but raised: {exc!r}")
+
+    def test_os_error_in_ensure_bus_does_not_propagate_from_set_tracks(self):
+        """The main-loop-facing entry point (set_tracks) must survive too."""
+        d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg())
+        with patch.object(d, "_ensure_bus", side_effect=OSError("SocketCAN: no such device")):
+            try:
+                d.set_tracks(200, 50)
+            except Exception as exc:  # pragma: no cover - failure path
+                self.fail(f"set_tracks must survive a CAN bus-open failure, but raised: {exc!r}")
+
+    def test_can_error_in_ensure_bus_counts_as_send_failure(self):
+        """A contained bus-open failure should still be visible via the existing
+        send-failure counters (consistent with the send-path failure handling)."""
+
+        class _CanError(Exception):
+            pass
+
+        d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg())
+        with patch.object(d, "_ensure_bus", side_effect=_CanError("bus init failed")):
+            for _ in range(d._SEND_FAIL_THRESHOLD):
+                d._send_rpm(d._left_id, 100)
+        with d._telem_lock:
+            self.assertGreaterEqual(d._send_fail_count, d._SEND_FAIL_THRESHOLD)
+            self.assertTrue(d._send_fail_alert)
+
+    def test_runtime_error_in_ensure_bus_still_contained(self):
+        """Backward-compat: the original RuntimeError (python-can missing)
+        path must still be silently contained, same as before."""
+        d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg())
+        with patch.object(d, "_ensure_bus", side_effect=RuntimeError("python-can missing")):
+            try:
+                d._send_rpm(d._left_id, 100)
+            except Exception as exc:  # pragma: no cover - failure path
+                self.fail(f"_send_rpm must contain RuntimeError, but raised: {exc!r}")
+
+
+class TestRxLoopStaleBlockContainment(unittest.TestCase):
+    """Wave 2: the `msg is None` staleness-reopen block inside _rx_loop was the
+    one segment NOT wrapped in try/except — an exception there would kill the
+    daemon RX thread silently. It must now be contained like every sibling
+    block in the loop, and the RX thread must keep running afterward."""
+
+    def test_exception_in_stale_check_block_does_not_kill_rx_thread(self):
+        d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg())
+        d._bus = _FakeBus()
+
+        # Force the `msg is None` branch to execute and make the staleness
+        # check inside it raise, by poisoning _rx_last_reopen_s access via a
+        # broken telem lock replacement is too invasive; instead corrupt
+        # _rx_last_frame_s state so the "then" branch runs, and monkeypatch
+        # time.monotonic to raise on the second call within that block.
+        d._rx_last_frame_s = time.monotonic() - 5.0  # looks stale -> enters warn path
+        d._rx_last_reopen_s = 0.0
+
+        call_count = {"n": 0}
+        real_monotonic = time.monotonic
+
+        def _flaky_monotonic():
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("simulated clock failure inside stale-check block")
+            return real_monotonic()
+
+        d.start()
+        try:
+            with patch("pi_app.hardware.vesc.time.monotonic", side_effect=_flaky_monotonic):
+                # Give the RX thread a couple of iterations to hit the poisoned path.
+                deadline = real_monotonic() + 1.0
+                while call_count["n"] < 2 and real_monotonic() < deadline:
+                    time.sleep(0.01)
+                time.sleep(0.1)
+            # The RX thread must still be alive — the exception must have been
+            # contained, not propagated out of _rx_loop.
+            self.assertTrue(d._rx_thread.is_alive())
+            # And normal operation must continue afterward (fresh frames still parse).
+            _inject(d, _status_frame(2, 777, 0.0, 0.0))
+            self.assertEqual(d.get_rpm("left"), 777)
+        finally:
+            d.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

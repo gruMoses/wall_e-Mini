@@ -493,7 +493,6 @@ class Controller:
                 _rx_health = None
             self._telem_last_poll = mono_now
             if _telem is not None:
-                self._telem_stale_warned = False
                 self._telem_last_valid = mono_now
                 self._actual_left_rpm = _telem.left_rpm
                 self._actual_right_rpm = _telem.right_rpm
@@ -527,6 +526,44 @@ class Controller:
                 self._vesc_rx_last_frame_age_s = getattr(
                     _telem, "can_rx_last_frame_age_s", self._vesc_rx_last_frame_age_s
                 )
+
+                # ── Per-motor staleness fallback ─────────────────────────────
+                # get_telemetry() returns non-None as long as EITHER motor has
+                # ever reported an RPM frame — its per-motor rpm fields are
+                # never reset, so a dead RX thread or one silent VESC would
+                # otherwise freeze stale numbers that are indistinguishable
+                # from fresh ones. left/right_status_age_s (per-motor STATUS(9)
+                # frame age) is the real freshness signal; >0.5s on either
+                # motor means that motor's RPM cannot be trusted, so both are
+                # cleared to force follow_me/slip back to open-loop.
+                _l_age = getattr(_telem, "left_status_age_s", None)
+                _r_age = getattr(_telem, "right_status_age_s", None)
+                _stale_ages = [a for a in (_l_age, _r_age) if a is not None]
+                _rx_alive = getattr(_telem, "rx_thread_alive", None)
+                _motor_stale = any(a > 0.5 for a in _stale_ages)
+                _rx_dead = _rx_alive is False
+                if _motor_stale or _rx_dead:
+                    if not self._telem_stale_warned:
+                        if _rx_dead:
+                            _logger.warning(
+                                "VESC CAN RX thread is dead — falling back to open-loop"
+                            )
+                        else:
+                            _logger.warning(
+                                "VESC telemetry stale for >500 ms "
+                                "(left_age=%s right_age=%s) — falling back to open-loop",
+                                _l_age, _r_age,
+                            )
+                        self._telem_stale_warned = True
+                    self._actual_left_rpm = None
+                    self._actual_right_rpm = None
+                    self._actual_speed_mps = None
+                    self._actual_left_current_a = None
+                    self._actual_right_current_a = None
+                    self._actual_left_temp_c = None
+                    self._actual_right_temp_c = None
+                else:
+                    self._telem_stale_warned = False
             elif (self._telem_last_valid > 0.0
                   and (mono_now - self._telem_last_valid) > 0.5
                   and not self._telem_stale_warned):
