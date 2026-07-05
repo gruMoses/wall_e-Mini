@@ -20,6 +20,8 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 from config import FollowMeConfig
 from pi_app.hardware.oak_depth import Tracklet, TrackletTracker
 from pi_app.control.follow_me import PersonDetection
+from pi_app.web.oak_viewer import sse_detection_dict
+from pi_app.hardware.oak_recorder import mcap_detection_dict
 
 
 def _box(cx, cy, w=0.1, h=0.3):
@@ -153,32 +155,25 @@ def _make_det(x_m=0.0, z_m=2.0, confidence=0.85,
 
 
 def _sse_detections(person_detections):
-    """Mirror the SSE dict-comprehension from oak_viewer.py ~line 1147-1151."""
-    return [
-        {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
-         "conf": round(d.confidence, 2), "track_id": d.track_id}
-        for d in person_detections
-    ]
+    """Apply the real SSE serializer (pi_app/web/oak_viewer.py) to a list."""
+    return [sse_detection_dict(d) for d in person_detections]
 
 
 def _mcap_detections(person_detections):
-    """Mirror the MCAP dict-comprehension from oak_recorder.py ~line 985-990."""
-    return [
-        {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
-         "conf": round(d.confidence, 2), "track_id": d.track_id,
-         "bbox": [round(b, 3) for b in d.bbox]}
-        for d in person_detections
-    ]
+    """Apply the real MCAP serializer (pi_app/hardware/oak_recorder.py) to a list."""
+    return [mcap_detection_dict(d) for d in person_detections]
 
 
 class TestDetectionTrackIdSerialization(unittest.TestCase):
     """
     Backlog G: per-detection track_id in SSE /api/telemetry detections array.
 
-    Both the SSE builder (oak_viewer.py) and the MCAP recorder (oak_recorder.py)
-    emit {"track_id": d.track_id} for each PersonDetection.  These tests verify
-    the field is present with the correct value for tracked detections and is
-    JSON-null-compatible (Python None) for unconfirmed / untracked detections.
+    Both the SSE builder (oak_viewer.sse_detection_dict) and the MCAP recorder
+    (oak_recorder.mcap_detection_dict) emit {"track_id": d.track_id} for each
+    PersonDetection. These tests call the real production serializers
+    (not mirrors) to verify the field is present with the correct value for
+    tracked detections and is JSON-null-compatible (Python None) for
+    unconfirmed / untracked detections.
     """
 
     # ── SSE serialization ─────────────────────────────────────────────────────

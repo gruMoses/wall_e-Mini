@@ -43,6 +43,19 @@ from pi_app.control.follow_me import PersonDetection
 from pi_app.hardware.oak_depth import DepthStats
 
 
+def mcap_detection_dict(d: PersonDetection) -> dict:
+    """Serialize one PersonDetection for the MCAP telemetry `detections` array.
+
+    Pure function extracted so tests can exercise the exact production
+    serialization instead of a hand-maintained mirror.
+    """
+    return {
+        "x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
+        "conf": round(d.confidence, 2), "track_id": d.track_id,
+        "bbox": [round(b, 3) for b in d.bbox],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Recording state machine
 # ---------------------------------------------------------------------------
@@ -983,10 +996,7 @@ class OakRecorder:
             obj["depth_valid_pct"] = t.depth_stats.valid_pixel_pct
         if t.person_detections:
             obj["detections"] = [
-                {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
-                 "conf": round(d.confidence, 2), "track_id": d.track_id,
-                 "bbox": [round(b, 3) for b in d.bbox]}
-                for d in t.person_detections
+                mcap_detection_dict(d) for d in t.person_detections
             ]
         if t.heading_deg is not None:
             obj["heading_deg"] = round(t.heading_deg, 1)

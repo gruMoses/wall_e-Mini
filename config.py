@@ -541,8 +541,8 @@ class OakDetectionConfig:
     model_type: str = "yolov8n"
     # Local .blob path — empty string pulls from Luxonis model hub (uses model_type as name)
     model_path: str = "models/yolov8n_640x352.blob"
-    # Network-level confidence threshold. Lower than Follow Me threshold so safety tiers
-    # see all detections; Follow Me applies its own post-filter (FollowMeConfig.detection_confidence).
+    # Network-level confidence threshold. Currently equal to the Follow Me threshold
+    # (FollowMeConfig.detection_confidence); Follow Me applies its own post-filter on top.
     confidence_threshold: float = 0.45
     nms_threshold: float = 0.45
     # Input resolution — 640x352 (≈16:9) uses the full OAK-D Lite horizontal FOV

@@ -1039,6 +1039,18 @@ def _depth_frame_to_jpeg(depth_frame) -> bytes | None:
         return None
 
 
+def sse_detection_dict(d) -> dict:
+    """Serialize one PersonDetection for the /api/telemetry SSE `detections` array.
+
+    Pure function extracted so tests can exercise the exact production
+    serialization instead of a hand-maintained mirror.
+    """
+    return {
+        "x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
+        "conf": round(d.confidence, 2), "track_id": d.track_id,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Flask app factory
 # ---------------------------------------------------------------------------
@@ -1145,9 +1157,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "follow_target_x_m": round(t.follow_target_x_m, 2) if t.follow_target_x_m is not None else None,
                     "follow_target_z_m": round(t.follow_target_z_m, 2) if t.follow_target_z_m is not None else None,
                     "detections": [
-                        {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
-                         "conf": round(d.confidence, 2), "track_id": d.track_id}
-                        for d in t.person_detections
+                        sse_detection_dict(d) for d in t.person_detections
                     ],
                     "gps_lat": round(t.gps_lat, 7) if t.gps_lat is not None else None,
                     "gps_lon": round(t.gps_lon, 7) if t.gps_lon is not None else None,
