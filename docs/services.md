@@ -22,7 +22,7 @@ At startup it:
 2. Ensures `wall-e-spp.service` is running.
 3. Terminates stale `python3 -m app.main` / venv Python processes.
 4. Removes stale lock file `/tmp/wall_e_mini_main.lock`.
-5. Launches `python3 -u -m app.main --pid-debug` from `pi_app/`.
+5. Launches `python3 -u -m app.main` from `pi_app/`.
 
 ## Bluetooth Data Path
 

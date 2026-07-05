@@ -7,10 +7,12 @@ Scope: Bug fixes and features tracked here; see `docs/performance_optimization_t
 
 ## Known Issues (not yet investigated)
 
-- [ ] **VESC telemetry RPM stuck at 0**
+- [x] **VESC telemetry RPM stuck at 0** *(resolved bench-verified commit 8e0d6ee)*
   - CAN STATUS frame parsing is present and voltage-based shutdown works (uses STATUS_5).
-  - But the RPM/speed readback always returns 0 — wheel-speed feedback is not usable.
-  - Root cause unknown; not yet investigated.
+  - Confirmed live: `/api/telemetry` `vesc_rx_frame_count` climbing, 0 parse errors.
+  - Follow-ups:
+    - [ ] Confirm nonzero RPM readback during a real drive (bench verification only so far).
+    - [ ] Decide whether to re-enable the velocity PID now that wheel-speed feedback is usable.
 
 ---
 
