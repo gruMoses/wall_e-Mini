@@ -2175,13 +2175,28 @@ initMap();
 # Flask Blueprint
 # ---------------------------------------------------------------------------
 
-def create_nav_blueprint(controller=None) -> Blueprint:
-    """Create and return the waypoint-nav Flask blueprint."""
+def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
+    """Create and return the waypoint-nav Flask blueprint.
+
+    ``estop_check``: optional zero-arg callable returning True while the
+    /drive TeleopSession's e-stop is latched. When latched, autonomy
+    activation (``/api/nav/start``, ``/api/nav/go``) refuses with 409.
+    ``None`` (the default) means "no session gate" — unchanged prior
+    behavior.
+    """
     bp = Blueprint("waypoint_nav_ui", __name__)
     cal_path = _PROJECT_ROOT / config.property_map.calibration_path
 
     # Ensure routes directory exists
     _ROUTES_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _teleop_estopped() -> bool:
+        if estop_check is None:
+            return False
+        try:
+            return bool(estop_check())
+        except Exception:
+            return False
 
     # ── Page ──
 
@@ -2256,6 +2271,8 @@ def create_nav_blueprint(controller=None) -> Blueprint:
     def start_nav():
         if controller is None:
             return _json_resp({"ok": False, "error": "no controller"}, 503)
+        if _teleop_estopped():
+            return _json_resp({"ok": False, "error": "teleop session e-stop latched"}, 409)
 
         data = request.get_json(force=True)
         wp_list = data.get("waypoints", [])
@@ -2405,6 +2422,8 @@ def create_nav_blueprint(controller=None) -> Blueprint:
         """
         if controller is None:
             return _json_resp({"ok": False, "error": "no controller"}, 503)
+        if _teleop_estopped():
+            return _json_resp({"ok": False, "error": "teleop session e-stop latched"}, 409)
 
         data = request.get_json(force=True) or {}
         cruise_speed = int(data.get("cruise_speed", 40))

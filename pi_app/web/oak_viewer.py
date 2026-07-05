@@ -87,16 +87,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .recordings h2 { font-size: 14px; margin-bottom: 12px; color: #ccc; }
   .teleop { background: #1a1d27; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
   .teleop h2 { font-size: 14px; margin-bottom: 10px; color: #ccc; }
-  .teleop-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-  .teleop-top label { font-size: 12px; color: #aaa; }
-  .teleop-top input[type=range] { width: 170px; }
-  .teleop-status { font-size: 12px; color: #888; }
-  .teleop-grid { display: grid; grid-template-columns: repeat(3, 64px); gap: 8px; justify-content: start; }
-  .teleop-btn { height: 56px; border: 1px solid #2a2d37; border-radius: 8px; background: #22252f; color: #e0e0e0;
-                font-weight: 700; cursor: pointer; user-select: none; touch-action: manipulation; }
-  .teleop-btn:active, .teleop-btn.active { background: #4a9eff; color: #111; border-color: #4a9eff; }
-  .teleop-btn.stop { background: #e63946; border-color: #e63946; color: #fff; }
   .teleop-hint { margin-top: 8px; font-size: 11px; color: #666; }
+  .teleop-hint a { color: #4a9eff; }
   .rec-list { list-style: none; }
   .rec-list li { padding: 8px 0; border-bottom: 1px solid #22252f; display: flex;
                  align-items: center; justify-content: space-between; }
@@ -192,36 +184,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div class="teleop">
     <h2>Web Remote Drive (Manual Mode)</h2>
-    <div class="teleop-top">
-      <label for="teleop-speed">Speed</label>
-      <input id="teleop-speed" type="range" min="0.20" max="1.00" step="0.05" value="0.60">
-      <span class="teleop-status" id="teleop-status">Idle</span>
+    <div class="teleop-hint">
+      Manual drive moved to the fail-safe session at <a href="/drive">/drive</a>
+      (deadman watchdog, single-driver lock, e-stop, speed caps). The old
+      unauthenticated W/A/S/D controls here have been retired.
     </div>
-    <div class="teleop-grid">
-      <div></div>
-      <button class="teleop-btn" id="btn-fwd"
-              onpointerdown="teleopPress(event, 'forward')"
-              onpointerup="teleopRelease()"
-              onpointerleave="teleopRelease()">W</button>
-      <div></div>
-      <button class="teleop-btn" id="btn-left"
-              onpointerdown="teleopPress(event, 'left')"
-              onpointerup="teleopRelease()"
-              onpointerleave="teleopRelease()">A</button>
-      <button class="teleop-btn stop"
-              onclick="teleopStop()">STOP</button>
-      <button class="teleop-btn" id="btn-right"
-              onpointerdown="teleopPress(event, 'right')"
-              onpointerup="teleopRelease()"
-              onpointerleave="teleopRelease()">D</button>
-      <div></div>
-      <button class="teleop-btn" id="btn-back"
-              onpointerdown="teleopPress(event, 'reverse')"
-              onpointerup="teleopRelease()"
-              onpointerleave="teleopRelease()">S</button>
-      <div></div>
-    </div>
-    <div class="teleop-hint">Hold buttons or use keyboard W/A/S/D. Works through existing BT override safety gate.</div>
   </div>
   <div class="telemetry">
     <div class="telem-card">
@@ -392,91 +359,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 const sse = new EventSource('/api/telemetry');
 const radarCanvas = document.getElementById('radar');
 const radarCtx = radarCanvas.getContext('2d');
-let teleopInterval = null;
-let teleopDirection = null;
-let teleopArmed = false;
-let teleopMode = 'MANUAL';
 let rtkModeName = null;
 let rtkModeSinceMs = Date.now();
-
-function teleopSpeed() {
-  const el = document.getElementById('teleop-speed');
-  const v = parseFloat(el ? el.value : '0.6');
-  return Number.isFinite(v) ? Math.max(0.2, Math.min(1.0, v)) : 0.6;
-}
-
-function teleopMix(direction) {
-  const s = teleopSpeed();
-  if (direction === 'forward') return [s, s];
-  if (direction === 'reverse') return [-s, -s];
-  if (direction === 'left') return [-s, s];
-  if (direction === 'right') return [s, -s];
-  return [0.0, 0.0];
-}
-
-function setTeleopStatus(text, isWarn) {
-  const el = document.getElementById('teleop-status');
-  if (!el) return;
-  el.textContent = text;
-  el.style.color = isWarn ? '#e6a239' : '#888';
-}
-
-function setTeleopActiveButton(direction) {
-  ['btn-fwd', 'btn-back', 'btn-left', 'btn-right'].forEach(id => {
-    const btn = document.getElementById(id);
-    if (btn) btn.classList.remove('active');
-  });
-  const map = {forward: 'btn-fwd', reverse: 'btn-back', left: 'btn-left', right: 'btn-right'};
-  const activeId = map[direction];
-  if (activeId) {
-    const btn = document.getElementById(activeId);
-    if (btn) btn.classList.add('active');
-  }
-}
-
-async function sendTeleop(direction) {
-  const [left_f, right_f] = teleopMix(direction);
-  try {
-    await fetch('/api/teleop', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({left_f, right_f})
-    });
-  } catch (e) {}
-}
-
-function teleopPress(ev, direction) {
-  if (ev) ev.preventDefault();
-  teleopDirection = direction;
-  setTeleopActiveButton(direction);
-  if (!teleopArmed) {
-    setTeleopStatus('Arm robot to drive', true);
-    return;
-  }
-  if (teleopMode !== 'MANUAL') {
-    setTeleopStatus('Switch to MANUAL mode first', true);
-    return;
-  }
-  sendTeleop(direction);
-  if (teleopInterval) clearInterval(teleopInterval);
-  teleopInterval = setInterval(() => { if (teleopDirection) sendTeleop(teleopDirection); }, 120);
-  setTeleopStatus('Driving ' + direction.toUpperCase(), false);
-}
-
-function teleopRelease() {
-  teleopDirection = null;
-  setTeleopActiveButton(null);
-  if (teleopInterval) {
-    clearInterval(teleopInterval);
-    teleopInterval = null;
-  }
-  teleopStop();
-}
-
-function teleopStop() {
-  fetch('/api/teleop/stop', {method: 'POST'}).catch(() => {});
-  setTeleopStatus('Idle', false);
-}
 
 function formatDuration(sec) {
   if (!(sec >= 0)) return '—';
@@ -578,8 +462,6 @@ function drawRadar(detections, targetX, targetZ, tracking, mode) {
 sse.onmessage = function(e) {
   const d = JSON.parse(e.data);
   document.getElementById('t-mode').textContent = d.mode || '—';
-  teleopArmed = !!d.is_armed;
-  teleopMode = d.mode || 'MANUAL';
   const dist = d.obstacle_distance_m;
   document.getElementById('t-dist').textContent = dist != null ? dist.toFixed(2) + 'm' : '—';
   const scl = d.throttle_scale;
@@ -768,18 +650,6 @@ sse.onmessage = function(e) {
     hint.textContent = 'System must be armed (ch3 high)';
   }
 };
-document.addEventListener('keydown', function(e) {
-  if (e.repeat) return;
-  if (e.key === 'w' || e.key === 'W') teleopPress(e, 'forward');
-  else if (e.key === 's' || e.key === 'S') teleopPress(e, 'reverse');
-  else if (e.key === 'a' || e.key === 'A') teleopPress(e, 'left');
-  else if (e.key === 'd' || e.key === 'D') teleopPress(e, 'right');
-  else if (e.key === ' ') { e.preventDefault(); teleopStop(); }
-});
-document.addEventListener('keyup', function(e) {
-  const k = (e.key || '').toLowerCase();
-  if (k === 'w' || k === 'a' || k === 's' || k === 'd') teleopRelease();
-});
 function toggleFollowMe() {
   const btn = document.getElementById('follow-btn');
   btn.disabled = true;
@@ -1043,8 +913,17 @@ def _depth_frame_to_jpeg(depth_frame) -> bytes | None:
 # Flask app factory
 # ---------------------------------------------------------------------------
 
-def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader=None) -> Flask:  # recorder may be None
-    """Create the Flask app wired to the given OakRecorder and Controller instances."""
+def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader=None,
+               estop_check=None) -> Flask:  # recorder may be None
+    """Create the Flask app wired to the given OakRecorder and Controller instances.
+
+    ``estop_check``: optional zero-arg callable returning True while the
+    /drive TeleopSession's e-stop is latched. When it returns True, autonomy
+    activation (``/api/follow_me``) refuses with 409 rather than silently
+    fighting a driver who just hit the physical e-stop. ``None`` (the
+    default, e.g. when /drive fails to load) means "no session gate" —
+    behavior is unchanged from before this check existed.
+    """
     if Flask is None:
         raise ImportError("Flask is required for the web viewer: pip install flask")
 
@@ -1055,7 +934,14 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
     rec_cache: list[dict] = []
     rec_cache_ts = 0.0
     rec_cache_ttl_s = 5.0
-    bt_override_path = Path("/tmp/wall_e_bt_latest.json")
+
+    def _teleop_estopped() -> bool:
+        if estop_check is None:
+            return False
+        try:
+            return bool(estop_check())
+        except Exception:
+            return False
 
     # -- Dashboard -----------------------------------------------------------
 
@@ -1231,6 +1117,10 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         if controller is None:
             return Response(json.dumps({"error": "no controller"}), status=503,
                             content_type="application/json")
+        if _teleop_estopped():
+            return Response(
+                json.dumps({"error": "teleop session e-stop latched", "mode": "MANUAL"}),
+                status=409, content_type="application/json")
         t = recorder.get_latest_telemetry() if recorder is not None else None
         mode = t.mode if t else "MANUAL"
         if mode == "FOLLOW_ME":
@@ -1301,50 +1191,29 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         return Response(json.dumps({"ok": True, "applied": applied}),
                         content_type="application/json")
 
+    # -- Legacy teleop (RETIRED) ----------------------------------------------
+    #
+    # These endpoints used to write /tmp/wall_e_bt_latest.json directly, with
+    # NO auth/arm/e-stop/single-driver-lock checks — they routed around every
+    # safety guard the /drive TeleopSession enforces (250ms watchdog deadman,
+    # single-driver lock, latched e-stop, speed caps) while sharing the exact
+    # same override file the /drive watchdog thread writes. Last-writer-wins
+    # meant this endpoint could fight /drive, or drive unsupervised while a
+    # /drive e-stop was latched. Retired in favor of the session-gated REST
+    # mirror at /api/teleop/session/* (see pi_app/web/teleop.py) or the /drive
+    # page directly. Kept as a 410 Gone stub (not a plain 404) so any stale
+    # client gets an unambiguous "this is gone for good" signal.
     @app.route("/api/teleop", methods=["POST"])
     def api_teleop():
-        payload = request.get_json(silent=True) or {}
-        try:
-            left_f = float(payload.get("left_f", 0.0))
-            right_f = float(payload.get("right_f", 0.0))
-        except Exception:
-            return Response(json.dumps({"error": "invalid payload"}), status=400,
-                            content_type="application/json")
-        left_f = max(-1.0, min(1.0, left_f))
-        right_f = max(-1.0, min(1.0, right_f))
-        try:
-            from pi_app.io.bt_proto import floats_to_bytes
-            left_byte, right_byte = floats_to_bytes(left_f, right_f)
-            bt_override_path.write_text(
-                json.dumps({
-                    "left_byte": left_byte,
-                    "right_byte": right_byte,
-                    "last_update_epoch_s": time.time(),
-                }),
-                encoding="utf-8",
-            )
-            return Response(json.dumps({"ok": True, "left_byte": left_byte, "right_byte": right_byte}),
-                            content_type="application/json")
-        except Exception as exc:
-            return Response(json.dumps({"error": str(exc)}), status=500,
-                            content_type="application/json")
+        return Response(
+            json.dumps({"error": "retired — use /drive or /api/teleop/session/*"}),
+            status=410, content_type="application/json")
 
     @app.route("/api/teleop/stop", methods=["POST"])
     def api_teleop_stop():
-        try:
-            from pi_app.control.mapping import CENTER_OUTPUT_VALUE
-            bt_override_path.write_text(
-                json.dumps({
-                    "left_byte": CENTER_OUTPUT_VALUE,
-                    "right_byte": CENTER_OUTPUT_VALUE,
-                    "last_update_epoch_s": time.time(),
-                }),
-                encoding="utf-8",
-            )
-            return Response(json.dumps({"ok": True}), content_type="application/json")
-        except Exception as exc:
-            return Response(json.dumps({"error": str(exc)}), status=500,
-                            content_type="application/json")
+        return Response(
+            json.dumps({"error": "retired — use /drive or /api/teleop/session/*"}),
+            status=410, content_type="application/json")
 
     # -- Recordings API ------------------------------------------------------
 
@@ -1408,6 +1277,17 @@ class OakWebViewer:
         )
         self._thread.start()
 
+    def _session_estopped(self) -> bool:
+        """True while the /drive TeleopSession's e-stop is latched.
+
+        Read-only gate used by autonomy-activation endpoints (follow-me,
+        waypoint nav) so they refuse to arm while a driver has hit e-stop.
+        Safe to call before the session exists (startup ordering below
+        creates it last) — returns False ("not gated") until then.
+        """
+        session = self._teleop_session
+        return bool(session is not None and session.estop_latched)
+
     def _run(self) -> None:
         try:
             app = create_app(
@@ -1415,6 +1295,7 @@ class OakWebViewer:
                 self._config,
                 controller=self._controller,
                 oak_reader=self._oak_reader,
+                estop_check=self._session_estopped,
             )
 
             try:
@@ -1448,6 +1329,7 @@ class OakWebViewer:
                 from pi_app.web.waypoint_nav_ui import create_nav_blueprint
                 nav_bp = create_nav_blueprint(
                     controller=self._controller,
+                    estop_check=self._session_estopped,
                 )
                 app.register_blueprint(nav_bp)
                 logger.info("Waypoint nav UI registered at /navigate")

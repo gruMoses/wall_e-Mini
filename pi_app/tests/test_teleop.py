@@ -827,3 +827,180 @@ def test_register_teleop_backward_compat_without_frame_client_hook(tmp_path):
     assert c.get("/api/teleop/session/status?token=T0K").status_code == 200
     # Without hook, None frame -> immediate 503.
     assert c.get("/api/teleop/camera/frame?token=T0K").status_code == 503
+
+
+# ==========================================================================
+# Wave 1 web-surface hardening:
+#   - legacy /api/teleop + /api/teleop/stop are retired (410 Gone)
+#   - /api/follow_me and /api/nav/start /api/nav/go refuse (409) while the
+#     /drive TeleopSession e-stop is latched
+#   - the /drive session itself is unaffected (still arms/drives normally)
+# ==========================================================================
+
+def test_legacy_api_teleop_retired_410(tmp_path):
+    """POST /api/teleop and /api/teleop/stop are gone — 410, not silently 200."""
+    from config import OakWebViewerConfig
+    from pi_app.web.oak_viewer import create_app
+
+    app = create_app(None, OakWebViewerConfig(), controller=None)
+    c = app.test_client()
+    r1 = c.post("/api/teleop", json={"left_f": 1.0, "right_f": 1.0})
+    assert r1.status_code == 410
+    assert "error" in r1.get_json()
+    # No trace of the old 200 payload shape (which echoed left_byte/right_byte
+    # after writing the shared override file) — this is an error, not a motor ack.
+    assert b"left_byte" not in r1.data
+
+    r2 = c.post("/api/teleop/stop")
+    assert r2.status_code == 410
+    assert "error" in r2.get_json()
+
+
+class _SpyController:
+    """Minimal controller stand-in that records whether autonomy was armed.
+
+    ``activate_follow_me`` would only be reached if the e-stop gate in
+    ``api_follow_me_toggle`` let the request through — so a call count of 0
+    after a 409 proves the gate short-circuited before touching the
+    controller at all.
+    """
+
+    def __init__(self):
+        self.activate_calls = 0
+        self._mode = "MANUAL"
+
+    def activate_follow_me(self):
+        self.activate_calls += 1
+        self._mode = "FOLLOW_ME"
+        return True
+
+    def deactivate_follow_me(self):
+        self._mode = "MANUAL"
+
+
+def test_follow_me_refuses_409_while_session_estop_latched():
+    from config import OakWebViewerConfig
+    from pi_app.web.oak_viewer import create_app
+
+    ctrl = _SpyController()
+    app = create_app(None, OakWebViewerConfig(), controller=ctrl,
+                     estop_check=lambda: True)
+    c = app.test_client()
+    r = c.post("/api/follow_me")
+    assert r.status_code == 409
+    assert "e-stop" in r.get_json()["error"].lower()
+    assert ctrl.activate_calls == 0
+
+
+def test_follow_me_allowed_when_session_not_estopped():
+    from config import OakWebViewerConfig
+    from pi_app.web.oak_viewer import create_app
+
+    ctrl = _SpyController()
+    app = create_app(None, OakWebViewerConfig(), controller=ctrl,
+                     estop_check=lambda: False)
+    c = app.test_client()
+    r = c.post("/api/follow_me")
+    assert r.status_code == 200
+    assert ctrl.activate_calls == 1
+
+
+def test_follow_me_unaffected_when_estop_check_omitted():
+    """estop_check defaults to None — behavior identical to before the gate existed."""
+    from config import OakWebViewerConfig
+    from pi_app.web.oak_viewer import create_app
+
+    ctrl = _SpyController()
+    app = create_app(None, OakWebViewerConfig(), controller=ctrl)
+    c = app.test_client()
+    r = c.post("/api/follow_me")
+    assert r.status_code == 200
+    assert ctrl.activate_calls == 1
+
+
+def test_nav_start_refuses_409_while_session_estop_latched():
+    from pi_app.web.waypoint_nav_ui import create_nav_blueprint
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.register_blueprint(
+        create_nav_blueprint(controller=object(), estop_check=lambda: True)
+    )
+    c = app.test_client()
+    r = c.post("/api/nav/start", json={"waypoints": [{"lat": 1.0, "lon": 2.0}]})
+    assert r.status_code == 409
+    assert "e-stop" in r.get_json()["error"].lower()
+
+
+def test_nav_go_refuses_409_while_session_estop_latched():
+    from pi_app.web.waypoint_nav_ui import create_nav_blueprint
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.register_blueprint(
+        create_nav_blueprint(controller=object(), estop_check=lambda: True)
+    )
+    c = app.test_client()
+    r = c.post("/api/nav/go", json={"lat": 1.0, "lon": 2.0})
+    assert r.status_code == 409
+    assert "e-stop" in r.get_json()["error"].lower()
+
+
+def test_nav_start_and_go_unaffected_when_estop_check_omitted():
+    """No estop_check passed (None default) — the 503 'no controller' path
+    still fires for a bare object() controller with no _waypoint_nav, proving
+    the gate itself did not swallow the request (no 409 short-circuit)."""
+    from pi_app.web.waypoint_nav_ui import create_nav_blueprint
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.register_blueprint(create_nav_blueprint(controller=object()))
+    c = app.test_client()
+    r = c.post("/api/nav/start", json={"waypoints": [{"lat": 1.0, "lon": 2.0}]})
+    assert r.status_code != 409
+    r2 = c.post("/api/nav/go", json={"lat": 1.0, "lon": 2.0})
+    assert r2.status_code != 409
+
+
+def test_nav_start_not_gated_when_estop_check_returns_false():
+    from pi_app.web.waypoint_nav_ui import create_nav_blueprint
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.register_blueprint(
+        create_nav_blueprint(controller=object(), estop_check=lambda: False)
+    )
+    c = app.test_client()
+    r = c.post("/api/nav/start", json={"waypoints": [{"lat": 1.0, "lon": 2.0}]})
+    # Not gated by e-stop; falls through to whatever object() lacking
+    # _waypoint_nav produces (a 500 from the AttributeError, not a 409).
+    assert r.status_code != 409
+
+
+def test_drive_session_still_arms_and_drives_with_estop_gate_wired(tmp_path):
+    """The hardening pass must not touch /drive's own semantics: arming and
+    driving through the REST mirror still works exactly as before, and the
+    TeleopSession's own estop_latched flag is what the OakWebViewer-level
+    gate reads (verified directly here without needing the full OakWebViewer
+    thread)."""
+    app, s = _make_flask_app("T0K", tmp_path)
+    c = app.test_client()
+
+    # Arm + drive still works normally.
+    r = c.post("/api/teleop/session/arm?token=T0K", json={"hold_ms": 600})
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is True
+    assert s.estop_latched is False
+
+    r = c.post("/api/teleop/session/drive?token=T0K",
+              json={"left": 0.5, "right": 0.5, "seq": 1, "t": time.time() * 1000})
+    assert r.status_code == 200
+
+    # e-stop latches on the session object exactly as the gate expects to read it.
+    c.post("/api/teleop/session/estop?token=T0K")
+    assert s.estop_latched is True
+
+    # And clearing it un-latches, restoring normal semantics.
+    ok, _ = s.clear_estop()
+    assert ok is True
+    assert s.estop_latched is False
