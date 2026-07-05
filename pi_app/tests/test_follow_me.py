@@ -324,6 +324,236 @@ class TestSteerSlewCap(unittest.TestCase):
         self.assertLessEqual(emitted, slew_limit + 1e-9)
 
 
+class TestTrackingModeByteIdentical(unittest.TestCase):
+    """Wave 2 (fm-lost-path) touched the emission gate and did a getattr->direct-
+    attribute sweep across FollowMeController. NONE of that may change a single
+    emitted byte in TRACKING mode (fresh, continuously-detected target: lateral
+    PID, edge-boost, deadband, geometric detection filter, tracking-mode slew
+    all stay exactly as validated pre-Wave-2).
+
+    This test drives a representative tracked-target sequence (person drifting
+    from centered->right-edge->back->left-edge->center, at varying distance, on
+    EVERY tick a FRESH detection so the path never touches persist/lost/search)
+    and asserts the emitted (left, right) byte sequence exactly matches the
+    sequence captured by running the identical scenario against the
+    pre-Wave-2 code at commit 912bb34 (see wave2/fm-lost-path branch base).
+    """
+
+    EXPECTED_BYTES = [
+        (216, 216),
+        (213, 210),
+        (207, 199),
+        (209, 196),
+        (184, 170),
+        (156, 147),
+        (128, 124),
+        (126, 126),
+        (126, 126),
+        (126, 126),
+    ]
+
+    def test_tracking_mode_output_byte_identical_to_pre_wave2(self):
+        cfg = FollowMeConfig(
+            trail_follow_enabled=False,  # isolate the DIRECT PID tracking path
+            follow_distance_m=1.5,
+            max_follow_speed_byte=90,
+        )
+        fm = FollowMeController(cfg)
+
+        # (x_m, z_m, bbox) per tick -- every tick is a fresh, in-range, high-
+        # confidence detection so the controller stays in pure tracking mode.
+        seq = [
+            (0.0, 3.0, (0.40, 0.3, 0.60, 0.8)),   # centered, far
+            (0.3, 2.8, (0.55, 0.3, 0.72, 0.8)),   # drifting right
+            (0.6, 2.5, (0.65, 0.3, 0.85, 0.8)),   # further right, closer
+            (0.9, 2.0, (0.75, 0.3, 0.95, 0.8)),   # near right edge
+            (0.9, 1.8, (0.75, 0.3, 0.95, 0.8)),   # hold near edge
+            (0.5, 1.6, (0.60, 0.3, 0.80, 0.8)),   # coming back
+            (0.0, 1.5, (0.40, 0.3, 0.60, 0.8)),   # centered, at follow distance
+            (-0.4, 1.5, (0.25, 0.3, 0.45, 0.8)),  # drift left
+            (-0.8, 1.7, (0.10, 0.3, 0.30, 0.8)),  # left edge
+            (0.0, 1.5, (0.40, 0.3, 0.60, 0.8)),   # back to center
+        ]
+
+        results = []
+        t = 100.0
+        with patch("pi_app.control.follow_me.time") as mt:
+            for x_m, z_m, bbox in seq:
+                t += 0.1  # 10 Hz vision ticks, above the 15 Hz output gate
+                mt.monotonic.return_value = t
+                det = PersonDetection(
+                    x_m=x_m, z_m=z_m, confidence=0.9, bbox=bbox, track_id=1,
+                )
+                left, right = fm.compute([det])
+                results.append((left, right))
+
+        self.assertEqual(
+            results, self.EXPECTED_BYTES,
+            "Tracking-mode emitted bytes changed -- this must stay byte-"
+            "identical across the Wave 2 lost/search + config-getattr fix.",
+        )
+
+
+class TestLostSearchSlewContinuity(unittest.TestCase):
+    """Wave 2 (fm-lost-path): the per-tick steer slew cap (steer_slew_per_tick)
+    now applies to EVERY emission-gate branch -- tracking, persist, lost, AND
+    search -- and _last_emitted_steer carries continuously across mode
+    transitions instead of being force-reset to 0 whenever target_present is
+    False. Before this fix, SEARCH could snap steering from 0 to its full
+    magnitude in a single 15 Hz output tick, and reacquisition after a lost/
+    search spell always slewed from a false 0 instead of the real last-
+    commanded steer.
+    """
+
+    def _make(self, **overrides) -> FollowMeController:
+        cfg = FollowMeConfig(**overrides)
+        return FollowMeController(cfg)
+
+    def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
+                bbox=(0.4, 0.3, 0.6, 0.8), track_id=None) -> PersonDetection:
+        return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence,
+                               bbox=bbox, track_id=track_id)
+
+    def test_search_steer_is_slew_capped_not_a_step(self):
+        """Entering SEARCH must ramp steer in, not snap it to search_steer_cap_byte
+        in one output tick -- the same per-tick cap tracking mode obeys.
+
+        Checked on the actual emitted MOTOR BYTES (the physical command), not
+        just internal bookkeeping -- the pre-fix bug force-reset the
+        bookkeeping variable (_last_emitted_steer) to 0 on every lost/search
+        tick while still returning the UNCAPPED full-magnitude search byte
+        differential to the caller, so asserting on the bookkeeping variable
+        alone would not catch the regression.
+        """
+        slew_per_tick = 0.05  # small cap so the ramp is unmistakable
+        max_steer = 25.0
+        search_cap = 20.0
+        fm = self._make(
+            trail_follow_enabled=False,   # skip trail pursuit -> straight to search
+            target_persistence_s=2.0,
+            steer_slew_per_tick=slew_per_tick,
+            max_steer_offset_byte=max_steer,
+            search_steer_cap_byte=search_cap,
+            follow_output_rate_hz=10000.0,  # emit on every compute() call
+        )
+        slew_limit = slew_per_tick * max_steer  # 1.25 bytes/tick
+
+        # Person off to the right so search direction is set, then person lost.
+        left0, right0 = fm.compute([self._person(x_m=1.0, z_m=3.0)])
+        valid = fm._last_valid_time
+
+        with patch("pi_app.control.follow_me.time") as mt:
+            # First lost tick (still within persistence window -> persist path,
+            # not search yet). Advance further to enter SEARCH.
+            mt.monotonic.return_value = valid + 2.5
+            left1, right1 = fm.compute([])
+            self.assertEqual(fm._pursuit_mode, "search")
+
+        # The full search differential (uncapped) would be ~search_cap bytes
+        # each side -- i.e. |left1 - right1| would jump to roughly 2*search_cap
+        # if the slew cap were bypassed. Confirm the ACTUAL byte differential
+        # produced this tick is instead bounded by one slew step.
+        emitted_diff = abs((left1 - right1) - (left0 - right0))
+        slew_byte_diff_limit = 2 * slew_limit + 1.0  # x2 for L/R split, +1 rounding
+        self.assertLessEqual(
+            emitted_diff, slew_byte_diff_limit,
+            f"First SEARCH-tick byte differential changed by {emitted_diff} "
+            f"(limit ~{slew_byte_diff_limit}) -- SEARCH is bypassing the slew "
+            "gate and stepping straight to the full search magnitude.",
+        )
+        # And the full uncapped search magnitude must NOT have been reached in
+        # one tick (sanity that this scenario would actually exercise a step
+        # if the cap were absent).
+        full_search_diff = 2 * search_cap
+        self.assertLess(emitted_diff, full_search_diff - 1.0)
+
+    def test_reacquisition_slews_from_true_last_emitted_not_zero(self):
+        """After a lost/search spell where the robot was actually commanding a
+        non-trivial steer, reacquiring the target must slew FROM that real
+        last-emitted steer -- not from a false 0 -- so the first
+        re-tracking tick's delta is bounded by the slew cap relative to the
+        ACTUAL last command, matching tracking-mode continuity."""
+        slew_per_tick = 0.5  # generous cap so search saturates to its full value
+        max_steer = 25.0
+        fm = self._make(
+            trail_follow_enabled=False,
+            target_persistence_s=2.0,
+            steer_slew_per_tick=slew_per_tick,
+            max_steer_offset_byte=max_steer,
+            direct_mode_max_steer_byte=max_steer,
+            search_steer_cap_byte=20.0,
+            pid_lateral_kp=10.0,   # saturate direct PID so post-reacq steer is large
+            pid_lateral_kd=0.0,
+            pid_lateral_ki=0.0,
+            reacq_slew_window_s=0.001,  # effectively disable the separate reacq ramp
+            follow_output_rate_hz=10000.0,
+        )
+
+        # Prime a rightward search lock, then let elapsed time enter SEARCH and
+        # saturate the slew-capped steer toward search_steer_cap_byte.
+        fm.compute([self._person(x_m=1.0, z_m=3.0)])
+        valid = fm._last_valid_time
+
+        with patch("pi_app.control.follow_me.time") as mt:
+            mt.monotonic.return_value = valid + 2.5
+            fm.compute([])
+            mt.monotonic.return_value = valid + 2.6
+            fm.compute([])
+            mt.monotonic.return_value = valid + 2.8
+            fm.compute([])
+
+        self.assertEqual(fm._pursuit_mode, "search")
+        last_emitted_before_reacq = fm._last_emitted_steer
+        # Sanity: search must have actually built up a non-trivial steer for
+        # this test to mean anything (not stuck at 0).
+        self.assertGreater(abs(last_emitted_before_reacq), slew_per_tick * max_steer)
+
+        # Reacquire: a hard-right detection whose direct-PID output saturates
+        # far past the current commanded steer, in the OPPOSITE-leaning frame
+        # position to stress the slew (person far to the LEFT this time).
+        det = self._person(x_m=-2.0, z_m=2.0, bbox=(0.05, 0.3, 0.25, 0.8), track_id=1)
+        with patch("pi_app.control.follow_me.time") as mt:
+            mt.monotonic.return_value = valid + 2.9
+            fm.compute([det])
+
+        first_reacq_emitted = fm._last_emitted_steer
+        slew_limit = slew_per_tick * max_steer
+        delta_from_true_last = abs(first_reacq_emitted - last_emitted_before_reacq)
+
+        # The first reacquisition tick's emitted steer must be within one slew
+        # step of the ACTUAL last-emitted search steer -- proving the slew
+        # reference carried across the lost->tracking transition instead of
+        # resetting to a false 0 (which would have allowed a jump all the way
+        # from 0, i.e. up to slew_limit past 0 instead of past the true value).
+        self.assertLessEqual(
+            delta_from_true_last, slew_limit + 1e-6,
+            f"Reacquisition step {delta_from_true_last:.3f} exceeds the slew "
+            f"limit {slew_limit:.3f} measured from the TRUE last-emitted steer "
+            f"{last_emitted_before_reacq:.3f} -- slew reference did not carry "
+            "continuously across the lost/search -> tracking transition.",
+        )
+
+    def test_full_timeout_resets_emitted_steer_to_zero(self):
+        """Past the full lost_target_trail_pursuit_max_s budget the robot hard
+        stops -- this is the one legitimate case where _last_emitted_steer
+        resets to 0 (nothing left to slew from)."""
+        fm = self._make(
+            trail_follow_enabled=False,
+            target_persistence_s=0.5,
+            lost_target_trail_pursuit_max_s=1.0,
+            follow_output_rate_hz=10000.0,
+        )
+        fm.compute([self._person(x_m=1.0, z_m=3.0)])
+        valid = fm._last_valid_time
+
+        with patch("pi_app.control.follow_me.time") as mt:
+            mt.monotonic.return_value = valid + 1.5  # past full timeout
+            left, right = fm.compute([])
+
+        self.assertEqual((left, right), (NEUTRAL, NEUTRAL))
+        self.assertEqual(fm._last_emitted_steer, 0.0)
+
+
 class TestRecorder(unittest.TestCase):
     """Tests for the per-session JSONL flight recorder."""
 

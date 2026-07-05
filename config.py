@@ -301,9 +301,21 @@ class FollowMeConfig:
     # Allow continued blind trail pursuit longer than short target-drop timeout.
     # This is the key behavior needed to keep moving around corners after LOS loss.
     lost_target_trail_pursuit_max_s: float = 3.0
-    lost_target_search_steer_pct: float = 0.40  # fraction of max_follow_speed_byte for search turn
-    max_steer_delta_per_s: float = 35.0          # steering differential slew limit (bytes/s)
     max_steer_offset_byte: float = 25.0          # increased from 15 — lets robot turn harder to keep person in FOV
+    # Search-rotation steer magnitude (bytes) while pivoting in place to reacquire
+    # a lost target. Was previously read via a phantom getattr fallback (30.0)
+    # that had no backing field and EXCEEDED both max_steer_offset_byte (25) and
+    # direct_mode_max_steer_byte (18). 20 keeps search comfortably under the
+    # global cap (25) while still turning harder than the tighter direct-pursuit
+    # cap (18), matching the pre-existing effective ceiling search operated
+    # under once the (now also slew-capped) emission gate clamps everything.
+    search_steer_cap_byte: float = 20.0
+    # Gain on the trail-tangent/last-known-position bias blended into blind
+    # trail-pursuit steer as elapsed lost-time grows (anticipates the turn the
+    # person was making). Was previously read via a phantom getattr fallback
+    # with no backing field; 3.0 matches that fallback exactly, so behavior is
+    # unchanged — it's now a real, discoverable config knob.
+    lost_steer_bias_gain: float = 3.0
 
     # Trail-following Pure Pursuit (breadcrumb path instead of direct pursuit)
     trail_follow_enabled: bool = True
