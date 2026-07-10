@@ -172,6 +172,36 @@ AC_RECOVERY_QUIET_S = 5.0
 # slower cadence and carry their own ts_batt so staleness stays honest.
 SUPPLEMENTAL_READ_PERIOD_S = 10.0
 
+# --- Early USB load-shedding across main-pack transitions ------------------
+#
+# HARDWARE THEORY (owner's, fits all field evidence to date): the OAK-D camera
+# hangs off a Genesys POWERED USB hub whose upstream power comes from the MAIN
+# PACK — not from the Pi/UPS. When the main pack is switched off, that hub loses
+# its external power and its downstream devices dump their FULL draw back onto
+# the Pi's own USB ports. That extra load lands on the UPS at the exact instant
+# it is transferring to battery — overloading the UPS output and hard-cutting
+# the Pi. At pack-return the reverse collides: simultaneous device
+# re-enumeration inrush + UPS charge inrush. Three hard cuts in the field match
+# this signature.
+#
+# MITIGATION (shed early, restore late): shed OAK-hub USB power the MOMENT input
+# loss is seen — off THIS poll's INSTANT charger reading (pre-debounce), so
+# within ~1s worst case, NOT after the 10s AC_LOSS_DEBOUNCE_S or the 30s grace.
+# A false positive (a single-poll voltage glitch) costs only a brief camera
+# blip, an acceptable trade against a hard power cut. The shed is fire-once per
+# outage (guarded by the loop-state flag usb_shed_active). The CH340 VESC serial
+# (RC link) is deliberately never cut — see shed_usb_load / _usb_power_targets.
+#
+# RESTORE is deliberately LATE and staggered: USB power is only re-applied once
+# AC has been continuously clean (instant-present, out of the debounce window,
+# and not the committed-MISSING state) for USB_RESTORE_DELAY_S, measured from
+# the last unclean poll (the same monotonic clock the supplemental-read recovery
+# holdoff uses). 15s sits comfortably past AC_RECOVERY_QUIET_S (5s) so the I2C
+# bus-quiet window ends first, and it staggers the hub's re-enumeration inrush
+# well clear of the UPS charge-inrush spike at pack-return — the two inrush
+# events that collided in the field.
+USB_RESTORE_DELAY_S = 15.0
+
 
 def detect_addr(bus: smbus2.SMBus) -> int:
     for addr in (0x17, 0x18):
@@ -632,20 +662,52 @@ def stop_rover_service() -> None:
         logging.warning("Failed to stop wall-e.service: %s", error)
 
 
+def _usb_power_targets() -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+    """Single source of truth for the USB power targets shed AND restore act on.
+
+    Returns ``(uhubctl_targets, sysfs_targets)``:
+      * ``uhubctl_targets`` — ``(location, port, label)`` for
+        ``uhubctl -l <loc> -p <port> -a off|on`` (the preferred, VBUS-cutting
+        path once uhubctl is installed at deploy).
+      * ``sysfs_targets`` — ``(authorized-attribute path, label)`` written ``0``
+        to shed / ``1`` to restore (the fallback; note this toggles driver
+        authorization and may NOT physically cut VBUS on every hub, which is
+        exactly why uhubctl is preferred).
+
+    Kept in ONE place so shed_usb_load and restore_usb_load can never drift onto
+    different ports/paths. The CH340 VESC serial (the RC link, Bus 3 Port 2) is
+    deliberately ABSENT from both lists so it is never cut.
+    """
+    uhubctl_targets = [
+        ("3", "1", "USB2.0 hub (OAK-D)"),
+        ("4", "1", "USB3.0 companion hub"),
+    ]
+    sysfs_targets = [
+        ("/sys/bus/usb/devices/3-1.3/authorized", "OAK-D (3-1.3)"),
+        ("/sys/bus/usb/devices/3-1/authorized", "USB2.0 hub (3-1)"),
+        ("/sys/bus/usb/devices/4-1/authorized", "USB3.0 hub (4-1)"),
+    ]
+    return uhubctl_targets, sysfs_targets
+
+
 def shed_usb_load() -> None:
     """Cut USB power to the OAK-D hub to reduce battery drain.
 
     Pi 5 root hubs support per-port power switching.  The OAK-D sits
     behind a Genesys hub on Bus 3 Port 1 (USB 2.0) / Bus 4 Port 1
     (USB 3.0 companion).  The VESC CH340 is on Bus 3 Port 2 and is
-    left untouched.
+    left untouched (see _usb_power_targets).
+
+    IDEMPOTENT-SAFE: re-running ``uhubctl -a off`` on an already-off port, or
+    re-writing ``0`` to an already-deauthorized sysfs attribute, is a harmless
+    no-op. This matters because there are two call sites — the early shed on AC
+    loss (main loop, guarded once by usb_shed_active) and run_shutdown_sequence
+    at grace expiry — and either may fire after the other has already shed.
     """
+    uhubctl_targets, sysfs_targets = _usb_power_targets()
     uhubctl = shutil.which("uhubctl")
     if uhubctl:
-        for loc, port, label in [
-            ("3", "1", "USB2.0 hub (OAK-D)"),
-            ("4", "1", "USB3.0 companion hub"),
-        ]:
+        for loc, port, label in uhubctl_targets:
             try:
                 result = subprocess.run(
                     ["sudo", uhubctl, "-l", loc, "-p", port, "-a", "off"],
@@ -663,17 +725,65 @@ def shed_usb_load() -> None:
                 logging.warning("uhubctl error for %s: %s", label, error)
     else:
         logging.info("uhubctl not found; falling back to sysfs deauthorize.")
-        for devpath, label in [
-            ("/sys/bus/usb/devices/3-1.3/authorized", "OAK-D (3-1.3)"),
-            ("/sys/bus/usb/devices/3-1/authorized", "USB2.0 hub (3-1)"),
-            ("/sys/bus/usb/devices/4-1/authorized", "USB3.0 hub (4-1)"),
-        ]:
+        for devpath, label in sysfs_targets:
             try:
                 with open(devpath, "w") as f:
                     f.write("0")
                 logging.info("Deauthorized %s via sysfs.", label)
             except Exception as error:
                 logging.warning("sysfs deauthorize failed for %s: %s", label, error)
+
+
+def restore_usb_load() -> bool:
+    """Restore USB power to the OAK-D hub after AC has stabilized.
+
+    Exact inverse of shed_usb_load(): re-powers the SAME hub locations shed cut
+    (Bus 3 Port 1 / Bus 4 Port 1) with ``uhubctl -a on`` when available, else
+    re-authorizes the SAME sysfs paths shed deauthorized (writing ``1``). Both
+    pull their targets from _usb_power_targets() so shed and restore can never
+    drift apart.
+
+    Returns True only if EVERY target's restore step reported success; False if
+    any failed. The caller keeps usb_shed_active set on a False return and
+    retries next poll while AC is still stable — a failed/partial restore is
+    never latched as done. Per-target exceptions are swallowed + logged (mirror
+    of shed's discipline) so this can never raise into the poll loop; the sysfs
+    fallback in particular may transiently fail if a hub is still
+    re-enumerating, which the next-poll retry resolves.
+    """
+    uhubctl_targets, sysfs_targets = _usb_power_targets()
+    uhubctl = shutil.which("uhubctl")
+    all_ok = True
+    if uhubctl:
+        for loc, port, label in uhubctl_targets:
+            try:
+                result = subprocess.run(
+                    ["sudo", uhubctl, "-l", loc, "-p", port, "-a", "on"],
+                    timeout=5,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    logging.info("USB power on: %s (location %s port %s).", label, loc, port)
+                else:
+                    all_ok = False
+                    logging.warning(
+                        "uhubctl power on failed for %s: %s", label, result.stderr.strip()
+                    )
+            except Exception as error:
+                all_ok = False
+                logging.warning("uhubctl error (restore) for %s: %s", label, error)
+    else:
+        logging.info("uhubctl not found; falling back to sysfs re-authorize.")
+        for devpath, label in sysfs_targets:
+            try:
+                with open(devpath, "w") as f:
+                    f.write("1")
+                logging.info("Re-authorized %s via sysfs.", label)
+            except Exception as error:
+                all_ok = False
+                logging.warning("sysfs re-authorize failed for %s: %s", label, error)
+    return all_ok
 
 
 def _resolve_detect_only(argv: list[str] | None = None) -> bool:
@@ -921,6 +1031,10 @@ def main(detect_only: bool | None = None) -> None:
     batt_cache: dict[str, float | int | None] = {}
     last_supplemental_monotonic: float | None = None
     last_unclean_monotonic: float | None = None
+    # Early-USB-shed loop state: True once we have shed OAK-hub USB power for the
+    # CURRENT input-loss episode (fire-once), cleared only after the staggered
+    # restore succeeds. See the USB_RESTORE_DELAY_S constants block for the why.
+    usb_shed_active = False
 
     while True:
         try:
@@ -988,13 +1102,76 @@ def main(detect_only: bool | None = None) -> None:
                     bus, device_addr, ina_batt, detect_only=detect_only
                 )
 
+        # --- EARLY USB SHED / STAGGERED RESTORE ------------------------------
+        # Runs AFTER the shutdown-decision block (so it never delays it) and
+        # BEFORE the supplemental-gate/publish. The shed decision keys off THIS
+        # poll's INSTANT charger reading (pre-debounce) so a real input loss
+        # sheds OAK-hub USB power within ~1s — long before the 10s debounce or
+        # 30s grace. See the USB_RESTORE_DELAY_S constants block for the theory.
+        instant_present = is_ac_present_instant(typec_mv, microusb_mv)
+        # "Unclean" mirrors the supplemental gate's transfer-window test exactly
+        # (instant-below OR debounce window open OR committed MISSING). We stamp
+        # last_unclean_monotonic here so the restore holdoff measures from the
+        # last unclean poll; the gate below recomputes this identically, so
+        # threading it through leaves the gate's own behavior byte-for-byte
+        # unchanged.
+        usb_unclean = (
+            (not instant_present)
+            or tracker.in_debounce_window
+            or (tracker.state is False)
+        )
+        if usb_unclean:
+            last_unclean_monotonic = now
+
+        if not instant_present and not usb_shed_active:
+            # First poll of an input-loss episode — shed once (idempotent via
+            # the flag). ACTION SITE: suppressed in detect-only.
+            if detect_only:
+                logging.info("DETECT-ONLY: would shed USB power (suppressed).")
+            else:
+                logging.warning(
+                    "AC input lost — shedding OAK hub USB power to protect "
+                    "UPS output (early shed)"
+                )
+                try:
+                    shed_usb_load()
+                except Exception as error:  # a shed failure must never kill the loop
+                    logging.warning("Early USB shed failed (non-fatal): %s", error)
+            usb_shed_active = True
+        elif (
+            usb_shed_active
+            and last_unclean_monotonic is not None
+            and (now - last_unclean_monotonic) >= USB_RESTORE_DELAY_S
+        ):
+            # AC has been continuously clean for USB_RESTORE_DELAY_S measured
+            # from the last unclean poll — restore. ACTION SITE: suppressed in
+            # detect-only. A failed/partial restore is NOT latched: keep the
+            # flag set and retry next poll while conditions still hold.
+            if detect_only:
+                logging.info("DETECT-ONLY: would restore USB power (suppressed).")
+                usb_shed_active = False
+            else:
+                logging.info("AC stable 15s — restoring USB power")
+                restored = False
+                try:
+                    restored = restore_usb_load()
+                except Exception as error:  # never latch a failed restore as done
+                    logging.warning(
+                        "USB restore raised (non-fatal); will retry next poll: %s",
+                        error,
+                    )
+                if restored:
+                    usb_shed_active = False
+                else:
+                    logging.warning("USB restore incomplete; will retry next poll.")
+
         # I2C politeness (prophylactic; see the constants block above). Decide
         # whether this poll may issue the EXTRA snapshot + INA219 reads. The
         # inputs are all derived from state already computed above — this gate
         # does NOT touch the bus and does NOT feed back into any AC-detection /
         # shutdown decision; it only throttles the telemetry reads.
         do_supplemental, last_unclean_monotonic = _supplemental_gate(
-            instant_present=is_ac_present_instant(typec_mv, microusb_mv),
+            instant_present=instant_present,
             in_debounce=tracker.in_debounce_window,
             state_missing=(tracker.state is False),
             now=now,
