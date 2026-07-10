@@ -49,6 +49,9 @@ DETECT-ONLY: AC loss confirmed (grace expired) — would begin shutdown sequence
 
 ## How to enable on the Pi
 
+**Deploy first:** the detect-only code must actually be at `/home/pi/bin/` before either option — `sudo cp ~/wall_e-Mini/scripts/upsPlus_power_daemon.py /home/pi/bin/upsPlus_power_daemon.py`. If you skip this and run a stale copy, the mandatory MODE banner check below catches it (no banner = stop).
+
+
 Activated by **either** a CLI flag **or** an environment variable (either one
 is sufficient; the daemon ORs them):
 

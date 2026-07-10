@@ -558,7 +558,7 @@ def main(detect_only: bool | None = None) -> None:
 
     # Ensure auto power-on when AC returns.
     # ACTION SITE (startup): UPS register write, suppressed in detect-only so
-    # the mode is strictly read-only against the hardware.
+    # the mode is read-only against the UPS MCU (no UPS register writes; INA219 sensor configure still runs).
     if detect_only:
         logging.info(
             "DETECT-ONLY: skipped Back-to-AC auto power-on register write "
