@@ -659,6 +659,9 @@ def run() -> None:
                         vesc_rx_reopen_count=telem.get("vesc_rx_reopen_count", 0),
                         vesc_rx_last_frame_age_s=telem.get("vesc_rx_last_frame_age_s"),
                         vesc_pack_low_latched=telem.get("vesc_pack_low_latched", False),
+                        vesc_left_status_age_s=telem.get("vesc_left_status_age_s"),
+                        vesc_right_status_age_s=telem.get("vesc_right_status_age_s"),
+                        vesc_rx_thread_alive=telem.get("vesc_rx_thread_alive"),
                         # Follow-Me visualization (Items 2 + 4)
                         follow_mode=telem.get("follow_mode"),
                         trail_points_xy=telem.get("trail_points_xy"),

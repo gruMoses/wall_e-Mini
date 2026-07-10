@@ -184,6 +184,13 @@ class Controller:
         # VESC low-voltage watchdog latch (early-warning + motor-cutoff). Mirrors
         # the charger_inhibit plumbing so the run log / SSE / dashboard can see it.
         self._vesc_pack_low_latched: bool = False
+        # Per-motor STATUS(9) frame ages + RX-thread liveness. Already read below
+        # to drive the open-loop staleness fallback; also surfaced (same
+        # charger_inhibit plumbing) so the /debug board can show which motor
+        # went silent and whether the CAN RX thread is alive.
+        self._vesc_left_status_age_s: Optional[float] = None
+        self._vesc_right_status_age_s: Optional[float] = None
+        self._vesc_rx_thread_alive: Optional[bool] = None
 
     def _reset_imu_timestamp(self, now: float) -> None:
         """Reset the monotonic timestamp used to throttle IMU updates.
@@ -546,6 +553,10 @@ class Controller:
                 _r_age = getattr(_telem, "right_status_age_s", None)
                 _stale_ages = [a for a in (_l_age, _r_age) if a is not None]
                 _rx_alive = getattr(_telem, "rx_thread_alive", None)
+                # Surface these for the /debug board (read-only diagnostics).
+                self._vesc_left_status_age_s = _l_age
+                self._vesc_right_status_age_s = _r_age
+                self._vesc_rx_thread_alive = _rx_alive
                 _motor_stale = any(a > 0.5 for a in _stale_ages)
                 _rx_dead = _rx_alive is False
                 if _motor_stale or _rx_dead:
@@ -597,6 +608,8 @@ class Controller:
                 self._vesc_rx_last_frame_age_s = (
                     float(_rx_age) if isinstance(_rx_age, (int, float)) else None
                 )
+                if "rx_thread_alive" in _rx_health:
+                    self._vesc_rx_thread_alive = _rx_health.get("rx_thread_alive")
 
         # ── GPS heading aligner: runs every tick in every mode ──────────────
         # The aligner self-gates on fix quality, displacement, and speed, so
@@ -1142,6 +1155,9 @@ class Controller:
         telemetry["vesc_rx_reopen_count"] = self._vesc_rx_reopen_count
         telemetry["vesc_rx_last_frame_age_s"] = self._vesc_rx_last_frame_age_s
         telemetry["vesc_pack_low_latched"] = self._vesc_pack_low_latched
+        telemetry["vesc_left_status_age_s"] = self._vesc_left_status_age_s
+        telemetry["vesc_right_status_age_s"] = self._vesc_right_status_age_s
+        telemetry["vesc_rx_thread_alive"] = self._vesc_rx_thread_alive
         if self._gps_heading_aligner is not None:
             telemetry["heading_offset_deg"] = self._gps_heading_aligner.offset_deg
             telemetry["heading_offset_locked"] = self._gps_heading_aligner.locked

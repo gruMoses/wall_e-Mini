@@ -26,10 +26,72 @@ try:
 except ImportError:
     Flask = None  # type: ignore[assignment,misc]
 
+import os
 import sys
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from config import OakWebViewerConfig
+
+
+# ---------------------------------------------------------------------------
+# UPS status bridge (read side)
+# ---------------------------------------------------------------------------
+#
+# The UPSPlus HAT is watched by a *separate* process (scripts/upsPlus_power_daemon.py)
+# that has the I2C bus; WALL-E's control loop never touches it. That daemon
+# atomically publishes a small JSON snapshot to UPS_STATUS_FILE each poll; this
+# reader lets the /debug board show live UPS state without giving the web app
+# any hardware access. Both sides read the same env var so they stay in sync.
+
+UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
+UPS_STATUS_MAX_AGE_S = 10.0
+
+
+def read_ups_status(path: str = UPS_STATUS_FILE,
+                    max_age_s: float = UPS_STATUS_MAX_AGE_S,
+                    now: float | None = None) -> dict:
+    """Read the UPS status JSON published by the power daemon.
+
+    Always returns a dict with at least ``available`` and ``stale`` bools —
+    a missing file, unreadable path, corrupt/undecodable JSON, or a non-dict
+    payload all yield ``{"available": False, ...}`` instead of raising, so the
+    /api/ups route can never 500 on a bad/absent file. A readable file whose
+    ``ts`` is older than ``max_age_s`` (or has no usable ``ts``) is reported
+    ``available=True, stale=True`` so the page can grey out last-known values
+    rather than hide them.
+    """
+    now = time.time() if now is None else now
+    try:
+        with open(path, "r") as f:
+            raw = f.read()
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError, OSError):
+        return {"available": False, "stale": True, "age_s": None, "reason": "missing"}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {"available": False, "stale": True, "age_s": None, "reason": "corrupt"}
+    if not isinstance(data, dict):
+        return {"available": False, "stale": True, "age_s": None, "reason": "corrupt"}
+
+    ts = data.get("ts")
+    age_s = None
+    if isinstance(ts, (int, float)):
+        age_s = max(0.0, float(now) - float(ts))
+    stale = (age_s is None) or (age_s > max_age_s)
+    return {
+        "available": True,
+        "stale": bool(stale),
+        "age_s": round(age_s, 2) if age_s is not None else None,
+        "ts": ts,
+        "ac_present": data.get("ac_present"),
+        "typec_mv": data.get("typec_mv"),
+        "microusb_mv": data.get("microusb_mv"),
+        "batt_v": data.get("batt_v"),
+        "batt_ma": data.get("batt_ma"),
+        "protect_mv": data.get("protect_mv"),
+        "detect_only": data.get("detect_only"),
+        "seconds_without_charge": data.get("seconds_without_charge"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +228,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <a href="/map" class="nav-link">Map</a>
     <a href="/navigate" class="nav-link">Navigate</a>
     <a href="/calibrate" class="nav-link">Calibrate</a>
+    <a href="/debug" class="nav-link">Debug</a>
     <span id="rec-badge" class="rec-badge rec-idle">IDLE</span>
   </div>
 </header>
@@ -866,6 +929,372 @@ function resetCounter(type) {
 
 
 # ---------------------------------------------------------------------------
+# Debug status board (self-contained, no external assets) — READ ONLY.
+#
+# Bench/diagnostic page: subscribes to the existing /api/telemetry SSE and
+# polls /api/ups, rendering every safety + power status as a big pill that
+# visibly flips as the owner physically toggles switches / pulls plugs. There
+# are NO control elements here — nothing on this page can command the robot.
+# ---------------------------------------------------------------------------
+
+_DEBUG_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WALL-E Mini — Debug Status Board</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: #0f1117; color: #e0e0e0; padding-bottom: 40px; }
+  header { background: #1a1d27; padding: 12px 24px; display: flex; align-items: center;
+           justify-content: space-between; border-bottom: 1px solid #2a2d37;
+           position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 17px; font-weight: 600; color: #fff; }
+  header .sub { font-size: 11px; color: #7f8798; margin-top: 2px; }
+  header .nav-link { color: #7aa2f7; text-decoration: none; font-size: 13px; font-weight: 500; }
+  header .nav-link:hover { text-decoration: underline; }
+  .hdr-right { display: flex; align-items: center; gap: 14px; }
+  .conn { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+          padding: 3px 10px; border-radius: 12px; background: #2a2d37; color: #888; }
+  .conn.live { background: #143d33; color: #4ecdc4; }
+  .conn.dead { background: #3d1a1f; color: #e63946; }
+  .container { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  .panel { background: #1a1d27; border-radius: 10px; padding: 16px; margin-bottom: 16px;
+           border: 1px solid #22252f; }
+  .panel h2 { font-size: 12px; color: #9aa2b1; margin-bottom: 12px; text-transform: uppercase;
+              letter-spacing: 0.8px; font-weight: 700; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .cell { background: #12151d; border: 1px solid #22252f; border-radius: 8px; padding: 10px 12px; }
+  .cell .k { font-size: 10px; color: #7f8798; text-transform: uppercase; letter-spacing: 0.5px;
+             margin-bottom: 6px; }
+  .pill { display: inline-block; font-size: 17px; font-weight: 800; letter-spacing: 0.3px;
+          padding: 5px 12px; border-radius: 8px; font-variant-numeric: tabular-nums;
+          background: #262a36; color: #c8ccd6; transition: background 0.15s, color 0.15s;
+          min-width: 54px; text-align: center; }
+  .pill.flash { animation: flashpill 0.9s ease-out; }
+  @keyframes flashpill { 0% { box-shadow: 0 0 0 2px #fff; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  .pill.green { background: #143d33; color: #4ecdc4; }
+  .pill.red   { background: #3d1a1f; color: #ff6b74; }
+  .pill.amber { background: #3a2f15; color: #f0b344; }
+  .pill.blue  { background: #14263d; color: #6bb6ff; }
+  .pill.grey  { background: #262a36; color: #9aa2b1; }
+  .val { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; color: #e0e0e0; }
+  .val.green { color: #4ecdc4; } .val.red { color: #ff6b74; }
+  .val.amber { color: #f0b344; } .val.blue { color: #6bb6ff; } .val.grey { color: #7f8798; }
+  .panel.stale { opacity: 0.5; }
+  .stale-tag { font-size: 10px; font-weight: 700; color: #f0b344; margin-left: 8px;
+               text-transform: uppercase; letter-spacing: 0.5px; }
+  .log { background: #0b0d13; border: 1px solid #22252f; border-radius: 8px; padding: 10px;
+         font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 12px;
+         line-height: 1.7; height: 260px; overflow-y: auto; }
+  .log .row { white-space: pre; }
+  .log .ts { color: #5b6472; }
+  .log .up { color: #4ecdc4; } .log .down { color: #ff6b74; } .log .neu { color: #f0b344; }
+  .log .empty { color: #444; font-style: italic; }
+  .hint { font-size: 11px; color: #5b6472; margin-top: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>WALL-E Mini — Debug Status Board</h1>
+    <div class="sub">Read-only bench diagnostics · flip a switch and watch it react</div>
+  </div>
+  <div class="hdr-right">
+    <a href="/" class="nav-link">&larr; Dashboard</a>
+    <span id="conn" class="conn">connecting</span>
+  </div>
+</header>
+<div class="container">
+
+  <div class="panel" id="p-safety">
+    <h2>Safety</h2>
+    <div class="grid">
+      <div class="cell"><div class="k">Armed</div><span id="s-armed" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Emergency Stop</div><span id="s-estop" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Mode</div><span id="s-mode" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Charger Inhibit</div><span id="s-chgi" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Pack Low Latched</div><span id="s-packlow" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Throttle Scale</div><span id="s-throttle" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Obstacle Distance</div><span id="s-dist" class="val grey">&mdash;</span></div>
+    </div>
+  </div>
+
+  <div class="panel" id="p-vesc">
+    <h2>VESC / CAN</h2>
+    <div class="grid">
+      <div class="cell"><div class="k">Left RPM</div><span id="v-lrpm" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Right RPM</div><span id="v-rrpm" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Motor Bytes L / R</div><span id="v-bytes" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">RX Frames</div><span id="v-frames" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Frames / sec</div><span id="v-fps" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Last Frame Age</div><span id="v-age" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">RX Thread</div><span id="v-thread" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Left Status Age</div><span id="v-lage" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Right Status Age</div><span id="v-rage" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Parse / Recv / Reopen</div><span id="v-errs" class="val grey">&mdash;</span></div>
+    </div>
+  </div>
+
+  <div class="panel" id="p-bms">
+    <h2>BMS &mdash; Main Pack</h2>
+    <div class="grid">
+      <div class="cell"><div class="k">Connected</div><span id="b-conn" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Voltage</div><span id="b-volt" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Current</div><span id="b-curr" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">SOC</div><span id="b-soc" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Cell Delta</div><span id="b-delta" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Temp Max</div><span id="b-temp" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Charging</div><span id="b-chg" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Discharge FET</div><span id="b-dfet" class="pill grey">&mdash;</span></div>
+    </div>
+  </div>
+
+  <div class="panel" id="p-ups">
+    <h2>UPS <span id="ups-tag" class="stale-tag"></span></h2>
+    <div class="grid">
+      <div class="cell"><div class="k">AC Power</div><span id="u-ac" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Type-C In</div><span id="u-typec" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Micro-USB In</div><span id="u-microusb" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Battery Voltage</div><span id="u-battv" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Battery Current</div><span id="u-battma" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Protect Threshold</div><span id="u-protect" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Secs Without Charge</div><span id="u-swc" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Daemon Mode</div><span id="u-mode" class="pill grey">&mdash;</span></div>
+    </div>
+    <div class="hint" id="u-hint">Waiting for /tmp/ups_status.json from upsPlus_power_daemon.py &hellip;</div>
+  </div>
+
+  <div class="panel">
+    <h2>Event Log <span style="font-weight:400;color:#5b6472;">(status transitions)</span></h2>
+    <div class="log" id="log"><div class="row empty">Watching for changes&hellip;</div></div>
+    <div class="hint">Newest at top &middot; last 50 transitions &middot; no journalctl required.</div>
+  </div>
+
+</div>
+<script>
+/* ── Event log ─────────────────────────────────────────────────────── */
+var LOG_MAX = 50;
+var logEl = document.getElementById('log');
+var logRows = [];
+var prev = {};   // last seen value per watched key
+function nowStr() {
+  var d = new Date();
+  function p(n){ return String(n).padStart(2,'0'); }
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function logLine(label, oldV, newV, dir) {
+  var cls = dir === 'up' ? 'up' : dir === 'down' ? 'down' : 'neu';
+  var row = '<div class="row"><span class="ts">' + nowStr() + '</span>  ' +
+            esc(label) + ': <span class="' + cls + '">' + esc(oldV) + ' → ' + esc(newV) +
+            '</span></div>';
+  logRows.unshift(row);
+  if (logRows.length > LOG_MAX) logRows.length = LOG_MAX;
+  logEl.innerHTML = logRows.join('');
+}
+/* Compare a watched value against its previous; log on change.
+   dirFn(newV) -> 'up' | 'down' | 'neu' picks the color. */
+function watch(key, label, value, fmt, dirFn) {
+  if (value === undefined) return;
+  var shown = fmt ? fmt(value) : String(value);
+  if (!(key in prev)) { prev[key] = shown; return; }   // seed silently, no log
+  if (prev[key] !== shown) {
+    var dir = dirFn ? dirFn(value, prev[key]) : 'neu';
+    logLine(label, prev[key], shown, dir);
+    prev[key] = shown;
+  }
+}
+var boolStr = function(v){ return v ? 'true' : 'false'; };
+
+/* ── Pill / value helpers ──────────────────────────────────────────── */
+function pill(id, text, cls) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  if (el.textContent !== text) {
+    el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+  }
+  el.textContent = text;
+  el.className = 'pill ' + cls;
+}
+function val(id, text, cls) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'val ' + (cls || 'grey');
+}
+function num(v, digits, suffix) {
+  if (v === null || v === undefined) return '—';
+  return v.toFixed(digits === undefined ? 0 : digits) + (suffix || '');
+}
+
+/* ── Telemetry SSE (robot safety + VESC + BMS) ─────────────────────── */
+var connEl = document.getElementById('conn');
+var lastFrameCount = null, lastFrameTs = null, fps = null;
+
+var sse = new EventSource('/api/telemetry');
+sse.onopen = function(){ connEl.textContent = 'live'; connEl.className = 'conn live'; };
+sse.onerror = function(){ connEl.textContent = 'reconnecting'; connEl.className = 'conn dead'; };
+sse.onmessage = function(e) {
+  var d;
+  try { d = JSON.parse(e.data); } catch(_) { return; }
+  connEl.textContent = 'live'; connEl.className = 'conn live';
+
+  /* ---- SAFETY ---- */
+  pill('s-armed', d.is_armed ? 'ARMED' : 'DISARMED', d.is_armed ? 'green' : 'red');
+  var es = d.emergency_active;
+  pill('s-estop', es == null ? '—' : (es ? 'E-STOP' : 'clear'),
+       es == null ? 'grey' : (es ? 'red' : 'green'));
+  pill('s-mode', d.mode || '—', d.mode === 'FOLLOW_ME' ? 'amber' : 'blue');
+  var ci = d.charger_inhibit;
+  pill('s-chgi', ci == null ? '—' : (ci ? 'INHIBIT' : 'clear'),
+       ci == null ? 'grey' : (ci ? 'red' : 'green'));
+  var pl = d.vesc_pack_low_latched;
+  pill('s-packlow', pl ? 'LATCHED' : 'clear', pl ? 'red' : 'green');
+  var sc = d.throttle_scale;
+  var scCls = sc == null ? 'grey' : sc >= 0.8 ? 'green' : sc >= 0.3 ? 'amber' : 'red';
+  pill('s-throttle', sc == null ? '—' : sc.toFixed(2), scCls);
+  var dist = d.obstacle_distance_m;
+  val('s-dist', dist == null ? '—' : dist.toFixed(2) + ' m',
+      dist == null ? 'grey' : dist < 0.5 ? 'red' : dist < 1.2 ? 'amber' : 'green');
+
+  /* ---- VESC / CAN ---- */
+  val('v-lrpm', d.vesc_left_rpm == null ? '—' : d.vesc_left_rpm,
+      d.vesc_left_rpm == null ? 'grey' : '');
+  val('v-rrpm', d.vesc_right_rpm == null ? '—' : d.vesc_right_rpm,
+      d.vesc_right_rpm == null ? 'grey' : '');
+  val('v-bytes', d.motor_left + ' / ' + d.motor_right, '');
+  var fc = d.vesc_rx_frame_count;
+  val('v-frames', fc == null ? '—' : fc, '');
+  var tnow = performance.now();
+  if (fc != null && lastFrameCount != null && lastFrameTs != null) {
+    var dt = (tnow - lastFrameTs) / 1000.0;
+    if (dt > 0.05) { fps = Math.max(0, (fc - lastFrameCount) / dt); lastFrameCount = fc; lastFrameTs = tnow; }
+  } else if (fc != null) { lastFrameCount = fc; lastFrameTs = tnow; }
+  pill('v-fps', fps == null ? '—' : fps.toFixed(1),
+       fps == null ? 'grey' : fps >= 20 ? 'green' : fps > 0 ? 'amber' : 'red');
+  var age = d.vesc_rx_last_frame_age_s;
+  pill('v-age', age == null ? '—' : age.toFixed(2) + 's',
+       age == null ? 'grey' : age > 1.0 ? 'red' : age > 0.3 ? 'amber' : 'green');
+  var th = d.vesc_rx_thread_alive;
+  pill('v-thread', th == null ? 'n/a' : (th ? 'ALIVE' : 'DEAD'),
+       th == null ? 'grey' : (th ? 'green' : 'red'));
+  var la = d.vesc_left_status_age_s, ra = d.vesc_right_status_age_s;
+  pill('v-lage', la == null ? 'n/a' : la.toFixed(2) + 's',
+       la == null ? 'grey' : la > 0.5 ? 'red' : 'green');
+  pill('v-rage', ra == null ? 'n/a' : ra.toFixed(2) + 's',
+       ra == null ? 'grey' : ra > 0.5 ? 'red' : 'green');
+  val('v-errs', (d.vesc_rx_parse_error_count ?? 0) + ' / ' +
+                (d.vesc_rx_recv_error_count ?? 0) + ' / ' +
+                (d.vesc_rx_reopen_count ?? 0),
+      ((d.vesc_rx_parse_error_count || d.vesc_rx_recv_error_count || d.vesc_rx_reopen_count)) ? 'amber' : '');
+
+  /* ---- BMS ---- */
+  var bc = d.bms_connected;
+  pill('b-conn', bc == null ? '—' : (bc ? 'ONLINE' : 'OFFLINE'),
+       bc == null ? 'grey' : (bc ? 'green' : 'red'));
+  val('b-volt', d.bms_voltage_v == null ? '—' : d.bms_voltage_v.toFixed(2) + ' V',
+      d.bms_voltage_v == null ? 'grey' : '');
+  var ba = d.bms_current_a;
+  if (ba == null) { val('b-curr', '—', 'grey'); }
+  else {
+    var lbl = ba > 0.05 ? ' (charging)' : ba < -0.05 ? ' (discharging)' : '';
+    val('b-curr', ba.toFixed(1) + ' A' + lbl, ba > 0.05 ? 'green' : ba < -0.05 ? 'amber' : '');
+  }
+  var soc = d.bms_soc_pct;
+  val('b-soc', soc == null ? '—' : soc.toFixed(1) + '%',
+      soc == null ? 'grey' : soc >= 40 ? 'green' : soc >= 20 ? 'amber' : 'red');
+  var cd = d.bms_cell_delta_mv;
+  val('b-delta', cd == null ? '—' : cd + ' mV',
+      cd == null ? 'grey' : cd <= 20 ? 'green' : cd <= 40 ? 'amber' : 'red');
+  var tp = d.bms_temp_max_c;
+  val('b-temp', tp == null ? '—' : tp.toFixed(1) + '°C',
+      tp == null ? 'grey' : tp >= 50 ? 'red' : tp >= 40 ? 'amber' : 'green');
+  var chg = d.bms_charging;
+  pill('b-chg', chg == null ? '—' : (chg ? 'YES' : 'no'),
+       chg == null ? 'grey' : (chg ? 'blue' : 'grey'));
+  var df = d.bms_discharge_fet_on;
+  pill('b-dfet', df == null ? '—' : (df ? 'ON' : 'OFF'),
+       df == null ? 'grey' : (df ? 'green' : 'amber'));
+
+  /* ---- event log (robot) ---- */
+  watch('armed', 'is_armed', d.is_armed, boolStr, function(v){ return v ? 'up' : 'down'; });
+  watch('estop', 'emergency', d.emergency_active, boolStr, function(v){ return v ? 'down' : 'up'; });
+  watch('mode', 'mode', d.mode, null, null);
+  watch('chgi', 'charger_inhibit', d.charger_inhibit, boolStr, function(v){ return v ? 'down' : 'up'; });
+  watch('packlow', 'pack_low_latched', d.vesc_pack_low_latched, boolStr, function(v){ return v ? 'down' : 'up'; });
+  watch('rxthread', 'vesc_rx_thread', d.vesc_rx_thread_alive, function(v){ return v ? 'alive' : 'dead'; }, function(v){ return v ? 'up' : 'down'; });
+  watch('bmsconn', 'bms_connected', d.bms_connected, boolStr, function(v){ return v ? 'up' : 'down'; });
+  watch('bmschg', 'bms_charging', d.bms_charging, boolStr, null);
+  watch('bmsdfet', 'bms_discharge_fet', d.bms_discharge_fet_on, function(v){ return v ? 'on' : 'off'; }, function(v){ return v ? 'up' : 'down'; });
+  var band = dist == null ? 'unknown' : dist < 0.5 ? 'STOP' : dist < 1.2 ? 'slow' : 'clear';
+  watch('obsband', 'obstacle_band', band, null, function(v){ return v === 'clear' ? 'up' : v === 'STOP' ? 'down' : 'neu'; });
+};
+
+/* ── UPS poll (separate daemon via /api/ups) ───────────────────────── */
+function applyUps(u) {
+  var panel = document.getElementById('p-ups');
+  var tag = document.getElementById('ups-tag');
+  var hint = document.getElementById('u-hint');
+  if (!u || !u.available) {
+    panel.classList.add('stale');
+    tag.textContent = 'UNAVAILABLE';
+    var reason = u && u.reason ? u.reason : 'no data';
+    hint.textContent = 'UPS status unavailable (' + reason + '). Is upsPlus_power_daemon.py running?';
+    ['u-ac','u-mode'].forEach(function(id){ pill(id, '—', 'grey'); });
+    ['u-typec','u-microusb','u-battv','u-battma','u-protect','u-swc'].forEach(function(id){ val(id,'—','grey'); });
+    watch('ac', 'ups_ac_present', undefined, null, null);
+    return;
+  }
+  if (u.stale) {
+    panel.classList.add('stale');
+    tag.textContent = 'STALE ' + (u.age_s != null ? u.age_s + 's' : '');
+    hint.textContent = 'Last UPS update ' + (u.age_s != null ? u.age_s + 's ago' : '(unknown age)') +
+                       ' — older than freshness window; values may be out of date.';
+  } else {
+    panel.classList.remove('stale');
+    tag.textContent = '';
+    hint.textContent = 'Live — updated ' + (u.age_s != null ? u.age_s + 's ago' : 'just now') + '.';
+  }
+  var ac = u.ac_present;
+  pill('u-ac', ac == null ? '—' : (ac ? 'PRESENT' : 'MISSING'),
+       ac == null ? 'grey' : (ac ? 'green' : 'red'));
+  val('u-typec', num(u.typec_mv, 0, ' mV'), u.typec_mv == null ? 'grey' : '');
+  val('u-microusb', num(u.microusb_mv, 0, ' mV'), u.microusb_mv == null ? 'grey' : '');
+  val('u-battv', num(u.batt_v, 3, ' V'), u.batt_v == null ? 'grey' : '');
+  if (u.batt_ma == null) { val('u-battma', '—', 'grey'); }
+  else {
+    var mlbl = u.batt_ma > 20 ? ' (charging)' : u.batt_ma < -20 ? ' (discharging)' : '';
+    val('u-battma', u.batt_ma.toFixed(0) + ' mA' + mlbl,
+        u.batt_ma > 20 ? 'green' : u.batt_ma < -20 ? 'amber' : '');
+  }
+  val('u-protect', num(u.protect_mv, 0, ' mV'), u.protect_mv == null ? 'grey' : '');
+  var swc = u.seconds_without_charge;
+  val('u-swc', swc == null ? '—' : swc + ' s',
+      swc == null ? 'grey' : swc > 0 ? 'amber' : 'green');
+  pill('u-mode', u.detect_only ? 'DETECT-ONLY' : 'ARMED',
+       u.detect_only ? 'amber' : 'green');
+
+  watch('ac', 'ups_ac_present', ac, boolStr, function(v){ return v ? 'up' : 'down'; });
+  watch('upsmode', 'ups_daemon_mode', u.detect_only ? 'detect-only' : 'armed', null, null);
+}
+function pollUps() {
+  fetch('/api/ups', {cache: 'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(applyUps)
+    .catch(function(){ applyUps({available: false, reason: 'fetch failed'}); });
+}
+pollUps();
+setInterval(pollUps, 1000);
+</script>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
 # Placeholder JPEG (shown when camera has no frames yet)
 # ---------------------------------------------------------------------------
 
@@ -961,6 +1390,22 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
     def index():
         return Response(_DASHBOARD_HTML, content_type="text/html")
 
+    # -- Debug status board (read-only) --------------------------------------
+
+    @app.route("/debug")
+    def debug_board():
+        return Response(_DEBUG_HTML, content_type="text/html")
+
+    @app.route("/api/ups")
+    def api_ups():
+        """UPS snapshot from the separate power daemon's status file.
+
+        Read-only: reads /tmp/ups_status.json (via read_ups_status, which never
+        raises). Returns 200 even when the file is missing/stale/corrupt so the
+        debug page can render an UNAVAILABLE/STALE state instead of erroring.
+        """
+        return Response(json.dumps(read_ups_status()), content_type="application/json")
+
     # -- MJPEG streams -------------------------------------------------------
 
     def _mjpeg_generator(get_jpeg_fn, fps: float = 10.0, stream_name: str | None = None):
@@ -1037,6 +1482,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "motor_left": t.motor_left,
                     "motor_right": t.motor_right,
                     "is_armed": t.is_armed,
+                    "emergency_active": getattr(t, "emergency_active", None),
                     "charger_inhibit": t.charger_inhibit,
                     "num_persons": len(t.person_detections),
                     "recording_state": recorder.recording_state if recorder is not None else "disabled",
@@ -1072,6 +1518,9 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "vesc_rx_reopen_count": getattr(t, "vesc_rx_reopen_count", 0),
                     "vesc_rx_last_frame_age_s": _finite_or_none(getattr(t, "vesc_rx_last_frame_age_s", None), 3),
                     "vesc_pack_low_latched": bool(getattr(t, "vesc_pack_low_latched", False)),
+                    "vesc_left_status_age_s": _finite_or_none(getattr(t, "vesc_left_status_age_s", None), 3),
+                    "vesc_right_status_age_s": _finite_or_none(getattr(t, "vesc_right_status_age_s", None), 3),
+                    "vesc_rx_thread_alive": getattr(t, "vesc_rx_thread_alive", None),
                     "wp_index": getattr(t, "wp_index", None),
                     "wp_total": getattr(t, "wp_total", None),
                     "wp_name": getattr(t, "wp_name", None),
