@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WALL-E Mini — Feature One-Sheet</title>
+<style>
+  :root{
+    --bg:#0a0c10;
+    --bg2:#0d1117;
+    --panel:#12161d;
+    --panel2:#161b24;
+    --border:#232a35;
+    --border2:#2c3543;
+    --text:#e7edf4;
+    --muted:#8b96a5;
+    --faint:#5f6b7a;
+    --amber:#ffb43a;
+    --amber-dim:#c98a26;
+    --cyan:#5cc7d8;
+    --green:#5ec27a;
+    --red:#ef5c5c;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1100px 600px at 78% -8%, rgba(255,180,58,.07), transparent 60%),
+      radial-gradient(900px 520px at 8% 4%, rgba(92,199,216,.05), transparent 55%),
+      var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  .sheet{max-width:900px;margin:0 auto;padding:40px 26px 60px}
+
+  /* ---------- Hero ---------- */
+  .hero{display:flex;gap:22px;align-items:center;margin-bottom:26px}
+  .glyph{flex:0 0 auto;width:72px;height:72px;filter:drop-shadow(0 4px 14px rgba(255,180,58,.22))}
+  .hero h1{
+    margin:0;font-size:34px;letter-spacing:-.5px;font-weight:700;line-height:1.05;
+  }
+  .hero h1 .mini{color:var(--amber);font-weight:600}
+  .tagline{margin:6px 0 0;color:var(--muted);font-size:14.5px;max-width:60ch}
+  .eyebrow{
+    font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;
+    color:var(--amber-dim);margin:0 0 4px;font-weight:600;
+  }
+
+  /* ---------- Spec strip ---------- */
+  .specs{
+    display:flex;flex-wrap:wrap;gap:7px;margin:22px 0 34px;
+    padding-top:18px;border-top:1px solid var(--border);
+  }
+  .spec{
+    font-family:var(--mono);font-size:11.5px;letter-spacing:.01em;
+    background:var(--panel);border:1px solid var(--border);border-radius:6px;
+    padding:5px 9px;color:var(--text);white-space:nowrap;
+  }
+  .spec b{color:var(--amber);font-weight:600}
+  .spec .u{color:var(--faint)}
+
+  /* ---------- Section ---------- */
+  section{margin:0 0 30px}
+  .sec-head{display:flex;align-items:baseline;gap:11px;margin:0 0 13px}
+  .sec-head .no{
+    font-family:var(--mono);font-size:11px;color:var(--amber);
+    border:1px solid var(--border2);border-radius:5px;padding:2px 6px;flex:0 0 auto;
+  }
+  .sec-head h2{
+    margin:0;font-size:16.5px;font-weight:650;letter-spacing:-.2px;
+  }
+  .sec-head .sub{color:var(--muted);font-size:12.5px;margin-left:auto;text-align:right}
+
+  /* ---------- Card grid ---------- */
+  .grid{display:grid;gap:11px;align-items:start;grid-template-columns:repeat(auto-fit,minmax(255px,1fr))}
+  .grid.two{grid-template-columns:repeat(auto-fit,minmax(390px,1fr))}
+  .card{
+    background:linear-gradient(180deg,var(--panel2),var(--panel));
+    border:1px solid var(--border);border-radius:9px;padding:13px 14px;
+    position:relative;overflow:hidden;
+  }
+  .card::before{
+    content:"";position:absolute;left:0;top:0;bottom:0;width:2px;
+    background:var(--amber);opacity:.55;
+  }
+  .card.cyan::before{background:var(--cyan)}
+  .card.green::before{background:var(--green)}
+  .card.red::before{background:var(--red)}
+  .card h3{
+    margin:0 0 6px;font-size:13.5px;font-weight:640;letter-spacing:-.1px;
+    display:flex;align-items:center;gap:7px;
+  }
+  .card h3 .tag{
+    margin-left:auto;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--faint);border:1px solid var(--border);
+    border-radius:4px;padding:1px 5px;font-weight:500;
+  }
+  .card p{margin:0;color:var(--muted);font-size:12.3px;line-height:1.48}
+  .card p + p{margin-top:6px}
+  .card b, .card strong{color:var(--text);font-weight:600}
+  .k{font-family:var(--mono);font-size:11px;color:var(--amber);background:rgba(255,180,58,.08);
+     border:1px solid rgba(255,180,58,.16);border-radius:4px;padding:0 4px}
+  .kc{color:var(--cyan);background:rgba(92,199,216,.08);border-color:rgba(92,199,216,.18)}
+
+  ul.tight{margin:6px 0 0;padding:0;list-style:none}
+  ul.tight li{
+    color:var(--muted);font-size:12.2px;padding:2px 0 2px 15px;position:relative;line-height:1.45;
+  }
+  ul.tight li::before{content:"›";position:absolute;left:0;color:var(--amber);font-weight:700}
+  ul.tight li b{color:var(--text);font-weight:600}
+
+  /* ---------- Safety ladder ---------- */
+  .ladder{display:flex;flex-direction:column;gap:6px}
+  .rung{
+    display:flex;gap:11px;align-items:flex-start;
+    background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:9px 12px;
+  }
+  .rung .lvl{
+    font-family:var(--mono);font-size:10px;font-weight:700;color:var(--bg);
+    background:var(--amber);border-radius:4px;padding:2px 6px;flex:0 0 auto;margin-top:1px;
+    min-width:30px;text-align:center;
+  }
+  .rung .lvl.c{background:var(--cyan)} .rung .lvl.g{background:var(--green)} .rung .lvl.r{background:var(--red)}
+  .rung .body{font-size:12.3px;color:var(--muted)}
+  .rung .body b{color:var(--text);font-weight:600}
+
+  /* ---------- footer ---------- */
+  footer{
+    margin-top:34px;padding-top:16px;border-top:1px solid var(--border);
+    display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;
+    color:var(--faint);font-size:11px;font-family:var(--mono);
+  }
+  footer .dot{color:var(--amber)}
+
+  @media (max-width:560px){
+    .sheet{padding:28px 16px 44px}
+    .hero{flex-direction:row;gap:16px}
+    .hero h1{font-size:27px}
+    .glyph{width:56px;height:56px}
+    .sec-head .sub{display:none}
+  }
+
+  /* ---------- Print: flip to light, tighten ---------- */
+  @media print{
+    :root{
+      --bg:#fff;--bg2:#fff;--panel:#fff;--panel2:#fbfbfa;--border:#d9dce1;--border2:#c7ccd3;
+      --text:#14181d;--muted:#3f474f;--faint:#7a828c;--amber:#a9720a;--amber-dim:#a9720a;
+      --cyan:#0f7f92;--green:#1f7a3d;--red:#c02a2a;
+    }
+    body{background:#fff}
+    .sheet{max-width:100%;padding:0}
+    .glyph{filter:none}
+    .card,.rung,.spec{box-shadow:none}
+    .card{background:#fff;break-inside:avoid}
+    .grid{gap:8px}
+    section{margin-bottom:16px;break-inside:avoid}
+    .k{background:transparent;border-color:#d9dce1}
+    .kc{background:transparent}
+    .hero h1 .mini{color:var(--amber)}
+    footer{color:#7a828c}
+    @page{margin:14mm}
+  }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <!-- ============ HERO ============ -->
+  <header class="hero">
+    <svg class="glyph" viewBox="0 0 64 64" role="img" aria-label="WALL-E robot glyph" xmlns="http://www.w3.org/2000/svg">
+      <!-- head / body -->
+      <rect x="12" y="14" width="40" height="26" rx="4" fill="none" stroke="#ffb43a" stroke-width="2.4"/>
+      <!-- binocular eyes -->
+      <circle cx="24" cy="26" r="6.4" fill="none" stroke="#ffb43a" stroke-width="2.4"/>
+      <circle cx="40" cy="26" r="6.4" fill="none" stroke="#ffb43a" stroke-width="2.4"/>
+      <circle cx="24" cy="26" r="2.2" fill="#5cc7d8"/>
+      <circle cx="40" cy="26" r="2.2" fill="#5cc7d8"/>
+      <!-- neck -->
+      <line x1="32" y1="40" x2="32" y2="45" stroke="#ffb43a" stroke-width="2.4"/>
+      <!-- twin track pods -->
+      <rect x="7"  y="45" width="22" height="12" rx="6" fill="none" stroke="#ffb43a" stroke-width="2.4"/>
+      <rect x="35" y="45" width="22" height="12" rx="6" fill="none" stroke="#ffb43a" stroke-width="2.4"/>
+      <circle cx="13" cy="51" r="1.6" fill="#ffb43a"/><circle cx="23" cy="51" r="1.6" fill="#ffb43a"/>
+      <circle cx="41" cy="51" r="1.6" fill="#ffb43a"/><circle cx="51" cy="51" r="1.6" fill="#ffb43a"/>
+    </svg>
+    <div>
+      <p class="eyebrow">Pi-5 person-following rover</p>
+      <h1>WALL&#8209;E <span class="mini">Mini</span></h1>
+      <p class="tagline">A ~40&nbsp;kg tracked rover that follows you, dodges obstacles, and takes a phone or GPS route — with RC always holding the kill switch. Every autonomy layer sits under a hardware safety chain.</p>
+    </div>
+  </header>
+
+  <!-- ============ SPEC STRIP ============ -->
+  <div class="specs">
+    <span class="spec"><b>~40&nbsp;kg</b> <span class="u">tracked / diff-drive</span></span>
+    <span class="spec"><b>Raspberry&nbsp;Pi&nbsp;5</b> <span class="u">NVMe boot</span></span>
+    <span class="spec"><b>2&times;&nbsp;VESC</b> <span class="u">over CAN</span></span>
+    <span class="spec"><b>OAK&#8209;D&nbsp;Lite</b> <span class="u">depth + YOLOv8n</span></span>
+    <span class="spec"><b>~1.2&nbsp;m/s</b> <span class="u">top speed</span></span>
+    <span class="spec"><b>~30&nbsp;Hz</b> <span class="u">control loop</span></span>
+    <span class="spec"><b>13S</b> <span class="u">Li-ion + Daly BMS</span></span>
+    <span class="spec"><b>UPSPlus</b> <span class="u">18650 HAT</span></span>
+    <span class="spec"><b>RTK&nbsp;GPS</b> <span class="u">waypoint nav</span></span>
+    <span class="spec"><b>~580</b> <span class="u">unit tests</span></span>
+  </div>
+
+  <!-- ============ 1 · AUTONOMY ============ -->
+  <section>
+    <div class="sec-head"><span class="no">01</span><h2>Autonomy</h2>
+      <span class="sub">follow · avoid · navigate · retrace</span></div>
+    <div class="grid">
+      <div class="card">
+        <h3>Follow-Me person tracking<span class="tag">4-layer</span></h3>
+        <p>Locks onto one person and holds a <span class="k">1.5&nbsp;m</span> follow distance. A layered pipeline keeps the lock honest:</p>
+        <ul class="tight">
+          <li><b>Detection filter</b> — rejects edge slivers, thin boxes &amp; short ground blobs (bbox/width/implied-height gates)</li>
+          <li><b>Sticky target lock</b> — 1.5&nbsp;s switch-grace + higher <span class="k">0.65</span> acquire bar; won't drop you for a closer, lower-confidence blob</li>
+          <li><b>Lateral PID steering</b> with edge-boost gain to fight targets drifting to the frame edge</li>
+          <li><b>Depth-based speed</b> with dead-zone &amp; accel cap; open-loop fallback</li>
+        </ul>
+        <p><b>Engage</b> by RC (ch4), a <b>hand gesture</b> (3&#8209;4&#8209;3 fingers; open palm stops), or the dashboard — but only when a person is already in view.</p>
+      </div>
+      <div class="card cyan">
+        <h3>Obstacle avoidance<span class="tag">depth tiers</span></h3>
+        <p>Reads a depth corridor ahead and gates <b>forward</b> motion only (camera can't see behind):</p>
+        <ul class="tight">
+          <li><b>Slow</b> below <span class="kc">1.5&nbsp;m</span>, <b>hard stop</b> below <span class="kc">0.4&nbsp;m</span></li>
+          <li><b>Person-stop tier</b> — YOLO person/animal inside <span class="kc">0.8&nbsp;m</span> forces distance&nbsp;→&nbsp;0</li>
+          <li><b>Stale-depth fail-safe</b> — stops autonomy if depth data ages past 0.5&nbsp;s</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Waypoint / RTK-GPS nav<span class="tag">ALIGN·DRIVE·ARRIVE</span></h3>
+        <p>Three-state machine: <b>pivot</b> until heading error &lt;&nbsp;<span class="k">12&deg;</span>, <b>drive</b> with PID steering, <b>arrive</b> within <span class="k">1&nbsp;m</span> then advance. Requires <b>RTK-fixed</b> (quality&nbsp;&ge;&nbsp;4); stale GPS &gt;3&nbsp;s halts motion.</p>
+      </div>
+      <div class="card">
+        <h3>Trail pursuit<span class="tag">pure-pursuit</span></h3>
+        <p>Drops GPS/odometry breadcrumbs and follows the <b>path you walked</b> — not just your live position — so it rounds corners after losing line-of-sight. Adaptive lookahead, Savitzky-Golay smoothing, and curvature-based slowdown in tight turns.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 2 · TELEOP & CONTROL ============ -->
+  <section>
+    <div class="sec-head"><span class="no">02</span><h2>Teleop &amp; Control</h2>
+      <span class="sub">RC boss · phone PWA · dashboard</span></div>
+    <div class="grid">
+      <div class="card red">
+        <h3>RC authority model<span class="tag">boss</span></h3>
+        <p>A 5-channel RC receiver is always in charge. <span class="k">ch3</span> arms/disarms, <span class="k">ch5</span> latches an emergency stop. The loop force-neutrals the motors unless RC keeps it armed — every autonomy &amp; teleop path rides <b>under</b> this gate.</p>
+      </div>
+      <div class="card">
+        <h3>Phone <span class="k">/drive</span> PWA<span class="tag">fail-safe</span></h3>
+        <p>Installable phone driver, fail-safe <b>by construction</b> — the robot stops if wifi drops, the tab sleeps, or a thread dies:</p>
+        <ul class="tight">
+          <li><b>Server-side 250&nbsp;ms deadman</b> — a watchdog thread is the sole motor writer</li>
+          <li><b>Arm ceremony</b> — hold-to-arm ≥500&nbsp;ms + RC-armed</li>
+          <li><b>Latched e-stop</b> from any client &amp; <b>single-driver lock</b></li>
+          <li><b>Speed caps</b> 30 / 60 / 100&nbsp;% + optional live camera over WS</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Web dashboard<span class="tag">:8080</span></h3>
+        <p>Flask app on port <span class="k">8080</span>: live RGB + depth camera, SSE telemetry, browsable recordings, plus a live Follow-Me radar, pure-pursuit trail visualizer &amp; RTK diagnostics — all served straight off the Pi.</p>
+      </div>
+      <div class="card">
+        <h3>Bluetooth override<span class="tag">SPP</span></h3>
+        <p>An external SPP service writes a fresh-within-600&nbsp;ms command file the main loop honors as a manual override — still gated by RC arm state.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 3 · PERCEPTION ============ -->
+  <section>
+    <div class="sec-head"><span class="no">03</span><h2>Perception</h2>
+      <span class="sub">depth · detection · heading</span></div>
+    <div class="grid">
+      <div class="card cyan">
+        <h3>Depth corridor</h3>
+        <p>OAK-D Lite stereo depth sampled in a tuned ROI (width, height, camera geometry all modeled). Valid-pixel % threshold ignores sparse/noisy corridors; <b>USB-drop self-heal</b> rebuilds the pipeline without a service restart.</p>
+      </div>
+      <div class="card cyan">
+        <h3>YOLOv8n pipeline<span class="tag">depthai v3</span></h3>
+        <p>80-class COCO detection via a <b>NeuralNetwork node + host-side NMS</b> — the stock Luxonis detection nodes silently return zero dets with ultralytics blobs. Host-side <b>IoU + Kalman tracklets</b> give each person a stable track id across brief occlusions.</p>
+      </div>
+      <div class="card cyan">
+        <h3>IMU heading</h3>
+        <p>Onboard <b>BMI270</b> (gyro + accel, <b>no magnetometer</b>) integrated to a startup-relative heading, feeding a PID heading-hold that keeps straight lines straight over bumps. External I2C IMU auto-preferred if present; GPS course-over-ground alignment re-zeros drift.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 4 · SAFETY SYSTEMS ============ -->
+  <section>
+    <div class="sec-head"><span class="no">04</span><h2>Layered safety</h2>
+      <span class="sub">hardware authority down to graceful shutdown</span></div>
+    <div class="ladder">
+      <div class="rung"><span class="lvl r">RC</span><div class="body"><b>ch3 arm / ch5 e-stop are authoritative.</b> ch5 latches emergency + shutdown; a &gt;1&nbsp;s RC-stale watchdog disarms. Final gate: not-armed&nbsp;→&nbsp;motors neutral.</div></div>
+      <div class="rung"><span class="lvl c">SEE</span><div class="body"><b>Obstacle tiers</b> slow then stop on depth; a <b>person/animal inside 0.8&nbsp;m</b> forces a full stop; stale depth (&gt;0.5&nbsp;s) halts autonomy.</div></div>
+      <div class="rung"><span class="lvl">CHG</span><div class="body"><b>Charger inhibit</b> — BMS-detected charging refuses drive commands, debounced (≥2&nbsp;A over consecutive polls) so a regen blip can't false-trip; <b>fail-open</b> after 30&nbsp;s of BLE silence.</div></div>
+      <div class="rung"><span class="lvl">PACK</span><div class="body"><b>BMS FET / pack-low guard</b> — discharge-FET grace at arm, then force-neutral if it stays off; VESC low-voltage watchdog triggers graceful OS shutdown at <b>39&nbsp;V</b> (13S @ 3.0&nbsp;V/cell) held 10&nbsp;s, latched.</div></div>
+      <div class="rung"><span class="lvl g">HAND</span><div class="body"><b>Phone deadman</b> — 250&nbsp;ms server-side watchdog, latched e-stop from any client, single-driver lock, speed caps.</div></div>
+      <div class="rung"><span class="lvl g">UPS</span><div class="body"><b>Graceful shutdown chain</b> — UPSPlus HAT keeps the Pi alive through pack cutoff; voltage-keyed AC detection (debounced) with auto-recovery on power return.</div></div>
+    </div>
+  </section>
+
+  <!-- ============ 5 · POWER ============ -->
+  <section>
+    <div class="sec-head"><span class="no">05</span><h2>Power</h2>
+      <span class="sub">13S pack · BMS · UPS chain</span></div>
+    <div class="grid">
+      <div class="card">
+        <h3>13S main pack</h3>
+        <p>13-series Li-ion drives both VESCs. VESC STATUS frames carry pack voltage; a sustained-low watchdog at <span class="k">39&nbsp;V</span> triggers a clean shutdown before cells are stressed.</p>
+      </div>
+      <div class="card">
+        <h3>Daly BMS<span class="tag">BLE</span></h3>
+        <p>Daly SPIM08HP over Bluetooth polls <b>SOC, per-cell voltages, temp &amp; MOSFET status</b> every 8&nbsp;s. Auto-reconnects; failures never block the control loop. Drives charger-inhibit &amp; pack-low logic.</p>
+      </div>
+      <div class="card green">
+        <h3>UPSPlus HAT<span class="tag">18650</span></h3>
+        <p>18650-backed UPS powers the Pi so main-pack cutoff never yanks power mid-write. Voltage-keyed AC detection + debounce drives the graceful-shutdown countdown, with auto-recovery when power returns.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 6 · TELEMETRY & DATA ============ -->
+  <section>
+    <div class="sec-head"><span class="no">06</span><h2>Telemetry &amp; Data</h2>
+      <span class="sub">stream · record · replay</span></div>
+    <div class="grid">
+      <div class="card">
+        <h3>Live SSE telemetry</h3>
+        <p>The dashboard streams live state over Server-Sent Events — mode, arm/e-stop, follow-me target, obstacle distance, BMS &amp; VESC health.</p>
+      </div>
+      <div class="card">
+        <h3>Flight recorder<span class="tag">JSONL</span></h3>
+        <p>Structured ~10&nbsp;Hz telemetry log, <b>segmented per arm/disarm cycle</b> for easy session analysis. <b>Arm-gated</b>: full rate while armed, a 5&nbsp;s heartbeat while idle (~99&nbsp;% less idle disk I/O) — but ARM/DISARM/e-stop &amp; mode flips log instantly.</p>
+      </div>
+      <div class="card cyan">
+        <h3>MCAP recordings<span class="tag">activity-triggered</span></h3>
+        <p>Records when Follow-Me or obstacle avoidance fires: on-device <b>H.265 video</b> (near-zero CPU) plus <b>MCAP</b> annotated snapshots + telemetry, with a 2&nbsp;s pre-buffer and auto storage pruning.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 7 · DEV & TOOLING ============ -->
+  <section>
+    <div class="sec-head"><span class="no">07</span><h2>Dev &amp; Tooling</h2>
+      <span class="sub">calibrate · tune · bench-test</span></div>
+    <div class="grid">
+      <div class="card">
+        <h3>Calibration wizard<span class="tag">/calibrate</span></h3>
+        <p>Browser-guided relay-feedback auto-tune (Ziegler-Nichols) for heading PID, Follow-Me steering &amp; straight-line bias — with a one-click <b>write tuned gains back into <span class="k">config.py</span></b>. Plus a fleet of CLI calibration harnesses.</p>
+      </div>
+      <div class="card">
+        <h3>Autotune &amp; replay</h3>
+        <p>Offline tools score &amp; <b>Bayesian-optimize</b> Follow-Me steering gains from recorded runs, and replay logged sessions (JSONL or MCAP) through the controller for regression analysis.</p>
+      </div>
+      <div class="card green">
+        <h3>Detect-only bench mode<span class="tag">safe</span></h3>
+        <p>Runs the UPS detection chain end-to-end <b>without</b> firing any shutdown action — verify AC-loss detection on the bench without risking a real power-down.</p>
+      </div>
+      <div class="card">
+        <h3>~580-test suite</h3>
+        <p>~580 unit tests across 35 files cover the safety state machine, follow-me targeting, obstacle math, VESC/BMS/UPS logic, teleop deadman &amp; more.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>WALL-E Mini</span>
+    <span class="dot">&bull;</span>
+    <span>Raspberry Pi 5 control stack</span>
+    <span class="dot">&bull;</span>
+    <span>every figure pulled from source &amp; docs</span>
+  </footer>
+
+</div>
+</body>
+</html>
