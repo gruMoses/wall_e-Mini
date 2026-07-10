@@ -35,6 +35,7 @@ try:
         WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
     )
     from pi_app.control.gps_heading_align import GpsHeadingAligner
+    from pi_app.app.log_gating import should_log_tick, cleanup_old_logs as _cleanup_old_logs
     from config import config
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -57,6 +58,7 @@ except ModuleNotFoundError:
         WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
     )
     from pi_app.control.gps_heading_align import GpsHeadingAligner  # type: ignore
+    from pi_app.app.log_gating import should_log_tick, cleanup_old_logs as _cleanup_old_logs  # type: ignore
     from config import config  # type: ignore
 
 
@@ -133,19 +135,6 @@ def _open_pid_csv(logs_dir: Path):
         fh = None
         path = None
     return fh, path
-
-
-def _cleanup_old_logs(log_dir: Path, days: int = 7) -> None:
-    try:
-        cutoff = time.time() - days * 24 * 3600
-        for p in log_dir.glob("run_*.log"):
-            try:
-                if p.stat().st_mtime < cutoff:
-                    p.unlink()
-            except Exception:
-                pass
-    except Exception:
-        pass
 
 
 def run() -> None:
@@ -430,7 +419,12 @@ def run() -> None:
 
     try:
         last_log_ts = 0.0
-        log_interval = 0.1  # 10 Hz logging
+        log_interval = 0.1  # 10 Hz logging (armed rate; unchanged)
+        # Disarmed-state logging drops to a periodic heartbeat (see should_log_tick)
+        # to avoid writing ~10Hz of "nothing happening" telemetry while idle.
+        log_disarmed_heartbeat_s = float(getattr(config, "log_disarmed_heartbeat_s", 5.0))
+        _prev_tick_mode = None              # previous tick's mode, for transition detection
+        _prev_tick_charger_inhibit = None   # previous tick's charger_inhibit, for flip detection
         prev_loop_ts = time.monotonic()
         _vesc_debug_last_t = 0.0
         prev_imu_ts = getattr(controller, "_last_imu_update", None)
@@ -820,10 +814,33 @@ def run() -> None:
                     f"{'  SLIP!' if _slip else ''}"
                 )
 
-            # Structured JSON log for analysis (one line per tick)
+            # Structured JSON log for analysis (one line per tick when armed).
+            # When disarmed (robot idle -- most of its uptime), drop to a
+            # low-rate heartbeat + always-log-on-event to cut disk I/O.
             try:
                 now_ts = time.time()
-                if now_ts - last_log_ts >= log_interval:
+                _cur_tick_mode = telem.get("mode", "MANUAL")
+                _cur_tick_charger_inhibit = telem.get("charger_inhibit", False)
+                _mode_changed = (
+                    _prev_tick_mode is not None and _cur_tick_mode != _prev_tick_mode
+                )
+                _charger_inhibit_changed = (
+                    _prev_tick_charger_inhibit is not None
+                    and _cur_tick_charger_inhibit != _prev_tick_charger_inhibit
+                )
+                _prev_tick_mode = _cur_tick_mode
+                _prev_tick_charger_inhibit = _cur_tick_charger_inhibit
+                if should_log_tick(
+                    is_armed=cmd.is_armed,
+                    now_ts=now_ts,
+                    last_log_ts=last_log_ts,
+                    log_interval_s=log_interval,
+                    heartbeat_s=log_disarmed_heartbeat_s,
+                    has_event=bool(events),
+                    charger_inhibit_changed=_charger_inhibit_changed,
+                    emergency_active=cmd.emergency_active,
+                    mode_changed=_mode_changed,
+                ):
                     last_log_ts = now_ts
                     imu_pipeline = None
                     if oak_reader is not None:

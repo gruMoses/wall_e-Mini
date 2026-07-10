@@ -640,6 +640,15 @@ class Config:
     # Debug settings
     log_imu_data: bool = False
 
+    # Disarmed-state telemetry logging cadence. The main loop writes the full
+    # ~10Hz structured JSON telemetry line only while armed. While disarmed
+    # (robot idle, which is most of its uptime) it drops to a periodic
+    # heartbeat write every log_disarmed_heartbeat_s seconds, cutting
+    # idle-time disk I/O by ~99%. Events (ARM/DISARM/EMERGENCY/etc.),
+    # charger_inhibit flips, active emergencies, and mode transitions still
+    # log immediately regardless of this interval.
+    log_disarmed_heartbeat_s: float = 5.0
+
 
 # Global configuration instance
 config = Config()
