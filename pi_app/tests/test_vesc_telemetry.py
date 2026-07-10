@@ -844,6 +844,29 @@ class TestPackLowLatch(unittest.TestCase):
         self.assertIsNone(d._low_voltage_since)
         self.assertTrue(d._pack_low_latched)
 
+    def test_latch_survives_can_dropout(self):
+        """QA pin: while latched, a CAN dropout (voltage=None — no usable
+        frames) must NOT release the latch or mutate any watchdog state — the
+        monitor early-returns before touching anything. A dropout mid-latch
+        would otherwise silently re-enable motors on a critically low pack."""
+        d = self._driver()
+        with patch.object(d, "_send_rpm"):
+            d._trigger_low_voltage_shutdown(38.0)
+        self.assertTrue(d._pack_low_latched)
+        # No STATUS_5 voltage available -> _get_pack_voltage() returns None.
+        self.assertIsNone(d._get_pack_voltage())
+        before_since = d._low_voltage_since
+        before_floor_flag = d._below_floor_active
+        d._check_voltage_shutdown()                    # must be a no-op
+        self.assertTrue(d._pack_low_latched)           # no false release
+        self.assertEqual(d._low_voltage_since, before_since)
+        self.assertEqual(d._below_floor_active, before_floor_flag)
+        # Driver-level enforcement still holds during the dropout.
+        sent: list = []
+        with patch.object(d, "_send_rpm", side_effect=lambda *a: sent.append(a)):
+            d.set_tracks(220, 220)
+        self.assertEqual(sent, [(d._left_id, 0), (d._right_id, 0)])
+
     def test_pack_low_latched_surfaced_on_telemetry(self):
         d = self._driver(delay=0.0)
         # Need an RPM frame so get_telemetry() returns non-None.

@@ -1007,6 +1007,21 @@ class Controller:
             telemetry["slew_out_right"] = right
             telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
             telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
+        elif self._vesc_pack_low_latched:
+            # VESC pack-low latch engaged (see vesc._check_voltage_shutdown):
+            # refuse all drive commands. The driver's set_tracks() also forces
+            # neutral (belt-and-suspenders), but the controller must observe
+            # the latch too — otherwise the slew state keeps ramping toward the
+            # commanded value while latched, and the moment the latch clears at
+            # ~41V the fully-ramped command would be emitted instantly (full-
+            # speed lurch). Resetting slew here makes release ramp from neutral.
+            left = right = CENTER_OUTPUT_VALUE
+            self._motor.stop()
+            self._reset_slew_state(mono_now)
+            telemetry["slew_out_left"] = left
+            telemetry["slew_out_right"] = right
+            telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
+            telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
         else:
             left_in = int(left)
             right_in = int(right)
