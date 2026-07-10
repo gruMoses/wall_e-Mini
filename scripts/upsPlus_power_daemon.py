@@ -142,6 +142,36 @@ UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
 # for protection regs 0x11/0x12 is 0-4500mV.
 BATTERY_PROTECTION_MV = 3400
 
+# --- I2C politeness: minimize supplemental traffic to the UPS MCU ----------
+#
+# PROPHYLACTIC load reduction, NOT a proven root-cause fix (n=1 field death).
+# Field evidence (2026-07-10): with ZERO I2C traffic, 3/3 main-pack output
+# flips transferred cleanly (not one dropped ping); with this daemon's per-poll
+# load active (detection read + the ~16-register snapshot + INA219 read that the
+# /tmp/ups_status.json bridge added), the FIRST pack-flip after deploy hard-cut
+# the Pi output in ~2s (dirty fsck). Hypothesis: I2C servicing during the
+# input-sag transfer window delays/glitches the IP5328P power-path switchover.
+# n=1 death, so this is load-reduction insurance, not a confirmed cause.
+#
+# Policy: the per-poll DETECTION read (read_charger_voltages, the shutdown
+# decision input) is NEVER suppressed — it was present in every survived
+# scenario. Only the EXTRA "nice to have" reads (the 16-register snapshot +
+# INA219 battery gauge behind _publish_status) are gated: silenced entirely
+# during any input sag / transfer / outage / recovery window, and otherwise
+# throttled to a slow cadence. The status file still publishes every poll (1Hz)
+# with fresh charger-voltage + AC state so the owner keeps seeing AC state
+# during an outage; only the battery/protect fields go stale (flagged as such).
+
+# After AC returns (present again), keep supplemental reads suspended this much
+# longer so the MCU finishes any transfer/recovery completely untouched.
+AC_RECOVERY_QUIET_S = 5.0
+
+# In steady AC-present state, take the supplemental snapshot + INA219 read only
+# this often — not every 1s poll. The status file still updates every poll with
+# fresh typec/microusb/ac_present; the battery/protect fields refresh at this
+# slower cadence and carry their own ts_batt so staleness stays honest.
+SUPPLEMENTAL_READ_PERIOD_S = 10.0
+
 
 def detect_addr(bus: smbus2.SMBus) -> int:
     for addr in (0x17, 0x18):
@@ -247,6 +277,20 @@ class AcPresenceTracker:
     def state(self) -> bool | None:
         return self._state
 
+    @property
+    def in_debounce_window(self) -> bool:
+        """True while instant readings are below threshold but the debounced
+        state has NOT yet flipped to MISSING — i.e. we are inside the open
+        AC_LOSS_DEBOUNCE_S window watching a possible loss.
+
+        Used by the daemon's I2C-politeness gate to suppress supplemental reads
+        the moment a sag begins, not only after the full debounce elapses. Pure
+        derived state; no I2C. (Once instant voltage is seen above threshold the
+        window closes; once the state commits to MISSING this returns False and
+        the missing-state suppression takes over instead.)
+        """
+        return self._below_threshold_since is not None and self._state is not False
+
     def update(self, typec_mv: int, microusb_mv: int, now: float) -> bool:
         """Feed one instantaneous reading; returns the current debounced state."""
         instant_present = is_ac_present_instant(typec_mv, microusb_mv)
@@ -328,6 +372,8 @@ def write_status_file(
     batt_v: float | None = None,
     batt_ma: float | None = None,
     protect_mv: int | None = None,
+    ts_batt: float | None = None,
+    batt_stale: bool = False,
     path: str = UPS_STATUS_FILE,
 ) -> bool:
     """Atomically publish a small UPS status snapshot for the web dashboard.
@@ -368,6 +414,14 @@ def write_status_file(
             "batt_v": batt_v,
             "batt_ma": batt_ma,
             "protect_mv": protect_mv,
+            # ts_batt: wall-clock time of the battery/protect fields' last
+            # actual supplemental read (may lag ts when the extra reads are
+            # suppressed during a transfer window or between slow-cadence
+            # reads). batt_stale flags that batt_v/batt_ma/protect_mv are
+            # last-known rather than freshly read this poll, so the debug page
+            # can grey them honestly.
+            "ts_batt": ts_batt,
+            "batt_stale": bool(batt_stale),
             "detect_only": bool(detect_only),
             "seconds_without_charge": seconds_without_charge,
         }
@@ -393,6 +447,54 @@ def write_status_file(
         return False
 
 
+def _supplemental_gate(
+    *,
+    instant_present: bool,
+    in_debounce: bool,
+    state_missing: bool,
+    now: float,
+    last_unclean_at: float | None,
+    last_supplemental_at: float | None,
+) -> tuple[bool, float | None]:
+    """Decide whether THIS poll may issue supplemental (non-decision) I2C.
+
+    The I2C-politeness policy (see the module constants above) lives here as a
+    PURE function of its inputs so it is unit-testable without driving the
+    infinite poll loop or real hardware. ``now`` is a monotonic clock.
+
+    Returns ``(do_supplemental, new_last_unclean_at)``. The caller threads
+    ``new_last_unclean_at`` back in on the next poll and, when do_supplemental
+    is True, records ``now`` as its ``last_supplemental_at`` for the cadence.
+
+    Any ONE of these forces the supplemental reads quiet:
+      * TRANSFER/SAG/OUTAGE window — instant charger voltage below threshold
+        THIS sample (pre-debounce), OR the debounce window is open, OR the
+        debounced state is already MISSING. (All three are enumerated for
+        clarity even though the instant-below term subsumes the others.)
+      * RECOVERY HOLDOFF — within AC_RECOVERY_QUIET_S after the most recent
+        unclean poll, so the MCU finishes its switchover untouched.
+      * SLOW CADENCE — not yet SUPPLEMENTAL_READ_PERIOD_S since the last
+        supplemental read.
+    """
+    in_transfer_window = (not instant_present) or in_debounce or state_missing
+    if in_transfer_window:
+        last_unclean_at = now
+    within_recovery_holdoff = (
+        last_unclean_at is not None
+        and (now - last_unclean_at) < AC_RECOVERY_QUIET_S
+    )
+    due_for_supplemental = (
+        last_supplemental_at is None
+        or (now - last_supplemental_at) >= SUPPLEMENTAL_READ_PERIOD_S
+    )
+    do_supplemental = (
+        (not in_transfer_window)
+        and (not within_recovery_holdoff)
+        and due_for_supplemental
+    )
+    return do_supplemental, last_unclean_at
+
+
 def _publish_status(
     bus: smbus2.SMBus,
     device_addr: int,
@@ -403,38 +505,107 @@ def _publish_status(
     microusb_mv: int,
     seconds_without_charge: int,
     detect_only: bool,
+    do_supplemental: bool = True,
+    batt_cache: dict | None = None,
 ) -> None:
-    """Read battery/protect context and publish the status file — fully isolated.
+    """Publish the status file — fully isolated. Optionally does supplemental I2C.
 
-    Wraps BOTH the supplemental I2C/INA read and the file write in one broad
-    try/except so neither can ever raise into the poll loop. The authoritative
-    charger-voltage readings (typec_mv/microusb_mv) are passed in already-read;
-    only the extra "nice to have" fields (batt V/mA, protect threshold) are
-    fetched here, and if that read fails they degrade to None rather than
-    aborting the publish.
+    Wraps BOTH the (optional) supplemental I2C/INA read and the file write in
+    one broad try/except so neither can ever raise into the poll loop. The
+    authoritative charger-voltage readings (typec_mv/microusb_mv) and AC state
+    are passed in already-read from the per-poll DETECTION read and are always
+    published fresh.
+
+    ``do_supplemental`` (the I2C-politeness lever): when True this issues the
+    EXTRA reads — the ~16-register snapshot + INA219 battery gauge — and
+    refreshes ``batt_cache`` in place (batt_v/batt_ma/protect_mv/ts_batt),
+    publishing them fresh (batt_stale=False). When False it issues NO
+    supplemental I2C at all and republishes the last-known values from
+    ``batt_cache`` marked batt_stale=True. This is exactly the traffic the
+    politeness gate silences during transfer/recovery windows and throttles
+    between slow-cadence reads. A failed supplemental read degrades to the
+    cached values (still stale) rather than aborting the publish.
+
+    ``batt_cache`` is a caller-owned dict threaded across polls; None (legacy
+    callers) means "no cache", equivalent to an empty dict for this call.
     """
     try:
-        batt_v = batt_ma = protect_mv = None
-        try:
-            snap = read_ups_snapshot(bus, device_addr, ina_batt)
-            batt_v = snap.get("battery_v")
-            batt_ma = snap.get("battery_i_ma")
-            protect_mv = snap.get("protect_mv")
-        except Exception:
-            pass  # supplemental context only; publish what we have
+        cache = batt_cache if batt_cache is not None else {}
+        batt_stale = True
+        if do_supplemental:
+            try:
+                snap = read_ups_snapshot(bus, device_addr, ina_batt)
+                cache["batt_v"] = snap.get("battery_v")
+                cache["batt_ma"] = snap.get("battery_i_ma")
+                cache["protect_mv"] = snap.get("protect_mv")
+                cache["ts_batt"] = time.time()
+                batt_stale = False
+            except Exception:
+                pass  # supplemental context only; fall back to cached (stale)
         write_status_file(
             ac_present=ac_present,
             typec_mv=typec_mv,
             microusb_mv=microusb_mv,
             seconds_without_charge=seconds_without_charge,
             detect_only=detect_only,
-            batt_v=batt_v,
-            batt_ma=batt_ma,
-            protect_mv=protect_mv,
+            batt_v=cache.get("batt_v"),
+            batt_ma=cache.get("batt_ma"),
+            protect_mv=cache.get("protect_mv"),
+            ts_batt=cache.get("ts_batt"),
+            batt_stale=batt_stale,
             path=UPS_STATUS_FILE,
         )
     except Exception as error:  # noqa: BLE001 — must never reach the poll loop
         logging.debug("UPS status publish failed (non-fatal): %s", error)
+
+
+def _format_ac_transition_log(
+    *,
+    ac_present: bool,
+    typec_mv: int,
+    microusb_mv: int,
+    batt_cache: dict | None = None,
+    now_wall: float | None = None,
+) -> str:
+    """Format the AC state-change log line with ZERO supplemental I2C.
+
+    Historically this transition log did a fresh read_ups_snapshot (~16 regs +
+    INA219) — extra I2C at the WORST possible moments for the politeness
+    policy: the 'missing' edge read landed mid-outage/transfer and the
+    'present again' edge read landed inside the recovery holdoff. ALL
+    transition logging is now snapshot-free (even a transition during steady
+    AC-present state, for simplicity): charger voltages come from THIS poll's
+    detection read (already in hand) and battery values come from the last
+    cached supplemental read, tagged with their age when it is old enough to
+    matter (>= ~2 polls), so the log stays honest about what was measured when.
+
+    Pure string formatting — no I2C, no side effects — so it is directly
+    unit-testable.
+    """
+    cache = batt_cache or {}
+    batt_v = cache.get("batt_v")
+    batt_ma = cache.get("batt_ma")
+    ts_batt = cache.get("ts_batt")
+    age_note = ""
+    if batt_v is None and batt_ma is None:
+        age_note = ", no battery read yet"
+    elif ts_batt is not None:
+        now_wall = time.time() if now_wall is None else now_wall
+        age_s = max(0.0, float(now_wall) - float(ts_batt))
+        if age_s >= 2.0:  # older than ~a couple of polls — worth flagging
+            age_note = f", batt {age_s:.0f}s old"
+    return (
+        "UPS AC state changed -> %s (typec=%smV microusb=%smV "
+        "batt=%sV %smA [cached%s])"
+        % (
+            "present" if ac_present else "missing",
+            typec_mv,
+            microusb_mv,
+            batt_v,
+            batt_ma,
+            age_note,
+        )
+    )
 
 
 def stop_rover_service() -> None:
@@ -744,6 +915,12 @@ def main(detect_only: bool | None = None) -> None:
     last_ac_present = None
     tracker = AcPresenceTracker(AC_LOSS_DEBOUNCE_S)
     consecutive_i2c_errors = 0
+    # I2C-politeness state (all monotonic clock). batt_cache holds the last-known
+    # supplemental values so we can keep publishing them (marked stale) while the
+    # extra reads are suppressed during transfer/recovery windows.
+    batt_cache: dict[str, float | int | None] = {}
+    last_supplemental_monotonic: float | None = None
+    last_unclean_monotonic: float | None = None
 
     while True:
         try:
@@ -773,18 +950,22 @@ def main(detect_only: bool | None = None) -> None:
             logging.info("UPS AC state initialized: %s", "present" if ac_present else "missing")
         elif ac_present != last_ac_present:
             last_ac_present = ac_present
-            try:
-                snap = read_ups_snapshot(bus, device_addr, ina_batt)
-                logging.info(
-                    "UPS AC state changed -> %s (typec=%smV microusb=%smV batt=%sV %smA)",
-                    "present" if ac_present else "missing",
-                    snap["typec_mv"],
-                    snap["microusb_mv"],
-                    snap["battery_v"],
-                    snap["battery_i_ma"],
-                )
-            except Exception as error:
-                logging.info("UPS AC state changed -> %s (snapshot failed: %s)", ac_present, error)
+            # I2C politeness: transition logging is snapshot-free. The old code
+            # did a fresh read_ups_snapshot right here — supplemental I2C at the
+            # worst possible moments (the 'missing' edge lands mid-outage/
+            # transfer; the 'present again' edge lands inside the recovery
+            # holdoff). ALL transitions now log this poll's detection-read
+            # charger voltages plus the last-cached battery values (aged),
+            # even in steady AC-present state, for simplicity.
+            logging.info(
+                "%s",
+                _format_ac_transition_log(
+                    ac_present=ac_present,
+                    typec_mv=typec_mv,
+                    microusb_mv=microusb_mv,
+                    batt_cache=batt_cache,
+                ),
+            )
 
         if ac_present:
             if seconds_without_charge != 0:
@@ -807,9 +988,28 @@ def main(detect_only: bool | None = None) -> None:
                     bus, device_addr, ina_batt, detect_only=detect_only
                 )
 
+        # I2C politeness (prophylactic; see the constants block above). Decide
+        # whether this poll may issue the EXTRA snapshot + INA219 reads. The
+        # inputs are all derived from state already computed above — this gate
+        # does NOT touch the bus and does NOT feed back into any AC-detection /
+        # shutdown decision; it only throttles the telemetry reads.
+        do_supplemental, last_unclean_monotonic = _supplemental_gate(
+            instant_present=is_ac_present_instant(typec_mv, microusb_mv),
+            in_debounce=tracker.in_debounce_window,
+            state_missing=(tracker.state is False),
+            now=now,
+            last_unclean_at=last_unclean_monotonic,
+            last_supplemental_at=last_supplemental_monotonic,
+        )
+        if do_supplemental:
+            last_supplemental_monotonic = now
+
         # Best-effort status publish for the web debug board. Fully isolated —
         # cannot raise into this loop and does not consult or change any state
-        # used by the AC-detection / shutdown decisions above.
+        # used by the AC-detection / shutdown decisions above. Always publishes
+        # fresh AC state + charger voltages (from the detection read); the extra
+        # battery/protect fields refresh only when do_supplemental is True and
+        # are otherwise republished stale from batt_cache.
         _publish_status(
             bus, device_addr, ina_batt,
             ac_present=ac_present,
@@ -817,6 +1017,8 @@ def main(detect_only: bool | None = None) -> None:
             microusb_mv=microusb_mv,
             seconds_without_charge=seconds_without_charge,
             detect_only=detect_only,
+            do_supplemental=do_supplemental,
+            batt_cache=batt_cache,
         )
 
         time.sleep(1)

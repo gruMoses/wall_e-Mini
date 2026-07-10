@@ -89,6 +89,13 @@ def read_ups_status(path: str = UPS_STATUS_FILE,
         "batt_v": data.get("batt_v"),
         "batt_ma": data.get("batt_ma"),
         "protect_mv": data.get("protect_mv"),
+        # Battery/protect fields refresh at a slower cadence than the whole file
+        # and are suppressed entirely during power-transfer windows (the daemon
+        # minimizes I2C to the UPS MCU then). ts_batt is when they were last
+        # actually read; batt_stale flags that they are last-known, not fresh —
+        # the page greys them so the owner isn't misled during an outage.
+        "ts_batt": data.get("ts_batt"),
+        "batt_stale": data.get("batt_stale"),
         "detect_only": data.get("detect_only"),
         "seconds_without_charge": data.get("seconds_without_charge"),
     }
@@ -1266,14 +1273,24 @@ function applyUps(u) {
        ac == null ? 'grey' : (ac ? 'green' : 'red'));
   val('u-typec', num(u.typec_mv, 0, ' mV'), u.typec_mv == null ? 'grey' : '');
   val('u-microusb', num(u.microusb_mv, 0, ' mV'), u.microusb_mv == null ? 'grey' : '');
-  val('u-battv', num(u.batt_v, 3, ' V'), u.batt_v == null ? 'grey' : '');
+  /* Battery/protect come from the daemon's supplemental read, which is
+     suppressed during power-transfer windows and throttled to a slow cadence
+     to keep I2C off the UPS MCU. When batt_stale, these are last-known (not
+     fresh this poll) — grey them and tag with age so the owner isn't misled. */
+  var bstale = !!u.batt_stale;
+  var bage = (u.ts_batt != null) ? Math.max(0, Math.round(Date.now()/1000 - u.ts_batt)) : null;
+  var bsuffix = (bstale && bage != null) ? ' (' + bage + 's old)' : bstale ? ' (stale)' : '';
+  val('u-battv', num(u.batt_v, 3, ' V') + (u.batt_v == null ? '' : bsuffix),
+      (u.batt_v == null || bstale) ? 'grey' : '');
   if (u.batt_ma == null) { val('u-battma', '—', 'grey'); }
+  else if (bstale) { val('u-battma', u.batt_ma.toFixed(0) + ' mA' + bsuffix, 'grey'); }
   else {
     var mlbl = u.batt_ma > 20 ? ' (charging)' : u.batt_ma < -20 ? ' (discharging)' : '';
     val('u-battma', u.batt_ma.toFixed(0) + ' mA' + mlbl,
         u.batt_ma > 20 ? 'green' : u.batt_ma < -20 ? 'amber' : '');
   }
-  val('u-protect', num(u.protect_mv, 0, ' mV'), u.protect_mv == null ? 'grey' : '');
+  val('u-protect', num(u.protect_mv, 0, ' mV'),
+      (u.protect_mv == null || bstale) ? 'grey' : '');
   var swc = u.seconds_without_charge;
   val('u-swc', swc == null ? '—' : swc + ' s',
       swc == null ? 'grey' : swc > 0 ? 'amber' : 'green');
