@@ -141,6 +141,81 @@ class WriteStatusFileIsolation(unittest.TestCase):
             self.assertFalse(os.path.exists(path))
 
 
+class WriteStatusFileSymlinkHardening(unittest.TestCase):
+    """The temp file must be created O_EXCL|O_NOFOLLOW under an unpredictable
+    name — /tmp is world-writable and the daemon runs as root, so an attacker
+    pre-planting a symlink at a predictable temp path must NOT get an
+    arbitrary-file-write; the publish is refused, swallowed, and retried on a
+    later poll."""
+
+    def _write(self, path):
+        return daemon.write_status_file(
+            ac_present=True, typec_mv=5000, microusb_mv=0,
+            seconds_without_charge=0, detect_only=False, path=path,
+        )
+
+    def test_preplanted_symlink_at_temp_path_refused_and_target_untouched(self):
+        with _tmp() as path:
+            victim = os.path.join(os.path.dirname(path), "victim.txt")
+            with open(victim, "w") as f:
+                f.write("precious")
+            # Make the (normally random) temp name predictable, then squat it
+            # with a symlink pointing at the victim — the classic /tmp attack.
+            with mock.patch("upsPlus_power_daemon.secrets.token_hex",
+                            return_value="feedfacecafe"):
+                planted = f"{path}.tmp.{os.getpid()}.feedfacecafe"
+                os.symlink(victim, planted)
+                result = self._write(path)
+            # Refused (O_EXCL sees the path exists; symlinks are never
+            # followed) and swallowed — no exception reached us.
+            self.assertFalse(result)
+            # The victim was NOT written through the symlink.
+            with open(victim) as f:
+                self.assertEqual(f.read(), "precious")
+            # The status file was not published this cycle.
+            self.assertFalse(os.path.exists(path))
+            # And we did not unlink the foreign path we never created.
+            self.assertTrue(os.path.islink(planted))
+
+    def test_preplanted_regular_file_at_temp_path_refused(self):
+        # O_EXCL also refuses a squatted regular file (EEXIST) — swallowed,
+        # foreign file left alone, publish skipped.
+        with _tmp() as path:
+            with mock.patch("upsPlus_power_daemon.secrets.token_hex",
+                            return_value="deadbeef0000"):
+                squatted = f"{path}.tmp.{os.getpid()}.deadbeef0000"
+                with open(squatted, "w") as f:
+                    f.write("squatter")
+                result = self._write(path)
+            self.assertFalse(result)
+            self.assertFalse(os.path.exists(path))
+            with open(squatted) as f:
+                self.assertEqual(f.read(), "squatter")
+
+    def test_temp_created_with_excl_nofollow_and_random_suffix(self):
+        opens = []
+        real_open = os.open
+
+        def spy(p, flags, *args, **kwargs):
+            opens.append((p, flags))
+            return real_open(p, flags, *args, **kwargs)
+
+        with _tmp() as path:
+            with mock.patch("upsPlus_power_daemon.os.open", side_effect=spy):
+                self.assertTrue(self._write(path))
+                self.assertTrue(self._write(path))
+        self.assertEqual(len(opens), 2)
+        for p, flags in opens:
+            self.assertTrue(flags & os.O_CREAT)
+            self.assertTrue(flags & os.O_EXCL)
+            self.assertTrue(flags & os.O_NOFOLLOW)
+            # pid + 12 hex chars of secrets.token_hex(6) entropy.
+            self.assertRegex(os.path.basename(p),
+                             r"^ups_status\.json\.tmp\.\d+\.[0-9a-f]{12}$")
+        # Unpredictable: two consecutive writes must not reuse a temp name.
+        self.assertNotEqual(opens[0][0], opens[1][0])
+
+
 class PublishStatusIsolation(unittest.TestCase):
     """_publish_status wraps the supplemental I2C read + the write; neither
     can propagate into the poll loop, and a failed context read degrades

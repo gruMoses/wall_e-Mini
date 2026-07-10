@@ -62,6 +62,7 @@ THE FIX:
 import json
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -337,14 +338,27 @@ def write_status_file(
     or perturb the AC-detection / shutdown decision logic. This mirrors the
     flight-recorder try/except discipline used elsewhere in this codebase.
 
-    The file is written to a per-pid temp path in the same directory and then
+    The file is written to a temp path in the same directory and then
     ``os.replace``d into place, so a concurrent reader never observes a
     half-written file (os.replace is atomic within a filesystem).
+
+    SYMLINK HARDENING: /tmp is world-writable and this daemon typically runs
+    as root, so a predictable temp name would let a local attacker pre-plant
+    a symlink and turn the open() into an arbitrary-file-write-as-root. The
+    temp file is therefore created with O_CREAT|O_EXCL|O_NOFOLLOW (refuses to
+    open ANY pre-existing path — O_EXCL never follows a symlink, dangling or
+    not; O_NOFOLLOW is belt-and-suspenders) under an unpredictable
+    secrets.token_hex suffix so the name can't be guessed and squatted ahead
+    of time. Any failure — including EEXIST from a squatted name — is
+    swallowed like every other error here: a skipped publish cycle is fine,
+    the next poll retries. os.replace itself is symlink-safe (it renames over
+    the destination rather than writing through it).
 
     Returns True on a successful write, False if the write was suppressed by an
     error (callers ignore the return; it exists purely for tests).
     """
-    tmp = f"{path}.tmp.{os.getpid()}"
+    tmp = None
+    created = False
     try:
         payload = {
             "ts": time.time(),
@@ -357,16 +371,25 @@ def write_status_file(
             "detect_only": bool(detect_only),
             "seconds_without_charge": seconds_without_charge,
         }
-        with open(tmp, "w") as handle:
-            handle.write(json.dumps(payload))
+        data = json.dumps(payload).encode("utf-8")
+        tmp = f"{path}.tmp.{os.getpid()}.{secrets.token_hex(6)}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        created = True
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
         os.replace(tmp, path)
         return True
     except Exception as error:  # noqa: BLE001 — intentional catch-all (see docstring)
         logging.debug("UPS status file write failed (non-fatal): %s", error)
-        try:
-            os.unlink(tmp)
-        except Exception:
-            pass
+        # Only clean up a temp file WE created — never unlink a pre-existing
+        # path (e.g. an attacker-planted symlink that made os.open EEXIST).
+        if created:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
         return False
 
 

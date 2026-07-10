@@ -1166,7 +1166,9 @@ sse.onmessage = function(e) {
       d.vesc_left_rpm == null ? 'grey' : '');
   val('v-rrpm', d.vesc_right_rpm == null ? '—' : d.vesc_right_rpm,
       d.vesc_right_rpm == null ? 'grey' : '');
-  val('v-bytes', d.motor_left + ' / ' + d.motor_right, '');
+  var mbl = d.motor_left, mbr = d.motor_right;
+  val('v-bytes', (mbl == null || mbr == null) ? '—' : mbl + ' / ' + mbr,
+      (mbl == null || mbr == null) ? 'grey' : '');
   var fc = d.vesc_rx_frame_count;
   val('v-frames', fc == null ? '—' : fc, '');
   var tnow = performance.now();
@@ -1275,11 +1277,15 @@ function applyUps(u) {
   var swc = u.seconds_without_charge;
   val('u-swc', swc == null ? '—' : swc + ' s',
       swc == null ? 'grey' : swc > 0 ? 'amber' : 'green');
-  pill('u-mode', u.detect_only ? 'DETECT-ONLY' : 'ARMED',
-       u.detect_only ? 'amber' : 'green');
+  /* Older daemons may not publish detect_only at all — render unknown as
+     '—', never as ARMED (a false "armed" claim about power protection). */
+  var dm = u.detect_only;
+  pill('u-mode', dm == null ? '—' : (dm ? 'DETECT-ONLY' : 'ARMED'),
+       dm == null ? 'grey' : (dm ? 'amber' : 'green'));
 
   watch('ac', 'ups_ac_present', ac, boolStr, function(v){ return v ? 'up' : 'down'; });
-  watch('upsmode', 'ups_daemon_mode', u.detect_only ? 'detect-only' : 'armed', null, null);
+  watch('upsmode', 'ups_daemon_mode',
+        dm == null ? undefined : (dm ? 'detect-only' : 'armed'), null, null);
 }
 function pollUps() {
   fetch('/api/ups', {cache: 'no-store'})
