@@ -20,6 +20,9 @@ daemon already passed twice) and the module docstring in
 
 ## What DETECT-ONLY does (and does NOT do)
 
+**⚠ The UPS hardware battery cutoff (3.2 V/cell) is NOT suppressed — it's in the UPS firmware, not the daemon.** While unplugged, the Pi drains the UPS cells (~5 A); from a full pack you have only a few minutes before the UPS hard-cuts power (verified the hard way 2026-07-10: cells went 3.53 V → cutoff in ~5 min). Keep unplug intervals under ~2 minutes, or watch `batt=` in the log and replug above 3.35 V.
+
+
 | Behavior | Armed (normal) | DETECT-ONLY |
 | --- | --- | --- |
 | AC present/absent detection + debounce | ✅ | ✅ identical |
