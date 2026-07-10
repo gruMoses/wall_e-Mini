@@ -26,6 +26,7 @@ import os
 import sys
 import types
 import unittest
+from unittest import mock
 
 # ---------------------------------------------------------------------------
 # Stub out smbus2 / ina219 before importing the daemon so it imports cleanly
@@ -174,6 +175,236 @@ class AcPresenceTrackerTests(unittest.TestCase):
         self.assertTrue(state, "first low sample should not immediately be MISSING")
         state = tracker.update(0, 0, 10.0)
         self.assertFalse(state, "should be MISSING once debounce window elapses")
+
+
+# ---------------------------------------------------------------------------
+# DETECT-ONLY (bench-test) mode.
+#
+# These tests cover the safety-critical guarantee that detect-only mode runs
+# the ENTIRE detection/debounce/grace chain exactly like armed mode but never
+# performs a shutdown action or writes any UPS register, and that it keeps
+# monitoring across repeated unplug/replug cycles. They also prove the armed
+# (default) path is unchanged.
+# ---------------------------------------------------------------------------
+
+
+class _LoopDone(BaseException):
+    """Raised from the stubbed charger read to break the daemon's ``while True``.
+
+    Subclasses BaseException (not Exception) on purpose: the main loop wraps
+    the charger read in ``except Exception`` to swallow transient I2C errors,
+    so a plain Exception here would be caught and the loop would spin. A
+    BaseException propagates cleanly out of ``main()`` to end the test.
+    """
+
+
+PRESENT = (4900, 0)  # typec_mv above threshold -> AC present
+ABSENT = (0, 0)  # both charger rails at 0mV -> AC absent
+
+
+def _make_charger_reader(readings):
+    """Return a read_charger_voltages replacement yielding scripted samples.
+
+    Once the script is exhausted it raises _LoopDone to terminate main()'s
+    loop deterministically.
+    """
+    it = iter(readings)
+
+    def _read(*_args, **_kwargs):
+        try:
+            return next(it)
+        except StopIteration:
+            raise _LoopDone()
+
+    return _read
+
+
+_SNAPSHOT = {
+    "typec_mv": 0,
+    "microusb_mv": 0,
+    "protect_mv": 3200,
+    "shutdown_countdown_s": 0,
+    "auto_power_on": 1,
+    "sample_period_min": 2,
+    "battery_v": 3.7,
+    "battery_i_ma": -1200.0,
+}
+
+
+class RunShutdownSequenceTests(unittest.TestCase):
+    """Direct tests of run_shutdown_sequence's action-site guards."""
+
+    def _patches(self, **overrides):
+        """Patch every side-effecting collaborator; return the mock dict."""
+        patchers = {
+            "stop_rover_service": mock.patch.object(daemon, "stop_rover_service"),
+            "shed_usb_load": mock.patch.object(daemon, "shed_usb_load"),
+            "write_reg_verified": mock.patch.object(
+                daemon, "write_reg_verified", return_value=True
+            ),
+            "read_ups_snapshot": mock.patch.object(
+                daemon, "read_ups_snapshot", return_value=dict(_SNAPSHOT)
+            ),
+            "os_system": mock.patch.object(daemon.os, "system"),
+            "time_sleep": mock.patch.object(daemon.time, "sleep"),
+        }
+        started = {name: p.start() for name, p in patchers.items()}
+        for p in patchers.values():
+            self.addCleanup(p.stop)
+        return started
+
+    def test_detect_only_suppresses_every_shutdown_action(self):
+        m = self._patches()
+        daemon.run_shutdown_sequence(object(), 0x17, None, detect_only=True)
+
+        # (a) NONE of the shutdown-sequence actions run in detect-only mode.
+        m["stop_rover_service"].assert_not_called()
+        m["shed_usb_load"].assert_not_called()
+        m["write_reg_verified"].assert_not_called()  # no countdown register write
+        m["os_system"].assert_not_called()  # no sync, no shutdown
+        # No 600s post-shutdown park sleep either.
+        for call in m["time_sleep"].call_args_list:
+            self.assertNotEqual(call.args and call.args[0], 600)
+
+    def test_detect_only_emits_would_begin_line_once(self):
+        self._patches()
+        with self.assertLogs(level="INFO") as cm:
+            daemon.run_shutdown_sequence(object(), 0x17, None, detect_only=True)
+        joined = "\n".join(cm.output)
+        # (b) The single unmistakable "would begin shutdown" line is present.
+        self.assertIn("DETECT-ONLY", joined)
+        self.assertIn("would begin shutdown sequence NOW (suppressed)", joined)
+        self.assertEqual(
+            joined.count("would begin shutdown sequence NOW (suppressed)"),
+            1,
+            "the suppression line must be emitted exactly once per grace expiry",
+        )
+
+    def test_normal_mode_triggers_every_shutdown_action(self):
+        m = self._patches()
+        daemon.run_shutdown_sequence(object(), 0x17, None, detect_only=False)
+
+        # (d) The armed/default path performs the full sequence in order.
+        m["stop_rover_service"].assert_called_once()
+        m["shed_usb_load"].assert_called_once()
+        m["write_reg_verified"].assert_called_once_with(
+            mock.ANY,
+            mock.ANY,
+            daemon.REG_SHUTDOWN_COUNTDOWN,
+            daemon.UPS_SHUTDOWN_COUNTDOWN_SECONDS,
+        )
+        m["os_system"].assert_any_call("sudo sync")
+        m["os_system"].assert_any_call("sudo /sbin/shutdown -h now")
+        m["time_sleep"].assert_any_call(600)
+
+    def test_normal_mode_does_not_emit_detect_only_line(self):
+        self._patches()
+        with self.assertLogs(level="INFO") as cm:
+            daemon.run_shutdown_sequence(object(), 0x17, None, detect_only=False)
+        self.assertNotIn("DETECT-ONLY", "\n".join(cm.output))
+
+
+class ResolveDetectOnlyTests(unittest.TestCase):
+    """(e) Both activation paths: CLI flag and env var."""
+
+    def test_cli_flag_activates(self):
+        with mock.patch.dict(os.environ, {"UPS_DETECT_ONLY": ""}):
+            self.assertTrue(daemon._resolve_detect_only(["--detect-only"]))
+
+    def test_env_var_activates(self):
+        for truthy in ("1", "true", "TRUE", "yes", "on"):
+            with self.subTest(value=truthy):
+                with mock.patch.dict(os.environ, {"UPS_DETECT_ONLY": truthy}):
+                    self.assertTrue(daemon._resolve_detect_only([]))
+
+    def test_no_flag_no_env_is_armed(self):
+        with mock.patch.dict(os.environ, {"UPS_DETECT_ONLY": ""}):
+            self.assertFalse(daemon._resolve_detect_only([]))
+
+    def test_env_falsey_is_armed(self):
+        with mock.patch.dict(os.environ, {"UPS_DETECT_ONLY": "0"}):
+            self.assertFalse(daemon._resolve_detect_only([]))
+
+
+class DetectOnlyMainLoopTests(unittest.TestCase):
+    """Integration tests that drive the real main() loop with scripted reads.
+
+    Hardware collaborators are stubbed; run_shutdown_sequence is replaced with
+    a spy so we can observe how the loop reacts at grace expiry without either
+    halting the Pi (armed) or depending on the suppression internals (already
+    covered above). A virtual clock advances only via the daemon's own
+    time.sleep() calls, so the debounce/grace timing is faithful.
+    """
+
+    def _drive(self, readings, detect_only):
+        clock = {"t": 0.0}
+
+        def fake_sleep(dur):
+            clock["t"] += dur
+
+        def fake_monotonic():
+            return clock["t"]
+
+        shutdown_spy = mock.Mock()
+
+        with mock.patch.object(daemon, "detect_addr", return_value=0x17), \
+            mock.patch.object(
+                daemon, "read_charger_voltages", _make_charger_reader(readings)
+            ), \
+            mock.patch.object(
+                daemon, "read_ups_snapshot", return_value=dict(_SNAPSHOT)
+            ), \
+            mock.patch.object(daemon, "write_reg_verified", return_value=True) as m_write, \
+            mock.patch.object(daemon, "run_shutdown_sequence", shutdown_spy), \
+            mock.patch.object(daemon.time, "sleep", fake_sleep), \
+            mock.patch.object(daemon.time, "monotonic", fake_monotonic):
+            with self.assertLogs(level="INFO") as cm:
+                try:
+                    daemon.main(detect_only=detect_only)
+                except _LoopDone:
+                    pass
+        return shutdown_spy, m_write, "\n".join(cm.output)
+
+    @staticmethod
+    def _one_grace_cycle():
+        # 10 boot-grace iters + 2 to init PRESENT, then enough ABSENT samples
+        # to clear the 10s debounce and the 30s grace window with margin.
+        return [PRESENT] * 12 + [ABSENT] * 42
+
+    def test_detect_only_continues_and_repeats_across_replug(self):
+        # Two full unplug->grace-expiry cycles separated by a replug.
+        readings = (
+            self._one_grace_cycle()  # cycle 1 -> first grace expiry
+            + [PRESENT] * 3  # replug: present-again + grace reset
+            + [ABSENT] * 42  # cycle 2 -> second grace expiry
+        )
+        spy, m_write, logs = self._drive(readings, detect_only=True)
+
+        # (c) The loop did NOT exit at first grace expiry: it reached a second.
+        self.assertEqual(spy.call_count, 2, "grace expiry should recur after a replug")
+        for call in spy.call_args_list:
+            self.assertIs(call.kwargs["detect_only"], True)
+
+        # Replug was detected and the grace timer reset between the two cycles.
+        self.assertIn("UPS AC state changed -> present", logs)
+        self.assertIn("Charger present again; resetting grace timer.", logs)
+
+        # Startup banner shown; NO UPS register writes happened at all
+        # (startup writes skipped, and the spied shutdown path writes nothing).
+        self.assertIn("MODE: DETECT-ONLY", logs)
+        m_write.assert_not_called()
+
+    def test_normal_mode_reaches_shutdown_sequence_and_writes_startup_regs(self):
+        # Single unplug to grace expiry; spy stands in for the real shutdown.
+        spy, m_write, logs = self._drive(self._one_grace_cycle(), detect_only=False)
+
+        # (d) Default path reaches the shutdown sequence at grace expiry.
+        self.assertGreaterEqual(spy.call_count, 1)
+        self.assertIs(spy.call_args_list[0].kwargs["detect_only"], False)
+
+        # Armed mode performs its startup register writes and shows no banner.
+        m_write.assert_called()  # auto-power-on + battery-protect thresholds
+        self.assertNotIn("MODE: DETECT-ONLY", logs)
 
 
 if __name__ == "__main__":
