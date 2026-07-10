@@ -129,6 +129,8 @@ class RecordingTelemetry:
     vesc_rx_recv_error_count: int = 0
     vesc_rx_reopen_count: int = 0
     vesc_rx_last_frame_age_s: float | None = None
+    # VESC low-voltage watchdog latch (early-warning + motor-cutoff; recoverable).
+    vesc_pack_low_latched: bool = False
     # ── Follow-Me visualization fields (Items 2 + 4) ─────────────────
     follow_mode: str | None = None
     trail_points_xy: list | None = None       # [[x,y], ...] last 20

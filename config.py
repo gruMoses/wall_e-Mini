@@ -125,12 +125,27 @@ class VescConfig:
     left_can_id: int = 2
     right_can_id: int = 1
 
-    # Low-voltage shutdown: trigger graceful OS shutdown when pack voltage stays
-    # below threshold for voltage_shutdown_delay_s consecutive seconds.
+    # Low-voltage watchdog — EARLY WARNING + MOTOR CUTOFF only (no OS shutdown).
+    # When pack voltage stays in the band [floor, threshold) for
+    # voltage_shutdown_delay_s consecutive seconds we cut motors and raise a
+    # recoverable pack-low latch (surfaced on telemetry). We do NOT halt the Pi:
+    # the Pi runs on its own UPS, so over-discharge protection is delegated to
+    # the pack BMS hard-cut (~37.7 V) -> UPS input-loss -> graceful-shutdown
+    # chain, which auto-recovers when pack power returns.
     # 39.0 V = 13S Li-ion at 3.0 V/cell (safe cutoff; BMS hardware also cuts at ~2.9 V/cell).
     # BMS reports 13 cells — confirmed 13S (stale 14S comment corrected 2026-04-01).
     voltage_shutdown_threshold_v: float = 39.0
-    voltage_shutdown_delay_s: float = 10.0
+    # Plausibility floor: a reading BELOW this means the pack is disconnected /
+    # switched off / sensor garbage. A 13S pack's BMS hard-cuts ~37.7 V, so it
+    # can never genuinely sit this low — a reading below the floor is a normal
+    # bench event (main battery switched off while the Pi runs on its UPS), NOT
+    # a dying pack. Below the floor we stop motors and log once, but never latch
+    # and never treat it as a low-voltage event (2026-07-10 false-trigger fix).
+    voltage_shutdown_floor_v: float = 30.0
+    # 30s sustain: a genuinely dying pack sags slowly, so a full 30s continuous
+    # in-band reading is required before cutting motors (rejects transients).
+    # (Was 10.0; contract changed 2026-07-10.)
+    voltage_shutdown_delay_s: float = 30.0
 
     # Wheel geometry + drivetrain for eRPM -> wheel speed (m/s) conversion.
     # wheel_radius_m: centre of wheel axle to contact patch (14.5in wheel dia).

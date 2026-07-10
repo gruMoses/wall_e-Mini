@@ -181,6 +181,9 @@ class Controller:
         self._vesc_rx_recv_error_count: int = 0
         self._vesc_rx_reopen_count: int = 0
         self._vesc_rx_last_frame_age_s: Optional[float] = None
+        # VESC low-voltage watchdog latch (early-warning + motor-cutoff). Mirrors
+        # the charger_inhibit plumbing so the run log / SSE / dashboard can see it.
+        self._vesc_pack_low_latched: bool = False
 
     def _reset_imu_timestamp(self, now: float) -> None:
         """Reset the monotonic timestamp used to throttle IMU updates.
@@ -525,6 +528,9 @@ class Controller:
                 )
                 self._vesc_rx_last_frame_age_s = getattr(
                     _telem, "can_rx_last_frame_age_s", self._vesc_rx_last_frame_age_s
+                )
+                self._vesc_pack_low_latched = bool(
+                    getattr(_telem, "pack_low_latched", False)
                 )
 
                 # ── Per-motor staleness fallback ─────────────────────────────
@@ -1120,6 +1126,7 @@ class Controller:
         telemetry["vesc_rx_recv_error_count"] = self._vesc_rx_recv_error_count
         telemetry["vesc_rx_reopen_count"] = self._vesc_rx_reopen_count
         telemetry["vesc_rx_last_frame_age_s"] = self._vesc_rx_last_frame_age_s
+        telemetry["vesc_pack_low_latched"] = self._vesc_pack_low_latched
         if self._gps_heading_aligner is not None:
             telemetry["heading_offset_deg"] = self._gps_heading_aligner.offset_deg
             telemetry["heading_offset_locked"] = self._gps_heading_aligner.locked
