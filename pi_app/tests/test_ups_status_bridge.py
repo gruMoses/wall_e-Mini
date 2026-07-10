@@ -80,7 +80,8 @@ class WriteStatusFileHappyPath(unittest.TestCase):
         self.assertEqual(
             set(data.keys()),
             {"ts", "ac_present", "typec_mv", "microusb_mv", "batt_v",
-             "batt_ma", "protect_mv", "detect_only", "seconds_without_charge"},
+             "batt_ma", "protect_mv", "ts_batt", "batt_stale", "detect_only",
+             "seconds_without_charge"},
         )
         self.assertEqual(data["ts"], 1234.5)
         self.assertIs(data["ac_present"], True)
@@ -265,6 +266,177 @@ class DecisionLogicUnchanged(unittest.TestCase):
         # Sanity: the authoritative instant decision is unchanged by our edits.
         self.assertTrue(daemon.is_ac_present_instant(4800, 0))
         self.assertFalse(daemon.is_ac_present_instant(0, 3999))
+
+
+class PolitenessConstants(unittest.TestCase):
+    """The I2C-politeness cadence/holdoff knobs are the named values the
+    daemon and this suite agree on."""
+
+    def test_politeness_constants(self):
+        self.assertEqual(daemon.AC_RECOVERY_QUIET_S, 5.0)
+        self.assertEqual(daemon.SUPPLEMENTAL_READ_PERIOD_S, 10.0)
+
+
+class DebounceWindowFlag(unittest.TestCase):
+    """AcPresenceTracker.in_debounce_window drives the daemon's sag-suppression;
+    it must be True only while a possible loss is being debounced (state still
+    PRESENT), and False both when cleanly present and once committed MISSING."""
+
+    def test_in_debounce_window_transitions(self):
+        t = daemon.AcPresenceTracker(debounce_s=10.0)
+        t.update(5000, 0, now=0.0)                 # cleanly present
+        self.assertFalse(t.in_debounce_window)
+        t.update(0, 0, now=1.0)                    # first low reading — window opens
+        self.assertTrue(t.in_debounce_window)
+        self.assertTrue(t.state)                   # still PRESENT, debouncing
+        t.update(0, 0, now=5.0)                    # still low, inside window
+        self.assertTrue(t.in_debounce_window)
+        t.update(0, 0, now=11.0)                   # debounce elapsed → MISSING
+        self.assertFalse(t.in_debounce_window)     # window closed; state-missing takes over
+        self.assertFalse(t.state)
+        t.update(5000, 0, now=12.0)                # charger back → PRESENT
+        self.assertFalse(t.in_debounce_window)
+        self.assertTrue(t.state)
+
+
+class SupplementalGate(unittest.TestCase):
+    """The pure I2C-politeness decision: WHEN a poll may issue the extra
+    (non-decision) snapshot + INA219 reads. No hardware, no file I/O."""
+
+    def test_steady_state_cadence_is_10s_not_1s(self):
+        # 25 one-second steady AC-present polls; supplemental should fire on the
+        # first poll then only every SUPPLEMENTAL_READ_PERIOD_S (10s), not 1Hz.
+        last_unclean = None
+        last_supp = None
+        fired = []
+        for i in range(25):
+            now = 100.0 + i
+            do, last_unclean = daemon._supplemental_gate(
+                instant_present=True, in_debounce=False, state_missing=False,
+                now=now, last_unclean_at=last_unclean, last_supplemental_at=last_supp,
+            )
+            if do:
+                fired.append(now)
+                last_supp = now
+        self.assertEqual(fired, [100.0, 110.0, 120.0])
+
+    def test_transfer_window_forces_quiet_even_when_due(self):
+        # Cadence long overdue (last read at t=0, now t=1000) but any of the
+        # three sag conditions this poll must still force quiet.
+        do, lu = daemon._supplemental_gate(
+            instant_present=False, in_debounce=False, state_missing=False,
+            now=1000.0, last_unclean_at=None, last_supplemental_at=0.0,
+        )
+        self.assertFalse(do)               # instant-not-present wins over "due"
+        self.assertEqual(lu, 1000.0)       # and this poll is recorded as unclean
+        do2, _ = daemon._supplemental_gate(
+            instant_present=True, in_debounce=True, state_missing=False,
+            now=1000.0, last_unclean_at=None, last_supplemental_at=0.0,
+        )
+        self.assertFalse(do2)              # debounce window open
+        do3, _ = daemon._supplemental_gate(
+            instant_present=True, in_debounce=False, state_missing=True,
+            now=1000.0, last_unclean_at=None, last_supplemental_at=0.0,
+        )
+        self.assertFalse(do3)              # debounced state already MISSING
+
+    def test_recovery_holdoff_after_ac_returns(self):
+        last_unclean = None
+        last_supp = None
+        res = {}
+        # t=0..3: AC missing/sagging — quiet, each poll marks itself unclean.
+        for now in (0.0, 1.0, 2.0, 3.0):
+            do, last_unclean = daemon._supplemental_gate(
+                instant_present=False, in_debounce=False, state_missing=True,
+                now=now, last_unclean_at=last_unclean, last_supplemental_at=last_supp)
+            res[now] = do
+            if do:
+                last_supp = now
+        # t=4..8: AC present again; must stay quiet through the 5s holdoff
+        # (measured from the last unclean poll t=3) and only resume once elapsed.
+        for now in (4.0, 5.0, 6.0, 7.0, 8.0):
+            do, last_unclean = daemon._supplemental_gate(
+                instant_present=True, in_debounce=False, state_missing=False,
+                now=now, last_unclean_at=last_unclean, last_supplemental_at=last_supp)
+            res[now] = do
+            if do:
+                last_supp = now
+        self.assertFalse(any(res[t] for t in (0.0, 1.0, 2.0, 3.0)))  # quiet during outage
+        self.assertFalse(res[4.0])   # 1s past last-unclean, inside holdoff
+        self.assertFalse(res[7.0])   # 4s past, still inside holdoff (<5s)
+        self.assertTrue(res[8.0])    # 5s elapsed → supplemental resumes
+
+
+class PublishStatusPoliteness(unittest.TestCase):
+    """_publish_status honors do_supplemental: when False it issues NO
+    supplemental I2C (no 16-reg snapshot, no INA219 read) yet still publishes
+    fresh AC state + charger voltages with the battery fields marked stale;
+    when True it refreshes the caller's batt_cache and clears the stale flag."""
+
+    def test_no_supplemental_read_when_quiet_but_still_publishes(self):
+        ina = mock.Mock()
+        cache = {"batt_v": 3.71, "batt_ma": -1400.0, "protect_mv": 3400,
+                 "ts_batt": 900.0}
+        with mock.patch("time.time", return_value=1000.0):
+            with _tmp() as path:
+                with mock.patch.object(daemon, "UPS_STATUS_FILE", path):
+                    with mock.patch.object(daemon, "read_ups_snapshot") as snap_spy:
+                        daemon._publish_status(
+                            daemon.smbus2.SMBus(1), 0x17, ina,
+                            ac_present=False, typec_mv=0, microusb_mv=0,
+                            seconds_without_charge=5, detect_only=False,
+                            do_supplemental=False, batt_cache=cache,
+                        )
+                        snap_spy.assert_not_called()   # NO 16-register snapshot
+                data = json.loads(open(path).read())
+        ina.current.assert_not_called()                # NO INA219 read
+        ina.voltage.assert_not_called()
+        self.assertIs(data["ac_present"], False)       # AC state still published
+        self.assertTrue(data["batt_stale"])            # battery marked stale
+        self.assertEqual(data["batt_v"], 3.71)         # last-known reused
+        self.assertEqual(data["ts_batt"], 900.0)       # from cache, not "now"
+        self.assertEqual(data["ts"], 1000.0)           # file ts is fresh
+
+    def test_supplemental_read_refreshes_cache_and_clears_stale(self):
+        cache = {"batt_v": 1.0, "batt_ma": 1.0, "protect_mv": 1, "ts_batt": 1.0}
+        fake_snap = {"battery_v": 3.95, "battery_i_ma": 1234.0, "protect_mv": 3400}
+        with mock.patch("time.time", return_value=3000.0):
+            with _tmp() as path:
+                with mock.patch.object(daemon, "UPS_STATUS_FILE", path):
+                    with mock.patch.object(daemon, "read_ups_snapshot",
+                                           return_value=fake_snap):
+                        daemon._publish_status(
+                            daemon.smbus2.SMBus(1), 0x17, None,
+                            ac_present=True, typec_mv=5000, microusb_mv=0,
+                            seconds_without_charge=0, detect_only=False,
+                            do_supplemental=True, batt_cache=cache,
+                        )
+                data = json.loads(open(path).read())
+        self.assertFalse(data["batt_stale"])
+        self.assertEqual(data["batt_v"], 3.95)
+        self.assertEqual(data["ts_batt"], 3000.0)
+        # Cache mutated in place so the next quiet poll republishes these.
+        self.assertEqual(cache["batt_v"], 3.95)
+        self.assertEqual(cache["ts_batt"], 3000.0)
+
+    def test_status_always_carries_ts_and_ts_batt(self):
+        # Even on a quiet poll the file carries both timestamps: ts fresh,
+        # ts_batt from the cache (honest staleness).
+        with mock.patch("time.time", return_value=2000.0):
+            with _tmp() as path:
+                with mock.patch.object(daemon, "UPS_STATUS_FILE", path):
+                    daemon._publish_status(
+                        daemon.smbus2.SMBus(1), 0x17, None,
+                        ac_present=True, typec_mv=5000, microusb_mv=0,
+                        seconds_without_charge=0, detect_only=False,
+                        do_supplemental=False, batt_cache={"ts_batt": 111.0},
+                    )
+                q = json.loads(open(path).read())
+        self.assertIn("ts", q)
+        self.assertIn("ts_batt", q)
+        self.assertEqual(q["ts"], 2000.0)
+        self.assertEqual(q["ts_batt"], 111.0)
+        self.assertTrue(q["batt_stale"])
 
 
 # ---------------------------------------------------------------------------
