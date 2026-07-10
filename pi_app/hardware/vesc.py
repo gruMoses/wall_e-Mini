@@ -1,13 +1,18 @@
 """
-VESC CAN motor driver with telemetry reception and low-voltage shutdown.
+VESC CAN motor driver with telemetry reception and a low-voltage watchdog.
 
 Design:
 - TX path (unchanged): set_tracks(left_byte, right_byte) converts byte offsets to RPM and
-  sends CAN_PACKET_SET_RPM (extended frame 0x300 + can_id).
-- RX path (new): background daemon thread reads VESC status broadcasts and updates
+  sends CAN_PACKET_SET_RPM (extended frame 0x300 + can_id).  While the pack-low latch is
+  engaged, set_tracks forces neutral until voltage recovers.
+- RX path: background daemon thread reads VESC status broadcasts and updates
   thread-safe telemetry state.
-- Voltage monitor: once pack voltage stays below threshold for a configurable duration,
-  motors are stopped and 'sudo shutdown -h now' is invoked (hysteresis: one-shot latch).
+- Low-voltage watchdog (early warning + motor cutoff ONLY — no OS shutdown): once pack
+  voltage stays in the band [floor, threshold) for a configurable duration, motors are
+  cut and a recoverable pack-low latch is raised (surfaced on telemetry).  Readings below
+  the plausibility floor are treated as "pack switched off" (bench event) and never latch.
+  Over-discharge protection is delegated to the pack BMS hard-cut -> UPS input-loss ->
+  graceful-shutdown chain, which auto-recovers on power return.
 
 VESC CAN status frame layout (all big-endian, extended IDs):
   arbitration_id = (packet_id << 8) | vesc_can_id
@@ -36,7 +41,6 @@ from __future__ import annotations
 import logging
 import os
 import struct
-import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -50,6 +54,11 @@ logger = logging.getLogger(__name__)
 _CAN_PACKET_STATUS = 9
 _CAN_PACKET_STATUS_4 = 16
 _CAN_PACKET_STATUS_5 = 27
+
+# The pack-low latch clears only after voltage recovers this many volts ABOVE
+# the shutdown threshold (hysteresis to stop the latch chattering around the
+# threshold as a marginal pack sags and rebounds).
+_PACK_LOW_RECOVERY_HYST_V = 2.0
 
 
 @dataclass
@@ -97,6 +106,11 @@ class VescTelemetry:
     # escaped _rx_loop). Telemetry can look "fresh" for a while after that
     # because get_telemetry() only reports frame age, not thread liveness.
     rx_thread_alive: Optional[bool] = None
+    # True while the low-voltage watchdog's recoverable pack-low latch is engaged
+    # (pack sat in [floor, threshold) for the full sustain window). Motors are
+    # forced neutral until voltage recovers above threshold + hysteresis. This is
+    # early-warning only — it never shuts the Pi down.
+    pack_low_latched: bool = False
 
 
 class VescCanDriver:
@@ -125,9 +139,18 @@ class VescCanDriver:
         self._stop_event: Optional[threading.Event] = None
         self._rx_thread: Optional[threading.Thread] = None
 
-        # Low-voltage shutdown tracking (accessed only from the RX thread)
+        # Low-voltage watchdog state — EARLY WARNING + MOTOR CUTOFF only (this
+        # path no longer shuts the Pi down; see _trigger_low_voltage_shutdown).
+        #   _low_voltage_since   times the in-band [floor, threshold) sustain.
+        #   _pack_low_latched    recoverable latched warning (motors forced
+        #                        neutral); cross-thread, guard with _telem_lock.
+        #   _below_floor_active  de-dupes the below-floor "pack switched off" log.
+        # _low_voltage_since / _below_floor_active are touched only on the RX
+        # thread; _pack_low_latched is read by set_tracks()/get_telemetry() on
+        # the control thread, so its reads/writes go through _telem_lock.
         self._low_voltage_since: Optional[float] = None
-        self._shutdown_triggered = False
+        self._pack_low_latched: bool = False
+        self._below_floor_active: bool = False
 
         # CAN send failure tracking (thread-safe via _telem_lock)
         self._send_fail_count: int = 0
@@ -194,6 +217,17 @@ class VescCanDriver:
     # ──────────────────────────────────────────────────────────────────────────
 
     def set_tracks(self, left_byte: int, right_byte: int) -> None:
+        with self._telem_lock:
+            latched = self._pack_low_latched
+        if latched:
+            # Pack critically low: force neutral until the latch clears (voltage
+            # recovers above threshold + hysteresis). This is the recoverable
+            # analogue of the old one-shot motor-stop — no process kill, no OS
+            # shutdown. We stop forcing neutral the moment the latch clears
+            # (mirroring how the old one-shot behaved, except now it recovers).
+            self._send_rpm(self._left_id, 0)
+            self._send_rpm(self._right_id, 0)
+            return
         left_rpm = self._byte_to_rpm(left_byte, self._max_rpm)
         right_rpm = self._byte_to_rpm(right_byte, self._max_rpm)
         self._send_rpm(self._left_id, left_rpm)
@@ -206,6 +240,11 @@ class VescCanDriver:
     def get_voltage(self) -> Optional[float]:
         """Return the most recently received pack input voltage (V), or None."""
         return self._get_pack_voltage()
+
+    def get_pack_low_latched(self) -> bool:
+        """True while the recoverable pack-low latch is engaged (motors neutral)."""
+        with self._telem_lock:
+            return self._pack_low_latched
 
     def get_rpm(self, motor: str) -> Optional[int]:
         """Return actual electrical RPM for 'left' or 'right' motor, or None."""
@@ -262,6 +301,7 @@ class VescCanDriver:
                 if self._rx_last_frame_s > 0.0
                 else None
             )
+            telem.pack_low_latched = self._pack_low_latched
         # Thread liveness is independent of _telem_lock (it's a plain
         # threading.Thread reference, not telemetry state).
         _rx_thread = self._rx_thread
@@ -445,15 +485,15 @@ class VescCanDriver:
             t.last_status5_s = now
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Low-voltage shutdown
+    # Low-voltage watchdog — EARLY WARNING + MOTOR CUTOFF (no OS shutdown)
     # ──────────────────────────────────────────────────────────────────────────
 
     def _get_pack_voltage(self) -> Optional[float]:
         """Return best-available pack voltage.
 
         Both VESCs are on the same pack.  Taking the maximum of the two readings
-        prevents a transient glitch on one controller from causing a false shutdown
-        trigger while still detecting genuine pack sag (which affects both).
+        prevents a transient glitch on one controller from causing a false trigger
+        while still detecting genuine pack sag (which affects both).
         """
         with self._telem_lock:
             lv = self._left_telem.voltage_v
@@ -462,8 +502,28 @@ class VescCanDriver:
         return max(readings) if readings else None
 
     def _check_voltage_shutdown(self) -> None:
-        """Called from the RX thread after every processed frame."""
-        if self._shutdown_triggered or self._cfg is None:
+        """Called from the RX thread after every processed frame.
+
+        EARLY-WARNING + MOTOR-CUTOFF watchdog.  It does NOT shut the Pi down:
+        the Pi runs on its own UPS, so pack over-discharge protection is
+        delegated to the pack BMS hard-cut (~37.7V) -> UPS input-loss ->
+        graceful-shutdown chain (which auto-recovers when pack power returns).
+        This watchdog only warns early and cuts motors (a recoverable latch) so
+        a genuinely dying pack can't keep driving the wheels.
+
+        Three regimes on the pack voltage V, with floor <= threshold:
+          * V < floor              -> pack disconnected / switched off / garbage.
+                                      Stop motors, log once, cancel any countdown.
+                                      NEVER latch, NEVER shut down.
+          * floor <= V < threshold -> in-band sag.  Start/continue the sustain
+                                      timer; after voltage_shutdown_delay_s
+                                      continuous seconds, engage the pack-low
+                                      latch (motors cut).
+          * V >= threshold         -> recovery.  Reset the sustain timer; once V
+                                      also clears threshold + hysteresis, release
+                                      the latch and re-enable motors.
+        """
+        if self._cfg is None:
             return
 
         voltage = self._get_pack_voltage()
@@ -472,45 +532,98 @@ class VescCanDriver:
 
         threshold: float = self._cfg.voltage_shutdown_threshold_v
         delay: float = self._cfg.voltage_shutdown_delay_s
+        floor: float = self._cfg.voltage_shutdown_floor_v
 
+        # ── Below the plausibility floor ──────────────────────────────────────
+        # A reading below the floor means the pack is disconnected / switched off
+        # / sensor garbage — a 13S pack's BMS hard-cuts ~37.7V, so it can never
+        # genuinely sit this low.  The Pi runs on its own UPS, so "main pack
+        # switched off" is a NORMAL bench event: stop motors, log once, cancel
+        # any in-progress band countdown, and never latch or shut down.
+        if voltage < floor:
+            if not self._below_floor_active:
+                self._below_floor_active = True
+                logger.warning(
+                    "VESC: pack voltage %.1fV below plausibility floor %.1fV — "
+                    "treating as pack switched off, NOT shutting down",
+                    voltage, floor,
+                )
+                # Neutral is harmless and safe; send once per below-floor episode.
+                self._send_rpm(self._left_id, 0)
+                self._send_rpm(self._right_id, 0)
+            # A pack switched off mid-sag is a bench action, not a dying pack —
+            # cancel any band countdown that was running.
+            self._low_voltage_since = None
+            return
+
+        # V >= floor: any below-floor episode is over.
+        self._below_floor_active = False
+
+        # ── In the shutdown band: floor <= V < threshold ──────────────────────
         if voltage < threshold:
             if self._low_voltage_since is None:
                 self._low_voltage_since = time.monotonic()
                 logger.warning(
-                    "VESC: pack voltage %.2fV below threshold %.2fV — "
-                    "will shut down in %.0fs if sustained",
+                    "VESC: pack voltage %.1fV below threshold %.1fV — motors "
+                    "will be cut in %.0fs if sustained",
                     voltage, threshold, delay,
                 )
             elif time.monotonic() - self._low_voltage_since >= delay:
                 self._trigger_low_voltage_shutdown(voltage)
-        else:
-            if self._low_voltage_since is not None:
-                logger.info(
-                    "VESC: voltage recovered to %.2fV — low-voltage timer cleared", voltage
-                )
+            return
+
+        # ── V >= threshold: recovery ──────────────────────────────────────────
+        if self._low_voltage_since is not None:
+            logger.info(
+                "VESC: voltage recovered to %.1fV — low-voltage timer cleared",
+                voltage,
+            )
             self._low_voltage_since = None
+        # Release the pack-low latch only once voltage clears the threshold plus
+        # a hysteresis band, then let normal drive resume (set_tracks() stops
+        # forcing neutral).
+        if voltage >= threshold + _PACK_LOW_RECOVERY_HYST_V:
+            with self._telem_lock:
+                was_latched = self._pack_low_latched
+                self._pack_low_latched = False
+            if was_latched:
+                logger.warning(
+                    "VESC: pack voltage recovered to %.1fV (>= %.1fV) — pack-low "
+                    "latch cleared, motors re-enabled",
+                    voltage, threshold + _PACK_LOW_RECOVERY_HYST_V,
+                )
 
     def _trigger_low_voltage_shutdown(self, voltage: float) -> None:
-        """Latch the shutdown flag, stop motors, and invoke OS shutdown."""
-        self._shutdown_triggered = True  # One-shot latch — never cleared
-        logger.critical(
-            "VESC: CRITICAL LOW VOLTAGE %.2fV (threshold %.2fV) — "
-            "stopping motors and initiating OS shutdown",
-            voltage,
-            self._cfg.voltage_shutdown_threshold_v,  # type: ignore[union-attr]
-        )
-        # Stop motors immediately from the RX thread (don't wait for join)
-        self._send_rpm(self._left_id, 0)
-        self._send_rpm(self._right_id, 0)
-        # Signal the RX loop to exit (we ARE the RX thread; join happens externally)
-        if self._stop_event is not None:
-            self._stop_event.set()
-        # Run OS shutdown in a separate thread so we don't block or deadlock
-        threading.Thread(
-            target=lambda: subprocess.run(["sudo", "shutdown", "-h", "now"], check=False),
-            daemon=True,
-            name="vesc-os-shutdown",
-        ).start()
+        """Engage the recoverable pack-low latch and cut motors — NO OS shutdown.
+
+        Repurposed from the old one-shot shutdown trigger: the
+        ``sudo shutdown -h now`` path is intentionally GONE.  A direct OS
+        shutdown here was a dead end — the Pi is UPS-powered, so halting it does
+        nothing to stop pack drain and nothing ever boots it back up.  Pack
+        over-discharge protection is instead delegated to the pack BMS hard-cut
+        (~37.7V) -> UPS input-loss -> graceful-shutdown chain, which recovers
+        automatically on power return.  This path only raises a recoverable
+        latched warning (surfaced on VescTelemetry.pack_low_latched) and cuts
+        motors; set_tracks() keeps forcing neutral until the latch clears on
+        voltage recovery (see _check_voltage_shutdown).
+        """
+        with self._telem_lock:
+            already = self._pack_low_latched
+            self._pack_low_latched = True
+        if not already:
+            logger.warning(
+                "VESC: main pack critically low (%.1fV < %.1fV for %.0fs) — "
+                "motors stopped; pack BMS will cut power if it keeps falling",
+                voltage,
+                self._cfg.voltage_shutdown_threshold_v,  # type: ignore[union-attr]
+                self._cfg.voltage_shutdown_delay_s,      # type: ignore[union-attr]
+            )
+            # Cut motors now from the RX thread (idempotent neutral).  While
+            # latched, set_tracks() also forces neutral so the controller can't
+            # re-command motion.  We do NOT set the stop-event: the main loop
+            # keeps running so the latch can later clear on recovery.
+            self._send_rpm(self._left_id, 0)
+            self._send_rpm(self._right_id, 0)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Internal helpers

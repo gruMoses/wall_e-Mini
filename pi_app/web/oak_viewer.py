@@ -1071,6 +1071,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "vesc_rx_recv_error_count": getattr(t, "vesc_rx_recv_error_count", 0),
                     "vesc_rx_reopen_count": getattr(t, "vesc_rx_reopen_count", 0),
                     "vesc_rx_last_frame_age_s": _finite_or_none(getattr(t, "vesc_rx_last_frame_age_s", None), 3),
+                    "vesc_pack_low_latched": bool(getattr(t, "vesc_pack_low_latched", False)),
                     "wp_index": getattr(t, "wp_index", None),
                     "wp_total": getattr(t, "wp_total", None),
                     "wp_name": getattr(t, "wp_name", None),

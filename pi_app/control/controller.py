@@ -181,6 +181,9 @@ class Controller:
         self._vesc_rx_recv_error_count: int = 0
         self._vesc_rx_reopen_count: int = 0
         self._vesc_rx_last_frame_age_s: Optional[float] = None
+        # VESC low-voltage watchdog latch (early-warning + motor-cutoff). Mirrors
+        # the charger_inhibit plumbing so the run log / SSE / dashboard can see it.
+        self._vesc_pack_low_latched: bool = False
 
     def _reset_imu_timestamp(self, now: float) -> None:
         """Reset the monotonic timestamp used to throttle IMU updates.
@@ -525,6 +528,9 @@ class Controller:
                 )
                 self._vesc_rx_last_frame_age_s = getattr(
                     _telem, "can_rx_last_frame_age_s", self._vesc_rx_last_frame_age_s
+                )
+                self._vesc_pack_low_latched = bool(
+                    getattr(_telem, "pack_low_latched", False)
                 )
 
                 # ── Per-motor staleness fallback ─────────────────────────────
@@ -1001,6 +1007,21 @@ class Controller:
             telemetry["slew_out_right"] = right
             telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
             telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
+        elif self._vesc_pack_low_latched:
+            # VESC pack-low latch engaged (see vesc._check_voltage_shutdown):
+            # refuse all drive commands. The driver's set_tracks() also forces
+            # neutral (belt-and-suspenders), but the controller must observe
+            # the latch too — otherwise the slew state keeps ramping toward the
+            # commanded value while latched, and the moment the latch clears at
+            # ~41V the fully-ramped command would be emitted instantly (full-
+            # speed lurch). Resetting slew here makes release ramp from neutral.
+            left = right = CENTER_OUTPUT_VALUE
+            self._motor.stop()
+            self._reset_slew_state(mono_now)
+            telemetry["slew_out_left"] = left
+            telemetry["slew_out_right"] = right
+            telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
+            telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
         else:
             left_in = int(left)
             right_in = int(right)
@@ -1120,6 +1141,7 @@ class Controller:
         telemetry["vesc_rx_recv_error_count"] = self._vesc_rx_recv_error_count
         telemetry["vesc_rx_reopen_count"] = self._vesc_rx_reopen_count
         telemetry["vesc_rx_last_frame_age_s"] = self._vesc_rx_last_frame_age_s
+        telemetry["vesc_pack_low_latched"] = self._vesc_pack_low_latched
         if self._gps_heading_aligner is not None:
             telemetry["heading_offset_deg"] = self._gps_heading_aligner.offset_deg
             telemetry["heading_offset_locked"] = self._gps_heading_aligner.locked

@@ -356,7 +356,11 @@ def run() -> None:
             vesc_cfg=vesc_cfg,
         )
         motor_driver.start()
-        print(f"  VESC CAN telemetry RX started (voltage shutdown at {vesc_cfg.voltage_shutdown_threshold_v}V)")
+        print(
+            "  VESC CAN telemetry RX started (low-voltage motor cutoff at "
+            f"{vesc_cfg.voltage_shutdown_threshold_v}V for {vesc_cfg.voltage_shutdown_delay_s:.0f}s; "
+            f"plausibility floor {vesc_cfg.voltage_shutdown_floor_v}V; no OS shutdown)"
+        )
     else:
         print("VESC not detected; using Arduino Model X motor driver (stub)")
         motor_driver = ArduinoModelXDriver(rc_reader=rc_reader)
@@ -654,6 +658,7 @@ def run() -> None:
                         vesc_rx_recv_error_count=telem.get("vesc_rx_recv_error_count", 0),
                         vesc_rx_reopen_count=telem.get("vesc_rx_reopen_count", 0),
                         vesc_rx_last_frame_age_s=telem.get("vesc_rx_last_frame_age_s"),
+                        vesc_pack_low_latched=telem.get("vesc_pack_low_latched", False),
                         # Follow-Me visualization (Items 2 + 4)
                         follow_mode=telem.get("follow_mode"),
                         trail_points_xy=telem.get("trail_points_xy"),
@@ -864,6 +869,7 @@ def run() -> None:
                         "src": src,
                         "mode": telem.get("mode", "MANUAL"),
                         "charger_inhibit": telem.get("charger_inhibit", False),
+                        "vesc_pack_low_latched": telem.get("vesc_pack_low_latched", False),
                         "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
                         "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
                         "imu": imu_status if imu_status else None,

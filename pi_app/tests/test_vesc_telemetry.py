@@ -67,8 +67,14 @@ from pi_app.hardware.vesc import VescCanDriver, _CAN_PACKET_STATUS, _CAN_PACKET_
 
 @dataclass
 class _Cfg:
+    # Test-convenient values, NOT the real config defaults (real: threshold 39.0,
+    # floor 30.0, delay 30.0 — see config.VescConfig). The legacy band/timer tests
+    # below use a 22.4V test threshold with a low 15.0V floor so their ~20-21V test
+    # frames land inside the shutdown band [floor, threshold). delay mirrors the new
+    # 30s contract default (was 10.0; contract changed 2026-07-10).
     voltage_shutdown_threshold_v: float = 22.4
-    voltage_shutdown_delay_s: float = 10.0
+    voltage_shutdown_delay_s: float = 30.0
+    voltage_shutdown_floor_v: float = 15.0
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +216,21 @@ class TestFrameParsing(unittest.TestCase):
 
 
 class TestVoltageThreshold(unittest.TestCase):
-    """Voltage monitor logic: threshold, delay, hysteresis, one-shot latch."""
+    """In-band shutdown-timer logic: band entry, delay, hysteresis recovery.
 
-    def _driver(self, threshold: float = 22.4, delay: float = 10.0) -> VescCanDriver:
+    These exercise the [floor, threshold) band with a low 15.0V test floor so
+    the ~20-21V test frames stay inside the band (see _Cfg). The contract change
+    (2026-07-10) turned the old one-shot OS-shutdown latch into a recoverable
+    pack-low latch with NO OS shutdown, so the two tests that used to assert the
+    OS-shutdown behavior were rewritten (test_trigger_latches_..., below).
+    """
+
+    def _driver(self, threshold: float = 22.4, delay: float = 30.0,
+                floor: float = 15.0) -> VescCanDriver:
         d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg(
             voltage_shutdown_threshold_v=threshold,
             voltage_shutdown_delay_s=delay,
+            voltage_shutdown_floor_v=floor,
         ))
         d._bus = _FakeBus()
         return d
@@ -224,23 +239,24 @@ class TestVoltageThreshold(unittest.TestCase):
         d = self._driver()
         d._parse_status5("left", _status5_frame(2, 25.0).data, time.monotonic())
         d._check_voltage_shutdown()
-        self.assertFalse(d._shutdown_triggered)
+        self.assertFalse(d._pack_low_latched)
         self.assertIsNone(d._low_voltage_since)
 
     def test_timer_starts_on_low_voltage(self):
         d = self._driver()
         d._parse_status5("left", _status5_frame(2, 21.0).data, time.monotonic())
         d._check_voltage_shutdown()
-        self.assertFalse(d._shutdown_triggered)
+        self.assertFalse(d._pack_low_latched)
         self.assertIsNotNone(d._low_voltage_since)
 
     def test_no_shutdown_before_delay_expires(self):
-        d = self._driver(threshold=22.4, delay=10.0)
+        # delay is the new 30s contract default (was 10.0 under the old contract).
+        d = self._driver(threshold=22.4, delay=30.0)
         d._parse_status5("left", _status5_frame(2, 21.0).data, time.monotonic())
         # Call check multiple times without advancing time past the delay
         for _ in range(5):
             d._check_voltage_shutdown()
-        self.assertFalse(d._shutdown_triggered)
+        self.assertFalse(d._pack_low_latched)
 
     def test_shutdown_triggers_after_delay(self):
         d = self._driver(threshold=22.4, delay=0.05)
@@ -260,16 +276,21 @@ class TestVoltageThreshold(unittest.TestCase):
         d._parse_status5("left", _status5_frame(2, 25.0).data, time.monotonic())
         d._check_voltage_shutdown()
         self.assertIsNone(d._low_voltage_since)
-        self.assertFalse(d._shutdown_triggered)
+        self.assertFalse(d._pack_low_latched)
 
-    def test_shutdown_latch_prevents_repeat_trigger(self):
+    def test_trigger_is_idempotent_and_never_shuts_down(self):
+        """The old one-shot early-return contract is gone — the latch is now
+        recoverable, so _check keeps running while latched. Re-entering the
+        trigger keeps the latch set, does not raise, and NEVER calls the OS
+        shutdown (subprocess.run)."""
         d = self._driver(threshold=22.4, delay=0.0)
-        with patch.object(d, "_trigger_low_voltage_shutdown") as mock_trigger:
-            d._parse_status5("left", _status5_frame(2, 21.0).data, time.monotonic())
-            # Force the latch directly
-            d._shutdown_triggered = True
-            d._check_voltage_shutdown()
-            mock_trigger.assert_not_called()
+        with patch("subprocess.run") as mock_run:
+            with patch.object(d, "_send_rpm"):
+                d._trigger_low_voltage_shutdown(21.0)
+                self.assertTrue(d._pack_low_latched)
+                d._trigger_low_voltage_shutdown(21.0)  # idempotent re-entry
+                self.assertTrue(d._pack_low_latched)
+        mock_run.assert_not_called()
 
     def test_shutdown_at_exact_threshold_not_triggered(self):
         """Voltage exactly at threshold is NOT below it — no trigger."""
@@ -283,24 +304,29 @@ class TestVoltageThreshold(unittest.TestCase):
         d._bus = _FakeBus()
         d._parse_status5("left", _status5_frame(2, 10.0).data, time.monotonic())
         d._check_voltage_shutdown()
-        self.assertFalse(d._shutdown_triggered)
+        self.assertFalse(d._pack_low_latched)
 
     def test_no_shutdown_without_voltage_data(self):
         d = self._driver()
         # No status5 frames received — voltage is None
         d._check_voltage_shutdown()
-        self.assertFalse(d._shutdown_triggered)
+        self.assertFalse(d._pack_low_latched)
         self.assertIsNone(d._low_voltage_since)
 
-    def test_trigger_sends_stop_and_sets_event(self):
+    def test_trigger_latches_and_cuts_motors_without_os_shutdown(self):
+        """Repurposed from test_trigger_sends_stop_and_sets_event. The trigger
+        now engages the recoverable pack-low latch and cuts motors, but must NOT
+        set the stop-event (process keeps running) and must NOT invoke the OS
+        shutdown (subprocess.run)."""
         d = self._driver()
         d._stop_event = threading.Event()
         sent: list = []
         with patch.object(d, "_send_rpm", side_effect=lambda *a: sent.append(a)):
-            with patch("subprocess.run"):
+            with patch("subprocess.run") as mock_run:
                 d._trigger_low_voltage_shutdown(21.0)
-        self.assertTrue(d._shutdown_triggered)
-        self.assertTrue(d._stop_event.is_set())
+        self.assertTrue(d._pack_low_latched)
+        self.assertFalse(d._stop_event.is_set())   # process NOT killed
+        mock_run.assert_not_called()                # NO OS shutdown
         # Both motors should receive RPM=0
         self.assertIn((d._left_id, 0), sent)
         self.assertIn((d._right_id, 0), sent)
@@ -428,23 +454,28 @@ class TestRxThread(unittest.TestCase):
         finally:
             d.shutdown()
 
-    def test_voltage_shutdown_fires_via_rx_thread(self):
+    def test_pack_low_latch_fires_via_rx_thread(self):
+        # 20.0V sits in the band [15.0, 22.4) (test floor 15.0), so a sustained
+        # in-band sag latches pack_low WITHOUT any OS shutdown or stop-event.
         d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg(
             voltage_shutdown_threshold_v=22.4,
             voltage_shutdown_delay_s=0.05,
+            voltage_shutdown_floor_v=15.0,
         ))
         d._bus = _FakeBus()
-        with patch("subprocess.run"):
+        with patch("subprocess.run") as mock_run:
             d.start()
             try:
-                # Repeatedly inject low-voltage frames to keep timer advancing
+                # Repeatedly inject in-band frames to keep the sustain timer advancing
                 for _ in range(20):
                     d._bus.push(_status5_frame(2, 20.0))
                     time.sleep(0.01)
                 time.sleep(0.2)
-                self.assertTrue(d._shutdown_triggered)
+                self.assertTrue(d._pack_low_latched)
+                # Watchdog must NOT kill the process or shell out to shutdown.
+                self.assertFalse(d._stop_event.is_set())  # type: ignore[union-attr]
+                mock_run.assert_not_called()
             finally:
-                # stop_event already set by shutdown path; thread may already be gone
                 if d._rx_thread and d._rx_thread.is_alive():
                     d._stop_event.set()  # type: ignore[union-attr]
                     d._rx_thread.join(timeout=1.0)
@@ -646,6 +677,207 @@ class TestRxLoopStaleBlockContainment(unittest.TestCase):
             self.assertEqual(d.get_rpm("left"), 777)
         finally:
             d.shutdown()
+
+
+class TestPackLowLatch(unittest.TestCase):
+    """Revised low-voltage contract (2026-07-10): plausibility floor + a
+    recoverable pack-low latch, and NO OS shutdown. Uses realistic 13S voltages
+    (floor 30.0, threshold 39.0) matching the field incident.
+
+    Regimes:
+      * V < floor (30.0)              -> pack switched off / garbage: motors
+                                         neutral, log once, NO latch, NO shutdown.
+      * 30.0 <= V < 39.0 for delay s  -> pack-low latch engaged, motors cut,
+                                         NO OS shutdown, process keeps running.
+      * V >= 39.0 + hysteresis (2.0)  -> latch clears, motors re-enabled.
+    """
+
+    LOGGER = "pi_app.hardware.vesc"
+
+    def _driver(self, threshold: float = 39.0, floor: float = 30.0,
+                delay: float = 30.0) -> VescCanDriver:
+        d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg(
+            voltage_shutdown_threshold_v=threshold,
+            voltage_shutdown_floor_v=floor,
+            voltage_shutdown_delay_s=delay,
+        ))
+        d._bus = _FakeBus()
+        d._stop_event = threading.Event()
+        return d
+
+    def _set_v(self, d: VescCanDriver, v: float) -> None:
+        d._parse_status5("left", _status5_frame(2, v).data, time.monotonic())
+
+    # (a) 6.8V reading -> no shutdown, motors stopped, log emitted, no latch.
+    def test_below_floor_no_latch_motors_stopped_logged(self):
+        d = self._driver()
+        sent: list = []
+        with patch.object(d, "_send_rpm", side_effect=lambda *a: sent.append(a)):
+            with patch("subprocess.run") as mock_run:
+                with self.assertLogs(self.LOGGER, level="WARNING") as cm:
+                    self._set_v(d, 6.8)      # the exact field-incident reading
+                    d._check_voltage_shutdown()
+        self.assertFalse(d._pack_low_latched)
+        self.assertIsNone(d._low_voltage_since)
+        self.assertIn((d._left_id, 0), sent)
+        self.assertIn((d._right_id, 0), sent)
+        mock_run.assert_not_called()
+        self.assertTrue(any("plausibility floor" in m for m in cm.output))
+
+    def test_below_floor_logs_only_once_per_episode(self):
+        d = self._driver()
+        with patch.object(d, "_send_rpm") as mock_send:
+            with self.assertLogs(self.LOGGER, level="WARNING") as cm:
+                for _ in range(5):
+                    self._set_v(d, 6.8)
+                    d._check_voltage_shutdown()
+        floor_logs = [m for m in cm.output if "plausibility floor" in m]
+        self.assertEqual(len(floor_logs), 1)          # one line, not spammed
+        self.assertEqual(mock_send.call_count, 2)     # neutral sent once (L+R)
+
+    # (b) 38V sustained for the delay -> motors stopped + pack_low_latched, NO shutdown.
+    def test_band_sustained_latches_and_cuts_motors_no_shutdown(self):
+        d = self._driver(delay=0.05)
+        sent: list = []
+        with patch.object(d, "_send_rpm", side_effect=lambda *a: sent.append(a)):
+            with patch("subprocess.run") as mock_run:
+                self._set_v(d, 38.0)
+                d._check_voltage_shutdown()          # starts the sustain timer
+                self.assertFalse(d._pack_low_latched)
+                time.sleep(0.1)
+                self._set_v(d, 38.0)
+                d._check_voltage_shutdown()          # delay elapsed -> latch
+        self.assertTrue(d._pack_low_latched)
+        self.assertFalse(d._stop_event.is_set())     # process NOT killed
+        self.assertIn((d._left_id, 0), sent)
+        self.assertIn((d._right_id, 0), sent)
+        mock_run.assert_not_called()                 # NO OS shutdown
+
+    # (c) 38V (timer running) then recovery to 45V -> timer resets, no latch.
+    def test_band_then_recovery_resets_timer(self):
+        d = self._driver(delay=30.0)
+        self._set_v(d, 38.0)
+        d._check_voltage_shutdown()
+        self.assertIsNotNone(d._low_voltage_since)    # timer running
+        self._set_v(d, 45.0)
+        d._check_voltage_shutdown()
+        self.assertIsNone(d._low_voltage_since)        # timer reset
+        self.assertFalse(d._pack_low_latched)
+
+    # (d) 38V (timer running) then drop below floor to 6V -> countdown CANCELLED.
+    def test_band_then_below_floor_cancels_countdown(self):
+        d = self._driver(delay=30.0)
+        self._set_v(d, 38.0)
+        d._check_voltage_shutdown()
+        self.assertIsNotNone(d._low_voltage_since)
+        with patch.object(d, "_send_rpm"):
+            self._set_v(d, 6.0)
+            d._check_voltage_shutdown()
+        self.assertIsNone(d._low_voltage_since)        # countdown cancelled
+        self.assertFalse(d._pack_low_latched)          # never latched
+
+    # (e) below-floor then recovery above threshold -> normal monitoring resumes.
+    def test_below_floor_then_recovery_resumes_monitoring(self):
+        d = self._driver(delay=30.0)
+        with patch.object(d, "_send_rpm"):
+            self._set_v(d, 6.0)
+            d._check_voltage_shutdown()
+            self.assertTrue(d._below_floor_active)
+            self._set_v(d, 45.0)                        # recover above threshold
+            d._check_voltage_shutdown()
+            self.assertFalse(d._below_floor_active)
+            # A fresh in-band sag now starts a new countdown (monitoring resumed).
+            self._set_v(d, 38.0)
+            d._check_voltage_shutdown()
+        self.assertIsNotNone(d._low_voltage_since)
+        self.assertFalse(d._pack_low_latched)
+
+    # (f) delay is config-driven, and the real config defaults are floor=30/delay=30.
+    def test_real_config_defaults(self):
+        from config import VescConfig
+        cfg = VescConfig()
+        self.assertEqual(cfg.voltage_shutdown_floor_v, 30.0)
+        self.assertEqual(cfg.voltage_shutdown_delay_s, 30.0)
+        self.assertEqual(cfg.voltage_shutdown_threshold_v, 39.0)
+
+    def test_delay_is_config_driven(self):
+        d = self._driver(delay=0.2)
+        self._set_v(d, 38.0)
+        d._check_voltage_shutdown()                    # start timer
+        d._check_voltage_shutdown()                    # still within the delay
+        self.assertFalse(d._pack_low_latched)
+        time.sleep(0.25)
+        self._set_v(d, 38.0)
+        d._check_voltage_shutdown()                    # delay exceeded -> latch
+        self.assertTrue(d._pack_low_latched)
+
+    # Recovery: latched, then 45V -> latch clears, motors no longer forced.
+    def test_latch_clears_on_recovery_and_reenables_motors(self):
+        d = self._driver(delay=0.0)
+        with patch.object(d, "_send_rpm"):
+            d._trigger_low_voltage_shutdown(38.0)      # force the latch
+        self.assertTrue(d._pack_low_latched)
+        # While latched, set_tracks() forces neutral regardless of command.
+        sent: list = []
+        with patch.object(d, "_send_rpm", side_effect=lambda *a: sent.append(a)):
+            d.set_tracks(200, 200)
+        self.assertEqual(sent, [(d._left_id, 0), (d._right_id, 0)])
+        # Recovery above threshold + hysteresis clears the latch.
+        self._set_v(d, 45.0)
+        d._check_voltage_shutdown()
+        self.assertFalse(d._pack_low_latched)
+        # Motors re-enabled: set_tracks() now sends the commanded (non-neutral) rpm.
+        sent2: list = []
+        with patch.object(d, "_send_rpm", side_effect=lambda *a: sent2.append(a)):
+            d.set_tracks(200, 200)
+        self.assertTrue(any(rpm != 0 for (_id, rpm) in sent2))
+
+    def test_latch_holds_within_hysteresis_deadband(self):
+        """Recovering to >= threshold but < threshold + hysteresis clears the
+        sustain timer but must NOT release the latch (anti-chatter)."""
+        d = self._driver(delay=0.0)
+        with patch.object(d, "_send_rpm"):
+            d._trigger_low_voltage_shutdown(38.0)
+        self.assertTrue(d._pack_low_latched)
+        self._set_v(d, 40.0)   # >= threshold (39) but < threshold+hyst (41)
+        d._check_voltage_shutdown()
+        self.assertIsNone(d._low_voltage_since)
+        self.assertTrue(d._pack_low_latched)
+
+    def test_latch_survives_can_dropout(self):
+        """QA pin: while latched, a CAN dropout (voltage=None — no usable
+        frames) must NOT release the latch or mutate any watchdog state — the
+        monitor early-returns before touching anything. A dropout mid-latch
+        would otherwise silently re-enable motors on a critically low pack."""
+        d = self._driver()
+        with patch.object(d, "_send_rpm"):
+            d._trigger_low_voltage_shutdown(38.0)
+        self.assertTrue(d._pack_low_latched)
+        # No STATUS_5 voltage available -> _get_pack_voltage() returns None.
+        self.assertIsNone(d._get_pack_voltage())
+        before_since = d._low_voltage_since
+        before_floor_flag = d._below_floor_active
+        d._check_voltage_shutdown()                    # must be a no-op
+        self.assertTrue(d._pack_low_latched)           # no false release
+        self.assertEqual(d._low_voltage_since, before_since)
+        self.assertEqual(d._below_floor_active, before_floor_flag)
+        # Driver-level enforcement still holds during the dropout.
+        sent: list = []
+        with patch.object(d, "_send_rpm", side_effect=lambda *a: sent.append(a)):
+            d.set_tracks(220, 220)
+        self.assertEqual(sent, [(d._left_id, 0), (d._right_id, 0)])
+
+    def test_pack_low_latched_surfaced_on_telemetry(self):
+        d = self._driver(delay=0.0)
+        # Need an RPM frame so get_telemetry() returns non-None.
+        d._parse_status("left", _status_frame(2, 100, 0.0, 0.0).data, time.monotonic())
+        self.assertFalse(d.get_pack_low_latched())
+        with patch.object(d, "_send_rpm"):
+            d._trigger_low_voltage_shutdown(38.0)
+        vt = d.get_telemetry()
+        self.assertIsNotNone(vt)
+        self.assertTrue(vt.pack_low_latched)
+        self.assertTrue(d.get_pack_low_latched())
 
 
 if __name__ == "__main__":
