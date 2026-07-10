@@ -36,11 +36,18 @@ class TestTrailPursuitBudget(unittest.TestCase):
             trail_min_spacing_m=0.05,
             target_persistence_s=0.5,   # drop into the lost path quickly
         ))
+        # Build the trail on a virtual clock: compute() reads time.monotonic()
+        # for persistence/trail timing, so under real wall-clock a slow
+        # iteration (> target_persistence_s) drops the tracker into the lost
+        # path mid-build and corrupts the trail state (flaky under CPU load).
         t = 100.0
-        for _ in range(15):
-            t += 0.1
-            fm.update_pose(heading_deg=0.0, motor_l=160, motor_r=160, timestamp=t)
-            fm.compute([_person(x_m=0.0, z_m=3.0)])
+        with patch("pi_app.control.follow_me.time") as mt:
+            for _ in range(15):
+                t += 0.1
+                mt.monotonic.return_value = t
+                fm.update_pose(heading_deg=0.0, motor_l=160, motor_r=160,
+                               timestamp=t)
+                fm.compute([_person(x_m=0.0, z_m=3.0)])
         valid = fm._last_valid_time
 
         # Inside the 3.0s budget: still pursuing the trail (not a full stop).
