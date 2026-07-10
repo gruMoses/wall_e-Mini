@@ -90,7 +90,12 @@ I2C_RETRY_DELAY_SECONDS = 0.15
 # shutdown sequence. This absorbs any residual short blips on top of
 # the debounce and gives a human a window to notice/replug.
 NO_CHARGE_GRACE_SECONDS = 30
-UPS_SHUTDOWN_COUNTDOWN_SECONDS = 120
+# UPS_SHUTDOWN_COUNTDOWN_SECONDS: after the OS halt command, how long the UPS
+# waits before cutting its own output. The Pi halts in ~10-20s, so 60s is a
+# ~3x margin over worst-case halt while cutting battery drain to a halted Pi
+# much sooner than the old 120s. Do NOT reduce below 10s: the EP-0136 (FW v14)
+# shutdown-countdown register 0x18 floor is 10s (valid range 0 or 10-255s).
+UPS_SHUTDOWN_COUNTDOWN_SECONDS = 60
 BOOT_GRACE_SECONDS = 10
 
 # --- AC-present detection (charger voltage primary) ------------------------
@@ -118,8 +123,12 @@ AC_LOSS_DEBOUNCE_S = 10.0
 BATTERY_DISCHARGE_CURRENT_MA = -50.0
 
 # 18650 Li-ion battery protection threshold (mV)
-# 3200mV is a conservative cutoff that protects battery life and avoids deep discharge.
-BATTERY_PROTECTION_MV = 3200
+# Owner prioritizes cell longevity over backup runtime: this UPS exists to give
+# a ~60s graceful-shutdown window, not to ride through an outage, so we keep the
+# cells off the deep-discharge floor. 3400mV lands at a ~15-20% SoC floor vs the
+# ~5-10% a 3200mV cutoff allowed. Pack is 1S, so per-cell == pack; valid range
+# for protection regs 0x11/0x12 is 0-4500mV.
+BATTERY_PROTECTION_MV = 3400
 
 
 def detect_addr(bus: smbus2.SMBus) -> int:

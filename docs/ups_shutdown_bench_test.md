@@ -45,7 +45,7 @@ module's docstring; summary:
   voltage to stay continuously below threshold before "AC lost" is declared
   at all. A single bad reading or brief glitch cannot arm anything.
 - The existing `NO_CHARGE_GRACE_SECONDS` (30s) and
-  `UPS_SHUTDOWN_COUNTDOWN_SECONDS` (120s) behavior is **unchanged** — it now
+  `UPS_SHUTDOWN_COUNTDOWN_SECONDS` (60s) behavior is **unchanged** — it now
   just triggers off the debounced signal instead of the raw current sign. A
   genuine, sustained power loss still shuts the Pi down cleanly; that
   protection is preserved, not removed.
@@ -135,13 +135,13 @@ stop and re-examine (see Abort path below).
    - After a further `NO_CHARGE_GRACE_SECONDS` (30s): log line "No charger
      for 30s (debounced); safe shutdown sequence begins," followed by
      `wall-e.service` stop, USB shedding, UPS shutdown countdown set to
-     `UPS_SHUTDOWN_COUNTDOWN_SECONDS` (120s), then `sync` and
+     `UPS_SHUTDOWN_COUNTDOWN_SECONDS` (60s), then `sync` and
      `shutdown -h now`.
    - Total time from physical unplug to shutdown command: roughly 40-45
      seconds (10s debounce + 30s grace + a couple seconds of overhead).
-   - Pi actually powers off some time within the 120s UPS countdown window
+   - Pi actually powers off some time within the 60s UPS countdown window
      after the shutdown command (OS halt itself is typically much faster
-     than that; the 120s is the UPS's own hard-cutoff backstop).
+     than that — ~10-20s; the 60s is the UPS's own hard-cutoff backstop).
 4. **This is the safety behavior working correctly** — a real, sustained
    power cut must still result in a clean shutdown. Do not interpret this as
    a bug.

@@ -134,7 +134,7 @@ MODE: DETECT-ONLY — shutdown actions suppressed.
 Bench-test mode: the Pi will NOT shut down on charger loss and NO UPS register WRITES are performed (strictly read-only against the hardware). ...
 ================================================================
 DETECT-ONLY: skipped Back-to-AC auto power-on register write (reg 25) — read-only mode.
-DETECT-ONLY: skipped battery-protection threshold register writes (regs 17/18, would be 3200mV) — read-only mode.
+DETECT-ONLY: skipped battery-protection threshold register writes (regs 17/18, would be 3400mV) — read-only mode.
 ```
 
 If you do **not** see `MODE: DETECT-ONLY`, the mode is **not** active — stop
@@ -161,7 +161,7 @@ Unplug the charger and leave it out for as long as you like. At the daemon's
    DETECT-ONLY: AC loss confirmed (grace expired) — would begin shutdown sequence NOW (suppressed). Continuing to monitor; replug to reset and repeat.
    DETECT-ONLY: suppressed stop_rover_service() — wall-e left running.
    DETECT-ONLY: suppressed shed_usb_load() — USB power left on.
-   DETECT-ONLY: suppressed UPS shutdown-countdown register write (reg 24 would be set to 120s).
+   DETECT-ONLY: suppressed UPS shutdown-countdown register write (reg 24 would be set to 60s).
    DETECT-ONLY: suppressed sync + '/sbin/shutdown -h now' — Pi stays up.
    ```
 3. The Pi stays up. No further "would begin shutdown" line is emitted for the

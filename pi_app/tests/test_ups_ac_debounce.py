@@ -222,7 +222,7 @@ def _make_charger_reader(readings):
 _SNAPSHOT = {
     "typec_mv": 0,
     "microusb_mv": 0,
-    "protect_mv": 3200,
+    "protect_mv": 3400,  # tracks daemon.BATTERY_PROTECTION_MV (readback mock)
     "shutdown_countdown_s": 0,
     "auto_power_on": 1,
     "sample_period_min": 2,
