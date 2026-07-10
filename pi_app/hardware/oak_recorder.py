@@ -131,6 +131,11 @@ class RecordingTelemetry:
     vesc_rx_last_frame_age_s: float | None = None
     # VESC low-voltage watchdog latch (early-warning + motor-cutoff; recoverable).
     vesc_pack_low_latched: bool = False
+    # Per-motor STATUS(9) frame ages + CAN RX-thread liveness (diagnostics for
+    # the /debug board — >0.5s on a motor means its RPM is not trustworthy).
+    vesc_left_status_age_s: float | None = None
+    vesc_right_status_age_s: float | None = None
+    vesc_rx_thread_alive: bool | None = None
     # ── Follow-Me visualization fields (Items 2 + 4) ─────────────────
     follow_mode: str | None = None
     trail_points_xy: list | None = None       # [[x,y], ...] last 20

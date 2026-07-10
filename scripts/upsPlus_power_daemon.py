@@ -59,8 +59,10 @@ THE FIX:
 ────────────────────────────────────────────────────────────────────────
 """
 
+import json
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -121,6 +123,16 @@ AC_LOSS_DEBOUNCE_S = 10.0
 # above). It is retained only as corroborating context in log lines, using
 # this threshold purely for human-readable "charging/discharging" labels.
 BATTERY_DISCHARGE_CURRENT_MA = -50.0
+
+# --- Status-file bridge for the web debug board ----------------------------
+#
+# Each poll loop this daemon atomically publishes a tiny JSON snapshot here so
+# WALL-E's web dashboard (pi_app/web/oak_viewer.py, /api/ups) can show live UPS
+# state WITHOUT touching the I2C bus itself. This is best-effort telemetry only:
+# the write is fully exception-isolated (see write_status_file) so a failure can
+# NEVER perturb the daemon's AC-detection / shutdown decision logic. Path is
+# overridable via env so tests and the reader can point at the same location.
+UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
 
 # 18650 Li-ion battery protection threshold (mV)
 # Owner prioritizes cell longevity over backup runtime: this UPS exists to give
@@ -304,6 +316,125 @@ def read_ups_snapshot(
         "battery_v": batt_v,
         "battery_i_ma": batt_i,
     }
+
+
+def write_status_file(
+    *,
+    ac_present: bool,
+    typec_mv: int,
+    microusb_mv: int,
+    seconds_without_charge: int,
+    detect_only: bool,
+    batt_v: float | None = None,
+    batt_ma: float | None = None,
+    protect_mv: int | None = None,
+    path: str = UPS_STATUS_FILE,
+) -> bool:
+    """Atomically publish a small UPS status snapshot for the web dashboard.
+
+    Best-effort TELEMETRY ONLY. This is deliberately wrapped so that ANY
+    failure — bad/unwritable path, disk full, permission error, serialization
+    error — is swallowed and can NEVER propagate into the caller's poll loop
+    or perturb the AC-detection / shutdown decision logic. This mirrors the
+    flight-recorder try/except discipline used elsewhere in this codebase.
+
+    The file is written to a temp path in the same directory and then
+    ``os.replace``d into place, so a concurrent reader never observes a
+    half-written file (os.replace is atomic within a filesystem).
+
+    SYMLINK HARDENING: /tmp is world-writable and this daemon typically runs
+    as root, so a predictable temp name would let a local attacker pre-plant
+    a symlink and turn the open() into an arbitrary-file-write-as-root. The
+    temp file is therefore created with O_CREAT|O_EXCL|O_NOFOLLOW (refuses to
+    open ANY pre-existing path — O_EXCL never follows a symlink, dangling or
+    not; O_NOFOLLOW is belt-and-suspenders) under an unpredictable
+    secrets.token_hex suffix so the name can't be guessed and squatted ahead
+    of time. Any failure — including EEXIST from a squatted name — is
+    swallowed like every other error here: a skipped publish cycle is fine,
+    the next poll retries. os.replace itself is symlink-safe (it renames over
+    the destination rather than writing through it).
+
+    Returns True on a successful write, False if the write was suppressed by an
+    error (callers ignore the return; it exists purely for tests).
+    """
+    tmp = None
+    created = False
+    try:
+        payload = {
+            "ts": time.time(),
+            "ac_present": bool(ac_present),
+            "typec_mv": typec_mv,
+            "microusb_mv": microusb_mv,
+            "batt_v": batt_v,
+            "batt_ma": batt_ma,
+            "protect_mv": protect_mv,
+            "detect_only": bool(detect_only),
+            "seconds_without_charge": seconds_without_charge,
+        }
+        data = json.dumps(payload).encode("utf-8")
+        tmp = f"{path}.tmp.{os.getpid()}.{secrets.token_hex(6)}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        created = True
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+        return True
+    except Exception as error:  # noqa: BLE001 — intentional catch-all (see docstring)
+        logging.debug("UPS status file write failed (non-fatal): %s", error)
+        # Only clean up a temp file WE created — never unlink a pre-existing
+        # path (e.g. an attacker-planted symlink that made os.open EEXIST).
+        if created:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+        return False
+
+
+def _publish_status(
+    bus: smbus2.SMBus,
+    device_addr: int,
+    ina_batt: INA219 | None,
+    *,
+    ac_present: bool,
+    typec_mv: int,
+    microusb_mv: int,
+    seconds_without_charge: int,
+    detect_only: bool,
+) -> None:
+    """Read battery/protect context and publish the status file — fully isolated.
+
+    Wraps BOTH the supplemental I2C/INA read and the file write in one broad
+    try/except so neither can ever raise into the poll loop. The authoritative
+    charger-voltage readings (typec_mv/microusb_mv) are passed in already-read;
+    only the extra "nice to have" fields (batt V/mA, protect threshold) are
+    fetched here, and if that read fails they degrade to None rather than
+    aborting the publish.
+    """
+    try:
+        batt_v = batt_ma = protect_mv = None
+        try:
+            snap = read_ups_snapshot(bus, device_addr, ina_batt)
+            batt_v = snap.get("battery_v")
+            batt_ma = snap.get("battery_i_ma")
+            protect_mv = snap.get("protect_mv")
+        except Exception:
+            pass  # supplemental context only; publish what we have
+        write_status_file(
+            ac_present=ac_present,
+            typec_mv=typec_mv,
+            microusb_mv=microusb_mv,
+            seconds_without_charge=seconds_without_charge,
+            detect_only=detect_only,
+            batt_v=batt_v,
+            batt_ma=batt_ma,
+            protect_mv=protect_mv,
+            path=UPS_STATUS_FILE,
+        )
+    except Exception as error:  # noqa: BLE001 — must never reach the poll loop
+        logging.debug("UPS status publish failed (non-fatal): %s", error)
 
 
 def stop_rover_service() -> None:
@@ -675,6 +806,18 @@ def main(detect_only: bool | None = None) -> None:
                 run_shutdown_sequence(
                     bus, device_addr, ina_batt, detect_only=detect_only
                 )
+
+        # Best-effort status publish for the web debug board. Fully isolated —
+        # cannot raise into this loop and does not consult or change any state
+        # used by the AC-detection / shutdown decisions above.
+        _publish_status(
+            bus, device_addr, ina_batt,
+            ac_present=ac_present,
+            typec_mv=typec_mv,
+            microusb_mv=microusb_mv,
+            seconds_without_charge=seconds_without_charge,
+            detect_only=detect_only,
+        )
 
         time.sleep(1)
 
