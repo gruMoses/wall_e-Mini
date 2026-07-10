@@ -559,6 +559,55 @@ def _publish_status(
         logging.debug("UPS status publish failed (non-fatal): %s", error)
 
 
+def _format_ac_transition_log(
+    *,
+    ac_present: bool,
+    typec_mv: int,
+    microusb_mv: int,
+    batt_cache: dict | None = None,
+    now_wall: float | None = None,
+) -> str:
+    """Format the AC state-change log line with ZERO supplemental I2C.
+
+    Historically this transition log did a fresh read_ups_snapshot (~16 regs +
+    INA219) — extra I2C at the WORST possible moments for the politeness
+    policy: the 'missing' edge read landed mid-outage/transfer and the
+    'present again' edge read landed inside the recovery holdoff. ALL
+    transition logging is now snapshot-free (even a transition during steady
+    AC-present state, for simplicity): charger voltages come from THIS poll's
+    detection read (already in hand) and battery values come from the last
+    cached supplemental read, tagged with their age when it is old enough to
+    matter (>= ~2 polls), so the log stays honest about what was measured when.
+
+    Pure string formatting — no I2C, no side effects — so it is directly
+    unit-testable.
+    """
+    cache = batt_cache or {}
+    batt_v = cache.get("batt_v")
+    batt_ma = cache.get("batt_ma")
+    ts_batt = cache.get("ts_batt")
+    age_note = ""
+    if batt_v is None and batt_ma is None:
+        age_note = ", no battery read yet"
+    elif ts_batt is not None:
+        now_wall = time.time() if now_wall is None else now_wall
+        age_s = max(0.0, float(now_wall) - float(ts_batt))
+        if age_s >= 2.0:  # older than ~a couple of polls — worth flagging
+            age_note = f", batt {age_s:.0f}s old"
+    return (
+        "UPS AC state changed -> %s (typec=%smV microusb=%smV "
+        "batt=%sV %smA [cached%s])"
+        % (
+            "present" if ac_present else "missing",
+            typec_mv,
+            microusb_mv,
+            batt_v,
+            batt_ma,
+            age_note,
+        )
+    )
+
+
 def stop_rover_service() -> None:
     """Stop the wall-e service so OAK-D pipeline shuts down cleanly."""
     logging.info("Stopping wall-e.service for clean OAK-D teardown...")
@@ -901,18 +950,22 @@ def main(detect_only: bool | None = None) -> None:
             logging.info("UPS AC state initialized: %s", "present" if ac_present else "missing")
         elif ac_present != last_ac_present:
             last_ac_present = ac_present
-            try:
-                snap = read_ups_snapshot(bus, device_addr, ina_batt)
-                logging.info(
-                    "UPS AC state changed -> %s (typec=%smV microusb=%smV batt=%sV %smA)",
-                    "present" if ac_present else "missing",
-                    snap["typec_mv"],
-                    snap["microusb_mv"],
-                    snap["battery_v"],
-                    snap["battery_i_ma"],
-                )
-            except Exception as error:
-                logging.info("UPS AC state changed -> %s (snapshot failed: %s)", ac_present, error)
+            # I2C politeness: transition logging is snapshot-free. The old code
+            # did a fresh read_ups_snapshot right here — supplemental I2C at the
+            # worst possible moments (the 'missing' edge lands mid-outage/
+            # transfer; the 'present again' edge lands inside the recovery
+            # holdoff). ALL transitions now log this poll's detection-read
+            # charger voltages plus the last-cached battery values (aged),
+            # even in steady AC-present state, for simplicity.
+            logging.info(
+                "%s",
+                _format_ac_transition_log(
+                    ac_present=ac_present,
+                    typec_mv=typec_mv,
+                    microusb_mv=microusb_mv,
+                    batt_cache=batt_cache,
+                ),
+            )
 
         if ac_present:
             if seconds_without_charge != 0:

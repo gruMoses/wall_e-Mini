@@ -439,6 +439,96 @@ class PublishStatusPoliteness(unittest.TestCase):
         self.assertTrue(q["batt_stale"])
 
 
+class TransitionLoggingSnapshotFree(unittest.TestCase):
+    """AC state-change logging must issue ZERO supplemental I2C. The old code
+    read a fresh snapshot on every transition — at the worst possible moments
+    (the 'missing' edge mid-outage, the 'present again' edge inside the
+    recovery holdoff). Transitions now log this poll's detection-read charger
+    voltages + last-cached battery values."""
+
+    def test_formatter_is_pure_and_tags_battery_age(self):
+        with mock.patch.object(daemon, "read_ups_snapshot") as snap_spy:
+            msg = daemon._format_ac_transition_log(
+                ac_present=False, typec_mv=123, microusb_mv=0,
+                batt_cache={"batt_v": 3.71, "batt_ma": -1400.0,
+                            "protect_mv": 3400, "ts_batt": 100.0},
+                now_wall=112.0,
+            )
+        snap_spy.assert_not_called()
+        self.assertIn("missing", msg)
+        self.assertIn("typec=123mV", msg)          # detection read, this poll
+        self.assertIn("batt=3.71V", msg)           # cached, not freshly read
+        self.assertIn("-1400.0", msg)
+        self.assertIn("batt 12s old", msg)         # honest staleness age
+
+    def test_formatter_handles_empty_cache(self):
+        msg = daemon._format_ac_transition_log(
+            ac_present=True, typec_mv=5000, microusb_mv=0, batt_cache={})
+        self.assertIn("present", msg)
+        self.assertIn("typec=5000mV", msg)
+        self.assertIn("no battery read yet", msg)
+
+    def test_ac_missing_transition_triggers_no_snapshot_read(self):
+        """Drive main() through boot grace, steady AC, a sag, and the debounced
+        MISSING transition on a fake clock. Every read_ups_snapshot call
+        (startup + steady-state cadence) must predate the sag; the transition
+        log line must still carry detection-read voltages + cached battery."""
+        clk = {"t": 0.0}
+        snapshot_calls = []
+        fake_snap = {
+            "typec_mv": 5000, "microusb_mv": 0, "protect_mv": 3400,
+            "shutdown_countdown_s": 0, "auto_power_on": 1,
+            "sample_period_min": 2, "battery_v": 3.9, "battery_i_ma": 250.0,
+        }
+
+        def fake_read_snapshot(*_a, **_k):
+            snapshot_calls.append(clk["t"])
+            return dict(fake_snap)
+
+        SAG_START = 25.0   # charger voltage drops here; debounce (10s) → t=35
+
+        def fake_read_charger(_bus, _addr):
+            return (5000, 0) if clk["t"] < SAG_START else (0, 0)
+
+        class _StopLoop(Exception):
+            pass
+
+        def fake_sleep(s):
+            clk["t"] += s
+            if clk["t"] >= 40.0:   # well past the transition, before grace expiry
+                raise _StopLoop
+
+        with _tmp() as path:
+            with mock.patch.object(daemon, "UPS_STATUS_FILE", path), \
+                 mock.patch.object(daemon, "detect_addr", return_value=0x17), \
+                 mock.patch.object(daemon, "read_ups_snapshot",
+                                   side_effect=fake_read_snapshot), \
+                 mock.patch.object(daemon, "read_charger_voltages",
+                                   side_effect=fake_read_charger), \
+                 mock.patch("time.monotonic", side_effect=lambda: clk["t"]), \
+                 mock.patch("time.sleep", side_effect=fake_sleep):
+                with self.assertLogs(level="INFO") as captured:
+                    with self.assertRaises(_StopLoop):
+                        daemon.main(detect_only=True)
+
+        missing_lines = [m for m in captured.output
+                         if "UPS AC state changed -> missing" in m]
+        self.assertEqual(len(missing_lines), 1)
+        line = missing_lines[0]
+        # Charger voltages from THIS poll's detection read (sagged to 0)…
+        self.assertIn("typec=0mV", line)
+        self.assertIn("microusb=0mV", line)
+        # …battery from the cache filled during steady state, marked cached.
+        self.assertIn("batt=3.9V", line)
+        self.assertIn("250.0", line)
+        self.assertIn("cached", line)
+        # ZERO supplemental I2C during the sag/outage: every snapshot call
+        # (startup config log + steady-state cadence) happened before the sag.
+        self.assertTrue(snapshot_calls)
+        self.assertTrue(all(t < SAG_START for t in snapshot_calls),
+                        f"snapshot call(s) during sag window: {snapshot_calls}")
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
