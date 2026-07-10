@@ -63,6 +63,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 import smbus2
@@ -364,8 +365,151 @@ def shed_usb_load() -> None:
                 logging.warning("sysfs deauthorize failed for %s: %s", label, error)
 
 
-def main() -> None:
+def _resolve_detect_only(argv: list[str] | None = None) -> bool:
+    """Decide whether DETECT-ONLY (bench-test) mode is active.
+
+    Activated by EITHER the ``--detect-only`` CLI flag OR the environment
+    variable ``UPS_DETECT_ONLY`` set to a truthy value (1/true/yes/on). The
+    env-var path exists so a systemd drop-in can flip the mode with
+    ``Environment=UPS_DETECT_ONLY=1`` without editing the unit's ExecStart.
+
+    Pure/argument-injectable so it is unit-testable without touching argv or
+    the real environment.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    env_val = os.environ.get("UPS_DETECT_ONLY", "").strip().lower()
+    env_on = env_val in ("1", "true", "yes", "on")
+    flag_on = "--detect-only" in argv
+    return env_on or flag_on
+
+
+def run_shutdown_sequence(
+    bus: smbus2.SMBus,
+    device_addr: int,
+    ina_batt: INA219 | None = None,
+    *,
+    detect_only: bool = False,
+) -> None:
+    """Grace window expired with the charger still absent — react.
+
+    In NORMAL (armed) mode this performs the full validated shutdown
+    sequence: stop the rover service, shed USB load, write the UPS hardware
+    shutdown-countdown register, then sync and halt the Pi. Behavior here is
+    unchanged from the pre-detect-only daemon.
+
+    In DETECT-ONLY (bench-test) mode EVERY hardware/side-effecting action is
+    suppressed at its OWN call site — deliberately NOT behind a single early
+    return — so a future refactor cannot accidentally re-arm one of them in
+    test mode. Nothing is stopped, no USB is shed, NO UPS register is
+    written, and no sync/shutdown is issued; the function simply returns so
+    the caller keeps monitoring. Only reads happen (the grace-expiry snapshot
+    below), which are safe.
+
+    The grace-expiry report itself is detection logging and is emitted
+    identically in both modes.
+    """
+    # --- Grace-expiry report: detection logging, identical in both modes. ---
+    try:
+        snap = read_ups_snapshot(bus, device_addr, ina_batt)
+        logging.warning(
+            "No charger for %ss (debounced); safe shutdown sequence begins. "
+            "typec=%smV microusb=%smV protect=%smV batt=%sV %smA",
+            NO_CHARGE_GRACE_SECONDS,
+            snap["typec_mv"],
+            snap["microusb_mv"],
+            snap["protect_mv"],
+            snap["battery_v"],
+            snap["battery_i_ma"],
+        )
+    except Exception as error:
+        logging.warning(
+            "No charger for %ss; safe shutdown sequence begins (snapshot failed: %s).",
+            NO_CHARGE_GRACE_SECONDS,
+            error,
+        )
+
+    if detect_only:
+        logging.warning(
+            "DETECT-ONLY: AC loss confirmed (grace expired) — would begin "
+            "shutdown sequence NOW (suppressed). Continuing to monitor; "
+            "replug to reset and repeat."
+        )
+
+    # --- ACTION SITE 1: stop the wall-e rover service. ----------------------
+    if detect_only:
+        logging.info("DETECT-ONLY: suppressed stop_rover_service() — wall-e left running.")
+    else:
+        stop_rover_service()
+
+    # --- ACTION SITE 2: shed USB load (OAK-D hub power). --------------------
+    if detect_only:
+        logging.info("DETECT-ONLY: suppressed shed_usb_load() — USB power left on.")
+    else:
+        shed_usb_load()
+
+    # --- ACTION SITE 3: write the UPS hardware shutdown-countdown register. --
+    if detect_only:
+        logging.info(
+            "DETECT-ONLY: suppressed UPS shutdown-countdown register write "
+            "(reg %d would be set to %ss).",
+            REG_SHUTDOWN_COUNTDOWN,
+            UPS_SHUTDOWN_COUNTDOWN_SECONDS,
+        )
+    else:
+        logging.info(
+            "Setting UPS shutdown countdown to %ss.",
+            UPS_SHUTDOWN_COUNTDOWN_SECONDS,
+        )
+        # Request UPS to cut power after countdown; with Back-to-AC enabled it
+        # powers back on only when AC returns.
+        if write_reg_verified(
+            bus,
+            device_addr,
+            REG_SHUTDOWN_COUNTDOWN,
+            UPS_SHUTDOWN_COUNTDOWN_SECONDS,
+        ):
+            logging.info(
+                "UPS shutdown countdown verified at %ss.",
+                UPS_SHUTDOWN_COUNTDOWN_SECONDS,
+            )
+        else:
+            logging.warning(
+                "Failed to set UPS shutdown countdown after retries; proceeding with OS shutdown."
+            )
+
+    # --- ACTION SITE 4: sync + OS halt. -------------------------------------
+    if detect_only:
+        logging.info(
+            "DETECT-ONLY: suppressed sync + '/sbin/shutdown -h now' — Pi stays up."
+        )
+        return
+
+    logging.info("Running sync and OS halt now.")
+    os.system("sudo sync")
+    os.system("sudo /sbin/shutdown -h now")
+    # Give systemd time; if still running, wait to avoid repeated triggers.
+    time.sleep(600)
+    # After halt, we should not reach here under normal conditions.
+
+
+def main(detect_only: bool | None = None) -> None:
+    if detect_only is None:
+        detect_only = _resolve_detect_only()
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+
+    if detect_only:
+        logging.warning("=" * 64)
+        logging.warning("MODE: DETECT-ONLY — shutdown actions suppressed.")
+        logging.warning(
+            "Bench-test mode: the Pi will NOT shut down on charger loss and NO "
+            "UPS register WRITES are performed (strictly read-only against the "
+            "hardware). Detection, debounce, and grace logging run normally. "
+            "Do NOT leave this enabled in service — the robot's power protection "
+            "is DISARMED until the mode banner is gone."
+        )
+        logging.warning("=" * 64)
 
     # Guard the startup hardware probe: if the UPS MCU or INA219 isn't
     # present (e.g. running on hardware without the HAT, or a bench test
@@ -413,29 +557,47 @@ def main() -> None:
         logging.warning("Unable to read UPS initial snapshot: %s", error)
 
     # Ensure auto power-on when AC returns.
-    if write_reg_verified(bus, device_addr, REG_AUTO_POWER_ON, 1):
+    # ACTION SITE (startup): UPS register write, suppressed in detect-only so
+    # the mode is read-only against the UPS MCU (no UPS register writes; INA219 sensor configure still runs).
+    if detect_only:
+        logging.info(
+            "DETECT-ONLY: skipped Back-to-AC auto power-on register write "
+            "(reg %d) — read-only mode.",
+            REG_AUTO_POWER_ON,
+        )
+    elif write_reg_verified(bus, device_addr, REG_AUTO_POWER_ON, 1):
         logging.info("Back-to-AC auto power-on enabled.")
     else:
         logging.warning("Failed to enable Back-to-AC after retries.")
 
     # Ensure battery protection threshold is set and verified.
-    protect_low = BATTERY_PROTECTION_MV & 0xFF
-    protect_high = (BATTERY_PROTECTION_MV >> 8) & 0xFF
-    low_ok = write_reg_verified(bus, device_addr, REG_BAT_PROTECT_LOW, protect_low)
-    high_ok = write_reg_verified(bus, device_addr, REG_BAT_PROTECT_HIGH, protect_high)
-    if low_ok and high_ok:
-        try:
-            low_read = read_reg_with_retry(bus, device_addr, REG_BAT_PROTECT_LOW)
-            high_read = read_reg_with_retry(bus, device_addr, REG_BAT_PROTECT_HIGH)
-            protect_readback = (high_read << 8) | low_read
-            logging.info("Battery protection threshold set/readback: %smV", protect_readback)
-        except Exception as error:
-            logging.warning("Battery protection threshold set but readback failed: %s", error)
-    else:
-        logging.warning(
-            "Failed to set battery protection threshold to %smV after retries.",
+    # ACTION SITE (startup): UPS register writes, suppressed in detect-only.
+    if detect_only:
+        logging.info(
+            "DETECT-ONLY: skipped battery-protection threshold register writes "
+            "(regs %d/%d, would be %smV) — read-only mode.",
+            REG_BAT_PROTECT_LOW,
+            REG_BAT_PROTECT_HIGH,
             BATTERY_PROTECTION_MV,
         )
+    else:
+        protect_low = BATTERY_PROTECTION_MV & 0xFF
+        protect_high = (BATTERY_PROTECTION_MV >> 8) & 0xFF
+        low_ok = write_reg_verified(bus, device_addr, REG_BAT_PROTECT_LOW, protect_low)
+        high_ok = write_reg_verified(bus, device_addr, REG_BAT_PROTECT_HIGH, protect_high)
+        if low_ok and high_ok:
+            try:
+                low_read = read_reg_with_retry(bus, device_addr, REG_BAT_PROTECT_LOW)
+                high_read = read_reg_with_retry(bus, device_addr, REG_BAT_PROTECT_HIGH)
+                protect_readback = (high_read << 8) | low_read
+                logging.info("Battery protection threshold set/readback: %smV", protect_readback)
+            except Exception as error:
+                logging.warning("Battery protection threshold set but readback failed: %s", error)
+        else:
+            logging.warning(
+                "Failed to set battery protection threshold to %smV after retries.",
+                BATTERY_PROTECTION_MV,
+            )
 
     seconds_without_charge = 0
     boot_elapsed = 0
@@ -497,55 +659,13 @@ def main() -> None:
                     NO_CHARGE_GRACE_SECONDS,
                 )
             if seconds_without_charge == NO_CHARGE_GRACE_SECONDS:
-                try:
-                    snap = read_ups_snapshot(bus, device_addr, ina_batt)
-                    logging.warning(
-                        "No charger for %ss (debounced); safe shutdown sequence begins. "
-                        "typec=%smV microusb=%smV protect=%smV batt=%sV %smA",
-                        NO_CHARGE_GRACE_SECONDS,
-                        snap["typec_mv"],
-                        snap["microusb_mv"],
-                        snap["protect_mv"],
-                        snap["battery_v"],
-                        snap["battery_i_ma"],
-                    )
-                except Exception as error:
-                    logging.warning(
-                        "No charger for %ss; safe shutdown sequence begins (snapshot failed: %s).",
-                        NO_CHARGE_GRACE_SECONDS,
-                        error,
-                    )
-
-                stop_rover_service()
-                shed_usb_load()
-
-                logging.info(
-                    "Setting UPS shutdown countdown to %ss.",
-                    UPS_SHUTDOWN_COUNTDOWN_SECONDS,
+                # Grace expired with the charger still gone. In normal mode
+                # this halts the Pi and never returns; in detect-only mode
+                # every action is suppressed at its own call site and this
+                # returns so we keep monitoring for a replug (repeatable).
+                run_shutdown_sequence(
+                    bus, device_addr, ina_batt, detect_only=detect_only
                 )
-                # Request UPS to cut power after countdown; with Back-to-AC enabled it
-                # powers back on only when AC returns.
-                if write_reg_verified(
-                    bus,
-                    device_addr,
-                    REG_SHUTDOWN_COUNTDOWN,
-                    UPS_SHUTDOWN_COUNTDOWN_SECONDS,
-                ):
-                    logging.info(
-                        "UPS shutdown countdown verified at %ss.",
-                        UPS_SHUTDOWN_COUNTDOWN_SECONDS,
-                    )
-                else:
-                    logging.warning(
-                        "Failed to set UPS shutdown countdown after retries; proceeding with OS shutdown."
-                    )
-
-                logging.info("Running sync and OS halt now.")
-                os.system("sudo sync")
-                os.system("sudo /sbin/shutdown -h now")
-                # Give systemd time; if still running, wait to avoid repeated triggers.
-                time.sleep(600)
-                # After halt, we should not reach here under normal conditions.
 
         time.sleep(1)
 
