@@ -356,6 +356,8 @@ class DetectOnlyMainLoopTests(unittest.TestCase):
             ), \
             mock.patch.object(daemon, "write_reg_verified", return_value=True) as m_write, \
             mock.patch.object(daemon, "run_shutdown_sequence", shutdown_spy), \
+            mock.patch.object(daemon, "shed_usb_load"), \
+            mock.patch.object(daemon, "restore_usb_load", return_value=True), \
             mock.patch.object(daemon.time, "sleep", fake_sleep), \
             mock.patch.object(daemon.time, "monotonic", fake_monotonic):
             with self.assertLogs(level="INFO") as cm:
