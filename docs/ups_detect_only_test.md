@@ -1,10 +1,18 @@
 # UPS daemon — DETECT-ONLY bench-test mode
 
 Lets you exercise the **entire** charger-loss detection chain of
-`scripts/upsPlus_power_daemon.py` — AC state transitions, the 10s loss
-debounce, the 30s grace window, and grace expiry — **without the Pi ever
-shutting down**, so you can unplug/replug the charger as many times as you
-like on the bench.
+`scripts/upsPlus_power_daemon.py` — AC state transitions, the 4s loss
+debounce, the 4s grace window, and grace expiry — with the daemon's own
+shutdown actions suppressed, so you can unplug/replug the charger repeatedly
+on the bench.
+
+> 🔪 **The Pi is NOT immune to power loss in this mode.** DETECT-ONLY only
+> suppresses the *daemon's* shutdown; it cannot stop the UPS firmware, which
+> guillotines its own 5V output ~19-20s after input loss regardless (confirmed
+> 2026-07-10 — see the "Firmware guillotine" section below). So an unplug left
+> out past ~15-18s **will hard-cut the Pi** (dirty fsck), daemon suppressed or
+> not. Keep detect-only unplugs short (replug within ~15s); the whole
+> detect→grace-expiry chain you're testing completes by ~8-9s anyway.
 
 > ⚠️ **SAFETY:** DETECT-ONLY *disarms* the robot's power protection. While it
 > is enabled the Pi will **not** gracefully shut down on real charger loss and
@@ -20,7 +28,33 @@ daemon already passed twice) and the module docstring in
 
 ## What DETECT-ONLY does (and does NOT do)
 
-**⚠ The UPS hardware battery-protect floor (default 3.2 V/cell, regs 17/18) is NOT suppressed — it's in the UPS firmware, not the daemon.** While unplugged, the Pi drains the UPS cells (~5 A), so long unplugs still risk the UPS's own hard cutoff. Keep unplug intervals short (~2 min) or watch `batt=` in the log. (Historical note: a 2026-07-10 shutdown during testing was initially blamed on this cutoff but was actually wall-e's VESC low-voltage watchdog reacting to the main battery being switched off — see the VESC plausibility-floor fix. The caution above remains valid prudence.)
+**⚠ Neither UPS firmware safety is suppressed by DETECT-ONLY — they live in the UPS MCU, not the daemon.** (1) The battery-protect floor (default 3.2 V/cell, regs 17/18) still cuts on deep discharge; while unplugged the Pi drains the cells (~5 A), so watch `batt=` in the log. (2) The **~20s output guillotine** (see below) hard-cuts the Pi on any unplug left out past ~18s. So: keep each detect-only unplug short (replug within ~15s), and after **any** battery stint **wait ~2 minutes** before assuming the UPS's internal clock is cleared — a quick replug does not reliably reset it. (Historical note: a 2026-07-10 shutdown during testing was initially blamed on the battery-protect cutoff but was actually wall-e's VESC low-voltage watchdog reacting to the main battery being switched off — see the VESC plausibility-floor fix. The cautions above remain valid prudence.)
+
+## Firmware guillotine (confirmed 2026-07-10)
+
+The UPSPlus EP-0136 (FW v14) **cuts its own 5V output ~19-20s after input
+power is lost, regardless of battery charge** — a graceful-shutdown bridge,
+not a ride-through UPS. Hardware-verified: a single 60s input cut with the
+pack full (4.2V, trickle), in **this detect-only mode**, with zero register
+writes and the countdown register at 0, still killed the output **19.5s**
+after the USB-C input collapsed (three earlier deaths at ~28-30s cumulative
+battery-time; every survived cut was ≤18s). A quick replug does **not**
+reliably reset the internal clock.
+
+**What this means for detect-only testing:** the mode suppresses the *daemon's*
+shutdown, but it **cannot** stop this firmware cut. The detection chain you're
+here to observe finishes fast — new time budget:
+
+| Elapsed since unplug | Event (detect-only) |
+| --- | --- |
+| ~1s | instant detection; "would shed USB power (suppressed)" |
+| ~4s | debounced "missing" — `Charger absent (debounced over 4.0s)` |
+| ~8s | grace expiry — `would begin shutdown sequence NOW (suppressed)` |
+| ~20s | **UPS firmware guillotine HARD-CUTS the Pi** (dirty) |
+
+So **replug within ~15s** to see the full chain and repeat cleanly. Any input
+cut **>18s WILL hard-cut the Pi** here, because the daemon that would normally
+have halted it first is suppressed.
 
 
 | Behavior | Armed (normal) | DETECT-ONLY |
@@ -142,31 +176,35 @@ and recheck the flag/env var before testing.
 
 ---
 
-## What you'll see during a test (unplug of any duration)
+## What you'll see during a test (short unplug — replug within ~15s)
 
-Unplug the charger and leave it out for as long as you like. At the daemon's
-~1s poll cadence you'll see, in order:
+Unplug the charger; **replug within ~15s** (past ~18s the firmware guillotine
+hard-cuts the Pi — see above). At the daemon's ~1s poll cadence you'll see, in
+order:
 
-1. After ~10s of continuous low charger voltage (the loss debounce), the state
+1. After ~4s of continuous low charger voltage (the loss debounce), the state
    flips to missing and the grace window opens:
    ```
    UPS AC state changed -> missing (typec=…mV microusb=…mV batt=…V …mA)
-   Charger absent (debounced over 10.0s); starting 30s glitch grace window.
+   Charger absent (debounced over 4.0s); starting 4s glitch grace window.
    ```
-2. ~30s later the grace window expires. In armed mode this is where it would
+2. ~4s later the grace window expires. In armed mode this is where it would
    shut down; in DETECT-ONLY it logs the suppression line and the per-action
    "suppressed …" lines, then **keeps running**:
    ```
-   No charger for 30s (debounced); safe shutdown sequence begins. typec=…mV …
+   No charger for 4s (debounced); safe shutdown sequence begins. typec=…mV …
    DETECT-ONLY: AC loss confirmed (grace expired) — would begin shutdown sequence NOW (suppressed). Continuing to monitor; replug to reset and repeat.
    DETECT-ONLY: suppressed stop_rover_service() — wall-e left running.
    DETECT-ONLY: suppressed shed_usb_load() — USB power left on.
-   DETECT-ONLY: suppressed UPS shutdown-countdown register write (reg 24 would be set to 60s).
+   DETECT-ONLY: suppressed UPS shutdown-countdown register write (reg 24 would be set to 30s).
    DETECT-ONLY: suppressed sync + '/sbin/shutdown -h now' — Pi stays up.
    ```
-3. The Pi stays up. No further "would begin shutdown" line is emitted for the
-   *same* unplug, no matter how long you leave it out — the sequence fires once
-   per grace expiry.
+   All of this lands by ~8-9s — well inside the ~15s replug window.
+3. The Pi stays up **only if you replug before ~18s**. The daemon's
+   "would begin shutdown" line fires once per grace expiry (it will not repeat
+   for the same unplug), but the UPS firmware will still guillotine the output
+   at ~20s if you leave the charger out — the daemon suppression cannot prevent
+   that.
 
 ### Confirming replug detection + repeatability
 

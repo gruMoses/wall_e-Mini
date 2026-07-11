@@ -253,13 +253,16 @@ class PublishStatusIsolation(unittest.TestCase):
 
 
 class DecisionLogicUnchanged(unittest.TestCase):
-    """Guard: the status-bridge additions did not touch the AC-detection
-    thresholds or the debounce constants the shutdown decision depends on."""
+    """Guard: the AC-detection thresholds and the (guillotine-tuned) debounce/
+    grace constants the shutdown decision depends on are at their expected
+    values. Debounce/grace were tightened 2026-07-10 to fit the ~20s UPS
+    firmware output guillotine (see the daemon docstring); the voltage-primary
+    detection LOGIC is unchanged."""
 
     def test_key_decision_constants_intact(self):
         self.assertEqual(daemon.AC_PRESENT_VOLTAGE_THRESHOLD_MV, 4000)
-        self.assertEqual(daemon.AC_LOSS_DEBOUNCE_S, 10.0)
-        self.assertEqual(daemon.NO_CHARGE_GRACE_SECONDS, 30)
+        self.assertEqual(daemon.AC_LOSS_DEBOUNCE_S, 4.0)
+        self.assertEqual(daemon.NO_CHARGE_GRACE_SECONDS, 4)
         self.assertEqual(daemon.BATTERY_PROTECTION_MV, 3400)
 
     def test_ac_present_decision_still_voltage_only(self):
@@ -485,7 +488,7 @@ class TransitionLoggingSnapshotFree(unittest.TestCase):
             snapshot_calls.append(clk["t"])
             return dict(fake_snap)
 
-        SAG_START = 25.0   # charger voltage drops here; debounce (10s) → t=35
+        SAG_START = 25.0   # charger voltage drops here; debounce (4s) → t≈29
 
         def fake_read_charger(_bus, _addr):
             return (5000, 0) if clk["t"] < SAG_START else (0, 0)
@@ -495,7 +498,11 @@ class TransitionLoggingSnapshotFree(unittest.TestCase):
 
         def fake_sleep(s):
             clk["t"] += s
-            if clk["t"] >= 40.0:   # well past the transition, before grace expiry
+            # Stop past the MISSING transition (~t=29) but before grace expiry
+            # (~t=32 now that grace is 4s), so run_shutdown_sequence — and its
+            # grace-expiry snapshot read — never fires and this test stays
+            # scoped to the sag/transition window it is asserting about.
+            if clk["t"] >= 32.0:
                 raise _StopLoop
 
         with _tmp() as path:

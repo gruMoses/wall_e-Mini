@@ -57,6 +57,30 @@ THE FIX:
      still shuts the Pi down cleanly. This safety behavior is preserved
      unchanged — only the trigger condition is fixed.
 ────────────────────────────────────────────────────────────────────────
+TIME BUDGET vs THE UPS FIRMWARE GUILLOTINE (bench-verified 2026-07-10):
+
+The UPSPlus EP-0136 (FW v14) cuts its own 5V output ~19-20s after input
+power is lost, REGARDLESS of battery charge — it is a graceful-shutdown
+bridge, NOT a ride-through UPS. Evidence: a single 60s input cut with the
+pack full (4.2V, trickle) in detect-only mode with ZERO register writes and
+the shutdown-countdown register at 0 still killed the output 19.5s after the
+USB-C input collapsed; three earlier deaths landed at ~28-30s cumulative
+battery-time across rapid cut/restore pairs, and every survived cut was
+≤18s. A quick replug does NOT reliably reset this internal clock.
+
+Consequence: the OLD budget (10s AC-loss debounce + 30s grace) started the
+OS shutdown at ~40s — AFTER the ~20s guillotine — so a real outage ALWAYS
+ended in an unclean hard cut. The constants below are retuned so the OS halt
+finishes BEFORE the guillotine fires:
+    ~1s    instant detection (the early USB shed already keys off this)
+    ~4s    AC_LOSS_DEBOUNCE_S — debounced "missing" declared
+    ~8s    NO_CHARGE_GRACE_SECONDS expiry — shutdown sequence begins
+   ~8-9s   OS `shutdown -h now` issued
+  ~15-17s  OS halt completes
+   ~20s    UPS firmware guillotine (now harmless — the Pi is already halted)
+The debounce still absorbs the charge-taper current-sign noise from the bug
+above (that was never voltage noise anyway), just over a shorter window.
+────────────────────────────────────────────────────────────────────────
 """
 
 import json
@@ -89,15 +113,23 @@ I2C_RETRY_DELAY_SECONDS = 0.15
 # Behavior configuration
 # NO_CHARGE_GRACE_SECONDS: once AC is *debounced* as lost (see
 # AC_LOSS_DEBOUNCE_S below), how long we wait before starting the
-# shutdown sequence. This absorbs any residual short blips on top of
-# the debounce and gives a human a window to notice/replug.
-NO_CHARGE_GRACE_SECONDS = 30
+# shutdown sequence. This absorbs any residual short blips on top of the
+# debounce. It is DELIBERATELY SHORT (4s): the UPSPlus FW v14 guillotines its
+# own 5V output ~19-20s after input loss regardless of battery charge
+# (bench-verified 2026-07-10: single 60s cut, full pack, detect-only, zero
+# register writes, output died at 19.5s; prior deaths at ~28-30s cumulative).
+# The whole detect→halt budget must fit UNDER that ~20s, so this is a glitch
+# absorber, NOT a human "notice and replug" window — see the module docstring.
+NO_CHARGE_GRACE_SECONDS = 4
 # UPS_SHUTDOWN_COUNTDOWN_SECONDS: after the OS halt command, how long the UPS
-# waits before cutting its own output. The Pi halts in ~10-20s, so 60s is a
-# ~3x margin over worst-case halt while cutting battery drain to a halted Pi
-# much sooner than the old 120s. Do NOT reduce below 10s: the EP-0136 (FW v14)
+# waits before cutting its own output. BELT-AND-BRACES only: the FW v14
+# firmware guillotines the output at ~20s regardless (see docstring), so this
+# register write rarely decides anything. 30s still guarantees the cut lands
+# AFTER the OS halt completes (~15-17s into the outage, ~7-9s after this write
+# at grace expiry) yet stays prompt enough that Back-to-AC auto-power-up fires
+# quickly on restore. Do NOT reduce below 10s: the EP-0136 (FW v14)
 # shutdown-countdown register 0x18 floor is 10s (valid range 0 or 10-255s).
-UPS_SHUTDOWN_COUNTDOWN_SECONDS = 60
+UPS_SHUTDOWN_COUNTDOWN_SECONDS = 30
 BOOT_GRACE_SECONDS = 10
 
 # --- AC-present detection (charger voltage primary) ------------------------
@@ -111,13 +143,14 @@ AC_PRESENT_VOLTAGE_THRESHOLD_MV = 4000
 
 # How long charger voltage must stay continuously BELOW threshold before we
 # declare AC lost. This is what stops instantaneous glitches/noise from
-# arming the shutdown path. Chosen well above the ~1-2 minute charge-taper
-# current-sign flapping period's *voltage* noise (which in practice is near
-# zero — voltage does not flap the way current sign does) and well above a
-# couple of consecutive I2C hiccups (each retried internally already), but
-# still short enough that a real unplug is caught quickly. 10s means at our
-# ~1s poll cadence we need roughly 10 consecutive low readings.
-AC_LOSS_DEBOUNCE_S = 10.0
+# arming the shutdown path. It still comfortably clears the ~1-2 minute
+# charge-taper current-sign flapping (which is a *current*-sign artifact, not
+# voltage noise — charger voltage does not flap the way current sign does) and
+# a couple of consecutive I2C hiccups (each retried internally already). It is
+# now 4s (down from 10s) so the full detect→grace→halt budget fits under the
+# UPSPlus FW v14 ~20s output guillotine (see the module docstring). At our ~1s
+# poll cadence that is roughly 4 consecutive low readings.
+AC_LOSS_DEBOUNCE_S = 4.0
 
 # INA219 current is NO LONGER authoritative for AC presence (see bug note
 # above). It is retained only as corroborating context in log lines, using
@@ -136,8 +169,9 @@ UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
 
 # 18650 Li-ion battery protection threshold (mV)
 # Owner prioritizes cell longevity over backup runtime: this UPS exists to give
-# a ~60s graceful-shutdown window, not to ride through an outage, so we keep the
-# cells off the deep-discharge floor. 3400mV lands at a ~15-20% SoC floor vs the
+# a ~15-20s graceful-shutdown bridge (the FW v14 output guillotine cuts at
+# ~20s — see the module docstring), not to ride through an outage, so we keep
+# the cells off the deep-discharge floor. 3400mV lands at a ~15-20% SoC floor vs the
 # ~5-10% a 3200mV cutoff allowed. Pack is 1S, so per-cell == pack; valid range
 # for protection regs 0x11/0x12 is 0-4500mV.
 BATTERY_PROTECTION_MV = 3400
@@ -186,7 +220,7 @@ SUPPLEMENTAL_READ_PERIOD_S = 10.0
 #
 # MITIGATION (shed early, restore late): shed OAK-hub USB power the MOMENT input
 # loss is seen — off THIS poll's INSTANT charger reading (pre-debounce), so
-# within ~1s worst case, NOT after the 10s AC_LOSS_DEBOUNCE_S or the 30s grace.
+# within ~1s worst case, NOT after the 4s AC_LOSS_DEBOUNCE_S or the 4s grace.
 # A false positive (a single-poll voltage glitch) costs only a brief camera
 # blip, an acceptable trade against a hard power cut. The shed is fire-once per
 # outage (guarded by the loop-state flag usb_shed_active). The CH340 VESC serial
@@ -1106,8 +1140,8 @@ def main(detect_only: bool | None = None) -> None:
         # Runs AFTER the shutdown-decision block (so it never delays it) and
         # BEFORE the supplemental-gate/publish. The shed decision keys off THIS
         # poll's INSTANT charger reading (pre-debounce) so a real input loss
-        # sheds OAK-hub USB power within ~1s — long before the 10s debounce or
-        # 30s grace. See the USB_RESTORE_DELAY_S constants block for the theory.
+        # sheds OAK-hub USB power within ~1s — long before the 4s debounce or
+        # 4s grace. See the USB_RESTORE_DELAY_S constants block for the theory.
         instant_present = is_ac_present_instant(typec_mv, microusb_mv)
         # "Unclean" mirrors the supplemental gate's transfer-window test exactly
         # (instant-below OR debounce window open OR committed MISSING). We stamp

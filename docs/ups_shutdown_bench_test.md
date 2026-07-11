@@ -41,20 +41,57 @@ module's docstring; summary:
   currently **4000mV**) instead of battery current sign.
 - Battery current sign is **no longer authoritative** — it's logged only as
   corroborating context.
-- A new debounce, `AC_LOSS_DEBOUNCE_S` = **10 seconds**, requires charger
+- A new debounce, `AC_LOSS_DEBOUNCE_S` = **4 seconds**, requires charger
   voltage to stay continuously below threshold before "AC lost" is declared
-  at all. A single bad reading or brief glitch cannot arm anything.
-- The existing `NO_CHARGE_GRACE_SECONDS` (30s) and
-  `UPS_SHUTDOWN_COUNTDOWN_SECONDS` (60s) behavior is **unchanged** — it now
-  just triggers off the debounced signal instead of the raw current sign. A
-  genuine, sustained power loss still shuts the Pi down cleanly; that
-  protection is preserved, not removed.
+  at all. A single bad reading or brief glitch cannot arm anything. (This was
+  10s until the 2026-07-10 guillotine finding below forced the whole budget
+  tighter.)
+- `NO_CHARGE_GRACE_SECONDS` = **4s** and `UPS_SHUTDOWN_COUNTDOWN_SECONDS` =
+  **30s** (down from 30s / 60s). They still trigger off the debounced signal
+  instead of the raw current sign, and a genuine sustained power loss still
+  shuts the Pi down cleanly. The numbers are now tuned so the OS halt finishes
+  **before the UPS firmware guillotines its own output at ~20s** — see the
+  "Firmware guillotine" section below. The countdown register write is
+  belt-and-braces since the firmware cuts at ~20s anyway.
 - I2C read errors during the poll loop no longer risk flipping state on a
   transient fault — a failed read is skipped (with backoff) rather than
   treated as a data point.
 - Startup hardware probe (I2C bus + UPS MCU + INA219) is wrapped so that if
   the hardware isn't present, the daemon logs a clear message and exits 0
   instead of crash-looping under `Restart=always`.
+
+## Firmware guillotine (confirmed 2026-07-10)
+
+The UPSPlus EP-0136 (FW v14) **cuts its own 5V output ~19-20s after input
+power is lost, regardless of battery charge.** It is a graceful-shutdown
+bridge, not a ride-through UPS.
+
+Evidence (hardware-verified bench run, 2026-07-10): a **single 60s input cut**
+with the pack **full (4.2V, trickle)**, in **detect-only** mode with **zero
+register writes** and the shutdown-countdown register at **0**, still killed
+the output **19.5s** after the USB-C input collapsed. Three earlier deaths
+landed at ~28-30s cumulative battery-time across rapid cut/restore pairs, and
+every survived cut was ≤18s. A quick replug does **not** reliably reset this
+internal clock.
+
+**Why this forced the retune:** the old budget (10s debounce + 30s grace)
+would have started the OS shutdown at ~40s — *after* the ~20s guillotine — so
+a real outage always ended in an unclean hard cut. The new budget lands the
+whole sequence under 20s:
+
+| Elapsed since input loss | Event |
+| --- | --- |
+| ~1s | instant detection (early USB shed keys off this) |
+| ~4s | `AC_LOSS_DEBOUNCE_S` — debounced "missing" declared |
+| ~8s | `NO_CHARGE_GRACE_SECONDS` expiry — shutdown sequence begins |
+| ~8-9s | OS `shutdown -h now` issued |
+| ~15-17s | OS halt completes |
+| ~20s | UPS firmware guillotine (now harmless — Pi already halted) |
+
+**Operational consequence:** any input cut **>18s WILL hard-cut the Pi**
+unless the daemon has already shut it down first. After any battery stint
+(any period the Pi ran off the UPS cells), **wait ~2 minutes** before assuming
+the UPS's internal clock is cleared — quick replugs do not reliably reset it.
 
 ## Before you deploy anything
 
@@ -127,21 +164,22 @@ stop and re-examine (see Abort path below).
 2. Physically disconnect the main charger input (unplug the USB-C/micro-USB
    feeding the UPS HAT — not just an intermediate cable, the actual wall/PSU
    side).
-3. Expected timeline:
-   - Within ~1-2s: charger voltage registers should drop toward 0.
-   - After `AC_LOSS_DEBOUNCE_S` (10s) of continuously-low voltage: log line
-     "Charger absent (debounced over 10.0s); starting 30s glitch grace
-     window."
-   - After a further `NO_CHARGE_GRACE_SECONDS` (30s): log line "No charger
-     for 30s (debounced); safe shutdown sequence begins," followed by
+3. Expected timeline (tightened to beat the ~20s firmware guillotine — see
+   the "Firmware guillotine" section):
+   - Within ~1-2s: charger voltage registers should drop toward 0 (the early
+     USB shed also fires here).
+   - After `AC_LOSS_DEBOUNCE_S` (4s) of continuously-low voltage: log line
+     "Charger absent (debounced over 4.0s); starting 4s glitch grace window."
+   - After a further `NO_CHARGE_GRACE_SECONDS` (4s): log line "No charger
+     for 4s (debounced); safe shutdown sequence begins," followed by
      `wall-e.service` stop, USB shedding, UPS shutdown countdown set to
-     `UPS_SHUTDOWN_COUNTDOWN_SECONDS` (60s), then `sync` and
-     `shutdown -h now`.
-   - Total time from physical unplug to shutdown command: roughly 40-45
-     seconds (10s debounce + 30s grace + a couple seconds of overhead).
-   - Pi actually powers off some time within the 60s UPS countdown window
-     after the shutdown command (OS halt itself is typically much faster
-     than that — ~10-20s; the 60s is the UPS's own hard-cutoff backstop).
+     `UPS_SHUTDOWN_COUNTDOWN_SECONDS` (30s), then `sync` and `shutdown -h now`.
+   - Total time from physical unplug to shutdown command: roughly **8-9
+     seconds** (4s debounce + 4s grace + a second of overhead).
+   - The OS halt completes ~15-17s after the unplug — **before** the UPS
+     firmware guillotines its own output at ~20s. The 30s countdown-register
+     write is belt-and-braces; the firmware cut is what actually powers the
+     rail down, and it happens after the Pi is already halted.
 4. **This is the safety behavior working correctly** — a real, sustained
    power cut must still result in a clean shutdown. Do not interpret this as
    a bug.
@@ -175,11 +213,12 @@ If anything looks wrong at any point:
   sudo systemctl restart upsplus-power.service
   ```
   Then bring the journal excerpt back for further diagnosis.
-- **During (b)** — if the countdown does NOT fire after ~45s of sustained
-  charger loss (i.e., the fix broke real shutdown protection): reconnect the
-  charger immediately, then revert to the backup as above and re-diagnose
-  before trying again. Do not leave the robot in a state where genuine power
-  loss won't trigger a graceful shutdown.
+- **During (b)** — if the shutdown sequence does NOT begin within ~10s of
+  sustained charger loss (i.e., the fix broke real shutdown protection):
+  reconnect the charger immediately, then revert to the backup as above and
+  re-diagnose before trying again. Do not leave the robot in a state where
+  genuine power loss won't trigger a graceful shutdown — with the ~20s
+  firmware guillotine there is no slack for a late shutdown.
 - **At any point** you're unsure what state the daemon or UPS is in: the
   UPS's own hardware shutdown-countdown register (`REG_SHUTDOWN_COUNTDOWN`,
   register 24) and battery protection threshold are independent hardware

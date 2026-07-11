@@ -369,8 +369,9 @@ class DetectOnlyMainLoopTests(unittest.TestCase):
 
     @staticmethod
     def _one_grace_cycle():
-        # 10 boot-grace iters + 2 to init PRESENT, then enough ABSENT samples
-        # to clear the 10s debounce and the 30s grace window with margin.
+        # 10 boot-grace iters + 2 to init PRESENT, then plenty of ABSENT samples
+        # to clear the 4s debounce and the 4s grace window (guillotine-tuned
+        # budget) with wide margin — 42 is far more than the ~8s needed.
         return [PRESENT] * 12 + [ABSENT] * 42
 
     def test_detect_only_continues_and_repeats_across_replug(self):
@@ -407,6 +408,35 @@ class DetectOnlyMainLoopTests(unittest.TestCase):
         # Armed mode performs its startup register writes and shows no banner.
         m_write.assert_called()  # auto-power-on + battery-protect thresholds
         self.assertNotIn("MODE: DETECT-ONLY", logs)
+
+
+class TimeBudgetTests(unittest.TestCase):
+    """The detection→shutdown-commit budget must stay under the UPS guillotine.
+
+    Hardware finding (bench-verified 2026-07-10): the UPSPlus EP-0136 (FW v14)
+    cuts its own 5V output ~19-20s after input power is lost, REGARDLESS of
+    battery charge (single 60s cut, full pack, detect-only, zero register
+    writes → output died at 19.5s; three prior deaths at ~28-30s cumulative
+    battery-time). So the OS shutdown must be *committed* early enough that the
+    halt (~10s more on its own) completes before that ~20s guillotine — a real
+    outage otherwise always ends in an unclean hard cut.
+
+    debounce + grace is the time from genuine AC loss to the shutdown sequence
+    being entered. We hold it to <= 10s so the subsequent halt still finishes
+    with margin below the ~20s guillotine.
+    """
+
+    def test_detect_to_shutdown_commit_budget_under_guillotine(self):
+        budget_s = daemon.AC_LOSS_DEBOUNCE_S + daemon.NO_CHARGE_GRACE_SECONDS
+        # 4s debounce + 4s grace = 8s, leaving ~10-12s of the ~20s guillotine
+        # window for the OS halt (completes ~15-17s into the outage) to land
+        # first. Ceiling is 10s: any higher risks committing shutdown too late
+        # for the halt to beat the UPS firmware output cut.
+        self.assertLessEqual(
+            budget_s,
+            10.0,
+            "detect+grace budget must stay under the ~20s UPS firmware guillotine",
+        )
 
 
 if __name__ == "__main__":

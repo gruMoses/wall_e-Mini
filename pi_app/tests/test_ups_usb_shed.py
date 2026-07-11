@@ -324,9 +324,12 @@ class UsbShedConstants(unittest.TestCase):
         self.assertGreater(daemon.USB_RESTORE_DELAY_S, daemon.AC_RECOVERY_QUIET_S)
 
     def test_detection_and_grace_constants_untouched(self):
+        # The USB-shed feature does not touch these; their values are the
+        # guillotine-tuned budget set 2026-07-10 (debounce 4s + grace 4s so the
+        # OS halt finishes before the ~20s UPS firmware output guillotine).
         self.assertEqual(daemon.AC_PRESENT_VOLTAGE_THRESHOLD_MV, 4000)
-        self.assertEqual(daemon.AC_LOSS_DEBOUNCE_S, 10.0)
-        self.assertEqual(daemon.NO_CHARGE_GRACE_SECONDS, 30)
+        self.assertEqual(daemon.AC_LOSS_DEBOUNCE_S, 4.0)
+        self.assertEqual(daemon.NO_CHARGE_GRACE_SECONDS, 4)
 
 
 if __name__ == "__main__":
