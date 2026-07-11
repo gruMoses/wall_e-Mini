@@ -56,18 +56,29 @@ So **replug within ~15s** to see the full chain and repeat cleanly. Any input
 cut **>18s WILL hard-cut the Pi** here, because the daemon that would normally
 have halted it first is suppressed.
 
+**False-positive cost (armed mode) — a clean reboot, not a stranded robot.**
+Back-to-AC (reg 0x19=1) is **level-triggered**, hardware-proven 2026-07-10
+20:50: countdown armed at 30 with AC present the whole time, clean halt, UPS
+cut output ~30s later and immediately re-powered the Pi (pinging again 25s
+after the cut, including ~19s of boot). Worth knowing while bench-testing:
+even if the armed daemon ever shuts down on a false AC-loss, the robot comes
+straight back.
 
 | Behavior | Armed (normal) | DETECT-ONLY |
 | --- | --- | --- |
 | AC present/absent detection + debounce | ✅ | ✅ identical |
 | "state changed", "starting grace window", grace-expiry log lines | ✅ | ✅ identical |
 | Startup banner announcing the mode | — (silent) | ✅ loud |
-| Stop `wall-e.service` at grace expiry | ✅ | 🚫 suppressed |
-| Shed USB load (OAK-D hub power off) | ✅ | 🚫 suppressed |
 | Write UPS shutdown-countdown register | ✅ | 🚫 suppressed |
+| Shed USB load (OAK-D hub power off) | ✅ (skipped if the early shed already fired) | 🚫 suppressed |
 | `sync` + `shutdown -h now` | ✅ | 🚫 suppressed |
 | Startup UPS register **writes** (Back-to-AC auto power-on, battery-protect threshold) | ✅ | 🚫 skipped |
 | I2C **reads** (voltages, snapshot) | ✅ | ✅ still happen |
+
+> Note: the old "stop `wall-e.service` at grace expiry" row is gone — that
+> serialized pre-stop was **removed 2026-07-10** in armed mode too (measured
+> 5.2s on its own; `shutdown -h now` stops wall-e in parallel and completes
+> the whole halt in ~7s). The halt is the teardown.
 
 DETECT-ONLY is deliberately **strictly read-only against the UPS hardware** —
 it performs **zero** register writes of any kind, including the two startup
@@ -194,11 +205,12 @@ order:
    ```
    No charger for 4s (debounced); safe shutdown sequence begins. typec=…mV …
    DETECT-ONLY: AC loss confirmed (grace expired) — would begin shutdown sequence NOW (suppressed). Continuing to monitor; replug to reset and repeat.
-   DETECT-ONLY: suppressed stop_rover_service() — wall-e left running.
-   DETECT-ONLY: suppressed shed_usb_load() — USB power left on.
    DETECT-ONLY: suppressed UPS shutdown-countdown register write (reg 24 would be set to 30s).
+   DETECT-ONLY: suppressed shed_usb_load() — USB power left on.
    DETECT-ONLY: suppressed sync + '/sbin/shutdown -h now' — Pi stays up.
    ```
+   (No `stop_rover_service` line — the serialized wall-e pre-stop was removed
+   from the armed sequence 2026-07-10; the halt stops wall-e in parallel.)
    All of this lands by ~8-9s — well inside the ~15s replug window.
 3. The Pi stays up **only if you replug before ~18s**. The daemon's
    "would begin shutdown" line fires once per grace expiry (it will not repeat

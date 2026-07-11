@@ -232,12 +232,11 @@ _SNAPSHOT = {
 
 
 class RunShutdownSequenceTests(unittest.TestCase):
-    """Direct tests of run_shutdown_sequence's action-site guards."""
+    """Direct tests of run_shutdown_sequence's action-site guards and order."""
 
     def _patches(self, **overrides):
         """Patch every side-effecting collaborator; return the mock dict."""
         patchers = {
-            "stop_rover_service": mock.patch.object(daemon, "stop_rover_service"),
             "shed_usb_load": mock.patch.object(daemon, "shed_usb_load"),
             "write_reg_verified": mock.patch.object(
                 daemon, "write_reg_verified", return_value=True
@@ -253,12 +252,19 @@ class RunShutdownSequenceTests(unittest.TestCase):
             self.addCleanup(p.stop)
         return started
 
+    def test_stop_rover_service_removed_from_module(self):
+        """CONTRACT CHANGE 2026-07-10 (QA): stop_rover_service was DELETED.
+        The serialized `systemctl stop wall-e.service` measured 5.2s on its
+        own while `shutdown -h now` stops wall-e IN PARALLEL and completes
+        the whole halt in ~7s — the pre-stop alone blew the ~19.5s firmware
+        guillotine budget. The shutdown sequence must NOT pre-stop wall-e."""
+        self.assertFalse(hasattr(daemon, "stop_rover_service"))
+
     def test_detect_only_suppresses_every_shutdown_action(self):
         m = self._patches()
         daemon.run_shutdown_sequence(object(), 0x17, None, detect_only=True)
 
         # (a) NONE of the shutdown-sequence actions run in detect-only mode.
-        m["stop_rover_service"].assert_not_called()
         m["shed_usb_load"].assert_not_called()
         m["write_reg_verified"].assert_not_called()  # no countdown register write
         m["os_system"].assert_not_called()  # no sync, no shutdown
@@ -284,9 +290,8 @@ class RunShutdownSequenceTests(unittest.TestCase):
         m = self._patches()
         daemon.run_shutdown_sequence(object(), 0x17, None, detect_only=False)
 
-        # (d) The armed/default path performs the full sequence in order.
-        m["stop_rover_service"].assert_called_once()
-        m["shed_usb_load"].assert_called_once()
+        # (d) The armed/default path performs the full sequence.
+        m["shed_usb_load"].assert_called_once()  # belt-and-braces (not early-shed)
         m["write_reg_verified"].assert_called_once_with(
             mock.ANY,
             mock.ANY,
@@ -296,6 +301,45 @@ class RunShutdownSequenceTests(unittest.TestCase):
         m["os_system"].assert_any_call("sudo sync")
         m["os_system"].assert_any_call("sudo /sbin/shutdown -h now")
         m["time_sleep"].assert_any_call(600)
+
+    def test_normal_mode_sequence_order_countdown_then_shed_then_halt(self):
+        """QA-mandated order (2026-07-10): countdown register write FIRST
+        (the one action guaranteeing an eventual clean power state), then the
+        (conditional) USB shed, then sync + halt — and NO serialized service
+        stop anywhere before the halt. Order is observed via a shared manager
+        mock so an accidental reorder fails loudly."""
+        m = self._patches()
+        manager = mock.Mock()
+        manager.attach_mock(m["write_reg_verified"], "write_reg")
+        manager.attach_mock(m["shed_usb_load"], "shed")
+        manager.attach_mock(m["os_system"], "os_system")
+
+        daemon.run_shutdown_sequence(object(), 0x17, None, detect_only=False)
+
+        names = [c[0] for c in manager.mock_calls]
+        self.assertEqual(
+            names,
+            ["write_reg", "shed", "os_system", "os_system"],
+            "sequence must be countdown-write -> shed -> sync -> halt",
+        )
+        # The two os_system calls, in order: sync then halt.
+        os_calls = [c for c in manager.mock_calls if c[0] == "os_system"]
+        self.assertEqual(os_calls[0].args, ("sudo sync",))
+        self.assertEqual(os_calls[1].args, ("sudo /sbin/shutdown -h now",))
+
+    def test_usb_already_shed_skips_re_shed_but_still_halts(self):
+        """QA finding (2026-07-10): when the main loop's early shed already
+        fired this outage, the sequence must NOT re-shed (two uhubctl spawns
+        with 5s timeouts each on already-off ports are pure critical-path
+        risk under the ~20s guillotine) — but everything else still runs."""
+        m = self._patches()
+        daemon.run_shutdown_sequence(
+            object(), 0x17, None, detect_only=False, usb_already_shed=True
+        )
+        m["shed_usb_load"].assert_not_called()
+        m["write_reg_verified"].assert_called_once()
+        m["os_system"].assert_any_call("sudo sync")
+        m["os_system"].assert_any_call("sudo /sbin/shutdown -h now")
 
     def test_normal_mode_does_not_emit_detect_only_line(self):
         self._patches()
@@ -404,6 +448,10 @@ class DetectOnlyMainLoopTests(unittest.TestCase):
         # (d) Default path reaches the shutdown sequence at grace expiry.
         self.assertGreaterEqual(spy.call_count, 1)
         self.assertIs(spy.call_args_list[0].kwargs["detect_only"], False)
+        # The loop tells the sequence the early shed already fired this outage
+        # (it fires on the FIRST instant-low poll, before debounce completes),
+        # so the sequence's belt-and-braces re-shed is skipped.
+        self.assertIs(spy.call_args_list[0].kwargs["usb_already_shed"], True)
 
         # Armed mode performs its startup register writes and shows no banner.
         m_write.assert_called()  # auto-power-on + battery-protect thresholds
@@ -417,25 +465,28 @@ class TimeBudgetTests(unittest.TestCase):
     cuts its own 5V output ~19-20s after input power is lost, REGARDLESS of
     battery charge (single 60s cut, full pack, detect-only, zero register
     writes → output died at 19.5s; three prior deaths at ~28-30s cumulative
-    battery-time). So the OS shutdown must be *committed* early enough that the
-    halt (~10s more on its own) completes before that ~20s guillotine — a real
-    outage otherwise always ends in an unclean hard cut.
+    battery-time). So the OS shutdown must be *committed* early enough that
+    the halt completes before that ~20s guillotine — a real outage otherwise
+    always ends in an unclean hard cut.
 
     debounce + grace is the time from genuine AC loss to the shutdown sequence
-    being entered. We hold it to <= 10s so the subsequent halt still finishes
-    with margin below the ~20s guillotine.
+    being entered (the "commit" point).
     """
 
     def test_detect_to_shutdown_commit_budget_under_guillotine(self):
         budget_s = daemon.AC_LOSS_DEBOUNCE_S + daemon.NO_CHARGE_GRACE_SECONDS
-        # 4s debounce + 4s grace = 8s, leaving ~10-12s of the ~20s guillotine
-        # window for the OS halt (completes ~15-17s into the outage) to land
-        # first. Ceiling is 10s: any higher risks committing shutdown too late
-        # for the halt to beat the UPS firmware output cut.
+        # Measured math (bench 2026-07-10 20:50, journal-verified): commit at
+        # ~8-9s (4s debounce + 4s grace + loop overhead), then a direct
+        # `shutdown -h now` takes ~7-9s to power-safe because systemd stops
+        # wall-e.service IN PARALLEL (the whole halt measured ~7s; the old
+        # serialized pre-stop alone was 5.2s and is why it was removed). Total
+        # ~16-18s vs the ~19.5s guillotine. Ceiling 8.0s: one extra second of
+        # commit latency eats the entire remaining margin.
         self.assertLessEqual(
             budget_s,
-            10.0,
-            "detect+grace budget must stay under the ~20s UPS firmware guillotine",
+            8.0,
+            "detect+grace budget must stay <= 8s: commit ~8-9s + halt ~7-9s "
+            "= power-safe ~16-18s vs the ~19.5s UPS firmware guillotine",
         )
 
 

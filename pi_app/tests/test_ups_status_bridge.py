@@ -488,7 +488,20 @@ class TransitionLoggingSnapshotFree(unittest.TestCase):
             snapshot_calls.append(clk["t"])
             return dict(fake_snap)
 
-        SAG_START = 25.0   # charger voltage drops here; debounce (4s) → t≈29
+        # Timing derived from the daemon's OWN constants so a future retune of
+        # the debounce/grace budget cannot silently break this test's intent:
+        # the loop must stop AFTER the debounced MISSING transition but BEFORE
+        # grace expiry, so run_shutdown_sequence — and its grace-expiry
+        # snapshot read — never fires and the test stays scoped to the
+        # sag/transition window it is asserting about.
+        SAG_START = 25.0  # charger voltage drops here
+        MISSING_AT = SAG_START + daemon.AC_LOSS_DEBOUNCE_S
+        GRACE_EXPIRY_AT = MISSING_AT + daemon.NO_CHARGE_GRACE_SECONDS
+        STOP_AT = GRACE_EXPIRY_AT - 1.0  # inside the grace window
+        self.assertGreater(
+            STOP_AT, MISSING_AT + 1.0,
+            "grace window too small to observe the transition before stopping",
+        )
 
         def fake_read_charger(_bus, _addr):
             return (5000, 0) if clk["t"] < SAG_START else (0, 0)
@@ -498,11 +511,7 @@ class TransitionLoggingSnapshotFree(unittest.TestCase):
 
         def fake_sleep(s):
             clk["t"] += s
-            # Stop past the MISSING transition (~t=29) but before grace expiry
-            # (~t=32 now that grace is 4s), so run_shutdown_sequence — and its
-            # grace-expiry snapshot read — never fires and this test stays
-            # scoped to the sag/transition window it is asserting about.
-            if clk["t"] >= 32.0:
+            if clk["t"] >= STOP_AT:
                 raise _StopLoop
 
         with _tmp() as path:

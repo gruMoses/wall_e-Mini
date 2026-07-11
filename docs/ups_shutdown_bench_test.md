@@ -53,6 +53,13 @@ module's docstring; summary:
   **before the UPS firmware guillotines its own output at ~20s** — see the
   "Firmware guillotine" section below. The countdown register write is
   belt-and-braces since the firmware cuts at ~20s anyway.
+- The shutdown sequence **no longer pre-stops `wall-e.service`** (measured
+  2026-07-10 20:50, journal-verified: the serialized `systemctl stop` took
+  **5.2s** on its own, while a direct `shutdown -h now` completes the *entire*
+  halt in **~7s** because systemd stops wall-e in parallel with everything
+  else). New order: grace-expiry logging → countdown register write (30s) →
+  USB shed only if the early shed hasn't already fired → `sync` →
+  `shutdown -h now`. The `stop_rover_service()` function was deleted.
 - I2C read errors during the poll loop no longer risk flipping state on a
   transient fault — a failed read is skipped (with backoff) rather than
   treated as a data point.
@@ -77,16 +84,30 @@ internal clock.
 **Why this forced the retune:** the old budget (10s debounce + 30s grace)
 would have started the OS shutdown at ~40s — *after* the ~20s guillotine — so
 a real outage always ended in an unclean hard cut. The new budget lands the
-whole sequence under 20s:
+whole sequence under 20s. Halt timings below are **measured** (bench
+2026-07-10 20:50, journal-verified), not estimates:
 
 | Elapsed since input loss | Event |
 | --- | --- |
 | ~1s | instant detection (early USB shed keys off this) |
 | ~4s | `AC_LOSS_DEBOUNCE_S` — debounced "missing" declared |
-| ~8s | `NO_CHARGE_GRACE_SECONDS` expiry — shutdown sequence begins |
+| ~8s | `NO_CHARGE_GRACE_SECONDS` expiry — countdown write, sync, halt |
 | ~8-9s | OS `shutdown -h now` issued |
-| ~15-17s | OS halt completes |
-| ~20s | UPS firmware guillotine (now harmless — Pi already halted) |
+| ~16-18s | **power-safe** (measured: a direct halt completes in ~7s — systemd stops `wall-e.service` in parallel, itself measured at 5.2s, inside that window) |
+| ~19.5-20s | UPS firmware guillotine (now harmless — Pi already halted) |
+
+The measured halt numbers are exactly why the old serialized
+`systemctl stop wall-e.service` was removed from the sequence: grace expiry
+~8-9s + 5.2s stop + the halt ≈ 21-22s — past the 19.5s guillotine. Without
+the pre-stop the same work happens in parallel inside the ~7s halt.
+
+**False-positive cost — a clean reboot, not a stranded robot.** Back-to-AC
+(reg 0x19=1) is **level-triggered**, hardware-proven 2026-07-10 20:50: the
+countdown register was armed at 30 with AC present the whole time, the Pi
+halted cleanly, the UPS cut output ~30s later (20:50:55) and immediately
+re-powered the Pi — pinging again at 20:51:20, including ~19s of boot. So if
+the daemon ever false-positives on AC-present (the pre-fix flapping scenario),
+the result is one clean ~1-minute reboot cycle, not a robot stranded off.
 
 **Operational consequence:** any input cut **>18s WILL hard-cut the Pi**
 unless the daemon has already shut it down first. After any battery stint
@@ -171,15 +192,19 @@ stop and re-examine (see Abort path below).
    - After `AC_LOSS_DEBOUNCE_S` (4s) of continuously-low voltage: log line
      "Charger absent (debounced over 4.0s); starting 4s glitch grace window."
    - After a further `NO_CHARGE_GRACE_SECONDS` (4s): log line "No charger
-     for 4s (debounced); safe shutdown sequence begins," followed by
-     `wall-e.service` stop, USB shedding, UPS shutdown countdown set to
-     `UPS_SHUTDOWN_COUNTDOWN_SECONDS` (30s), then `sync` and `shutdown -h now`.
+     for 4s (debounced); safe shutdown sequence begins," followed by the UPS
+     shutdown countdown write (`UPS_SHUTDOWN_COUNTDOWN_SECONDS`, 30s), a
+     "skipping re-shed" line (USB was already shed at ~1s by the early shed),
+     then `sync` and `shutdown -h now`. There is **no** `wall-e.service` stop
+     line — the pre-stop was removed (measured 5.2s serialized; the halt
+     stops wall-e in parallel).
    - Total time from physical unplug to shutdown command: roughly **8-9
      seconds** (4s debounce + 4s grace + a second of overhead).
-   - The OS halt completes ~15-17s after the unplug — **before** the UPS
-     firmware guillotines its own output at ~20s. The 30s countdown-register
-     write is belt-and-braces; the firmware cut is what actually powers the
-     rail down, and it happens after the Pi is already halted.
+   - Power-safe ~16-18s after the unplug (measured: a direct halt completes
+     in ~7s) — **before** the UPS firmware guillotines its own output at
+     ~19.5-20s. The 30s countdown-register write is belt-and-braces in a real
+     outage; the firmware cut is what actually powers the rail down, and it
+     happens after the Pi is already halted.
 4. **This is the safety behavior working correctly** — a real, sustained
    power cut must still result in a clean shutdown. Do not interpret this as
    a bug.

@@ -219,29 +219,51 @@ class DetectOnlyTests(_MainDriver):
 
 
 class ShutdownSequenceShedTests(unittest.TestCase):
-    """(f) The grace-expiry shutdown path still sheds, and shed_usb_load is
-    idempotent-safe so an early shed followed by the shutdown-sequence shed is
-    a harmless double no-op."""
+    """(f) The grace-expiry shutdown path sheds ONLY when the early shed has
+    not already fired this outage (QA 2026-07-10: re-shedding = two uhubctl
+    spawns with 5s timeouts each against already-off ports — pure
+    critical-path risk under the ~20s firmware guillotine). shed_usb_load
+    itself stays idempotent-safe for direct callers and edge paths."""
 
-    def test_shutdown_sequence_still_sheds_once(self):
-        with mock.patch.object(daemon, "stop_rover_service"), \
-            mock.patch.object(daemon, "shed_usb_load") as shed_spy, \
-            mock.patch.object(daemon, "write_reg_verified", return_value=True), \
-            mock.patch.object(daemon, "read_ups_snapshot", return_value=dict(_SNAPSHOT)), \
-            mock.patch.object(daemon.os, "system"), \
-            mock.patch.object(daemon.time, "sleep"):
-            daemon.run_shutdown_sequence(object(), 0x17, None, detect_only=False)
+    def _sequence_patches(self):
+        patchers = [
+            mock.patch.object(daemon, "shed_usb_load"),
+            mock.patch.object(daemon, "write_reg_verified", return_value=True),
+            mock.patch.object(daemon, "read_ups_snapshot", return_value=dict(_SNAPSHOT)),
+            mock.patch.object(daemon.os, "system"),
+            mock.patch.object(daemon.time, "sleep"),
+        ]
+        mocks = [p.start() for p in patchers]
+        for p in patchers:
+            self.addCleanup(p.stop)
+        return mocks[0]  # the shed spy
+
+    def test_shutdown_sequence_sheds_when_not_already_shed(self):
+        # Belt-and-braces path: a direct caller that never early-shed.
+        shed_spy = self._sequence_patches()
+        daemon.run_shutdown_sequence(object(), 0x17, None, detect_only=False)
         shed_spy.assert_called_once()
 
+    def test_shutdown_sequence_skips_shed_when_early_shed_fired(self):
+        # The armed main-loop path: early shed fired within ~1s of input loss,
+        # so at grace expiry the sequence must NOT spawn uhubctl again.
+        shed_spy = self._sequence_patches()
+        with self.assertLogs(level="INFO") as cm:
+            daemon.run_shutdown_sequence(
+                object(), 0x17, None, detect_only=False, usb_already_shed=True
+            )
+        shed_spy.assert_not_called()
+        self.assertIn("skipping re-shed", "\n".join(cm.output))
+
     def test_real_shed_is_idempotent_safe_across_two_calls(self):
-        # Early shed then shutdown-sequence shed both route through the same
-        # idempotent shed_usb_load; two consecutive calls must not raise and
-        # must only ever power OFF (never slip in a power-on).
+        # shed_usb_load stays idempotent for direct callers/edge paths: two
+        # consecutive calls must not raise and must only ever power OFF
+        # (never slip in a power-on).
         fake_run = mock.Mock(return_value=mock.Mock(returncode=0, stderr=""))
         with mock.patch.object(daemon.shutil, "which", return_value="/usr/bin/uhubctl"), \
             mock.patch.object(daemon.subprocess, "run", fake_run):
-            daemon.shed_usb_load()  # early shed
-            daemon.shed_usb_load()  # shutdown-sequence shed (post early-shed)
+            daemon.shed_usb_load()
+            daemon.shed_usb_load()
         # 2 hub targets x 2 calls, every invocation an "-a off".
         self.assertEqual(fake_run.call_count, 4)
         for c in fake_run.call_args_list:

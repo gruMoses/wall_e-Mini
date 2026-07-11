@@ -74,12 +74,23 @@ ended in an unclean hard cut. The constants below are retuned so the OS halt
 finishes BEFORE the guillotine fires:
     ~1s    instant detection (the early USB shed already keys off this)
     ~4s    AC_LOSS_DEBOUNCE_S — debounced "missing" declared
-    ~8s    NO_CHARGE_GRACE_SECONDS expiry — shutdown sequence begins
-   ~8-9s   OS `shutdown -h now` issued
-  ~15-17s  OS halt completes
+    ~8s    NO_CHARGE_GRACE_SECONDS expiry — countdown write, sync, halt
+   ~8-9s   OS `shutdown -h now` command issued
+  ~16-18s  power-safe (MEASURED 2026-07-10 20:50, journal-verified: a direct
+           halt completes in ~7s because systemd stops wall-e.service IN
+           PARALLEL with everything else — which is why the old serialized
+           pre-halt `systemctl stop wall-e.service`, measured at 5.2s on its
+           own, was REMOVED from the critical path; grace expiry ~8-9s plus
+           that 5.2s stop plus the halt would have been ~21-22s > guillotine)
    ~20s    UPS firmware guillotine (now harmless — the Pi is already halted)
 The debounce still absorbs the charge-taper current-sign noise from the bug
 above (that was never voltage noise anyway), just over a shorter window.
+
+FALSE-POSITIVE COST: a clean reboot cycle, NOT a stranded robot. Back-to-AC
+(reg 0x19=1) is LEVEL-triggered — hardware-proven 2026-07-10 20:50: the
+countdown register was armed at 30 with AC present the whole time, the Pi
+halted cleanly, the UPS cut output ~30s later and immediately re-powered
+the Pi (pinging again 25s after the cut, including ~19s of boot).
 ────────────────────────────────────────────────────────────────────────
 """
 
@@ -122,12 +133,13 @@ I2C_RETRY_DELAY_SECONDS = 0.15
 # absorber, NOT a human "notice and replug" window — see the module docstring.
 NO_CHARGE_GRACE_SECONDS = 4
 # UPS_SHUTDOWN_COUNTDOWN_SECONDS: after the OS halt command, how long the UPS
-# waits before cutting its own output. BELT-AND-BRACES only: the FW v14
-# firmware guillotines the output at ~20s regardless (see docstring), so this
-# register write rarely decides anything. 30s still guarantees the cut lands
-# AFTER the OS halt completes (~15-17s into the outage, ~7-9s after this write
-# at grace expiry) yet stays prompt enough that Back-to-AC auto-power-up fires
-# quickly on restore. Do NOT reduce below 10s: the EP-0136 (FW v14)
+# waits before cutting its own output. In a REAL outage this is BELT-AND-BRACES
+# only — the FW v14 firmware guillotines the output at ~20s regardless (see
+# docstring). Where it DOES decide: a FALSE-POSITIVE shutdown with AC still
+# present. Then this 30s cut lands well after the measured ~7s halt, and
+# level-triggered Back-to-AC (reg 0x19=1, hardware-proven 2026-07-10) re-powers
+# the Pi immediately — a false positive costs one clean reboot cycle, not a
+# stranded robot. Do NOT reduce below 10s: the EP-0136 (FW v14)
 # shutdown-countdown register 0x18 floor is 10s (valid range 0 or 10-255s).
 UPS_SHUTDOWN_COUNTDOWN_SECONDS = 30
 BOOT_GRACE_SECONDS = 10
@@ -672,28 +684,13 @@ def _format_ac_transition_log(
     )
 
 
-def stop_rover_service() -> None:
-    """Stop the wall-e service so OAK-D pipeline shuts down cleanly."""
-    logging.info("Stopping wall-e.service for clean OAK-D teardown...")
-    try:
-        result = subprocess.run(
-            ["sudo", "systemctl", "stop", "wall-e.service"],
-            timeout=15,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            logging.info("wall-e.service stopped.")
-        else:
-            logging.warning(
-                "wall-e.service stop returned %d: %s",
-                result.returncode,
-                result.stderr.strip(),
-            )
-    except subprocess.TimeoutExpired:
-        logging.warning("wall-e.service stop timed out after 15s.")
-    except Exception as error:
-        logging.warning("Failed to stop wall-e.service: %s", error)
+# NOTE: stop_rover_service() (a serialized `systemctl stop wall-e.service`
+# with a 15s timeout) was DELETED 2026-07-10. Measured on the bench: the stop
+# alone took 5.2s (depthai teardown), while a direct `shutdown -h now`
+# completes the ENTIRE halt in ~7s because systemd stops wall-e IN PARALLEL
+# with everything else. Serializing the stop before the halt added pure
+# critical-path cost (grace expiry ~8-9s + 5.2s + halt ≈ 21-22s) that blew the
+# ~19.5s firmware guillotine budget. The halt itself IS the clean teardown.
 
 
 def _usb_power_targets() -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
@@ -734,9 +731,12 @@ def shed_usb_load() -> None:
 
     IDEMPOTENT-SAFE: re-running ``uhubctl -a off`` on an already-off port, or
     re-writing ``0`` to an already-deauthorized sysfs attribute, is a harmless
-    no-op. This matters because there are two call sites — the early shed on AC
-    loss (main loop, guarded once by usb_shed_active) and run_shutdown_sequence
-    at grace expiry — and either may fire after the other has already shed.
+    no-op. There are two call sites — the early shed on AC loss (main loop,
+    guarded once by usb_shed_active) and run_shutdown_sequence at grace expiry.
+    The latter SKIPS its call when the early shed already fired this outage
+    (``usb_already_shed``; two uhubctl spawns with 5s timeouts each on
+    already-off ports are pure critical-path risk under the ~20s guillotine),
+    so idempotency now mainly guards direct callers and edge paths.
     """
     uhubctl_targets, sysfs_targets = _usb_power_targets()
     uhubctl = shutil.which("uhubctl")
@@ -845,21 +845,33 @@ def run_shutdown_sequence(
     ina_batt: INA219 | None = None,
     *,
     detect_only: bool = False,
+    usb_already_shed: bool = False,
 ) -> None:
-    """Grace window expired with the charger still absent — react.
+    """Grace window expired with the charger still absent — react, FAST.
 
-    In NORMAL (armed) mode this performs the full validated shutdown
-    sequence: stop the rover service, shed USB load, write the UPS hardware
-    shutdown-countdown register, then sync and halt the Pi. Behavior here is
-    unchanged from the pre-detect-only daemon.
+    In NORMAL (armed) mode: write the UPS hardware shutdown-countdown
+    register, shed USB load only if the early shed hasn't already fired this
+    outage, then sync and halt the Pi. Every step here races the UPSPlus
+    FW v14 output guillotine (~19.5s after input loss; we enter at ~8-9s),
+    so the critical path holds NOTHING serialized it doesn't need:
+
+      * The old pre-halt ``stop_rover_service()`` (serialized
+        ``systemctl stop wall-e.service``) was REMOVED 2026-07-10 — measured
+        5.2s on its own, while ``shutdown -h now`` stops wall-e IN PARALLEL
+        and completes the whole halt in ~7s. The halt IS the clean teardown.
+      * ``usb_already_shed``: the main loop's early shed fires within ~1s of
+        instant input loss — always before the 4s debounce even completes —
+        so by grace expiry the OAK-hub power is already off. Re-shedding
+        would spawn two uhubctl processes with 5s timeouts each against
+        already-off ports: pure critical-path risk, skipped. The shed here
+        remains as belt-and-braces for direct callers that didn't early-shed.
 
     In DETECT-ONLY (bench-test) mode EVERY hardware/side-effecting action is
     suppressed at its OWN call site — deliberately NOT behind a single early
     return — so a future refactor cannot accidentally re-arm one of them in
-    test mode. Nothing is stopped, no USB is shed, NO UPS register is
-    written, and no sync/shutdown is issued; the function simply returns so
-    the caller keeps monitoring. Only reads happen (the grace-expiry snapshot
-    below), which are safe.
+    test mode. No USB is shed, NO UPS register is written, and no
+    sync/shutdown is issued; the function simply returns so the caller keeps
+    monitoring. Only reads happen (the grace-expiry snapshot below).
 
     The grace-expiry report itself is detection logging and is emitted
     identically in both modes.
@@ -891,19 +903,14 @@ def run_shutdown_sequence(
             "replug to reset and repeat."
         )
 
-    # --- ACTION SITE 1: stop the wall-e rover service. ----------------------
-    if detect_only:
-        logging.info("DETECT-ONLY: suppressed stop_rover_service() — wall-e left running.")
-    else:
-        stop_rover_service()
+    # NOTE: the old ACTION SITE "stop the wall-e rover service" is GONE
+    # (2026-07-10): the serialized systemctl stop measured 5.2s while the halt
+    # below stops wall-e in parallel — see the module-level deletion note.
 
-    # --- ACTION SITE 2: shed USB load (OAK-D hub power). --------------------
-    if detect_only:
-        logging.info("DETECT-ONLY: suppressed shed_usb_load() — USB power left on.")
-    else:
-        shed_usb_load()
-
-    # --- ACTION SITE 3: write the UPS hardware shutdown-countdown register. --
+    # --- ACTION SITE 1: write the UPS hardware shutdown-countdown register. --
+    # First, because it is the one action that guarantees an eventual clean
+    # power state even if everything after it wedges: the UPS cuts output
+    # after the countdown and level-triggered Back-to-AC re-powers on AC.
     if detect_only:
         logging.info(
             "DETECT-ONLY: suppressed UPS shutdown-countdown register write "
@@ -933,7 +940,21 @@ def run_shutdown_sequence(
                 "Failed to set UPS shutdown countdown after retries; proceeding with OS shutdown."
             )
 
-    # --- ACTION SITE 4: sync + OS halt. -------------------------------------
+    # --- ACTION SITE 2: shed USB load (OAK-D hub power) — usually a skip. ----
+    # The main loop's early shed fires within ~1s of instant input loss, so in
+    # the armed daemon flow usb_already_shed is True here and this whole site
+    # is a no-cost skip (re-shedding = two 5s-timeout uhubctl spawns against
+    # already-off ports, pure critical-path risk). Kept for direct callers.
+    if detect_only:
+        logging.info("DETECT-ONLY: suppressed shed_usb_load() — USB power left on.")
+    elif usb_already_shed:
+        logging.info("USB load already shed earlier this outage (early shed); skipping re-shed.")
+    else:
+        shed_usb_load()
+
+    # --- ACTION SITE 3: sync + OS halt. -------------------------------------
+    # `shutdown -h now` stops wall-e.service (and everything else) in parallel;
+    # measured 2026-07-10: whole halt ~7s, power-safe ~8-9s after this command.
     if detect_only:
         logging.info(
             "DETECT-ONLY: suppressed sync + '/sbin/shutdown -h now' — Pi stays up."
@@ -1132,8 +1153,13 @@ def main(detect_only: bool | None = None) -> None:
                 # this halts the Pi and never returns; in detect-only mode
                 # every action is suppressed at its own call site and this
                 # returns so we keep monitoring for a replug (repeatable).
+                # usb_shed_active: the early shed (below) fired on the FIRST
+                # instant-low poll of this outage — necessarily before the 4s
+                # debounce even completed — so the sequence skips re-shedding.
                 run_shutdown_sequence(
-                    bus, device_addr, ina_batt, detect_only=detect_only
+                    bus, device_addr, ina_batt,
+                    detect_only=detect_only,
+                    usb_already_shed=usb_shed_active,
                 )
 
         # --- EARLY USB SHED / STAGGERED RESTORE ------------------------------
