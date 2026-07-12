@@ -58,8 +58,10 @@ def _pass_band(measured: float, expected: float, abs_tol_deg: float, rel_tol: fl
 
 
 class TriadIntegrator:
-    """Independent integrators for gyro_x / gyro_y / gyro_z at scale=1, sign=+1
-    (body rate integrated as-is). Also tracks production OakImuReader heading.
+    """Body-axis free-yaw at scale=1 for chalk evidence.
+
+    Prefer producer cumulative channels (lossless, every BMI270 packet). Fall
+    back to host-side sample integration only if producer cum is unavailable.
     """
 
     def __init__(self) -> None:
@@ -70,10 +72,38 @@ class TriadIntegrator:
         self.last_host_ts: Optional[float] = None
         self.samples = 0
         self.skipped = 0
+        self._baseline_set = False
+        self._base_x = 0.0
+        self._base_y = 0.0
+        self._base_z = 0.0
+        self.using_producer = False
+
+    def update_from_producer(
+        self,
+        cum_x_deg: float,
+        cum_y_deg: float,
+        cum_z_deg: float,
+        packets_integrated: int,
+    ) -> None:
+        """Mirror producer unscaled free-yaw (relative to first observation)."""
+        self.using_producer = True
+        if not self._baseline_set:
+            self._base_x = cum_x_deg
+            self._base_y = cum_y_deg
+            self._base_z = cum_z_deg
+            self._baseline_set = True
+            self.samples = int(packets_integrated)
+            return
+        self.x_deg = cum_x_deg - self._base_x
+        self.y_deg = cum_y_deg - self._base_y
+        self.z_deg = cum_z_deg - self._base_z
+        self.samples = int(packets_integrated)
 
     def update(self, gx_dps: float, gy_dps: float, gz_dps: float,
                dev_ts: float, host_ts: float, age_s: float,
                max_dt: float = 0.15, stale_s: float = 0.5) -> None:
+        if self.using_producer:
+            return
         if age_s > stale_s or not math.isfinite(age_s):
             self.skipped += 1
             return
@@ -154,7 +184,9 @@ def main() -> int:
     reader.start()
     time.sleep(1.5)
 
-    src = args.production_source or str(getattr(config.imu_steering, "oak_yaw_rate_source", "auto"))
+    src = args.production_source or str(
+        getattr(config.imu_steering, "oak_yaw_rate_source", "gyro_y")
+    )
     scale = (
         float(args.production_scale)
         if args.production_scale is not None
@@ -183,20 +215,26 @@ def main() -> int:
 
     def poll_once() -> Dict:
         data = imu.read()
-        # Prefer health body rates; fall back to read() triad fields.
         health = imu.get_health()
-        gx = float(health.get("gx_body_dps", data.get("gx_body_dps", data.get("gx_dps", 0.0))))
-        gy = float(health.get("gy_body_dps", data.get("gy_body_dps", data.get("gy_dps", 0.0))))
-        gz = float(health.get("gz_body_dps", data.get("gz_body_dps", 0.0)))
-        dev_ts = float(data.get("device_timestamp_s", 0.0) or 0.0)
-        # Host sample ts lives on oak state; use health last_host if needed.
-        host_ts = float(health.get("last_host_sample_ts") or 0.0)
-        age = float(data.get("sample_age_s", health.get("sample_age_s", 99.0)) or 99.0)
-        # Fresh host identity: re-read oak packet timestamp via get_imu_data.
-        st, age2 = reader.get_imu_data()
-        host_ts = float(getattr(st, "timestamp", 0.0) or host_ts)
-        age = float(age2)
-        triad.update(gx, gy, gz, dev_ts, host_ts, age)
+        # Prefer lossless producer cumulative triad (proves no host-side loss).
+        px = health.get("producer_cum_yaw_x_deg", data.get("producer_cum_yaw_x_deg"))
+        py = health.get("producer_cum_yaw_y_deg", data.get("producer_cum_yaw_y_deg"))
+        pz = health.get("producer_cum_yaw_z_deg", data.get("producer_cum_yaw_z_deg"))
+        p_int = health.get("producer_packets_integrated", data.get("count_producer_packets"))
+        if px is not None and py is not None and pz is not None:
+            triad.update_from_producer(
+                float(px), float(py), float(pz), int(p_int or 0)
+            )
+        else:
+            gx = float(health.get("gx_body_dps", data.get("gx_body_dps", data.get("gx_dps", 0.0))))
+            gy = float(health.get("gy_body_dps", data.get("gy_body_dps", data.get("gy_dps", 0.0))))
+            gz = float(health.get("gz_body_dps", data.get("gz_body_dps", 0.0)))
+            dev_ts = float(data.get("device_timestamp_s", 0.0) or 0.0)
+            host_ts = float(health.get("last_host_sample_ts") or 0.0)
+            st, age2 = reader.get_imu_data()
+            host_ts = float(getattr(st, "timestamp", 0.0) or host_ts)
+            age = float(age2)
+            triad.update(gx, gy, gz, dev_ts, host_ts, age)
         return data
 
     # Warm up integrators
@@ -307,11 +345,46 @@ def main() -> int:
     print()
     print("=== RESULTS (scale=1 triad; production uses configured scale) ===")
     print(f"  direction note: physical {args.direction}, expected |Δ|={expected:.1f}°")
-    print(f"  triad samples integrated: {triad.samples}  skipped: {triad.skipped}")
-    print(f"  oak_imu health: status={end_health.get('integrate_status')} "
+    triad_src = "producer_cum" if triad.using_producer else "host_sparse_fallback"
+    print(f"  triad source: {triad_src}  samples/packets: {triad.samples}  skipped: {triad.skipped}")
+    print(f"  oak_imu health: path={end_health.get('integration_path')} "
+          f"status={end_health.get('integrate_status')} "
           f"dup={end_health.get('count_duplicate')} stale={end_health.get('count_stale')} "
           f"regress={end_health.get('count_regressed')} restart={end_health.get('count_restart')} "
-          f"integrated={end_health.get('count_integrated')}")
+          f"integrated={end_health.get('count_integrated')} "
+          f"producer_pkts={end_health.get('count_producer_packets')}")
+    print(
+        "  producer metrics: "
+        f"recv/drained={end_health.get('producer_packets_received')} "
+        f"parsed={end_health.get('producer_packets_parsed')} "
+        f"integrated={end_health.get('producer_packets_integrated')} "
+        f"dup={end_health.get('producer_packets_duplicate')} "
+        f"gap={end_health.get('producer_packets_gap_freeze')} "
+        f"backlog_drop={end_health.get('producer_packets_backlog_dropped')} "
+        f"cadence_avg={end_health.get('producer_cadence_avg_s')} "
+        f"cadence_max={end_health.get('producer_cadence_max_s')} "
+        f"batch={end_health.get('last_batch_packets')}"
+    )
+    print(
+        "  drain-batch observability (NOT host-queue occupancy/overflow): "
+        f"maxSize={end_health.get('host_queue_max_size')} "
+        f"blocking={end_health.get('host_queue_blocking')} "
+        f"pkt_cap={end_health.get('max_packets_per_drain')} "
+        f"drain_hw={end_health.get('drain_batch_high_water_msgs')} "
+        f"drain_large={end_health.get('drain_batch_large_events')} "
+        f"drain_full={end_health.get('drain_batch_full_size_events')} "
+        f"q_drop={end_health.get('queue_msgs_dropped')} "
+        f"overwrite_obs={end_health.get('queue_msgs_overwrite_observable')} "
+        f"selection_coalesced={end_health.get('producer_packets_coalesced')} "
+        f"(structural only; not a loss proof)"
+    )
+    print(
+        "  consumer reseed: "
+        f"gen_change={end_health.get('count_generation_change')} "
+        f"cum_reset={end_health.get('count_cum_reset')} "
+        f"regress={end_health.get('count_regressed')} "
+        f"restart={end_health.get('count_restart')}"
+    )
     if end_health.get("oak_reconnect_count") is not None:
         print(f"  oak reconnect_count={end_health.get('oak_reconnect_count')} "
               f"connected={end_health.get('oak_connected')}")
@@ -343,18 +416,21 @@ def main() -> int:
     print()
     print("Interpretation:")
     print(f"  - Best body axis for this mounting (by |Δ| vs {expected:.0f}°): {best_name}")
-    print("  - Do NOT write config from this tool. If an axis PASSes at scale=1,")
-    print("    set oak_yaw_rate_source to that axis and oak_yaw_rate_scale≈1.0 after review.")
-    print("  - If production path fails but one axis passes, production source/scale is wrong")
-    print("    (auto may be locking the wrong axis — pin gyro_x/y/z from evidence).")
+    print("  - Production baseline (field-validated): gyro_y × 1.0 — never restore auto/0.46.")
+    print("  - Do NOT write config from this tool without review.")
+    print("  - Packet-loss proof (truthful): integrated tracks received; backlog_drop=0;")
+    print("    cadence_avg≈0.01 s. Drain-batch high-water is messages drained per poll —")
+    print("    NOT host-queue occupancy. DepthAI nonblocking overwrite loss is not observable.")
+    print("    selection_coalesced=0 is structural only — not a manufactured loss proof.")
     print("  - Sign: heading uses -yaw integration; if Δ sign is opposite your chalk CW/CCW")
     print("    expectation, document it — do not flip sign in production without a full retest.")
     print()
     print("Pass criteria (single axis, scale=1):")
     print(f"  | |measured| - {expected:.0f} | <= max({args.abs_tol_deg:.1f}°, "
           f"{args.rel_tol*100:.0f}% of expected)")
-    print("  duplicate/stale counters may rise when idle; during the turn integrated count")
-    print("  must increase and heading must not jump on reconnect (regressed→restart freeze).")
+    print("  Loss proof = integrated/received + backlog/gap + drain-batch size, not coalesced.")
+    print("  Generation bumps preserve unread cum (incl. +turn/-turn back to ~0);")
+    print("  only integrated-counter rewind (true producer replacement) freezes heading.")
 
     reader.stop()
     return 0

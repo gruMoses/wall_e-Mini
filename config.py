@@ -71,9 +71,11 @@ class ImuSteeringConfig:
     
     # Timing
     update_rate_hz: float = 60.0  # Controller-side IMU update cap (aligned with default OAK IMU poll)
-    # OAK-D IMU ingestion controls (IMU-3):
-    # - "latest": consume newest packet only (lowest CPU, current default)
-    # - "bounded": consume up to oak_imu_max_packets_per_poll packets each poll
+    # OAK-D IMU ingestion controls (IMU-3 + lossless producer yaw):
+    # Yaw is integrated from EVERY drained packet on the producer regardless of
+    # mode (see oak_imu_yaw_producer / docs/heading_tuning.md). These knobs are
+    # retained for poll cadence and metrics compatibility only.
+    # - "latest" / "bounded": historical snapshot selection (no longer drops yaw samples)
     oak_imu_packet_mode: str = "latest"
     oak_imu_max_packets_per_poll: int = 4
     # Optional dedicated OAK IMU polling cadence (separate from depth poll loop).
@@ -89,13 +91,14 @@ class ImuSteeringConfig:
     #   trusting auto; prefer pinned gyro_x/y/z once measured)
     # - "gyro_x" / "gyro_y" / "gyro_z": force specific axis for diagnostics/production
     # - "gravity_projected": project gyro onto gravity vector
-    # Baseline (not re-validated after 2026 chalk under-report): source="auto", scale=0.46.
-    # Do not change these from guesswork — fit from chalk harness evidence only.
-    # See docs/heading_tuning.md.
-    oak_yaw_rate_source: str = "auto"
+    # Field-validated 2026-07-12 with the hardened chalk harness. Pin gyro_y;
+    # "auto" was unstable. Scale is neutral (1.0): host-side packet loss was the
+    # under-report root cause — never mask sample loss with an empirical multiplier
+    # like the old auto/0.46 pair. See docs/heading_tuning.md.
+    oak_yaw_rate_source: str = "gyro_y"
     # Field-calibrated yaw-rate scale for OAK IMU heading integration.
     # Only meaningful for the axis actually selected when the scale was fitted.
-    oak_yaw_rate_scale: float = 0.46
+    oak_yaw_rate_scale: float = 1.0
     # Optional IMU lever-arm mitigation toggle for A/B testing.
     # Keep disabled for the known-good setup above.
     oak_use_gravity_projected_yaw_rate: bool = False

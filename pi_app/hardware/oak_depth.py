@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import marshal  # kept for _build_hand_tracker_script compatibility
+import math
 import re
 import sys
 import threading
@@ -28,6 +29,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 from config import ObstacleAvoidanceConfig, FollowMeConfig, GestureConfig, OakRecordingConfig, OakDetectionConfig
 from pi_app.control.follow_me import PersonDetection
 from pi_app.control.gesture_control import HandData
+from pi_app.hardware.oak_imu_yaw_producer import ImuPacket, ImuYawProducer
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,25 @@ YOLO_PERSON_LABEL = 0   # YOLOv8 COCO label index for "person"
 
 _HAND_MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "hand"
 _HAND_SCRIPT_TEMPLATE = _HAND_MODELS_DIR / "hand_tracker_script.py"
+
+# DepthAI host IMU output queue (message slots, not wall-clock seconds).
+# BMI270 is requested at 100 Hz with batch threshold 1 → ~1 packet/message.
+# Default DepthAI maxSize=16 overflows during ordinary full-vision stalls
+# (depth/YOLO/hand). 512 message slots give multi-second headroom at batch≈1,
+# but this is NOT a hard 5.1 s guarantee: one queue message may hold multiple
+# packets, and nonblocking overwrite loss is not observable via tryGet.
+# Nonblocking so a stalled host never wedges the device.
+IMU_HOST_QUEUE_MAX_SIZE = 512
+IMU_HOST_QUEUE_BLOCKING = False
+# Producer packet cap per drain (packets, not messages). Align with host
+# message capacity at ~1 pkt/msg so a full host backlog is not silently
+# halved. Keeps sort+fold memory O(cap). Raise only with measured multi-packet
+# need — not a free pass to unbounded CPU.
+IMU_MAX_PACKETS_PER_DRAIN = IMU_HOST_QUEUE_MAX_SIZE
+# Drain-batch observability thresholds (NOT host-queue occupancy).
+# A large drain means many messages were successfully retrieved in one poll;
+# it does not measure remaining queue depth or overwritten samples.
+IMU_DRAIN_BATCH_LARGE_FRAC = 0.75
 
 
 @dataclass
@@ -84,20 +105,55 @@ class _ImuState:
     gz_rads: float = 0.0
     timestamp: float = 0.0
     device_timestamp_s: float = 0.0
+    # Producer-side unscaled cumulative free yaw (rad). Consumers apply scale once.
+    cum_yaw_x_rad: float = 0.0
+    cum_yaw_y_rad: float = 0.0
+    cum_yaw_z_rad: float = 0.0
+    cum_yaw_grav_rad: float = 0.0
+    yaw_generation: int = 0
+    producer_packets_integrated: int = 0
+    producer_integrated_time_s: float = 0.0
+    last_integrated_device_ts_s: float = 0.0
 
 
 @dataclass
 class _ImuMetrics:
-    """Lightweight IMU observability counters."""
+    """Lightweight IMU observability counters.
+
+    Packet-loss proof uses integrated vs received, gap/backlog drops, and
+    drain-batch size stats — never a manufactured coalesced=0, and never
+    claims of DepthAI host-queue occupancy or overwrite count (those are
+    not exposed by nonblocking tryGet).
+    """
+    # Successfully tryGet'd host queue messages (all are consumed/batched).
     queue_msgs_received: int = 0
     queue_msgs_consumed: int = 0
+    # Always 0: drained messages are not dropped. Nonblocking DepthAI overwrite
+    # loss is not observable through this API — do not invent a drop count.
     queue_msgs_dropped: int = 0
     queue_drain_count: int = 0
-    packets_received: int = 0
-    packets_consumed: int = 0
+    packets_received: int = 0  # drained/parsed from host queue (batch total)
+    packets_parsed: int = 0    # successfully converted to ImuPacket
+    packets_consumed: int = 0  # alias of integrated delta (compat)
+    # Selection-mode drops (legacy "latest"/"bounded"). Lossless path never
+    # increments this — it stays 0 by structure, not by forcing assignment.
     packets_coalesced: int = 0
+    packets_integrated: int = 0
+    packets_duplicate: int = 0
+    packets_regressed: int = 0
+    packets_restart: int = 0
+    packets_gap_freeze: int = 0
+    packets_invalid_ts: int = 0
+    packets_backlog_dropped: int = 0
     last_batch_packets: int = 0
     last_drain_msgs: int = 0
+    host_queue_max_size: int = IMU_HOST_QUEUE_MAX_SIZE
+    host_queue_blocking: bool = IMU_HOST_QUEUE_BLOCKING
+    # Drain-batch observability: messages successfully drained per poll.
+    # NOT host-queue occupancy, NOT overwrite count, NOT overflow proof.
+    drain_batch_high_water_msgs: int = 0
+    drain_batch_large_events: int = 0      # drain size >= large frac of maxSize
+    drain_batch_full_size_events: int = 0  # drain size >= maxSize (interesting only)
     cadence_samples: int = 0
     cadence_last_s: float = 0.0
     cadence_min_s: float = 0.0
@@ -317,6 +373,18 @@ class OakDepthReader:
         self._lm_net = None  # lazy-loaded OpenCV DNN for host-side LM
         self._imu_state = _ImuState()
         self._imu_metrics = _ImuMetrics()
+        # Lossless producer-side yaw: every drained packet is integrated here
+        # independent of depth/YOLO/RGB/hand load and of consumer poll rate.
+        # Packet cap aligns with host message capacity at ~1 pkt/msg.
+        self._imu_yaw_producer = ImuYawProducer(
+            max_packets_per_drain=int(IMU_MAX_PACKETS_PER_DRAIN),
+        )
+        # Host output queue depth (also stamped into metrics for field tools).
+        self._imu_host_queue_max_size = int(IMU_HOST_QUEUE_MAX_SIZE)
+        self._imu_host_queue_blocking = bool(IMU_HOST_QUEUE_BLOCKING)
+        self._imu_max_packets_per_drain = int(IMU_MAX_PACKETS_PER_DRAIN)
+        self._imu_metrics.host_queue_max_size = self._imu_host_queue_max_size
+        self._imu_metrics.host_queue_blocking = self._imu_host_queue_blocking
         # Person label index depends on the active model
         _model_type = detection_config.model_type if detection_config is not None else "mobilenet-ssd"
         self._person_label: int = YOLO_PERSON_LABEL if _model_type == "yolov8n" else PERSON_LABEL
@@ -442,7 +510,12 @@ class OakDepthReader:
             self._rgb_poll_enabled = bool(enabled)
 
     def get_imu_data(self) -> tuple[_ImuState, float]:
-        """Return (imu_state_copy, age_s). Thread-safe."""
+        """Return (imu_state_copy, age_s). Thread-safe.
+
+        Includes producer cumulative free-yaw channels (unscaled rad). Consumers
+        must apply ``oak_yaw_rate_scale`` once and must not re-integrate gyro×dt
+        from the sparse latest snapshot for heading.
+        """
         with self._lock:
             age = time.monotonic() - self._imu_state.timestamp if self._imu_state.timestamp else float("inf")
             return _ImuState(
@@ -454,7 +527,25 @@ class OakDepthReader:
                 gz_rads=self._imu_state.gz_rads,
                 timestamp=self._imu_state.timestamp,
                 device_timestamp_s=self._imu_state.device_timestamp_s,
+                cum_yaw_x_rad=self._imu_state.cum_yaw_x_rad,
+                cum_yaw_y_rad=self._imu_state.cum_yaw_y_rad,
+                cum_yaw_z_rad=self._imu_state.cum_yaw_z_rad,
+                cum_yaw_grav_rad=self._imu_state.cum_yaw_grav_rad,
+                yaw_generation=self._imu_state.yaw_generation,
+                producer_packets_integrated=self._imu_state.producer_packets_integrated,
+                producer_integrated_time_s=self._imu_state.producer_integrated_time_s,
+                last_integrated_device_ts_s=self._imu_state.last_integrated_device_ts_s,
             ), age
+
+    def set_imu_gyro_bias_dps(self, gx_dps: float, gy_dps: float, gz_dps: float) -> None:
+        """Push gyro bias into the producer integrator (applied before cum yaw)."""
+        with self._lock:
+            self._imu_yaw_producer.set_gyro_bias_dps(gx_dps, gy_dps, gz_dps)
+
+    def set_imu_nmni(self, enabled: bool, threshold_dps: float = 0.3) -> None:
+        """Configure per-packet NMNI on the producer integrator."""
+        with self._lock:
+            self._imu_yaw_producer.set_nmni(enabled, threshold_dps)
 
     def get_imu_metrics(self) -> dict:
         """Return a thread-safe snapshot of IMU observability counters."""
@@ -462,16 +553,51 @@ class OakDepthReader:
         with self._lock:
             m = self._imu_metrics
             last_ts = self._imu_state.timestamp
+            snap = self._imu_yaw_producer.snapshot()
+            # Truthful accounting: not all received packets integrate (restart
+            # seeds, duplicates, gap freezes). Selection coalescing is separate.
+            packets_not_integrated = max(
+                0,
+                int(m.packets_parsed)
+                - int(m.packets_integrated)
+                - int(m.packets_duplicate)
+                - int(m.packets_gap_freeze)
+                - int(m.packets_regressed)
+                - int(m.packets_restart)
+                - int(m.packets_invalid_ts)
+                - int(m.packets_backlog_dropped),
+            )
             return {
                 "queue_msgs_received": m.queue_msgs_received,
                 "queue_msgs_consumed": m.queue_msgs_consumed,
+                # Always 0 — drained messages are consumed/batched, not dropped.
+                # DepthAI nonblocking overwrite loss is not observable here.
                 "queue_msgs_dropped": m.queue_msgs_dropped,
+                "queue_msgs_overwrite_observable": False,
                 "queue_drain_count": m.queue_drain_count,
                 "packets_received": m.packets_received,
+                "packets_parsed": m.packets_parsed,
+                "packets_drained": m.packets_received,
                 "packets_consumed": m.packets_consumed,
                 "packets_coalesced": m.packets_coalesced,
+                "packets_integrated": m.packets_integrated,
+                "packets_not_integrated_residual": packets_not_integrated,
+                "packets_duplicate": m.packets_duplicate,
+                "packets_regressed": m.packets_regressed,
+                "packets_restart": m.packets_restart,
+                "packets_gap_freeze": m.packets_gap_freeze,
+                "packets_invalid_ts": m.packets_invalid_ts,
+                "packets_backlog_dropped": m.packets_backlog_dropped,
                 "last_batch_packets": m.last_batch_packets,
                 "last_drain_msgs": m.last_drain_msgs,
+                "host_queue_max_size": m.host_queue_max_size,
+                "host_queue_blocking": m.host_queue_blocking,
+                "max_packets_per_drain": int(self._imu_max_packets_per_drain),
+                # Drain-batch observability (messages drained per poll).
+                # Never infer host-queue occupancy or overwrite overflow from these.
+                "drain_batch_high_water_msgs": m.drain_batch_high_water_msgs,
+                "drain_batch_large_events": m.drain_batch_large_events,
+                "drain_batch_full_size_events": m.drain_batch_full_size_events,
                 "cadence_samples": m.cadence_samples,
                 "cadence_last_s": m.cadence_last_s,
                 "cadence_min_s": m.cadence_min_s,
@@ -484,6 +610,14 @@ class OakDepthReader:
                 "warning_emits": m.warning_emits,
                 "last_sample_timestamp": last_ts,
                 "last_sample_age_s": (now - last_ts) if last_ts else float("inf"),
+                # Producer yaw channels (unscaled rad / deg helpers).
+                "producer_cum_yaw_x_deg": math.degrees(snap.cum_yaw_x_rad),
+                "producer_cum_yaw_y_deg": math.degrees(snap.cum_yaw_y_rad),
+                "producer_cum_yaw_z_deg": math.degrees(snap.cum_yaw_z_rad),
+                "producer_cum_yaw_grav_deg": math.degrees(snap.cum_yaw_grav_rad),
+                "producer_generation": snap.generation,
+                "producer_integrated_time_s": snap.integrated_time_s,
+                "producer_last_status": snap.last_status,
             }
 
     def get_health(self) -> dict:
@@ -939,7 +1073,19 @@ class OakDepthReader:
             imu_node.enableIMUSensor(dai.IMUSensor.GYROSCOPE_RAW, 100)
             imu_node.setBatchReportThreshold(1)
             imu_node.setMaxBatchReports(10)
-            imu_q = imu_node.out.createOutputQueue()
+            # Explicit depth: default maxSize=16 overflows under full-vision stalls.
+            # Nonblocking preserves device liveness if the host stalls longer.
+            imu_q = imu_node.out.createOutputQueue(
+                maxSize=int(self._imu_host_queue_max_size),
+                blocking=bool(self._imu_host_queue_blocking),
+            )
+            assert int(self._imu_host_queue_max_size) >= 256, (
+                "IMU host queue must buffer multiple seconds at 100 Hz "
+                f"(got maxSize={self._imu_host_queue_max_size})"
+            )
+            assert self._imu_host_queue_blocking is False, (
+                "IMU host queue must be nonblocking so a stalled host cannot wedge the device"
+            )
 
             # -- Hand tracking pipeline (host-orchestrated) --
             hand_queues = None
@@ -993,6 +1139,10 @@ class OakDepthReader:
                 self._connected = True
                 self._last_pipeline_loop_ts = time.monotonic()
                 self._last_pipeline_error_msg = ""
+                # Device clock restarts with a new session — reseed yaw clocks
+                # without jumping cumulative free-yaw.
+                self._imu_yaw_producer.note_pipeline_restart()
+                self._imu_prev_consumed_ts = 0.0
 
         except Exception:
             logger.exception("Failed to build/start OAK-D pipeline")
@@ -1727,118 +1877,188 @@ class OakDepthReader:
                 raise
             logger.debug("RGB poll error", exc_info=True)
 
+    @staticmethod
+    def _extract_imu_device_ts_s(pkt) -> float:
+        """Best-effort device timestamp (seconds) from a depthai IMU packet."""
+        device_ts_s = 0.0
+        gyro = getattr(pkt, "gyroscope", None)
+        accel = getattr(pkt, "acceleroMeter", None)
+        for ts_src in (gyro, accel, pkt):
+            if ts_src is None:
+                continue
+            ts = None
+            try:
+                getter = getattr(ts_src, "getTimestampDevice", None)
+                if callable(getter):
+                    ts = getter()
+                elif hasattr(ts_src, "timestampDevice"):
+                    ts = getattr(ts_src, "timestampDevice")
+            except Exception:
+                ts = None
+            if ts is None:
+                try:
+                    getter = getattr(ts_src, "getTimestamp", None)
+                    if callable(getter):
+                        ts = getter()
+                    elif hasattr(ts_src, "timestamp"):
+                        ts = getattr(ts_src, "timestamp")
+                except Exception:
+                    ts = None
+            if ts is None:
+                continue
+            try:
+                if hasattr(ts, "total_seconds"):
+                    device_ts_s = float(ts.total_seconds())
+                elif hasattr(ts, "timestamp"):
+                    device_ts_s = float(ts.timestamp())
+                elif isinstance(ts, (int, float)):
+                    device_ts_s = float(ts)
+            except Exception:
+                device_ts_s = 0.0
+            if device_ts_s > 0.0:
+                break
+        return device_ts_s
+
+    def _note_drain_batch(self, m: _ImuMetrics, drain_msg_count: int) -> None:
+        """Update drain-batch observability (caller holds lock).
+
+        Records how many host-queue messages were successfully drained in this
+        poll. This is **not** host-queue occupancy, remaining depth, or proof of
+        nonblocking overwrite loss (DepthAI does not expose those via tryGet).
+        """
+        if drain_msg_count > m.drain_batch_high_water_msgs:
+            m.drain_batch_high_water_msgs = int(drain_msg_count)
+        max_sz = max(1, int(m.host_queue_max_size or self._imu_host_queue_max_size))
+        if drain_msg_count >= max_sz:
+            m.drain_batch_full_size_events += 1
+        elif drain_msg_count >= int(max_sz * IMU_DRAIN_BATCH_LARGE_FRAC):
+            m.drain_batch_large_events += 1
+
     def _poll_imu(self, imu_q) -> None:
-        """Extract latest accelerometer and gyroscope data from the OAK-D IMU."""
+        """Drain IMU queue and integrate every packet into producer free-yaw.
+
+        Depth/YOLO/RGB/hand load may delay this poll, so many packets can arrive
+        in one drain. Historically only the newest (or a small tail) was kept
+        and OakImuReader under-reported chalk turns. Yaw is now integrated here
+        for **all** drained packets in timestamp order; the latest sample is
+        still published for body-axis diagnostics.
+
+        All successfully tryGet'd messages are consumed/batched — never counted
+        as dropped. Nonblocking DepthAI overwrite loss is not observable here.
+        """
         try:
             imu_data = imu_q.tryGet()
             if imu_data is None:
                 return
-            drained_msgs = 0
+            drained_extra = 0
             all_packets = list(getattr(imu_data, "packets", []) or [])
             while True:
                 newer = imu_q.tryGet()
                 if newer is None:
                     break
-                drained_msgs += 1
+                drained_extra += 1
                 newer_packets = getattr(newer, "packets", None)
                 if newer_packets:
                     all_packets.extend(list(newer_packets))
+            # First message + extras drained this poll (all successfully retrieved).
+            drain_msg_count = 1 + drained_extra
             if not all_packets:
                 with self._lock:
                     m = self._imu_metrics
-                    m.queue_msgs_received += (1 + drained_msgs)
-                    m.queue_msgs_dropped += drained_msgs
-                    if drained_msgs > 0:
+                    m.queue_msgs_received += drain_msg_count
+                    m.queue_msgs_consumed += drain_msg_count
+                    # queue_msgs_dropped stays 0: drained msgs are consumed.
+                    if drain_msg_count > 0:
                         m.queue_drain_count += 1
-                    m.last_drain_msgs = drained_msgs
+                    m.last_drain_msgs = drain_msg_count
+                    self._note_drain_batch(m, drain_msg_count)
                 return
+
             total_packets = len(all_packets)
-            if self._imu_packet_mode == "bounded":
-                selected = all_packets[-self._imu_max_packets_per_poll:]
-            else:
-                selected = [all_packets[-1]]
-
             now = time.monotonic()
-            with self._lock:
-                m = self._imu_metrics
-                m.queue_msgs_received += (1 + drained_msgs)
-                m.queue_msgs_consumed += 1
-                m.queue_msgs_dropped += drained_msgs
-                if drained_msgs > 0:
-                    m.queue_drain_count += 1
-                m.last_drain_msgs = drained_msgs
-                m.last_batch_packets = total_packets
-                m.packets_received += total_packets
-                m.packets_consumed += len(selected)
-                m.packets_coalesced += max(0, total_packets - len(selected))
-
-                for pkt in selected:
+            parsed: list[ImuPacket] = []
+            for pkt in all_packets:
+                try:
                     accel = pkt.acceleroMeter
                     gyro = pkt.gyroscope
-                    device_ts_s = 0.0
-                    # Prefer device timestamps when available; used downstream for dt integration.
-                    for ts_src in (gyro, accel, pkt):
-                        ts = None
-                        try:
-                            getter = getattr(ts_src, "getTimestampDevice", None)
-                            if callable(getter):
-                                ts = getter()
-                            elif hasattr(ts_src, "timestampDevice"):
-                                ts = getattr(ts_src, "timestampDevice")
-                        except Exception:
-                            ts = None
-                        if ts is None:
-                            try:
-                                getter = getattr(ts_src, "getTimestamp", None)
-                                if callable(getter):
-                                    ts = getter()
-                                elif hasattr(ts_src, "timestamp"):
-                                    ts = getattr(ts_src, "timestamp")
-                            except Exception:
-                                ts = None
-                        if ts is None:
-                            continue
-                        try:
-                            if hasattr(ts, "total_seconds"):
-                                device_ts_s = float(ts.total_seconds())
-                            elif hasattr(ts, "timestamp"):
-                                device_ts_s = float(ts.timestamp())
-                            elif isinstance(ts, (int, float)):
-                                device_ts_s = float(ts)
-                        except Exception:
-                            device_ts_s = 0.0
-                        if device_ts_s > 0.0:
-                            break
+                    device_ts_s = self._extract_imu_device_ts_s(pkt)
+                    # 0.0 from extractor means "not found" → NaN sentinel for producer.
+                    dev_for_pkt = device_ts_s if device_ts_s > 0.0 else float("nan")
+                    parsed.append(
+                        ImuPacket(
+                            device_ts_s=dev_for_pkt,
+                            host_ts_s=now,
+                            gx_rads=float(gyro.x),
+                            gy_rads=float(gyro.y),
+                            gz_rads=float(gyro.z),
+                            ax_mss=float(accel.x),
+                            ay_mss=float(accel.y),
+                            az_mss=float(accel.z),
+                        )
+                    )
+                except Exception:
+                    # Skip malformed packet; continue draining the rest.
+                    continue
 
-                    self._imu_state.ax_mss = accel.x
-                    self._imu_state.ay_mss = accel.y
-                    self._imu_state.az_mss = accel.z
-                    self._imu_state.gx_rads = gyro.x
-                    self._imu_state.gy_rads = gyro.y
-                    self._imu_state.gz_rads = gyro.z
-                    self._imu_state.timestamp = now
-                    self._imu_state.device_timestamp_s = device_ts_s
+            with self._lock:
+                m = self._imu_metrics
+                m.queue_msgs_received += drain_msg_count
+                # Every successfully drained message is consumed into the batch.
+                m.queue_msgs_consumed += drain_msg_count
+                # Do not count drained messages as dropped. Overwrite loss from
+                # a full nonblocking DepthAI queue is not observable via tryGet.
+                if drain_msg_count > 0:
+                    m.queue_drain_count += 1
+                m.last_drain_msgs = drain_msg_count
+                m.last_batch_packets = total_packets
+                m.packets_received += total_packets
+                m.packets_parsed += len(parsed)
+                self._note_drain_batch(m, drain_msg_count)
 
-                    sample_ts = device_ts_s if device_ts_s > 0.0 else now
-                    prev_ts = self._imu_prev_consumed_ts
-                    if prev_ts > 0.0:
-                        dt = sample_ts - prev_ts
-                        if dt <= 0.0:
-                            dt = now - prev_ts
-                        m.cadence_last_s = dt
-                        if m.cadence_samples == 0:
-                            m.cadence_min_s = dt
-                            m.cadence_max_s = dt
-                            m.cadence_avg_s = dt
-                        else:
-                            if dt < m.cadence_min_s:
-                                m.cadence_min_s = dt
-                            if dt > m.cadence_max_s:
-                                m.cadence_max_s = dt
-                            n = m.cadence_samples
-                            m.cadence_avg_s += (dt - m.cadence_avg_s) / (n + 1)
-                        m.cadence_samples += 1
-                    self._imu_prev_consumed_ts = sample_ts
+                # Always integrate every successfully parsed packet (lossless yaw).
+                # imu_packet_mode is retained for metrics compatibility only:
+                # "latest"/"bounded" no longer drop samples from the yaw path, so
+                # packets_coalesced is never incremented (stays 0 by structure).
+                before = self._imu_yaw_producer.snapshot()
+                snap = self._imu_yaw_producer.ingest(parsed, host_now_s=now)
+                integrated_delta = snap.packets_integrated - before.packets_integrated
+                m.packets_consumed += max(0, integrated_delta)
+                m.packets_integrated = snap.packets_integrated
+                m.packets_duplicate = snap.packets_duplicate
+                m.packets_regressed = snap.packets_regressed
+                m.packets_restart = snap.packets_restart
+                m.packets_gap_freeze = snap.packets_gap_freeze
+                m.packets_invalid_ts = snap.packets_invalid_ts
+                m.packets_backlog_dropped = snap.packets_backlog_dropped
+                m.cadence_samples = snap.cadence_samples
+                m.cadence_last_s = snap.cadence_last_s
+                m.cadence_min_s = snap.cadence_min_s
+                m.cadence_max_s = snap.cadence_max_s
+                m.cadence_avg_s = snap.cadence_avg_s
+
+                self._imu_state.ax_mss = snap.ax_mss
+                self._imu_state.ay_mss = snap.ay_mss
+                self._imu_state.az_mss = snap.az_mss
+                self._imu_state.gx_rads = snap.gx_rads
+                self._imu_state.gy_rads = snap.gy_rads
+                self._imu_state.gz_rads = snap.gz_rads
+                self._imu_state.timestamp = snap.timestamp if snap.timestamp > 0.0 else now
+                self._imu_state.device_timestamp_s = snap.device_timestamp_s
+                self._imu_state.cum_yaw_x_rad = snap.cum_yaw_x_rad
+                self._imu_state.cum_yaw_y_rad = snap.cum_yaw_y_rad
+                self._imu_state.cum_yaw_z_rad = snap.cum_yaw_z_rad
+                self._imu_state.cum_yaw_grav_rad = snap.cum_yaw_grav_rad
+                self._imu_state.yaw_generation = snap.generation
+                self._imu_state.producer_packets_integrated = snap.packets_integrated
+                self._imu_state.producer_integrated_time_s = snap.integrated_time_s
+                self._imu_state.last_integrated_device_ts_s = snap.last_integrated_device_ts_s
+
+                sample_ts = (
+                    snap.device_timestamp_s
+                    if snap.device_timestamp_s > 0.0
+                    else self._imu_state.timestamp
+                )
+                self._imu_prev_consumed_ts = sample_ts
         except Exception as e:
             # A fatal device/comm failure ends the session — propagate so the
             # supervisor rebuilds. Non-fatal errors keep the existing
@@ -1865,13 +2085,13 @@ class OakDepthReader:
                         m.queue_msgs_received,
                         m.queue_msgs_consumed,
                         m.packets_received,
-                        m.packets_consumed,
-                        m.packets_coalesced,
+                        m.packets_integrated,
+                        m.packets_backlog_dropped,
                     )
             if warn_summary is not None:
-                err_count, q_recv, q_cons, p_recv, p_cons, p_coal = warn_summary
+                err_count, q_recv, q_cons, p_recv, p_int, p_drop = warn_summary
                 logger.warning(
-                    "IMU poll path errors=%d q_recv=%d q_cons=%d p_recv=%d p_cons=%d p_coalesced=%d",
-                    err_count, q_recv, q_cons, p_recv, p_cons, p_coal,
+                    "IMU poll path errors=%d q_recv=%d q_cons=%d p_recv=%d p_integrated=%d p_backlog_drop=%d",
+                    err_count, q_recv, q_cons, p_recv, p_int, p_drop,
                 )
             logger.debug("IMU poll error", exc_info=True)
