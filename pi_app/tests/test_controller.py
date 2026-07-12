@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import replace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from pi_app.control.controller import Controller, RCInputs, MotorDriver, ArmRelay, ShutdownScheduler, RC_STALE_TIMEOUT_S
 from pi_app.control.mapping import MIN_PULSE_WIDTH_US, MAX_PULSE_WIDTH_US, MAX_OUTPUT, MIN_OUTPUT, CENTER_OUTPUT_VALUE
@@ -144,6 +144,33 @@ class TestRCStaleness(unittest.TestCase):
         self.assertTrue(cmd.is_armed)
         self.assertNotIn(SafetyEvent.RC_STALE, events)
         self.assertFalse(telem.get("rc_stale", False))
+
+    def test_stale_rc_still_refreshes_imu_heading(self):
+        c = Controller(
+            motor_driver=FakeMotor(),
+            arm_relay=FakeRelay(),
+            shutdown_scheduler=FakeShutdown(),
+        )
+        imu = MagicMock()
+        c._imu_compensator = imu
+        rc = RCInputs(
+            ch1_us=1500,
+            ch2_us=1500,
+            ch3_us=1000,
+            ch4_us=1000,
+            ch5_us=1000,
+            last_update_epoch_s=100.0,
+        )
+
+        cmd, events, telem = c.process(
+            rc,
+            now_epoch_s=100.0 + RC_STALE_TIMEOUT_S + 0.5,
+        )
+
+        imu.get_heading_deg.assert_called_once_with()
+        self.assertFalse(cmd.is_armed)
+        self.assertIn(SafetyEvent.RC_STALE, events)
+        self.assertTrue(telem["rc_stale"])
 
 
 class TestSlewLimiter(unittest.TestCase):

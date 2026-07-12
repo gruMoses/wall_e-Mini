@@ -671,6 +671,12 @@ class Controller:
                 if "rx_thread_alive" in _rx_health:
                     self._vesc_rx_thread_alive = _rx_health.get("rx_thread_alive")
 
+        # Keep IMU state and telemetry current even when RC staleness returns
+        # early below. Producer-side yaw already integrates independently;
+        # this consumes its cumulative delta without double-integrating.
+        if self._imu_compensator is not None:
+            self._imu_compensator.get_heading_deg()
+
         # RC staleness watchdog: if no RC update for >1s, force disarm
         rc_age = epoch_now - rc.last_update_epoch_s if rc.last_update_epoch_s > 0.0 else 0.0
         if rc_age > RC_STALE_TIMEOUT_S:
