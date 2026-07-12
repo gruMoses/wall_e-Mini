@@ -145,6 +145,10 @@ cd /home/pi/wall_e-Mini
 python3 -m pi_app.cli.oak_yaw_chalk_test --expected 90 --stream
 # then
 python3 -m pi_app.cli.oak_yaw_chalk_test --expected 180 --stream
+# optional NMNI override for this run only (does not write config):
+python3 -m pi_app.cli.oak_yaw_chalk_test --expected 90 --stream --no-nmni
+# stationary / expected-zero check (scale fit is n/a; no div-by-zero):
+python3 -m pi_app.cli.oak_yaw_chalk_test --expected 0 --stream --bias-s 10
 ```
 
 The harness uses the **full shared OakDepthReader pipeline** (same producer path as
@@ -159,12 +163,29 @@ service) and prints producer + drain-batch metrics.
 5. Align chassis to 0°. Enter → **MARK START**.
 6. Rotate slowly by hand (or carefully with RC only if you accept extra vibration) to the
    chalk target. Prefer hand-rotate for axis ID.
+   - **A clean 90° turn should take roughly 5–10 seconds** (slow enough for
+     clean integration, fast enough that residual bias does not dominate).
+   - **The camera must rotate rigidly with the chassis** — no flexible mount,
+     hand-hold on the camera alone, or relative slip between OAK and body.
 7. Enter → **MARK END**.
 8. Read the report:
    - triad from **producer cum** at scale=1 (`gyro_x/y/z`)
-   - production path (`gyro_y` × 1.0)
+   - production path (`gyro_y` × 1.0); production free-yaw Δ should ≈ −producer gyro_y Δ
+   - exact cumulative start/end, bias at 6 decimals, raw per-axis rate stats
+   - bias-corrected gyro_y fraction below NMNI threshold
+   - generation / restart / regression / gap / backlog metrics
    - producer `recv` / `integrated` / `gap` / `backlog_drop` / cadence
    - drain-batch high-water (msgs per poll) vs maxSize — not occupancy
+
+### Baseline sync (stream and non-stream)
+
+The harness **polls continuously** while waiting for MARK START and MARK END in
+both stream and non-stream modes, then captures producer / triad / production
+baselines from the **same** poll (triad re-anchored at MARK START). Do not use
+a blocking `input()` without polling — that freezes `TriadIntegrator` while
+producer cum advances, so a later production refresh desynchronizes start
+baselines (field symptom: start prod heading ≠ triad / producer Y, production
+Δ mismatch).
 
 ### Choosing axis and scale (from evidence only)
 
