@@ -133,7 +133,7 @@ if imu_status:
 ### Drift Issues (heading wandering over time)
 - Expected with gyro-only integration — the BMI270 has no magnetometer
 - Increase `ki` gain to correct slow bias
-- GPS COG heading alignment (in progress) will help re-zero heading at session start
+- GPS COG heading alignment locks a true-north offset while driving on RTK fixed; see `docs/gps_heading_alignment.md`
 
 ## Safety Features
 

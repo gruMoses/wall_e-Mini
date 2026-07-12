@@ -80,9 +80,9 @@ The GPS waypoint navigator (`pi_app/control/waypoint_nav.py`) implements a three
 - **DRIVE**: drive forward with PID steering; falls back to ALIGN on large errors
 - **ARRIVE**: within arrival radius of target; advance to next waypoint
 
-`compute()` returns `(v_cmd, yaw_cmd, state)` as normalized floats; a mixer converts these to left/right motor bytes. Requires RTK GPS fix quality ≥ 4.
+`compute()` returns `(v_cmd, yaw_cmd, state)` as normalized floats; a mixer converts these to left/right motor bytes. The default gate requires exactly fix quality 4 (RTK fixed); quality 5 is RTK float and halts autonomous motion.
 
-GPS COG heading alignment is **in progress** — will let the robot initialize its heading from GPS course-over-ground instead of relying solely on gyro integration.
+GPS COG heading alignment is **implemented** (software); field validation is pending — see `docs/gps_heading_alignment.md`.
 
 ## Known Issues
 

@@ -496,7 +496,9 @@ class WaypointNavConfig:
     cruise_speed_byte: int = 40
     approach_speed_byte: int = 20
     slow_radius_m: float = 2.0
-    min_rtk_quality: int = 4     # require RTK fixed for autonomous nav
+    # Quality 4 means RTK fixed and is matched exactly; quality 5 is RTK float.
+    # Other configured values retain minimum-threshold behavior.
+    min_rtk_quality: int = 4
     stale_timeout_s: float = 3.0
     # State-machine thresholds (see WaypointNavController)
     align_threshold_deg: float = 12.0      # |heading_err| below this -> ALIGN->DRIVE

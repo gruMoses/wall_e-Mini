@@ -159,6 +159,9 @@ class RecordingTelemetry:
     wp_completed: bool | None = None
     heading_offset_deg: float | None = None
     heading_offset_locked: bool | None = None
+    corrected_heading_deg: float | None = None
+    heading_align_last_cog_deg: float | None = None
+    heading_align_enabled: bool | None = None
     # ── Safety / liveness (consumed by phone-teleop rc_state_provider) ──
     # Latched RC ch5 emergency-stop state, mirrored from the controller so the
     # teleop session sees the real RC e-stop (it has no other view of ch5).

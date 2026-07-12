@@ -508,6 +508,8 @@ let gpsSats = 0;
 let navWpIndex = 0, navWpTotal = 0;
 let navState = 'IDLE';
 let navHeadingErrorDeg = 0;
+let headingAlignRequired = false;
+let headingAlignLocked = false;
 let goTimer = null;
 let goStart = 0;
 let missionDirty = false;
@@ -724,9 +726,17 @@ function getRouteValidation() {
     status: isArmed ? 'ok' : 'err',
   });
   checks.push({
-    label: gpsFix >= 4 ? 'RTK fixed GPS ready' : 'GPS fix below RTK fixed',
-    status: gpsFix >= 4 ? 'ok' : 'warn',
+    label: gpsFix === 4 ? 'RTK fixed GPS ready' : (gpsFix === 5 ? 'RTK float only (need fix quality 4)' : 'GPS fix below RTK fixed (need fix quality 4)'),
+    status: gpsFix === 4 ? 'ok' : 'warn',
   });
+  if (headingAlignRequired) {
+    checks.push({
+      label: headingAlignLocked
+        ? 'GPS heading alignment locked'
+        : 'Drive on RTK fixed to lock GPS heading alignment',
+      status: headingAlignLocked ? 'ok' : 'err',
+    });
+  }
   checks.push({
     label: calibration && calibration.calibrated ? 'Map calibration loaded' : 'Map calibration unavailable',
     status: calibration && calibration.calibrated ? 'ok' : 'warn',
@@ -970,7 +980,9 @@ function connectSSE() {
       if (sseMsgCount++ === 0) console.log('[nav] first SSE msg', d);
       const lat = d.gps_lat || 0;
       const lon = d.gps_lon || 0;
-      const heading = d.imu_heading_deg || 0;
+      const heading = (d.heading_align && d.heading_align.locked && d.corrected_heading_deg != null)
+        ? d.corrected_heading_deg
+        : (d.imu_heading_deg || 0);
       gpsFix = d.gps_fix || 0;
       gpsSats = d.gps_sats || 0;
       isArmed = !!d.is_armed;
@@ -984,6 +996,13 @@ function connectSSE() {
       navWpTotal = d.wp_total || 0;
       navState = d.nav_state || 'IDLE';
       navHeadingErrorDeg = (typeof d.wp_heading_error_deg === 'number') ? d.wp_heading_error_deg : 0;
+      if (d.heading_align) {
+        headingAlignRequired = !!d.heading_align.enabled;
+        headingAlignLocked = !!d.heading_align.locked;
+      } else {
+        headingAlignRequired = false;
+        headingAlignLocked = !!d.heading_offset_locked;
+      }
 
       if (lat !== 0 && lon !== 0) {
         updateRobotPosition(lat, lon, heading);
@@ -1006,7 +1025,7 @@ function connectSSE() {
 function updateGpsBadge() {
   const badge = document.getElementById('gpsBadge');
   badge.className = 'gps-badge';
-  if (gpsFix >= 4) {
+  if (gpsFix === 4) {
     badge.textContent = 'RTK FIXED · ' + gpsSats + ' sats';
     badge.classList.add('fix-rtk');
   } else if (gpsFix === 5 || gpsFix === 3) {
@@ -1855,7 +1874,7 @@ async function startNavWithWaypoints(wpData, isResume=false) {
       pausedMission = null;
       showToast(isResume ? 'Navigation resumed' : 'Navigation started!');
     } else {
-      showToast('Error: ' + (data.error || 'unknown'));
+      showToast('Error: ' + (data.message || data.error || 'unknown'));
     }
   } catch(err) {
     showToast(isResume ? 'Failed to resume navigation' : 'Failed to start navigation');
@@ -2198,6 +2217,20 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
         except Exception:
             return False
 
+    def _nav_block_message(reason: str) -> str:
+        messages = {
+            "gps_quality_not_trusted": (
+                "Waypoint navigation requires RTK fixed (fix quality 4); "
+                "RTK float (quality 5) is not trusted"
+            ),
+            "heading_alignment_not_locked": (
+                "GPS heading alignment is not locked — drive forward on RTK fixed "
+                "before starting waypoint navigation"
+            ),
+            "waypoint_nav_unavailable": "Waypoint navigation is not available",
+        }
+        return messages.get(reason, reason)
+
     # ── Page ──
 
     @bp.route("/navigate")
@@ -2309,7 +2342,13 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
             nav._cfg.cruise_speed_byte = int(cruise_speed)
             nav._cfg.arrival_radius_m = float(arrival_radius)
             nav.set_waypoints(gps_waypoints)
-            controller.activate_waypoint_nav()
+            block_reason = controller.activate_waypoint_nav()
+            if block_reason is not None:
+                return _json_resp({
+                    "ok": False,
+                    "error": block_reason,
+                    "message": _nav_block_message(block_reason),
+                }, 409)
             _log.info("Waypoint nav started with %d waypoints, speed=%d, radius=%.1f",
                        len(gps_waypoints), cruise_speed, arrival_radius)
             return _json_resp({"ok": True, "waypoint_count": len(gps_waypoints)})
@@ -2487,7 +2526,13 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
             nav._cfg.cruise_speed_byte = cruise_speed
             nav._cfg.arrival_radius_m = arrival_radius
             nav.set_waypoints([Waypoint(lat=target_lat, lon=target_lon, name="GO")])
-            controller.activate_waypoint_nav()
+            block_reason = controller.activate_waypoint_nav()
+            if block_reason is not None:
+                return _json_resp({
+                    "ok": False,
+                    "error": block_reason,
+                    "message": _nav_block_message(block_reason),
+                }, 409)
             _log.info("nav/go: target=(%.7f, %.7f) speed=%d radius=%.1f",
                       target_lat, target_lon, cruise_speed, arrival_radius)
             return _json_resp({"ok": True, "target_lat": target_lat, "target_lon": target_lon})

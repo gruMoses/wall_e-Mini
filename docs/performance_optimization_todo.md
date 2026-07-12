@@ -70,9 +70,8 @@ Scope: Single source of truth for active engineering work and prioritized enhanc
 - [ ] Gain scheduling (speed/mode/surface indexed PID sets)
 - [ ] RTK GPS hardening
   - reconnection/backoff, quality transition handling, startup convergence policy
-- [~] **GPS COG heading alignment** *(in progress)*
-  - Initialize heading from GPS course-over-ground at session start instead of assuming startup pose = reference
-  - Mitigates gyro drift for waypoint navigation
+- [x] **GPS COG heading alignment** *(software complete; field validation pending)*
+  - RTK COG offset lock, disarm reset, waypoint nav gate, telemetry — see `docs/gps_heading_alignment.md`
 
 ### P4 (Longer Horizon)
 

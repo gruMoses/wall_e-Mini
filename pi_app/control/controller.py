@@ -301,10 +301,34 @@ class Controller:
     def in_calibration_mode(self) -> bool:
         return self._calibration_mode
 
-    def activate_waypoint_nav(self) -> None:
-        """Enter WAYPOINT_NAV mode (call from UI / CLI)."""
+    def waypoint_nav_activation_blocked(self) -> Optional[str]:
+        """Return a machine-readable reason if waypoint nav must not start."""
+        nav = self._waypoint_nav
+        gps = self._gps_reading
+        if nav is not None and gps is not None and not nav.accepts_fix_quality(gps.fix_quality):
+            return "gps_quality_not_trusted"
+
+        aligner = self._gps_heading_aligner
+        if aligner is None or not aligner.enabled:
+            return None
+        if self._imu_compensator is None or gps is None:
+            return None
+        if aligner.locked:
+            return None
+        return "heading_alignment_not_locked"
+
+    def activate_waypoint_nav(self) -> Optional[str]:
+        """Enter WAYPOINT_NAV mode (call from UI / CLI).
+
+        Returns None on success, or a machine-readable block reason.
+        """
+        blocked = self.waypoint_nav_activation_blocked()
+        if blocked is not None:
+            return blocked
         if self._waypoint_nav is not None and not self._waypoint_nav.completed:
             self._mode = "WAYPOINT_NAV"
+            return None
+        return "waypoint_nav_unavailable"
 
     def deactivate_waypoint_nav(self) -> None:
         """Return to MANUAL mode from waypoint nav."""
@@ -327,6 +351,37 @@ class Controller:
         self._slew_initialized = False
         self._slew_seen_non_neutral = False
         self._straight_target_true_heading = None
+
+    def _on_armed_session_ended(self) -> None:
+        """Reset heading-align state when an armed session ends."""
+        if self._gps_heading_aligner is not None:
+            self._gps_heading_aligner.reset()
+        self._straight_target_true_heading = None
+
+    def _heading_align_telemetry(self, raw_heading: Optional[float]) -> dict:
+        """Nested heading-alignment observability for controller telemetry."""
+        aligner = self._gps_heading_aligner
+        if aligner is None:
+            return {
+                "enabled": False,
+                "locked": False,
+                "offset_deg": 0.0,
+                "corrected_heading_deg": raw_heading,
+                "last_cog_deg": None,
+                "last_speed_mps": None,
+                "history_samples": 0,
+            }
+        st = aligner.status()
+        corrected = aligner.correct(raw_heading) if raw_heading is not None else None
+        return {
+            "enabled": st.enabled,
+            "locked": st.locked,
+            "offset_deg": st.offset_deg,
+            "corrected_heading_deg": corrected,
+            "last_cog_deg": st.last_cog_deg,
+            "last_speed_mps": st.last_speed_mps,
+            "history_samples": st.history_samples,
+        }
 
     @staticmethod
     def _slew_toward_target(
@@ -487,6 +542,7 @@ class Controller:
     ) -> Tuple[DriveCommand, List[SafetyEvent], dict]:
         epoch_now = now_epoch_s if now_epoch_s is not None else time.time()
         mono_now = time.monotonic()
+        was_armed = self._safety_state.is_armed
 
         # ── Poll VESC telemetry every 50 ms ──────────────────────────────────
         _vesc_cfg = getattr(config, "vesc", None)
@@ -630,7 +686,7 @@ class Controller:
                     self._gps_reading.longitude,
                     raw_heading,
                     self._gps_reading.fix_quality,
-                    mono_now,
+                    self._gps_reading.timestamp,
                 )
 
         # RC staleness watchdog: if no RC update for >1s, force disarm
@@ -645,6 +701,8 @@ class Controller:
                 emergency_active=self._safety_state.emergency_active,
             )
             self._mode = "MANUAL"
+            if was_armed:
+                self._on_armed_session_ended()
             cmd = DriveCommand(
                 left_byte=CENTER_OUTPUT_VALUE,
                 right_byte=CENTER_OUTPUT_VALUE,
@@ -664,6 +722,8 @@ class Controller:
             now_epoch_s=epoch_now,
             params=self._safety_params,
         )
+        if was_armed and not self._safety_state.is_armed:
+            self._on_armed_session_ended()
 
         # Initialize telemetry before any event handler can write to it.
         # (Previously this dict was created further down, so the
@@ -1158,12 +1218,17 @@ class Controller:
         telemetry["vesc_left_status_age_s"] = self._vesc_left_status_age_s
         telemetry["vesc_right_status_age_s"] = self._vesc_right_status_age_s
         telemetry["vesc_rx_thread_alive"] = self._vesc_rx_thread_alive
-        if self._gps_heading_aligner is not None:
-            telemetry["heading_offset_deg"] = self._gps_heading_aligner.offset_deg
-            telemetry["heading_offset_locked"] = self._gps_heading_aligner.locked
-        else:
-            telemetry["heading_offset_deg"] = 0.0
-            telemetry["heading_offset_locked"] = False
+        raw_heading_telem: Optional[float] = None
+        if self._imu_compensator is not None:
+            try:
+                raw_heading_telem = float(self._imu_compensator.get_heading_deg())
+            except Exception:
+                raw_heading_telem = None
+        heading_align = self._heading_align_telemetry(raw_heading_telem)
+        telemetry["heading_align"] = heading_align
+        telemetry["heading_offset_deg"] = heading_align["offset_deg"]
+        telemetry["heading_offset_locked"] = heading_align["locked"]
+        telemetry["corrected_heading_deg"] = heading_align["corrected_heading_deg"]
         return cmd, events, telemetry
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:

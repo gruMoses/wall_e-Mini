@@ -684,6 +684,13 @@ def run() -> None:
                         wp_completed=telem.get("wp_completed"),
                         heading_offset_deg=telem.get("heading_offset_deg"),
                         heading_offset_locked=telem.get("heading_offset_locked"),
+                        corrected_heading_deg=telem.get("corrected_heading_deg"),
+                        heading_align_last_cog_deg=(
+                            (telem.get("heading_align") or {}).get("last_cog_deg")
+                        ),
+                        heading_align_enabled=(
+                            (telem.get("heading_align") or {}).get("enabled")
+                        ),
                     )
                     depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
                     rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None
@@ -957,6 +964,8 @@ def run() -> None:
                         }),
                         "heading_offset_deg": round1(telem.get("heading_offset_deg")),
                         "heading_offset_locked": telem.get("heading_offset_locked"),
+                        "corrected_heading_deg": round1(telem.get("corrected_heading_deg")),
+                        "heading_align": round1(telem.get("heading_align") or {}),
                         "recording_state": oak_recorder.recording_state if oak_recorder is not None else None,
                         "bms": (lambda s: {
                             "voltage_v": s.pack_voltage_v,

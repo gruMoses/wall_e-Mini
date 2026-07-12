@@ -559,7 +559,9 @@ sse.onmessage = function(e) {
   document.getElementById('t-gps-pos').textContent =
     d.gps_lat != null ? d.gps_lat.toFixed(7) + ', ' + d.gps_lon.toFixed(7) : '—';
   document.getElementById('t-imu-heading').textContent =
-    d.imu_heading_deg != null ? d.imu_heading_deg.toFixed(1) + '°' : '—';
+    (d.corrected_heading_deg != null && d.heading_offset_locked && d.imu_heading_deg != null)
+      ? d.imu_heading_deg.toFixed(1) + '° → ' + d.corrected_heading_deg.toFixed(1) + '°'
+      : (d.imu_heading_deg != null ? d.imu_heading_deg.toFixed(1) + '°' : '—');
   const loraEl = document.getElementById('t-lora-link');
   if (d.gps_diff_age_s != null) {
     const da = d.gps_diff_age_s;
@@ -1552,6 +1554,20 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "wp_completed": getattr(t, "wp_completed", None),
                     "heading_offset_deg": _finite_or_none(getattr(t, "heading_offset_deg", None), 1),
                     "heading_offset_locked": getattr(t, "heading_offset_locked", None),
+                    "corrected_heading_deg": _finite_or_none(
+                        getattr(t, "corrected_heading_deg", None), 1
+                    ),
+                    "heading_align": {
+                        "enabled": bool(getattr(t, "heading_align_enabled", False)),
+                        "locked": bool(getattr(t, "heading_offset_locked", False)),
+                        "offset_deg": _finite_or_none(getattr(t, "heading_offset_deg", None), 1),
+                        "corrected_heading_deg": _finite_or_none(
+                            getattr(t, "corrected_heading_deg", None), 1
+                        ),
+                        "last_cog_deg": _finite_or_none(
+                            getattr(t, "heading_align_last_cog_deg", None), 1
+                        ),
+                    },
                 }
                 # Follow-Me visualization fields
                 obj["follow_mode"] = getattr(t, "follow_mode", None)

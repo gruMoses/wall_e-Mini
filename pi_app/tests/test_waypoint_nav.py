@@ -3,6 +3,7 @@ import unittest
 
 from pi_app.control.waypoint_nav import (
     EARTH_RADIUS_M,
+    NavState,
     Waypoint,
     WaypointNavConfig,
     WaypointNavController,
@@ -257,10 +258,31 @@ class TestQualityGating(unittest.TestCase):
 
     def test_gps_only_rejected(self):
         nav = self._make(min_q=4)
-        # fix_quality=1 < min_rtk_quality=4 → halted before heading logic
+        # fix_quality=1 is not the configured trusted quality.
         v_cmd, yaw_cmd, state = nav.compute(0.0, 0.0, fix_quality=1, gps_age_s=0.0,
                                             current_heading_deg=0.0)
         self.assertEqual(v_cmd, 0.0)
+
+    def test_rtk_float_rejected_during_active_navigation(self):
+        nav = self._make(min_q=4)
+        v_cmd, _, state = nav.compute(
+            0.0, 0.0, fix_quality=4, gps_age_s=0.0, current_heading_deg=0.0
+        )
+        self.assertEqual(state, NavState.DRIVE)
+        self.assertGreater(v_cmd, 0.0)
+
+        v_cmd, yaw_cmd, state = nav.compute(
+            0.0, 0.0, fix_quality=5, gps_age_s=0.0, current_heading_deg=0.0
+        )
+        self.assertEqual(state, NavState.DRIVE)
+        self.assertEqual(v_cmd, 0.0)
+        self.assertEqual(yaw_cmd, 0.0)
+
+    def test_non_rtk_threshold_keeps_backward_compatible_minimum_semantics(self):
+        nav = self._make(min_q=1)
+        self.assertTrue(nav.accepts_fix_quality(1))
+        self.assertTrue(nav.accepts_fix_quality(4))
+        self.assertTrue(nav.accepts_fix_quality(5))
 
     def test_stale_data_rejected(self):
         nav = self._make(min_q=1)

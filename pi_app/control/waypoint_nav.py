@@ -169,6 +169,18 @@ class WaypointNavController:
     def state(self) -> NavState:
         return self._state
 
+    def accepts_fix_quality(self, fix_quality: int) -> bool:
+        """Return whether this fix quality is trusted for autonomous motion.
+
+        DFRobot quality 4 is RTK fixed while 5 is RTK float, so the normal
+        ``>= minimum`` interpretation is unsafe when the configured gate is 4.
+        Preserve threshold semantics for other configured values.
+        """
+        required = self._cfg.min_rtk_quality
+        if required == 4:
+            return fix_quality == 4
+        return fix_quality >= required
+
     def set_waypoints(self, wps: list[Waypoint]) -> None:
         self._waypoints = list(wps)
         self._index = 0
@@ -197,7 +209,10 @@ class WaypointNavController:
         if self._completed or not self._waypoints:
             return self._emit(NavState.IDLE, 0.0, 0.0)
 
-        if fix_quality < cfg.min_rtk_quality or gps_age_s > cfg.stale_timeout_s:
+        if (
+            not self.accepts_fix_quality(fix_quality)
+            or gps_age_s > cfg.stale_timeout_s
+        ):
             return self._emit(self._state, 0.0, 0.0)
 
         wp = self._waypoints[self._index]

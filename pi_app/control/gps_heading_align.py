@@ -21,19 +21,24 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from config import GpsHeadingAlignConfig
+
 _logger = logging.getLogger(__name__)
 
 EARTH_RADIUS_M = 6_371_000.0
 
 
 @dataclass(frozen=True)
-class GpsHeadingAlignConfig:
-    enabled: bool = True
-    min_distance_m: float = 2.0       # lock offset after this much displacement
-    min_speed_mps: float = 0.3        # only trust GPS COG above this speed
-    min_fix_quality: int = 4          # RTK fixed only
-    alpha: float = 0.1                # EMA factor for ongoing drift correction
-    history_seconds: float = 4.0      # rolling GPS window
+class GpsHeadingAlignStatus:
+    """Read-only snapshot for telemetry and field diagnostics."""
+
+    enabled: bool
+    locked: bool
+    offset_deg: float
+    last_cog_deg: Optional[float]
+    last_speed_mps: Optional[float]
+    last_displacement_m: Optional[float]
+    history_samples: int
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -64,8 +69,15 @@ class GpsHeadingAligner:
         self._cfg = cfg
         self._offset_deg: float = 0.0
         self._locked: bool = False
-        # Rolling GPS history: list of (monotonic_t, lat, lon).
+        # Rolling GPS history: list of (sample_ts, lat, lon).
+        # sample_ts is the GPS reading's own monotonic timestamp — not the
+        # controller-loop clock — so duplicate polls of the same fix do not
+        # inflate apparent speed.
         self._history: list[tuple[float, float, float]] = []
+        self._last_sample_ts: Optional[float] = None
+        self._last_cog_deg: Optional[float] = None
+        self._last_speed_mps: Optional[float] = None
+        self._last_displacement_m: Optional[float] = None
 
     @property
     def offset_deg(self) -> float:
@@ -75,11 +87,34 @@ class GpsHeadingAligner:
     def locked(self) -> bool:
         return self._locked
 
+    @property
+    def enabled(self) -> bool:
+        return self._cfg.enabled
+
+    @property
+    def last_cog_deg(self) -> Optional[float]:
+        return self._last_cog_deg
+
+    def status(self) -> GpsHeadingAlignStatus:
+        return GpsHeadingAlignStatus(
+            enabled=self._cfg.enabled,
+            locked=self._locked,
+            offset_deg=self._offset_deg,
+            last_cog_deg=self._last_cog_deg,
+            last_speed_mps=self._last_speed_mps,
+            last_displacement_m=self._last_displacement_m,
+            history_samples=len(self._history),
+        )
+
     def reset(self) -> None:
-        """Drop history and unlock. Use on disarm or coordinate-frame change."""
+        """Drop history and unlock. Use when an armed session ends."""
         self._offset_deg = 0.0
         self._locked = False
         self._history.clear()
+        self._last_sample_ts = None
+        self._last_cog_deg = None
+        self._last_speed_mps = None
+        self._last_displacement_m = None
 
     def correct(self, raw_imu_heading_deg: float) -> float:
         """Return true-frame heading for a raw-IMU reading."""
@@ -99,9 +134,14 @@ class GpsHeadingAligner:
         lon: float,
         raw_imu_heading_deg: float,
         fix_quality: int,
-        monotonic_t: float,
+        sample_ts: float,
     ) -> None:
         """Sample one GPS+IMU pair; maybe lock or refine the offset.
+
+        ``sample_ts`` must be the GPS reading's own ``GpsReading.timestamp``
+        (time.monotonic() when the fix was captured). Calling with the same
+        timestamp repeatedly is a no-op so controller-loop duplicates do not
+        distort movement speed.
 
         Safe to call every tick — self-gates on fix quality, displacement, and
         speed. Callers don't need to know about the internal window.
@@ -109,35 +149,46 @@ class GpsHeadingAligner:
         cfg = self._cfg
         if not cfg.enabled:
             return
-        if fix_quality < cfg.min_fix_quality:
-            # Without a good fix, stale samples would poison the offset.
+        # Require exact RTK fixed (quality 4). A >=4 check would also admit
+        # RTK float (5), which must not drive heading lock or refinement.
+        if fix_quality != cfg.min_fix_quality:
+            # Without RTK fixed, stale samples would poison the offset.
             # Don't reset what we already learned — just stop updating.
             self._history.clear()
+            self._last_sample_ts = None
             return
 
-        self._history.append((monotonic_t, lat, lon))
-        cutoff = monotonic_t - cfg.history_seconds
+        if self._last_sample_ts is not None:
+            if sample_ts == self._last_sample_ts:
+                return
+            if sample_ts < self._last_sample_ts:
+                return
+
+        self._last_sample_ts = sample_ts
+        self._history.append((sample_ts, lat, lon))
+        cutoff = sample_ts - cfg.history_seconds
         while len(self._history) > 1 and self._history[0][0] < cutoff:
             self._history.pop(0)
 
         t0, lat0, lon0 = self._history[0]
-        dt = monotonic_t - t0
+        dt = sample_ts - t0
         if dt <= 0.0:
             return
         displacement = _haversine_m(lat0, lon0, lat, lon)
+        self._last_displacement_m = displacement
         if displacement < cfg.min_distance_m:
             return
         speed = displacement / dt
+        self._last_speed_mps = speed
         if speed < cfg.min_speed_mps:
             return
 
         gps_cog = _bearing_deg(lat0, lon0, lat, lon)
+        self._last_cog_deg = gps_cog
         new_offset = _signed_error_deg(gps_cog, raw_imu_heading_deg)
         if not self._locked:
             self._offset_deg = new_offset
             self._locked = True
-            # One-shot log so the event is visible in journalctl without
-            # needing to scrape the structured JSON log.
             _logger.warning(
                 "GPS heading aligner LOCKED: offset=%+.1f° "
                 "(gps_cog=%.1f° raw_imu=%.1f° displacement=%.2fm speed=%.2fm/s fix=%d)",

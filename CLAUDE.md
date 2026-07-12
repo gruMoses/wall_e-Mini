@@ -26,7 +26,7 @@ VESC over CAN (`can0`) is the primary drive path; Arduino motor-driver fallback 
   - External I2C options: ICM-20948 or ISM330DHCX + MMC5983MA combo (if physically present).
   - `imu_use_magnetometer = False` is the current default — magnetometer fusion is disabled.
 - IMU feeds `ImuSteeringCompensator` (PID heading-hold, differential byte correction).
-- GPS COG heading alignment is **in progress** — will let the robot zero its heading from GPS course-over-ground at startup rather than assuming the startup pose is the reference.
+- GPS COG heading alignment is **implemented** (software) — locks IMU heading to true north from RTK course-over-ground while moving; field validation pending (`docs/gps_heading_alignment.md`).
 
 ### OAK-D Lite Camera
 - Obstacle avoidance: depth corridor, valid-pixel % threshold, tiered speed reduction/stop.
@@ -39,7 +39,7 @@ State machine in `pi_app/control/waypoint_nav.py`:
 - **DRIVE**: forward at cruise speed with PID steering; falls back to ALIGN if error exceeds `recovery_threshold_deg`.
 - **ARRIVE**: within `arrival_radius_m` of target; zeroes commands and advances waypoint.
 - `compute()` returns `(v_cmd, yaw_cmd, state)` as floats; caller's mixer converts to motor bytes.
-- Requires RTK GPS fix quality ≥ 4 (default). Stale GPS (>3 s) halts motion.
+- Default gate requires exactly RTK fixed quality 4; RTK float quality 5 is rejected. Stale GPS (>3 s) halts motion.
 
 ### BMS
 Daly SPIM08HP over BLE (`bleak`). Polls SOC / cell voltages / temp / MOSFET status. Auto-reconnect. `is_charging()` feeds charger-inhibit into controller every loop tick. Fail-open after 30 s BLE dropout.
