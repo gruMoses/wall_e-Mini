@@ -1311,6 +1311,17 @@ class Controller:
                 'is_calibrated': status.is_calibrated,
                 'error_count': status.error_count,
             }
+            # OakImuReader (and future readers) may expose get_health() with
+            # sample-identity / axis / scale diagnostics for field chalk tests.
+            reader = getattr(self._imu_compensator, "imu_reader", None)
+            health_fn = getattr(reader, "get_health", None) if reader is not None else None
+            if callable(health_fn):
+                try:
+                    health = health_fn()
+                    if isinstance(health, dict):
+                        status_dict["oak_imu"] = health
+                except Exception:
+                    pass
             return status_dict
         except Exception:
             return None

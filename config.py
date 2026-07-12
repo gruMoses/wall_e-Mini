@@ -84,13 +84,17 @@ class ImuSteeringConfig:
     oak_bias_adapt_enabled: bool = False
     oak_bias_adapt_alpha: float = 0.001
     # OAK IMU yaw-rate source:
-    # - "auto": lock onto dominant gyro axis while turning (robust to mounting orientation)
-    # - "gyro_x" / "gyro_y" / "gyro_z": force specific axis for diagnostics
+    # - "auto": lock onto dominant gyro axis while turning (can pick the wrong axis
+    #   under vibration — chalk 90/180 with pi_app.cli.oak_yaw_chalk_test before
+    #   trusting auto; prefer pinned gyro_x/y/z once measured)
+    # - "gyro_x" / "gyro_y" / "gyro_z": force specific axis for diagnostics/production
     # - "gravity_projected": project gyro onto gravity vector
-    # Known-good field setup (Apr 2026): source="auto", scale=0.46, gravity_projected=False.
+    # Baseline (not re-validated after 2026 chalk under-report): source="auto", scale=0.46.
+    # Do not change these from guesswork — fit from chalk harness evidence only.
+    # See docs/heading_tuning.md.
     oak_yaw_rate_source: str = "auto"
     # Field-calibrated yaw-rate scale for OAK IMU heading integration.
-    # Derived from in-place turn tests so displayed heading change matches reality.
+    # Only meaningful for the axis actually selected when the scale was fitted.
     oak_yaw_rate_scale: float = 0.46
     # Optional IMU lever-arm mitigation toggle for A/B testing.
     # Keep disabled for the known-good setup above.
