@@ -176,6 +176,8 @@ class Controller:
         self._actual_right_current_a: Optional[float] = None
         self._actual_left_temp_c: Optional[float] = None
         self._actual_right_temp_c: Optional[float] = None
+        self._actual_left_motor_temp_c: Optional[float] = None
+        self._actual_right_motor_temp_c: Optional[float] = None
         self._vesc_rx_frame_count: int = 0
         self._vesc_rx_parse_error_count: int = 0
         self._vesc_rx_recv_error_count: int = 0
@@ -510,6 +512,8 @@ class Controller:
                 self._actual_right_current_a = getattr(_telem, "right_current_a", None)
                 self._actual_left_temp_c = getattr(_telem, "left_temp_c", None)
                 self._actual_right_temp_c = getattr(_telem, "right_temp_c", None)
+                self._actual_left_motor_temp_c = getattr(_telem, "left_motor_temp_c", None)
+                self._actual_right_motor_temp_c = getattr(_telem, "right_motor_temp_c", None)
                 # Convert average eRPM to wheel speed (m/s)
                 _lr, _rr = _telem.left_rpm, _telem.right_rpm
                 _valid_rpms = [abs(r) for r in (_lr, _rr) if r is not None]
@@ -579,6 +583,8 @@ class Controller:
                     self._actual_right_current_a = None
                     self._actual_left_temp_c = None
                     self._actual_right_temp_c = None
+                    self._actual_left_motor_temp_c = None
+                    self._actual_right_motor_temp_c = None
                 else:
                     self._telem_stale_warned = False
             elif (self._telem_last_valid > 0.0
@@ -595,6 +601,8 @@ class Controller:
                 self._actual_right_current_a = None
                 self._actual_left_temp_c = None
                 self._actual_right_temp_c = None
+                self._actual_left_motor_temp_c = None
+                self._actual_right_motor_temp_c = None
             if isinstance(_rx_health, dict):
                 self._vesc_rx_frame_count = int(_rx_health.get("rx_frame_count", self._vesc_rx_frame_count))
                 self._vesc_rx_parse_error_count = int(
@@ -1158,6 +1166,12 @@ class Controller:
         telemetry["vesc_left_status_age_s"] = self._vesc_left_status_age_s
         telemetry["vesc_right_status_age_s"] = self._vesc_right_status_age_s
         telemetry["vesc_rx_thread_alive"] = self._vesc_rx_thread_alive
+        # MOSFET (FET) + motor winding temps from CAN STATUS_4 (°C); None when
+        # VESC telemetry is missing or stale so the debug board can gap-fill.
+        telemetry["vesc_left_temp_c"] = self._actual_left_temp_c
+        telemetry["vesc_right_temp_c"] = self._actual_right_temp_c
+        telemetry["vesc_left_motor_temp_c"] = self._actual_left_motor_temp_c
+        telemetry["vesc_right_motor_temp_c"] = self._actual_right_motor_temp_c
         if self._gps_heading_aligner is not None:
             telemetry["heading_offset_deg"] = self._gps_heading_aligner.offset_deg
             telemetry["heading_offset_locked"] = self._gps_heading_aligner.locked
