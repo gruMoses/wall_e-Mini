@@ -8,19 +8,22 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class GpsHeadingAlignConfig:
-    """Configuration for GPS-derived heading alignment of a gyro-only IMU.
+    """One-shot GPS alignment for the gyro-only IMU.
 
-    Runs every controller tick regardless of mode, so any consumer of
-    IMU heading can ask for a true-north-referenced value.
+    Lock history is accepted only from forward, straight manual-RC motion.
+    Once locked, the offset is frozen until the armed session ends.
     """
     enabled: bool = True
-    # Calibrated for slower real-world drive patterns so lock/refinement can
-    # occur during normal operation (not only fast straight runs).
+    # Calibrated for slower forward manual runs.
     min_distance_m: float = 0.8       # displacement required in history window
     min_speed_mps: float = 0.12       # trust COG once robot is clearly moving
     min_fix_quality: int = 4          # RTK fixed only
-    alpha: float = 0.1                # EMA factor for ongoing drift correction
+    # Retained for config compatibility; post-lock refinement is disabled.
+    alpha: float = 0.1
     history_seconds: float = 8.0      # longer window stabilizes low-speed COG
+    # Initial lock is permitted only during an explicit manual straight run
+    # and while body yaw rate remains below this threshold.
+    max_lock_yaw_rate_dps: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -613,7 +616,7 @@ class Config:
     # Waypoint navigation
     waypoint_nav: WaypointNavConfig = WaypointNavConfig()
 
-    # GPS-derived heading alignment (runs every tick regardless of mode)
+    # GPS-derived heading alignment (manual forward lock, then frozen)
     gps_heading_align: GpsHeadingAlignConfig = GpsHeadingAlignConfig()
 
     # Follow Me person-tracking mode

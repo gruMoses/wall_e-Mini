@@ -684,6 +684,8 @@ def run() -> None:
                         wp_completed=telem.get("wp_completed"),
                         heading_offset_deg=telem.get("heading_offset_deg"),
                         heading_offset_locked=telem.get("heading_offset_locked"),
+                        heading_offset_frozen=telem.get("heading_offset_frozen"),
+                        heading_offset_refining=telem.get("heading_offset_refining"),
                         corrected_heading_deg=telem.get("corrected_heading_deg"),
                         heading_align_last_cog_deg=(
                             (telem.get("heading_align") or {}).get("last_cog_deg")
@@ -773,10 +775,12 @@ def run() -> None:
             # so the aligner's state is visible in journalctl at a glance.
             _ho_deg = telem.get("heading_offset_deg")
             _ho_locked = telem.get("heading_offset_locked")
+            _ho_frozen = telem.get("heading_offset_frozen")
             if _ho_deg is None:
                 hdg_off_info = "  HDG_OFF(--)"
             else:
-                hdg_off_info = f"  HDG_OFF({_ho_deg:+.1f}°{' L' if _ho_locked else ' -'})"
+                state_tag = " F" if _ho_frozen else (" L" if _ho_locked else " -")
+                hdg_off_info = f"  HDG_OFF({_ho_deg:+.1f}°{state_tag})"
 
             # In non-MANUAL modes, add nav_state + motor bytes so we can see
             # ALIGN/DRIVE transitions and whether pivot actually reaches motors.
@@ -964,6 +968,8 @@ def run() -> None:
                         }),
                         "heading_offset_deg": round1(telem.get("heading_offset_deg")),
                         "heading_offset_locked": telem.get("heading_offset_locked"),
+                        "heading_offset_frozen": telem.get("heading_offset_frozen"),
+                        "heading_offset_refining": telem.get("heading_offset_refining"),
                         "corrected_heading_deg": round1(telem.get("corrected_heading_deg")),
                         "heading_align": round1(telem.get("heading_align") or {}),
                         "recording_state": oak_recorder.recording_state if oak_recorder is not None else None,

@@ -26,7 +26,7 @@ VESC over CAN (`can0`) is the primary drive path; Arduino motor-driver fallback 
   - External I2C options: ICM-20948 or ISM330DHCX + MMC5983MA combo (if physically present).
   - `imu_use_magnetometer = False` is the current default — magnetometer fusion is disabled.
 - IMU feeds `ImuSteeringCompensator` (PID heading-hold, differential byte correction).
-- GPS COG heading alignment is **implemented** (software) — locks IMU heading to true north from RTK course-over-ground while moving; field validation pending (`docs/gps_heading_alignment.md`).
+- GPS COG heading alignment is **implemented** (software) — one-shot locks IMU heading to true north during a forward, straight manual RTK-fixed run, then freezes the offset for the armed session; field validation pending (`docs/gps_heading_alignment.md`).
 
 ### OAK-D Lite Camera
 - Obstacle avoidance: depth corridor, valid-pixel % threshold, tiered speed reduction/stop.

@@ -510,6 +510,7 @@ let navState = 'IDLE';
 let navHeadingErrorDeg = 0;
 let headingAlignRequired = false;
 let headingAlignLocked = false;
+let headingAlignFrozen = false;
 let goTimer = null;
 let goStart = 0;
 let missionDirty = false;
@@ -732,8 +733,10 @@ function getRouteValidation() {
   if (headingAlignRequired) {
     checks.push({
       label: headingAlignLocked
-        ? 'GPS heading alignment locked'
-        : 'Drive on RTK fixed to lock GPS heading alignment',
+        ? (headingAlignFrozen
+          ? 'GPS heading alignment locked (frozen)'
+          : 'GPS heading alignment locked')
+        : 'Drive straight in manual mode on RTK fixed to lock GPS heading alignment',
       status: headingAlignLocked ? 'ok' : 'err',
     });
   }
@@ -999,9 +1002,11 @@ function connectSSE() {
       if (d.heading_align) {
         headingAlignRequired = !!d.heading_align.enabled;
         headingAlignLocked = !!d.heading_align.locked;
+        headingAlignFrozen = !!d.heading_align.frozen;
       } else {
         headingAlignRequired = false;
         headingAlignLocked = !!d.heading_offset_locked;
+        headingAlignFrozen = !!d.heading_offset_frozen;
       }
 
       if (lat !== 0 && lon !== 0) {

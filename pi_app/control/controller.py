@@ -141,8 +141,8 @@ class Controller:
         self._follow_me = follow_me
         self._waypoint_nav = waypoint_nav
         self._gesture = gesture_controller
-        # GPS→IMU heading aligner runs every tick regardless of mode so
-        # any consumer can ask for a true-north-referenced heading.
+        # GPS→IMU heading alignment locks only from an explicit forward,
+        # straight manual-RC run, then remains frozen for the armed session.
         self._gps_heading_aligner = gps_heading_aligner
         self._mode = "MANUAL"  # "MANUAL", "FOLLOW_ME", or "WAYPOINT_NAV"
         self._obstacle_distance_m: float | None = None
@@ -365,6 +365,8 @@ class Controller:
             return {
                 "enabled": False,
                 "locked": False,
+                "frozen": False,
+                "refining": False,
                 "offset_deg": 0.0,
                 "corrected_heading_deg": raw_heading,
                 "last_cog_deg": None,
@@ -376,6 +378,8 @@ class Controller:
         return {
             "enabled": st.enabled,
             "locked": st.locked,
+            "frozen": st.frozen,
+            "refining": st.refining,
             "offset_deg": st.offset_deg,
             "corrected_heading_deg": corrected,
             "last_cog_deg": st.last_cog_deg,
@@ -667,28 +671,6 @@ class Controller:
                 if "rx_thread_alive" in _rx_health:
                     self._vesc_rx_thread_alive = _rx_health.get("rx_thread_alive")
 
-        # ── GPS heading aligner: runs every tick in every mode ──────────────
-        # The aligner self-gates on fix quality, displacement, and speed, so
-        # it's safe to call unconditionally. Consumers read the corrected
-        # heading via self._get_corrected_heading() or the aligner directly.
-        if (
-            self._gps_heading_aligner is not None
-            and self._gps_reading is not None
-            and self._imu_compensator is not None
-        ):
-            try:
-                raw_heading = self._imu_compensator.get_heading_deg()
-            except Exception:
-                raw_heading = None
-            if raw_heading is not None:
-                self._gps_heading_aligner.update(
-                    self._gps_reading.latitude,
-                    self._gps_reading.longitude,
-                    raw_heading,
-                    self._gps_reading.fix_quality,
-                    self._gps_reading.timestamp,
-                )
-
         # RC staleness watchdog: if no RC update for >1s, force disarm
         rc_age = epoch_now - rc.last_update_epoch_s if rc.last_update_epoch_s > 0.0 else 0.0
         if rc_age > RC_STALE_TIMEOUT_S:
@@ -887,7 +869,10 @@ class Controller:
         rel_pct = getattr(config.imu_steering, 'straight_relative_tolerance_pct', 0.15)
         hysteresis_s = getattr(config.imu_steering, 'straight_disengage_hysteresis_s', 0.0)
 
-        # Derive moving_ok from the appropriate source
+        # Derive moving_ok from the appropriate source. Heading lock uses the
+        # separate manual_rc_forward_intent flag below; corrected motor output
+        # and equal reverse RC commands must never qualify it.
+        manual_rc_forward_intent = False
         if self._mode in ("FOLLOW_ME", "WAYPOINT_NAV"):
             left_diff = abs(left - CENTER_OUTPUT_VALUE)
             right_diff = abs(right - CENTER_OUTPUT_VALUE)
@@ -905,6 +890,7 @@ class Controller:
             d1 = rc.ch1_us - 1500
             d2 = rc.ch2_us - 1500
             moving_ok = max(abs(d1), abs(d2)) >= min_th
+            manual_rc_forward_intent = d1 >= min_th and d2 >= min_th
 
         # Determine equal_ok based on input source
         if self._mode in ("FOLLOW_ME", "WAYPOINT_NAV"):
@@ -942,17 +928,19 @@ class Controller:
                 is_moving_straight = True
             else:
                 self._straight_latched = False
-        if self._imu_compensator is not None and is_moving_straight:
+        if (
+            self._imu_compensator is not None
+            and is_moving_straight
+            and self._mode == "MANUAL"
+        ):
             try:
                 imu_state = self._imu_compensator.get_status()
                 raw_heading = float(imu_state.heading_deg)
                 if self._gps_heading_aligner is not None and self._gps_heading_aligner.locked:
-                    # Keep a true-frame target while driving straight. As GPS
-                    # heading offset refines, remap target back into raw-IMU frame
-                    # so heading correction stays seamless.
+                    # Keep a true-frame target while driving straight, mapped
+                    # through the frozen GPS-derived offset.
                     # In MANUAL BT/web teleop, prioritize operator intent and
-                    # avoid live GPS-offset retargeting, which can inject turns
-                    # during straight "W" holds if offset estimation jumps.
+                    # lock heading directly in the raw IMU frame.
                     allow_true_frame_retarget = not (
                         self._mode == "MANUAL" and bt_override_bytes is not None
                     )
@@ -970,9 +958,33 @@ class Controller:
                     self._imu_compensator.reset_target_heading()
             except Exception:
                 pass
-        elif not is_moving_straight:
+        elif not is_moving_straight or self._mode != "MANUAL":
             self._straight_target_true_heading = None
         self._was_moving_straight = is_moving_straight
+
+        if (
+            self._gps_heading_aligner is not None
+            and self._gps_reading is not None
+            and self._imu_compensator is not None
+        ):
+            try:
+                align_imu = self._imu_compensator.get_status()
+                self._gps_heading_aligner.update(
+                    self._gps_reading.latitude,
+                    self._gps_reading.longitude,
+                    float(align_imu.heading_deg),
+                    self._gps_reading.fix_quality,
+                    self._gps_reading.timestamp,
+                    lock_allowed=(
+                        self._mode == "MANUAL"
+                        and bt_override_bytes is None
+                        and is_moving_straight
+                        and manual_rc_forward_intent
+                    ),
+                    yaw_rate_dps=float(align_imu.yaw_rate_dps),
+                )
+            except Exception:
+                pass
 
         # Apply correction to motor outputs continuously with steering-scaled blending
         corr_applied = None
@@ -1228,6 +1240,8 @@ class Controller:
         telemetry["heading_align"] = heading_align
         telemetry["heading_offset_deg"] = heading_align["offset_deg"]
         telemetry["heading_offset_locked"] = heading_align["locked"]
+        telemetry["heading_offset_frozen"] = heading_align["frozen"]
+        telemetry["heading_offset_refining"] = heading_align["refining"]
         telemetry["corrected_heading_deg"] = heading_align["corrected_heading_deg"]
         return cmd, events, telemetry
 

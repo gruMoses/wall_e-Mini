@@ -159,6 +159,8 @@ class RecordingTelemetry:
     wp_completed: bool | None = None
     heading_offset_deg: float | None = None
     heading_offset_locked: bool | None = None
+    heading_offset_frozen: bool | None = None
+    heading_offset_refining: bool | None = None
     corrected_heading_deg: float | None = None
     heading_align_last_cog_deg: float | None = None
     heading_align_enabled: bool | None = None

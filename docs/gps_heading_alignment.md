@@ -23,14 +23,19 @@ All gates must pass on **distinct GPS samples** (deduped by `GpsReading.timestam
 | `min_distance_m` | `0.8` | Displacement in rolling window |
 | `min_speed_mps` | `0.12` | COG speed from GPS sample timestamps |
 | `history_seconds` | `8.0` | Rolling GPS window |
+| manual forward-straight intent | required | Both RC tracks must command forward; equal reverse never qualifies |
+| `max_lock_yaw_rate_dps` | `3.0` | Curved/turning motion clears lock history |
 
 Fix quality in this codebase (`rtk_gps.py`): `0=none`, `1=GPS`, `2=DGPS`,
 `4=RTK fixed`, `5=RTK float`.
 
-After lock, `alpha` (default `0.1`) EMA-refines the offset on subsequent RTK-fixed
-samples. RTK dropout (quality ≠ 4) clears history but **preserves** the last
-learned offset until the armed session ends. Out-of-order or duplicate GPS
-timestamps are ignored.
+After lock, the offset is **frozen** until the armed session ends. Continuous
+EMA refinement is disabled: the 2026-07-12 field trace proved that GPS COG
+during a turn is not the robot body heading and drove the offset through nearly
+200°, producing a self-sustaining circle.
+
+RTK dropout (quality ≠ 4) clears history but **preserves** the frozen offset.
+Out-of-order or duplicate GPS timestamps are ignored.
 
 ## Armed session lifecycle
 
@@ -41,8 +46,8 @@ session**:
 - RC link stale (>1 s)
 - Emergency stop (ch5 latched)
 
-A new arm starts fresh — drive forward on RTK fixed to re-lock before waypoint
-missions.
+A new arm starts fresh — drive forward with equal manual RC commands on RTK fixed to
+re-lock before waypoint missions.
 
 ## Waypoint navigation gate (field test)
 
@@ -68,20 +73,25 @@ when the gate applies.
 |-------|-------|---------|
 | `heading_offset_deg` | SSE, JSON log, MCAP | Learned IMU→true-north offset |
 | `heading_offset_locked` | SSE, JSON log, MCAP | `True` once COG lock succeeded |
+| `heading_offset_frozen` | SSE, JSON log, MCAP | `True` after the one-shot lock |
+| `heading_offset_refining` | SSE, JSON log, MCAP | Always `False` in this tranche |
 | `corrected_heading_deg` | SSE, JSON log, MCAP | True-north heading from raw IMU |
 | `heading_align.last_cog_deg` | SSE, JSON log | Last trusted GPS track bearing |
 | `heading_align.last_speed_mps` | Controller telemetry dict | Last COG speed used |
-| CLI `HDG_OFF(+12.3° L)` | journalctl heartbeat | Offset and lock (`L` = locked) |
+| CLI `HDG_OFF(+12.3° F)` | journalctl heartbeat | Offset and frozen state |
 
 Dashboard heading card shows `raw° → corrected°` when locked.
 
 ## Field gate checklist (upcoming validation)
 
 1. Arm on level ground with RTK fixed (fix quality **4**).
-2. Drive straight ≥1 m — confirm `heading_offset_locked=true` in SSE or CLI `HDG_OFF(… L)`.
-3. Start waypoint nav — must succeed only after lock.
-4. Disarm — offset clears (`HDG_OFF(… -)`); re-arm requires a new drive to lock.
-5. Run a short waypoint mission — compare cross-track error vs pre-alignment baseline.
+2. Drive forward straight ≥1 m with equal manual RC commands — confirm
+   `heading_offset_locked=true`, `heading_offset_frozen=true`, and CLI
+   `HDG_OFF(… F)`.
+3. Command a short turn; confirm the offset does not change.
+4. Start waypoint nav — it must succeed only after lock.
+5. Disarm — offset clears (`HDG_OFF(… -)`); re-arm requires a new drive to lock.
+6. Run a short waypoint mission — compare cross-track error vs pre-alignment baseline.
 
 Disable the gate temporarily with `gps_heading_align.enabled = False` in
 `config.py` (service restart required).

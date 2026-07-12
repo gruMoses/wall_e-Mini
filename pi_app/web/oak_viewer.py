@@ -561,6 +561,7 @@ sse.onmessage = function(e) {
   document.getElementById('t-imu-heading').textContent =
     (d.corrected_heading_deg != null && d.heading_offset_locked && d.imu_heading_deg != null)
       ? d.imu_heading_deg.toFixed(1) + '° → ' + d.corrected_heading_deg.toFixed(1) + '°'
+        + (d.heading_offset_frozen ? ' (frozen)' : '')
       : (d.imu_heading_deg != null ? d.imu_heading_deg.toFixed(1) + '°' : '—');
   const loraEl = document.getElementById('t-lora-link');
   if (d.gps_diff_age_s != null) {
@@ -1554,12 +1555,16 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "wp_completed": getattr(t, "wp_completed", None),
                     "heading_offset_deg": _finite_or_none(getattr(t, "heading_offset_deg", None), 1),
                     "heading_offset_locked": getattr(t, "heading_offset_locked", None),
+                    "heading_offset_frozen": getattr(t, "heading_offset_frozen", None),
+                    "heading_offset_refining": getattr(t, "heading_offset_refining", None),
                     "corrected_heading_deg": _finite_or_none(
                         getattr(t, "corrected_heading_deg", None), 1
                     ),
                     "heading_align": {
                         "enabled": bool(getattr(t, "heading_align_enabled", False)),
                         "locked": bool(getattr(t, "heading_offset_locked", False)),
+                        "frozen": bool(getattr(t, "heading_offset_frozen", False)),
+                        "refining": bool(getattr(t, "heading_offset_refining", False)),
                         "offset_deg": _finite_or_none(getattr(t, "heading_offset_deg", None), 1),
                         "corrected_heading_deg": _finite_or_none(
                             getattr(t, "corrected_heading_deg", None), 1

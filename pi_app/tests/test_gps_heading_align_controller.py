@@ -37,15 +37,16 @@ class FakeShutdown:
 class FakeImu:
     def __init__(self, heading_deg: float = 0.0):
         self._heading = heading_deg
+        self.target_history = []
 
     def get_heading_deg(self):
         return self._heading
 
     def get_status(self):
-        return MagicMock(heading_deg=self._heading)
+        return MagicMock(heading_deg=self._heading, yaw_rate_dps=0.0)
 
-    def set_target_heading(self, *_args, **_kwargs):
-        pass
+    def set_target_heading(self, heading, *_args, **_kwargs):
+        self.target_history.append(heading)
 
     def reset_target_heading(self):
         pass
@@ -158,6 +159,56 @@ class TestHeadingAlignDisarmReset(unittest.TestCase):
         self.assertEqual(aligner.offset_deg, 0.0)
 
 
+class TestHeadingAlignManualForwardGate(unittest.TestCase):
+
+    @staticmethod
+    def _aligner() -> GpsHeadingAligner:
+        return GpsHeadingAligner(
+            GpsHeadingAlignConfig(
+                enabled=True,
+                min_distance_m=0.5,
+                min_speed_mps=0.1,
+                max_lock_yaw_rate_dps=3.0,
+            )
+        )
+
+    def test_equal_reverse_rc_never_collects_or_locks(self):
+        aligner = self._aligner()
+        ctrl = _make_controller(aligner=aligner, imu=FakeImu(heading_deg=5.0))
+        ctrl._safety_state.is_armed = True
+        reverse_rc = replace(
+            _fresh_armed_rc(),
+            ch1_us=1300,
+            ch2_us=1300,
+        )
+
+        ctrl._gps_reading = _gps(lat=40.0, ts=1_000.0)
+        ctrl.process(reverse_rc)
+        ctrl._gps_reading = _gps(lat=40.00001, ts=1_001.0)
+        ctrl.process(reverse_rc)
+
+        self.assertFalse(aligner.locked)
+        self.assertEqual(aligner.status().history_samples, 0)
+
+    def test_equal_forward_rc_collects_and_locks(self):
+        aligner = self._aligner()
+        ctrl = _make_controller(aligner=aligner, imu=FakeImu(heading_deg=5.0))
+        ctrl._safety_state.is_armed = True
+        forward_rc = replace(
+            _fresh_armed_rc(),
+            ch1_us=1700,
+            ch2_us=1700,
+        )
+
+        ctrl._gps_reading = _gps(lat=40.0, ts=1_000.0)
+        ctrl.process(forward_rc)
+        ctrl._gps_reading = _gps(lat=40.00001, ts=1_001.0)
+        ctrl.process(forward_rc)
+
+        self.assertTrue(aligner.locked)
+        self.assertAlmostEqual(aligner.offset_deg, -5.0, places=1)
+
+
 class TestWaypointNavActivationGate(unittest.TestCase):
 
     def _nav(self):
@@ -232,7 +283,76 @@ class TestHeadingAlignTelemetry(unittest.TestCase):
         _, _, telem = ctrl.process(_fresh_armed_rc())
         self.assertAlmostEqual(telem["corrected_heading_deg"], 90.0, places=3)
         self.assertTrue(telem["heading_align"]["locked"])
+        self.assertTrue(telem["heading_align"]["frozen"])
+        self.assertFalse(telem["heading_align"]["refining"])
         self.assertAlmostEqual(telem["heading_align"]["offset_deg"], 10.0, places=3)
+        self.assertTrue(telem["heading_offset_frozen"])
+        self.assertFalse(telem["heading_offset_refining"])
+
+
+class TestWaypointHeadingTargetOwnership(unittest.TestCase):
+
+    def test_waypoint_drive_keeps_live_bearing_target(self):
+        """Regression: generic straight hold overwrote waypoint target at DRIVE entry."""
+        aligner = GpsHeadingAligner(GpsHeadingAlignConfig(enabled=True))
+        aligner._locked = True
+        aligner._offset_deg = -34.9
+        imu = FakeImu(heading_deg=42.0)  # corrected 7.1°, within ALIGN threshold
+        nav = WaypointNavController(
+            WaypointNavConfig(align_threshold_deg=12.0),
+            [Waypoint(lat=40.001, lon=-74.0, name="N")],
+        )
+        ctrl = _make_controller(aligner=aligner, imu=imu, waypoint_nav=nav)
+        ctrl._gps_reading = _gps(lat=40.0, lon=-74.0)
+        ctrl._safety_state.is_armed = True
+        ctrl._mode = "WAYPOINT_NAV"
+
+        _, _, telem = ctrl.process(_fresh_armed_rc())
+
+        self.assertEqual(telem["nav_state"], "DRIVE")
+        self.assertAlmostEqual(telem["wp_bearing_deg"], 0.0, places=1)
+        self.assertAlmostEqual(
+            imu.target_history[-1],
+            aligner.imu_target_heading(telem["wp_bearing_deg"]),
+            places=3,
+        )
+        self.assertNotAlmostEqual(imu.target_history[-1], imu._heading, places=3)
+
+    def test_waypoint_mode_cannot_collect_history_or_change_frozen_offset(self):
+        cfg = GpsHeadingAlignConfig(
+            enabled=True,
+            min_distance_m=0.5,
+            min_speed_mps=0.1,
+        )
+        nav = WaypointNavController(
+            WaypointNavConfig(),
+            [Waypoint(lat=40.001, lon=-74.0, name="N")],
+        )
+        aligner = GpsHeadingAligner(cfg)
+        ctrl = _make_controller(aligner=aligner, imu=FakeImu(), waypoint_nav=nav)
+        ctrl._safety_state.is_armed = True
+        ctrl._mode = "WAYPOINT_NAV"
+        base_ts = time.monotonic()
+
+        ctrl._gps_reading = _gps(lat=40.0, ts=base_ts)
+        ctrl.process(_fresh_armed_rc())
+        ctrl._gps_reading = _gps(lat=40.00001, ts=base_ts + 1.0)
+        ctrl.process(_fresh_armed_rc())
+
+        self.assertFalse(aligner.locked)
+        self.assertEqual(aligner.status().history_samples, 0)
+
+        aligner._locked = True
+        aligner._offset_deg = 175.7
+        ctrl._gps_reading = _gps(
+            lat=40.00002,
+            lon=-73.99999,
+            ts=base_ts + 2.0,
+        )
+        ctrl.process(_fresh_armed_rc())
+
+        self.assertAlmostEqual(aligner.offset_deg, 175.7, places=5)
+        self.assertEqual(aligner.status().history_samples, 0)
 
 
 if __name__ == "__main__":
