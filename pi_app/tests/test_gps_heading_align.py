@@ -75,17 +75,32 @@ class TestGpsHeadingAligner(unittest.TestCase):
         _drive_north(aligner, dt_s=10.0, steps=2)
         self.assertFalse(aligner.locked)
 
-    def test_bad_fix_gate_clears_history(self):
+    def test_bad_fix_after_lock_preserves_offset_and_history(self):
         aligner = GpsHeadingAligner(_cfg())
         _drive_north(aligner, steps=2)
         self.assertTrue(aligner.locked)
         offset = aligner.offset_deg
+        history_before = aligner.status().history_samples
         aligner.update(
             40.00005, -74.0, 0.0, fix_quality=3, sample_ts=1_010.0,
             lock_allowed=True, yaw_rate_dps=0.0,
         )
         self.assertTrue(aligner.locked)
         self.assertAlmostEqual(aligner.offset_deg, offset, places=3)
+        self.assertEqual(aligner.status().history_samples, history_before)
+
+    def test_bad_fix_on_new_sample_clears_unlocked_history(self):
+        aligner = GpsHeadingAligner(_cfg())
+        aligner.update(
+            40.0, -74.0, 0.0, 4, 1_000.0,
+            lock_allowed=True, yaw_rate_dps=0.0,
+        )
+        self.assertEqual(aligner.status().history_samples, 1)
+        aligner.update(
+            40.00001, -74.0, 0.0, fix_quality=3, sample_ts=1_001.0,
+            lock_allowed=True, yaw_rate_dps=0.0,
+        )
+        self.assertFalse(aligner.locked)
         self.assertEqual(aligner.status().history_samples, 0)
 
     def test_post_lock_samples_cannot_refine_offset(self):
@@ -183,13 +198,14 @@ class TestGpsHeadingAligner(unittest.TestCase):
         aligner = GpsHeadingAligner(_cfg())
         _drive_north(aligner, steps=2)
         locked_offset = aligner.offset_deg
+        history_before = aligner.status().history_samples
         aligner.update(
             40.00003, -74.0, 0.0, fix_quality=3, sample_ts=1_002.0,
             lock_allowed=True, yaw_rate_dps=0.0,
         )
         self.assertTrue(aligner.locked)
         self.assertAlmostEqual(aligner.offset_deg, locked_offset, places=3)
-        self.assertEqual(aligner.status().history_samples, 0)
+        self.assertEqual(aligner.status().history_samples, history_before)
 
     def test_rtk_float_rejected_for_lock_and_refinement(self):
         aligner = GpsHeadingAligner(_cfg())
@@ -204,15 +220,16 @@ class TestGpsHeadingAligner(unittest.TestCase):
         self.assertFalse(aligner.locked)
         _drive_north(aligner, raw_imu_deg=5.0, steps=2, base_ts=1_002.0)
         locked_offset = aligner.offset_deg
+        history_before = aligner.status().history_samples
         aligner.update(
             40.00004, -74.0, 5.0, fix_quality=5, sample_ts=1_004.0,
             lock_allowed=True, yaw_rate_dps=0.0,
         )
         self.assertTrue(aligner.locked)
         self.assertAlmostEqual(aligner.offset_deg, locked_offset, places=3)
-        self.assertEqual(aligner.status().history_samples, 0)
+        self.assertEqual(aligner.status().history_samples, history_before)
 
-    def test_out_of_order_sample_ts_ignored(self):
+    def test_out_of_order_sample_ts_clears_history(self):
         aligner = GpsHeadingAligner(_cfg())
         aligner.update(
             40.0, -74.0, 0.0, 4, 1_002.0,
@@ -222,7 +239,7 @@ class TestGpsHeadingAligner(unittest.TestCase):
             40.00001, -74.0, 0.0, 4, 1_001.0,
             lock_allowed=True, yaw_rate_dps=0.0,
         )
-        self.assertEqual(aligner.status().history_samples, 1)
+        self.assertEqual(aligner.status().history_samples, 0)
         self.assertFalse(aligner.locked)
 
     def test_reset_clears_state(self):
@@ -282,6 +299,66 @@ class TestGpsHeadingAligner(unittest.TestCase):
     def test_signed_error_wraparound_helper(self):
         self.assertAlmostEqual(_signed_error_deg(10.0, 350.0), 20.0, places=5)
         self.assertAlmostEqual(_signed_error_deg(350.0, 10.0), -20.0, places=5)
+
+    def test_duplicate_timestamp_yaw_spikes_do_not_clear_history(self):
+        """Controller-loop yaw noise on the same GPS fix must not erase history."""
+        aligner = GpsHeadingAligner(_cfg(max_lock_yaw_rate_dps=3.0))
+        aligner.update(
+            40.0, -74.0, 0.0, 4, 1_000.0,
+            lock_allowed=True, yaw_rate_dps=0.0,
+        )
+        self.assertEqual(aligner.status().history_samples, 1)
+        for yaw in (0.0, 4.0, -5.0, 8.0, 0.0):
+            aligner.update(
+                40.0, -74.0, 0.0, 4, 1_000.0,
+                lock_allowed=True, yaw_rate_dps=yaw,
+            )
+        self.assertEqual(aligner.status().history_samples, 1)
+        aligner.update(
+            40.00001, -74.0, 0.0, 4, 1_001.0,
+            lock_allowed=True, yaw_rate_dps=0.0,
+        )
+        self.assertEqual(aligner.status().history_samples, 2)
+
+    def test_high_yaw_new_gps_sample_clears_history(self):
+        aligner = GpsHeadingAligner(_cfg(max_lock_yaw_rate_dps=3.0))
+        aligner.update(
+            40.0, -74.0, 0.0, 4, 1_000.0,
+            lock_allowed=True, yaw_rate_dps=0.0,
+        )
+        aligner.update(
+            40.00001, -74.0, 0.0, 4, 1_001.0,
+            lock_allowed=True, yaw_rate_dps=5.0,
+        )
+        self.assertEqual(aligner.status().history_samples, 0)
+        self.assertFalse(aligner.locked)
+
+    def test_duplicate_non_forward_ticks_do_not_clear_history(self):
+        aligner = GpsHeadingAligner(_cfg())
+        aligner.update(
+            40.0, -74.0, 0.0, 4, 1_000.0,
+            lock_allowed=True, yaw_rate_dps=0.0,
+        )
+        for _ in range(20):
+            aligner.update(
+                40.0, -74.0, 0.0, 4, 1_000.0,
+                lock_allowed=False, yaw_rate_dps=0.0,
+            )
+        self.assertEqual(aligner.status().history_samples, 1)
+        self.assertFalse(aligner.locked)
+
+    def test_non_forward_new_sample_clears_history(self):
+        aligner = GpsHeadingAligner(_cfg())
+        aligner.update(
+            40.0, -74.0, 0.0, 4, 1_000.0,
+            lock_allowed=True, yaw_rate_dps=0.0,
+        )
+        aligner.update(
+            40.00001, -74.0, 0.0, 4, 1_001.0,
+            lock_allowed=False, yaw_rate_dps=0.0,
+        )
+        self.assertEqual(aligner.status().history_samples, 0)
+        self.assertFalse(aligner.locked)
 
 
 if __name__ == "__main__":
