@@ -130,23 +130,32 @@ class OakImuReader:
         self._count_generation_change: int = 0
         self._count_cum_reset: int = 0
 
-        # Push NMNI into producer so per-packet noise is zeroed at integrate time.
+        # Push bias + NMNI into producer. NMNI may be on before the first
+        # calibrate_gyro; calibrate temporarily clears it so bias estimation
+        # cannot be circular if the host snapshot is integrate-path corrected.
         self._sync_producer_config()
 
-    def _sync_producer_config(self) -> None:
+    def _push_producer_nmni(self, enabled: bool, threshold_dps: float) -> None:
         setter = getattr(self._oak, "set_imu_nmni", None)
         if callable(setter):
             try:
-                setter(self._nmni_enabled, self._nmni_threshold_dps)
+                setter(bool(enabled), float(threshold_dps))
             except Exception:
                 pass
+
+    def _push_producer_bias_dps(self, gx_dps: float, gy_dps: float, gz_dps: float) -> None:
         bias_setter = getattr(self._oak, "set_imu_gyro_bias_dps", None)
         if callable(bias_setter):
             try:
-                bx, by, bz = self.gyro_bias_dps
-                bias_setter(bx, by, bz)
+                bias_setter(float(gx_dps), float(gy_dps), float(gz_dps))
             except Exception:
                 pass
+
+    def _sync_producer_config(self) -> None:
+        """Push current local bias + NMNI settings into the producer integrator."""
+        bx, by, bz = self.gyro_bias_dps
+        self._push_producer_bias_dps(bx, by, bz)
+        self._push_producer_nmni(self._nmni_enabled, self._nmni_threshold_dps)
 
     @staticmethod
     def _compute_yaw_rate_rads(
@@ -292,23 +301,88 @@ class OakImuReader:
         self._seed_sample_clocks(0.0, host_ts)
         return float(delta_h), "fresh"
 
+    def _sample_raw_gyro_dps(self) -> tuple[Optional[tuple[float, float, float]], float]:
+        """Return ((gx, gy, gz) dps raw body rates, age_s) or (None, age).
+
+        Prefers ``OakDepthReader.get_imu_raw_gyro_dps`` (explicit raw contract).
+        Falls back to ``get_imu_data().gx/gy/gz_rads``, which the producer
+        documents as the latest **raw** sample (not bias/NMNI corrected).
+        """
+        raw_fn = getattr(self._oak, "get_imu_raw_gyro_dps", None)
+        if callable(raw_fn):
+            try:
+                raw, age = raw_fn()
+                age_s = float(age) if age is not None else float("inf")
+                if raw is None:
+                    return None, age_s
+                return (
+                    (float(raw[0]), float(raw[1]), float(raw[2])),
+                    age_s,
+                )
+            except Exception:
+                pass
+        imu_state, age = self._oak.get_imu_data()
+        age_s = float(age) if age is not None else float("inf")
+        return (
+            (
+                math.degrees(float(imu_state.gx_rads)),
+                math.degrees(float(imu_state.gy_rads)),
+                math.degrees(float(imu_state.gz_rads)),
+            ),
+            age_s,
+        )
+
     def calibrate_gyro(self, duration_s: float = 3.0) -> tuple:
-        """Collect gyro samples from OAK-D IMU to estimate bias."""
-        xs, ys, zs = [], [], []
-        end = time.monotonic() + float(duration_s)
-        while time.monotonic() < end:
-            imu_state, age = self._oak.get_imu_data()
-            if age < 0.5:
-                xs.append(math.degrees(imu_state.gx_rads))
-                ys.append(math.degrees(imu_state.gy_rads))
-                zs.append(math.degrees(imu_state.gz_rads))
-            time.sleep(0.01)
-        if xs:
-            self.gyro_bias_dps = (
-                sum(xs) / len(xs),
-                sum(ys) / len(ys),
-                sum(zs) / len(zs),
-            )
+        """Collect stationary RAW gyro samples to estimate bias.
+
+        Circular-calibration guard
+        --------------------------
+        ``__init__`` may enable producer NMNI (and zero bias) before the first
+        calibrate call. If the host snapshot ever exposed integrate-path rates
+        (bias-subtracted then NMNI-gated), sub-threshold residual bias would
+        read as exact zero and calibration would be a no-op — leaving that
+        residual in the lossless producer integral (CW/CCW magnitude skew).
+
+        During collection we force producer bias=0 and NMNI=off so any
+        corrected snapshot collapses to raw. Current ``get_imu_data`` already
+        returns raw latest rates; this is then a no-op on sample values but
+        keeps calibration correct if that contract ever changes. Prefer
+        ``get_imu_raw_gyro_dps`` when present.
+        """
+        prior_bias = self.gyro_bias_dps
+        measured: Optional[tuple] = None
+        xs: list[float] = []
+        ys: list[float] = []
+        zs: list[float] = []
+        try:
+            # Pause integrate-path transforms for the collection window.
+            self.gyro_bias_dps = (0.0, 0.0, 0.0)
+            self._push_producer_bias_dps(0.0, 0.0, 0.0)
+            self._push_producer_nmni(False, self._nmni_threshold_dps)
+
+            end = time.monotonic() + float(duration_s)
+            while time.monotonic() < end:
+                sample, age_s = self._sample_raw_gyro_dps()
+                if sample is not None and age_s < 0.5:
+                    xs.append(sample[0])
+                    ys.append(sample[1])
+                    zs.append(sample[2])
+                time.sleep(0.01)
+            if xs:
+                measured = (
+                    sum(xs) / len(xs),
+                    sum(ys) / len(ys),
+                    sum(zs) / len(zs),
+                )
+        finally:
+            # Always land on a real bias — the measured mean, or the prior
+            # estimate on empty collection *or* a mid-window sampling throw.
+            # Never leave the transient bias=0 that opened the window: the
+            # caller (imu_steering) swallows exceptions and does not retry, so
+            # a zeroed bias would silently reintroduce the residual-integrate
+            # skew this whole path exists to remove.
+            self.gyro_bias_dps = measured if measured is not None else prior_bias
+            # Restore NMNI + measured/prior bias on the producer.
             self._sync_producer_config()
         return self.gyro_bias_dps
 

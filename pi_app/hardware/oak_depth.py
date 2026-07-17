@@ -515,6 +515,11 @@ class OakDepthReader:
         Includes producer cumulative free-yaw channels (unscaled rad). Consumers
         must apply ``oak_yaw_rate_scale`` once and must not re-integrate gyro×dt
         from the sparse latest snapshot for heading.
+
+        ``gx_rads`` / ``gy_rads`` / ``gz_rads`` are the latest **raw** body rates
+        (not bias-subtracted, not NMNI-gated). Bias and NMNI apply only inside
+        the producer integrator that advances cum free-yaw. Gyro calibration
+        must sample these raw rates (see ``get_imu_raw_gyro_dps``).
         """
         with self._lock:
             age = time.monotonic() - self._imu_state.timestamp if self._imu_state.timestamp else float("inf")
@@ -536,6 +541,29 @@ class OakDepthReader:
                 producer_integrated_time_s=self._imu_state.producer_integrated_time_s,
                 last_integrated_device_ts_s=self._imu_state.last_integrated_device_ts_s,
             ), age
+
+    def get_imu_raw_gyro_dps(self) -> tuple[tuple[float, float, float], float]:
+        """Return ((gx, gy, gz) dps, age_s) of latest **raw** body gyro.
+
+        Explicit calibration contract: never bias-subtracted or NMNI-gated.
+        Same underlying sample as ``get_imu_data().g*_rads``; separate method
+        so callers cannot confuse integrate-path rates with raw rates if the
+        snapshot shape gains corrected fields later.
+        """
+        with self._lock:
+            age = (
+                time.monotonic() - self._imu_state.timestamp
+                if self._imu_state.timestamp
+                else float("inf")
+            )
+            return (
+                (
+                    math.degrees(self._imu_state.gx_rads),
+                    math.degrees(self._imu_state.gy_rads),
+                    math.degrees(self._imu_state.gz_rads),
+                ),
+                age,
+            )
 
     def set_imu_gyro_bias_dps(self, gx_dps: float, gy_dps: float, gz_dps: float) -> None:
         """Push gyro bias into the producer integrator (applied before cum yaw)."""

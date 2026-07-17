@@ -70,7 +70,9 @@ class ImuPacket:
 class ImuYawProducerSnapshot:
     """Thread-safe-friendly snapshot of producer state for consumers."""
 
-    # Latest raw sample (body frame).
+    # Latest **raw** sample (body frame). NOT bias-subtracted, NOT NMNI-gated.
+    # Gyro calibration and OakImuReader body-rate diagnostics rely on this.
+    # Integrate-path rates (bias then NMNI) exist only as locals inside ingest.
     ax_mss: float = 0.0
     ay_mss: float = 0.0
     az_mss: float = 0.0
@@ -390,7 +392,10 @@ class ImuYawProducer:
             host_ts = float("nan")
         dev_ts = float(pkt.device_ts_s) if self._ts_valid(pkt.device_ts_s) else float("nan")
 
-        # Always publish latest raw snapshot (diagnostics / roll-pitch).
+        # Always publish latest **raw** snapshot (calibration / roll-pitch /
+        # body-rate diagnostics). Bias and NMNI must NOT be written back here —
+        # otherwise OakImuReader.calibrate_gyro would average already-gated
+        # rates and sub-threshold residual bias would collapse to exact zero.
         self.ax_mss = float(pkt.ax_mss)
         self.ay_mss = float(pkt.ay_mss)
         self.az_mss = float(pkt.az_mss)
@@ -411,6 +416,7 @@ class ImuYawProducer:
         self.last_dt_s = dt
         self._note_cadence(dt)
 
+        # Integrate-path only (locals): bias then NMNI. Never overwrite gx_rads.
         gx = float(pkt.gx_rads) - self.bias_gx_rads
         gy = float(pkt.gy_rads) - self.bias_gy_rads
         gz = float(pkt.gz_rads) - self.bias_gz_rads

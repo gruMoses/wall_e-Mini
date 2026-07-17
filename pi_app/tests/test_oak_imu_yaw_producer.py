@@ -218,6 +218,18 @@ class ProducerBackedFakeOak:
     def set_imu_nmni(self, enabled, threshold_dps=0.3):
         self.producer.set_nmni(enabled, threshold_dps)
 
+    def get_imu_raw_gyro_dps(self):
+        """Explicit raw contract (mirrors OakDepthReader)."""
+        s = self.producer.snapshot()
+        return (
+            (
+                math.degrees(s.gx_rads),
+                math.degrees(s.gy_rads),
+                math.degrees(s.gz_rads),
+            ),
+            self.age_s,
+        )
+
     def get_health(self):
         return dict(self.health)
 
@@ -671,6 +683,234 @@ class TestLegacySnapshotPathStillWorks(unittest.TestCase):
         self.assertEqual(d1["integration_path"], "legacy_snapshot")
         self.assertEqual(d1["integrate_status"], "fresh")
         self.assertAlmostEqual(d1["heading_deg"], (h0 - 4.5) % 360.0, places=4)
+
+
+class CorrectedSnapshotFakeOak(ProducerBackedFakeOak):
+    """Footgun stand-in: get_imu_data exposes bias/NMNI-corrected rates.
+
+    Mimics the circular-calibration failure mode: with NMNI on and bias=0,
+    sub-threshold residual bias reads as exact zero from get_imu_data.
+    Deliberately omits get_imu_raw_gyro_dps so calibrate must either pause
+    NMNI or fail.
+    """
+
+    def get_imu_data(self):
+        st, age = super().get_imu_data()
+        bx, by, bz = self._bias
+        gx = st.gx_rads - math.radians(float(bx))
+        gy = st.gy_rads - math.radians(float(by))
+        gz = st.gz_rads - math.radians(float(bz))
+        thr = float(self.producer.nmni_threshold_dps)
+        if self.producer.nmni_enabled:
+            if abs(math.degrees(gx)) < thr:
+                gx = 0.0
+            if abs(math.degrees(gy)) < thr:
+                gy = 0.0
+            if abs(math.degrees(gz)) < thr:
+                gz = 0.0
+        st.gx_rads = gx
+        st.gy_rads = gy
+        st.gz_rads = gz
+        return st, age
+
+    def get_imu_raw_gyro_dps(self):
+        # Force calibrate onto the get_imu_data fallback path.
+        raise RuntimeError("raw API unavailable in this footgun fake")
+
+
+class TestGyroCalibrateNmniNoCircular(unittest.TestCase):
+    """Residual bias must be measurable with NMNI enabled; CW/CCW stay symmetric."""
+
+    RESIDUAL_Y_DPS = 0.15  # below default NMNI threshold 0.3
+    RESIDUAL_X_DPS = 0.08
+    RESIDUAL_Z_DPS = -0.05
+
+    def test_snapshot_gx_is_raw_not_nmni_gated(self):
+        """Producer contract: latest gx/gy/gz stay raw even when NMNI is on."""
+        prod = ImuYawProducer()
+        prod.set_nmni(True, 0.3)
+        prod.ingest([_pkt(0.0, gy_dps=self.RESIDUAL_Y_DPS)])
+        prod.ingest([_pkt(0.01, gy_dps=self.RESIDUAL_Y_DPS)])
+        snap = prod.snapshot()
+        self.assertAlmostEqual(math.degrees(snap.gy_rads), self.RESIDUAL_Y_DPS, places=6)
+        # Cum must NOT integrate sub-threshold residual when NMNI is on.
+        self.assertAlmostEqual(snap.cum_yaw_y_rad, 0.0, places=9)
+
+    def test_calibrate_recovers_subthreshold_bias_with_nmni_enabled(self):
+        oak = ProducerBackedFakeOak()
+        imu = OakImuReader(
+            oak,
+            yaw_rate_source="gyro_y",
+            yaw_rate_scale=1.0,
+            nmni_enabled=True,
+            nmni_threshold_dps=0.3,
+            bias_adapt_enabled=False,
+        )
+        # __init__ already enabled producer NMNI with bias=0.
+        self.assertTrue(oak.producer.nmni_enabled)
+
+        n = [0]
+
+        def pumping_raw():
+            n[0] += 1
+            t = 0.01 * n[0]
+            oak.push(
+                device_ts=t,
+                gx_dps=self.RESIDUAL_X_DPS,
+                gy_dps=self.RESIDUAL_Y_DPS,
+                gz_dps=self.RESIDUAL_Z_DPS,
+            )
+            return ProducerBackedFakeOak.get_imu_raw_gyro_dps(oak)
+
+        with patch.object(oak, "get_imu_raw_gyro_dps", side_effect=pumping_raw):
+            with patch("time.sleep", return_value=None):
+                bias = imu.calibrate_gyro(duration_s=0.05)
+
+        self.assertGreater(n[0], 5)
+        self.assertAlmostEqual(bias[0], self.RESIDUAL_X_DPS, places=3)
+        self.assertAlmostEqual(bias[1], self.RESIDUAL_Y_DPS, places=3)
+        self.assertAlmostEqual(bias[2], self.RESIDUAL_Z_DPS, places=3)
+        # NMNI restored after calibrate; bias pushed to producer.
+        self.assertTrue(oak.producer.nmni_enabled)
+        self.assertAlmostEqual(math.degrees(oak.producer.bias_gy_rads), self.RESIDUAL_Y_DPS, places=3)
+
+    def test_calibrate_not_circular_when_get_imu_data_is_corrected(self):
+        """If host snapshot exposes integrate-path rates, cal must still recover bias."""
+        oak = CorrectedSnapshotFakeOak()
+        imu = OakImuReader(
+            oak,
+            yaw_rate_source="gyro_y",
+            yaw_rate_scale=1.0,
+            nmni_enabled=True,
+            nmni_threshold_dps=0.3,
+            bias_adapt_enabled=False,
+        )
+        self.assertTrue(oak.producer.nmni_enabled)
+
+        # Without the pause-NMNI guard, corrected get_imu_data would read 0.
+        oak.push(device_ts=0.01, gy_dps=self.RESIDUAL_Y_DPS)
+        st1, _ = CorrectedSnapshotFakeOak.get_imu_data(oak)
+        self.assertAlmostEqual(math.degrees(st1.gy_rads), 0.0, places=6)
+
+        n = [0]
+
+        def pumping_get():
+            n[0] += 1
+            t = 0.01 * n[0]
+            oak.push(
+                device_ts=t,
+                gx_dps=self.RESIDUAL_X_DPS,
+                gy_dps=self.RESIDUAL_Y_DPS,
+                gz_dps=self.RESIDUAL_Z_DPS,
+            )
+            # Unbound call — avoid recursion through the patch.
+            return CorrectedSnapshotFakeOak.get_imu_data(oak)
+
+        with patch.object(oak, "get_imu_data", side_effect=pumping_get):
+            with patch("time.sleep", return_value=None):
+                bias = imu.calibrate_gyro(duration_s=0.05)
+
+        self.assertAlmostEqual(bias[0], self.RESIDUAL_X_DPS, places=3)
+        self.assertAlmostEqual(bias[1], self.RESIDUAL_Y_DPS, places=3)
+        self.assertAlmostEqual(bias[2], self.RESIDUAL_Z_DPS, places=3)
+        self.assertTrue(oak.producer.nmni_enabled)
+
+    def test_calibrate_restores_prior_bias_on_sampling_exception(self):
+        """A mid-window sampling throw must not leave the transient bias=0.
+
+        calibrate zeroes producer bias + turns NMNI off to open the sampling
+        window. If sampling raises before a mean is computed, the reader and
+        producer must both restore the *prior* bias (and NMNI on) — the caller
+        (imu_steering) swallows the exception and does not retry, so a zeroed
+        bias would silently reintroduce the residual-integrate skew.
+        """
+        oak = ProducerBackedFakeOak()
+        imu = OakImuReader(
+            oak,
+            yaw_rate_source="gyro_y",
+            yaw_rate_scale=1.0,
+            nmni_enabled=True,
+            nmni_threshold_dps=0.3,
+            bias_adapt_enabled=False,
+        )
+        prior = (0.11, 0.22, -0.07)
+        imu.gyro_bias_dps = prior
+        imu._sync_producer_config()
+        self.assertTrue(oak.producer.nmni_enabled)
+
+        def boom():
+            raise RuntimeError("sampling blew up mid-window")
+
+        with patch.object(imu, "_sample_raw_gyro_dps", side_effect=boom):
+            with patch("time.sleep", return_value=None):
+                with self.assertRaises(RuntimeError):
+                    imu.calibrate_gyro(duration_s=0.05)
+
+        # Prior bias retained (never the transient zero); NMNI restored on.
+        self.assertEqual(imu.gyro_bias_dps, prior)
+        self.assertTrue(oak.producer.nmni_enabled)
+        self.assertAlmostEqual(math.degrees(oak.producer.bias_gx_rads), prior[0], places=6)
+        self.assertAlmostEqual(math.degrees(oak.producer.bias_gy_rads), prior[1], places=6)
+        self.assertAlmostEqual(math.degrees(oak.producer.bias_gz_rads), prior[2], places=6)
+
+    def test_cw_ccw_symmetric_after_bias_cal_with_nmni(self):
+        """Uncorrected residual skews CW vs CCW; after cal both |Δ| match at scale=1."""
+        residual = self.RESIDUAL_Y_DPS
+        rate = 30.0  # dps turn rate (well above NMNI)
+        duration_s = 3.0  # 90° of true rotation
+        n_steps = int(duration_s / 0.01)
+
+        def production_free_yaw_deg(apply_cal: bool, sign: float) -> float:
+            """Production free-yaw = -yaw_rad_deg (matches chalk report sign)."""
+            oak = ProducerBackedFakeOak()
+            imu = OakImuReader(
+                oak,
+                yaw_rate_source="gyro_y",
+                yaw_rate_scale=1.0,
+                nmni_enabled=True,
+                nmni_threshold_dps=0.3,
+                bias_adapt_enabled=False,
+            )
+            if apply_cal:
+                n = [0]
+
+                def pumping_raw():
+                    n[0] += 1
+                    oak.push(
+                        device_ts=0.01 * n[0],
+                        gy_dps=residual,
+                        gx_dps=0.0,
+                        gz_dps=0.0,
+                    )
+                    return ProducerBackedFakeOak.get_imu_raw_gyro_dps(oak)
+
+                with patch.object(oak, "get_imu_raw_gyro_dps", side_effect=pumping_raw):
+                    with patch("time.sleep", return_value=None):
+                        imu.calibrate_gyro(duration_s=0.05)
+            # Seed consumer, then turn: raw = sign*rate + residual
+            t0 = 10.0
+            oak.push(device_ts=t0, gy_dps=sign * rate + residual)
+            imu.read()
+            batch = [
+                _pkt(t0 + 0.01 * i, gy_dps=sign * rate + residual)
+                for i in range(1, n_steps + 1)
+            ]
+            oak.push_batch(batch)
+            imu.read()
+            return -math.degrees(imu.yaw_rad)
+
+        # sign=+1 → positive body gy (field CW); production free-yaw negative.
+        cw_uncal = production_free_yaw_deg(False, +1.0)
+        ccw_uncal = production_free_yaw_deg(False, -1.0)
+        self.assertGreater(abs(abs(cw_uncal) - abs(ccw_uncal)), 0.3)
+
+        cw = production_free_yaw_deg(True, +1.0)
+        ccw = production_free_yaw_deg(True, -1.0)
+        self.assertAlmostEqual(abs(cw), 90.0, places=1)
+        self.assertAlmostEqual(abs(ccw), 90.0, places=1)
+        self.assertAlmostEqual(abs(cw), abs(ccw), places=2)
+        self.assertLess(cw, 0.0)
+        self.assertGreater(ccw, 0.0)
 
 
 if __name__ == "__main__":

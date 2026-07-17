@@ -237,6 +237,75 @@ On the robot, with service path (or chalk harness using full OakDepthReader):
 6. Only if magnitude still systematically off after lossless proof, fit scale from chalk
    and keep the axis pinned — never “guess” a multiplier to hide packet loss.
 
+## Field results after lossless producer (commit 4ca1ccc baseline)
+
+Chalk harness, full `OakDepthReader` path, production `gyro_y` × `1.0`, NMNI on
+(threshold 0.3 dps). Loss accounting was clean on every run below: zero
+duplicate/gap/backlog/queue loss, cadence ≈ 0.01007 s, no reconnect, producer
+`gyro_y` Δ exact opposite-sign match of production free-yaw Δ.
+
+| Run | Physical | Production free-yaw Δ | Result |
+| --- | --- | --- | --- |
+| 90° CW (precise) | 90° CW | **−89.728842°** | PASS |
+| 180° CW (slight physical over-rotate) | ~180°+ CW | **+188.870381°** magnitude band | PASS |
+| 90° CCW attempt 1 (precise) | 90° CCW | **+109.088079°** | fail (~+19°) |
+| 90° CCW attempt 2 (precise) | 90° CCW | **+112.239724°** | fail (~+22°) |
+
+Both CCW runs printed bias collection as **exactly** `x=y=z=0.000000`. During the
+marked turns only **0.4%–1.1%** of bias-corrected `gyro_y` samples were below the
+0.3 dps NMNI threshold (i.e. almost the entire window was above deadband — a
+turn with a persistent rate, not a sparse/gappy integrate).
+
+### Root-cause analysis (calibration vs lossless path)
+
+Lossless proof holds: under-report from host coalescing is **not** this bug.
+CW at scale=1 is already accurate; CCW overshoots with matching producer/production
+sign-pair → residual **rate offset** in the integrate path, not a second scale or
+packet drop.
+
+**Hypothesis checked:** `OakImuReader.__init__` enables producer NMNI (bias=0)
+before `calibrate_gyro`. If calibration averaged already bias/NMNI-corrected host
+rates, sub-threshold residual bias would collapse to exact zero → circular
+calibration → residual integrates for the whole turn and skews CW vs CCW.
+
+**What the code actually exposed (pre-fix):**
+- `ImuYawProducer` already published **raw** latest `gx/gy/gz` (bias/NMNI applied
+  only as integrate-path locals into cum).
+- So `get_imu_data()` did **not** expose corrected rates — the circular path was a
+  real footgun if that contract ever flipped, and field `bias=0.000000` still
+  matches “calibration saw zeros / no-op bias,” whether from true near-zero
+  stationary raw, empty/fresh-sample issues, or a corrected snapshot.
+
+**Fix (no scale fudge):**
+1. Document and keep latest `g*_rads` as **raw** forever; add
+   `OakDepthReader.get_imu_raw_gyro_dps()` as the explicit cal contract.
+2. `calibrate_gyro` temporarily forces producer **bias=0** and **NMNI=off**,
+   samples raw rates, then restores NMNI with the measured bias. If a host
+   snapshot were integrate-path corrected, pausing those transforms makes
+   samples raw-equivalent; if already raw, sample values are unchanged.
+3. Empty collection keeps prior bias (does not claim all-zero success).
+4. Unit regressions: sub-threshold residual recovered with NMNI on; corrected
+   `get_imu_data` footgun still calibrates; CW/CCW `|Δ|` symmetric after cal.
+
+### Hardware retest required?
+
+**Yes — one short chalk pass on the robot after deploy of this fix** (not done in
+this worktree; no commit/deploy from the agent session):
+
+```bash
+sudo systemctl stop wall-e
+cd /home/pi/wall_e-Mini   # or this worktree path on the Pi
+python3 -m pi_app.cli.oak_yaw_chalk_test --expected 90 --direction cw --stream
+python3 -m pi_app.cli.oak_yaw_chalk_test --expected 90 --direction ccw --stream
+# optional:
+python3 -m pi_app.cli.oak_yaw_chalk_test --expected 180 --direction cw --stream
+```
+
+Pass when both CW and CCW 90° sit in the existing band, bias print is **non-zero
+if residual exists** (or honestly near-zero with symmetric CW/CCW), and loss
+invariants stay clean. If CCW still overshoots with a truthful non-zero bias and
+zero loss, reopen as mount/g-sensitivity — **do not** reintroduce scale `0.46`.
+
 ## If regression happens in service
 
 1. Confirm IMU source: startup log `source: oak_d`.
@@ -261,8 +330,10 @@ Coverage includes: sparse undercount reproduction, full-batch accuracy under del
 consumer reads, full 512-packet backlog without drop, duplicates, ordering,
 generation-jitter 27° preservation, exact +10°/−10° with generation (no false
 cum_reset), true counter-rewind reset freeze, reconnect, bounded soft backlog cap,
-scale-once, host-queue / producer-cap alignment asserts, axis isolation, and
-controller health embedding.
+scale-once, host-queue / producer-cap alignment asserts, axis isolation,
+controller health embedding, **NMNI+bias non-circular calibrate** (sub-threshold
+residual recovered with NMNI on), corrected-snapshot footgun calibrate, and
+**CW/CCW free-yaw symmetry after bias cal**.
 
 ## Related docs
 
