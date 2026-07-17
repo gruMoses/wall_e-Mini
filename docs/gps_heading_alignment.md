@@ -34,8 +34,10 @@ EMA refinement is disabled: the 2026-07-12 field trace proved that GPS COG
 during a turn is not the robot body heading and drove the offset through nearly
 200°, producing a self-sustaining circle.
 
-RTK dropout (quality ≠ 4) clears history but **preserves** the frozen offset.
-Out-of-order or duplicate GPS timestamps are ignored.
+Before lock, RTK dropout (quality ≠ 4) clears history on a new sample.
+Once locked, `update()` is a pure no-op until `reset()`, preserving the frozen
+offset and history. Duplicate GPS timestamps are ignored. Out-of-order
+timestamps clear unlocked history (fail-closed).
 
 ## Armed session lifecycle
 

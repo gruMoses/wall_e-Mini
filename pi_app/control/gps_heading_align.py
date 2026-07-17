@@ -146,29 +146,43 @@ class GpsHeadingAligner:
         """Sample one GPS+IMU pair; maybe establish a one-shot offset lock.
 
         ``sample_ts`` must be the GPS reading's own ``GpsReading.timestamp``
-        (time.monotonic() when the fix was captured). Calling with the same
-        timestamp repeatedly is a no-op so controller-loop duplicates do not
-        distort movement speed.
+        (time.monotonic() when the fix was captured). Duplicate timestamps are
+        ignored before lock/yaw gates so controller-loop polls of the same fix
+        do not clear history or distort movement speed. Out-of-order timestamps
+        clear history (fail-closed).
 
         ``lock_allowed`` must represent an explicit trustworthy straight-run
-        condition from the controller. While it is false, or body yaw exceeds
-        the configured limit, movement history is discarded so a later lock
-        cannot include curved motion. Once locked, the offset is frozen until
-        ``reset()``.
+        condition from the controller. While it is false on a **new** GPS
+        sample, or body yaw exceeds the configured limit, movement history is
+        discarded so a later lock cannot include curved motion. Once locked, the
+        offset is frozen until ``reset()``.
         """
         cfg = self._cfg
         if not cfg.enabled:
             return
+
+        if self._locked:
+            return
+
+        # Deduplicate before lock/yaw gates so controller-loop polls of the
+        # same GPS fix (~30 Hz vs ~1 Hz GPS) do not re-evaluate straightness
+        # or clear history on transient IMU yaw spikes.
+        if self._last_sample_ts is not None:
+            if sample_ts == self._last_sample_ts:
+                return
+            if sample_ts < self._last_sample_ts:
+                self._history.clear()
+                self._last_sample_ts = None
+                return
+
         # Require exact RTK fixed (quality 4). A >=4 check would also admit
         # RTK float (5), which must not establish heading lock.
         if fix_quality != cfg.min_fix_quality:
             # Without RTK fixed, stale samples would poison the offset.
-            # Don't reset what we already learned — just stop updating.
+            # Clear the unlocked candidate; the early return above protects
+            # a frozen offset once lock has been established.
             self._history.clear()
-            self._last_sample_ts = None
-            return
-
-        if self._locked:
+            self._last_sample_ts = sample_ts
             return
 
         max_yaw_rate = float(getattr(cfg, "max_lock_yaw_rate_dps", 3.0))
@@ -178,14 +192,8 @@ class GpsHeadingAligner:
             or abs(yaw_rate_dps) > max_yaw_rate
         ):
             self._history.clear()
-            self._last_sample_ts = None
+            self._last_sample_ts = sample_ts
             return
-
-        if self._last_sample_ts is not None:
-            if sample_ts == self._last_sample_ts:
-                return
-            if sample_ts < self._last_sample_ts:
-                return
 
         self._last_sample_ts = sample_ts
         self._history.append((sample_ts, lat, lon))
