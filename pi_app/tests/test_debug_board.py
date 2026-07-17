@@ -42,7 +42,8 @@ def test_debug_route_serves_200_with_key_markers(client):
     body = resp.get_data(as_text=True)
     # Title + each panel the owner relies on to watch a physical switch flip.
     assert "Debug Status Board" in body
-    for marker in ("Safety", "VESC / CAN", "BMS", "UPS", "Event Log"):
+    for marker in ("Safety", "VESC / CAN", "BMS", "UPS", "Event Log",
+                   "Temperature History"):
         assert marker in body, marker
     # It subscribes to the existing SSE + polls the UPS bridge.
     assert "/api/telemetry" in body
@@ -56,6 +57,62 @@ def test_debug_page_is_read_only_no_control_posts(client):
     assert "method: 'POST'" not in body
     assert "/api/follow_me" not in body
     assert "/api/teleop" not in body
+
+
+def test_debug_page_temperature_history_markers(client):
+    """Temperature panel: canvas graph, named series, bounded buffer, no CDN."""
+    body = client.get("/debug").get_data(as_text=True)
+    assert 'id="temp-canvas"' in body
+    assert "pushTempSample" in body
+    assert "TEMP_MAX_POINTS" in body
+    assert "TEMP_WINDOW_MS" in body
+    # Named series keys match SSE field names.
+    for key in (
+        "bms_temp_max_c",
+        "bms_temp_min_c",
+        "vesc_left_temp_c",
+        "vesc_right_temp_c",
+        "vesc_left_motor_temp_c",
+        "vesc_right_motor_temp_c",
+        "pi_cpu_temp_c",
+    ):
+        assert key in body, key
+    # No chart libraries / CDNs — self-contained canvas draw.
+    assert "cdn." not in body.lower()
+    assert "chart.js" not in body.lower()
+    assert "googleapis" not in body.lower()
+    # Offline-safe: no external <script src=…> (all logic is inline).
+    assert "<script src=" not in body.lower()
+
+
+def test_debug_page_temperature_structural_invariants(client):
+    """Retention bounds, gap semantics, a11y hooks, and stale alignment with
+    the controller's 0.5 s STATUS-age cutoff must stay in the page source."""
+    body = client.get("/debug").get_data(as_text=True)
+    # Bounded 10-minute ring buffer hard caps.
+    assert "TEMP_WINDOW_MS = 10 * 60 * 1000" in body
+    assert "TEMP_MAX_POINTS = 720" in body
+    assert "TEMP_MIN_SAMPLE_MS = 900" in body
+    # SSE reconnect / tab freeze must not draw a diagonal across a time hole.
+    assert "TEMP_GAP_MS = 5000" in body
+    assert "(tv - prevT) > TEMP_GAP_MS" in body
+    # VESC stale matches controller open-loop fallback (>0.5 s any motor).
+    assert "TEMP_VESC_STALE_S = 0.5" in body
+    assert "function vescTempsStale" in body
+    # Null / disconnected sensors leave gaps (force raw = null).
+    assert "bmsOffline" in body
+    assert "vescStale" in body
+    # Accessibility: toggle state + live summary for screen readers.
+    assert 'aria-pressed="' in body
+    assert 'aria-live="polite"' in body
+    assert 'id="temp-sr"' in body
+    assert 'role="group"' in body
+    # High-DPI canvas capped at 2× for Pi cost.
+    assert "devicePixelRatio" in body
+    assert "Math.min(window.devicePixelRatio || 1, 2)" in body
+    # Legend updates in place (no full rebuild per sample → no focus steal).
+    assert "function updateTempLegend" in body
+    assert "legendBuilt" in body
 
 
 def test_root_dashboard_links_to_debug(client):
@@ -196,3 +253,124 @@ def test_sse_new_fields_present_even_when_none():
                 "vesc_rx_thread_alive", "emergency_active"):
         assert key in d, key
     assert d["vesc_rx_thread_alive"] is None
+
+
+_TEMP_SSE_KEYS = (
+    "bms_temp_max_c",
+    "bms_temp_min_c",
+    "vesc_left_temp_c",
+    "vesc_right_temp_c",
+    "vesc_left_motor_temp_c",
+    "vesc_right_motor_temp_c",
+    "pi_cpu_temp_c",
+)
+
+
+def test_sse_payload_carries_temperature_fields():
+    t = RecordingTelemetry(
+        timestamp=time.time(), mode="MANUAL", throttle_scale=1.0,
+        obstacle_distance_m=2.0, motor_left=128, motor_right=128, is_armed=True,
+        depth_stats=None, person_detections=[],
+        bms_temp_max_c=32.4, bms_temp_min_c=28.1,
+        bms_connected=True,
+        vesc_left_temp_c=41.5, vesc_right_temp_c=42.0,
+        vesc_left_motor_temp_c=48.2, vesc_right_motor_temp_c=49.0,
+        vesc_rx_thread_alive=True,
+    )
+    d = _first_sse_payload(_OneShotRecorder(t))
+    assert d["bms_temp_max_c"] == pytest.approx(32.4)
+    assert d["bms_temp_min_c"] == pytest.approx(28.1)
+    assert d["vesc_left_temp_c"] == pytest.approx(41.5)
+    assert d["vesc_right_temp_c"] == pytest.approx(42.0)
+    assert d["vesc_left_motor_temp_c"] == pytest.approx(48.2)
+    assert d["vesc_right_motor_temp_c"] == pytest.approx(49.0)
+    # Pi CPU is best-effort sysfs; key must always exist.
+    assert "pi_cpu_temp_c" in d
+    assert d["pi_cpu_temp_c"] is None or isinstance(d["pi_cpu_temp_c"], (int, float))
+
+
+def test_sse_temperature_keys_present_when_none():
+    t = RecordingTelemetry(
+        timestamp=time.time(), mode="MANUAL", throttle_scale=1.0,
+        obstacle_distance_m=None, motor_left=128, motor_right=128, is_armed=False,
+        depth_stats=None, person_detections=[],
+    )
+    d = _first_sse_payload(_OneShotRecorder(t))
+    for key in _TEMP_SSE_KEYS:
+        assert key in d, key
+
+
+def test_read_pi_cpu_temp_c_from_sysfs(tmp_path):
+    from pi_app.web.oak_viewer import read_pi_cpu_temp_c
+    import pi_app.web.oak_viewer as ov
+
+    p = tmp_path / "temp"
+    p.write_text("45678\n")  # 45.678 °C → rounded to 45.7
+    # Bust cache so the test path is used.
+    ov._pi_cpu_temp_cache = None
+    val = read_pi_cpu_temp_c(now=time.monotonic(), path=str(p))
+    assert val == pytest.approx(45.7)
+    # Cache hit returns same without re-read dependency on path still existing.
+    p.write_text("99999\n")
+    val2 = read_pi_cpu_temp_c(now=time.monotonic(), path=str(p))
+    assert val2 == pytest.approx(45.7)
+    # After TTL, re-reads.
+    ov._pi_cpu_temp_cache = None
+    val3 = read_pi_cpu_temp_c(now=time.monotonic() + 10.0, path=str(p))
+    assert val3 == pytest.approx(100.0)  # 99.999 → 100.0
+
+
+def test_read_pi_cpu_temp_c_missing_file(tmp_path):
+    from pi_app.web.oak_viewer import read_pi_cpu_temp_c
+    import pi_app.web.oak_viewer as ov
+
+    ov._pi_cpu_temp_cache = None
+    val = read_pi_cpu_temp_c(now=time.monotonic(), path=str(tmp_path / "nope"))
+    assert val is None
+
+
+def test_read_pi_cpu_temp_c_out_of_range_rejected(tmp_path):
+    """Garbage or implausible thermal_zone values must not reach the graph."""
+    from pi_app.web.oak_viewer import read_pi_cpu_temp_c
+    import pi_app.web.oak_viewer as ov
+
+    p = tmp_path / "temp"
+    # 200 °C is above the 125 °C sanity cap.
+    p.write_text("200000\n")
+    ov._pi_cpu_temp_cache = None
+    assert read_pi_cpu_temp_c(now=time.monotonic(), path=str(p)) is None
+    # Non-numeric
+    p.write_text("not-a-number\n")
+    ov._pi_cpu_temp_cache = None
+    assert read_pi_cpu_temp_c(now=time.monotonic(), path=str(p)) is None
+
+
+def test_sse_temperature_fields_reject_non_finite():
+    """NaN/Inf in RecordingTelemetry must serialize as null, not JSON null-ish
+    numbers that break the canvas finiteOrNull path."""
+    t = RecordingTelemetry(
+        timestamp=time.time(), mode="MANUAL", throttle_scale=1.0,
+        obstacle_distance_m=None, motor_left=128, motor_right=128, is_armed=False,
+        depth_stats=None, person_detections=[],
+        bms_temp_max_c=float("nan"),
+        vesc_left_temp_c=float("inf"),
+        vesc_right_motor_temp_c=float("-inf"),
+    )
+    d = _first_sse_payload(_OneShotRecorder(t))
+    assert d["bms_temp_max_c"] is None
+    assert d["vesc_left_temp_c"] is None
+    assert d["vesc_right_motor_temp_c"] is None
+
+
+def test_sse_bms_temp_min_is_independent_of_max():
+    """Min and max must both survive the SSE path (regression: only max was plumbed)."""
+    t = RecordingTelemetry(
+        timestamp=time.time(), mode="MANUAL", throttle_scale=1.0,
+        obstacle_distance_m=2.0, motor_left=128, motor_right=128, is_armed=True,
+        depth_stats=None, person_detections=[],
+        bms_temp_max_c=40, bms_temp_min_c=22,  # ints like Daly BmsState
+        bms_connected=True,
+    )
+    d = _first_sse_payload(_OneShotRecorder(t))
+    assert d["bms_temp_max_c"] == pytest.approx(40.0)
+    assert d["bms_temp_min_c"] == pytest.approx(22.0)

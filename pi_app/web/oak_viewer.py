@@ -102,6 +102,46 @@ def read_ups_status(path: str = UPS_STATUS_FILE,
 
 
 # ---------------------------------------------------------------------------
+# Pi CPU temperature (sysfs) — debug board only, never on the safety path
+# ---------------------------------------------------------------------------
+
+_PI_CPU_THERMAL_PATH = "/sys/class/thermal/thermal_zone0/temp"
+_pi_cpu_temp_cache: tuple[float, float | None] | None = None  # (mono_ts, °C|None)
+_PI_CPU_TEMP_CACHE_S = 1.0
+
+
+def read_pi_cpu_temp_c(now: float | None = None,
+                       path: str = _PI_CPU_THERMAL_PATH) -> float | None:
+    """Read Raspberry Pi SoC temperature from thermal_zone0 (°C).
+
+    Cached for ``_PI_CPU_TEMP_CACHE_S`` so a 4 Hz SSE client does not thrash
+    sysfs. Returns None on any OS/parse error (desktop dev machines, missing
+    thermal zone). Pure diagnostic — never used for control decisions.
+    """
+    global _pi_cpu_temp_cache
+    mono = time.monotonic() if now is None else now
+    if _pi_cpu_temp_cache is not None:
+        cached_ts, cached_val = _pi_cpu_temp_cache
+        if (mono - cached_ts) < _PI_CPU_TEMP_CACHE_S:
+            return cached_val
+    val: float | None = None
+    try:
+        with open(path, "r") as f:
+            raw = f.read().strip()
+        milli = int(raw)
+        # thermal_zone reports millidegrees C on Linux; reject nonsense.
+        # Typical Pi idle ~40–55 °C; 125 °C is the SoC hard limit band.
+        c = milli / 1000.0
+        if -40.0 <= c <= 125.0:
+            val = round(c, 1)
+        # else: leave val None (out-of-range / garbage sysfs)
+    except (OSError, ValueError, TypeError):
+        val = None
+    _pi_cpu_temp_cache = (mono, val)
+    return val
+
+
+# ---------------------------------------------------------------------------
 # Dashboard HTML (self-contained, no external dependencies)
 # ---------------------------------------------------------------------------
 
@@ -1003,6 +1043,39 @@ _DEBUG_HTML = """<!DOCTYPE html>
   .log .up { color: #4ecdc4; } .log .down { color: #ff6b74; } .log .neu { color: #f0b344; }
   .log .empty { color: #444; font-style: italic; }
   .hint { font-size: 11px; color: #5b6472; margin-top: 10px; }
+  /* ── Temperature history ─────────────────────────────────────────── */
+  .temp-toolbar { display: flex; flex-wrap: wrap; align-items: center;
+                  justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .temp-legend { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+  .temp-chip { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+               user-select: none; background: #12151d; border: 1px solid #2a2d37;
+               border-radius: 999px; padding: 5px 10px 5px 8px; font-size: 11px;
+               color: #c8ccd6; transition: opacity 0.12s, border-color 0.12s; }
+  .temp-chip:focus-visible { outline: 2px solid #6bb6ff; outline-offset: 2px; }
+  .temp-chip.off { opacity: 0.45; }
+  .temp-chip.stale { border-color: #8a7020; }
+  .temp-chip .swatch { width: 10px; height: 10px; border-radius: 50%;
+                       box-shadow: 0 0 0 1px rgba(255,255,255,0.12); flex-shrink: 0; }
+  .temp-chip .cname { font-weight: 600; letter-spacing: 0.2px; }
+  .temp-chip .cval { font-variant-numeric: tabular-nums; font-weight: 700;
+                     color: #e8eaf0; min-width: 3.6em; text-align: right; }
+  /* Secondary text: #8b93a3 on #12151d ≈ 5:1 contrast (was #5b6472, too dim). */
+  .temp-chip .cmm { color: #8b93a3; font-variant-numeric: tabular-nums; font-size: 10px; }
+  .temp-meta { font-size: 11px; color: #8b93a3; white-space: nowrap; }
+  .temp-canvas-wrap { position: relative; width: 100%; height: 280px;
+                      background: #0b0d13; border: 1px solid #22252f; border-radius: 8px;
+                      overflow: hidden; }
+  .temp-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+  .temp-empty { position: absolute; inset: 0; display: flex; align-items: center;
+                justify-content: center; color: #8b93a3; font-size: 13px;
+                pointer-events: none; }
+  .temp-empty.hidden { display: none; }
+  .temp-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+             overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  @media (max-width: 640px) {
+    .temp-canvas-wrap { height: 220px; }
+    .temp-chip .cmm { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -1055,7 +1128,7 @@ _DEBUG_HTML = """<!DOCTYPE html>
       <div class="cell"><div class="k">Current</div><span id="b-curr" class="val grey">&mdash;</span></div>
       <div class="cell"><div class="k">SOC</div><span id="b-soc" class="val grey">&mdash;</span></div>
       <div class="cell"><div class="k">Cell Delta</div><span id="b-delta" class="val grey">&mdash;</span></div>
-      <div class="cell"><div class="k">Temp Max</div><span id="b-temp" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Temp Min / Max</div><span id="b-temp" class="val grey">&mdash;</span></div>
       <div class="cell"><div class="k">Charging</div><span id="b-chg" class="pill grey">&mdash;</span></div>
       <div class="cell"><div class="k">Discharge FET</div><span id="b-dfet" class="pill grey">&mdash;</span></div>
     </div>
@@ -1074,6 +1147,23 @@ _DEBUG_HTML = """<!DOCTYPE html>
       <div class="cell"><div class="k">Daemon Mode</div><span id="u-mode" class="pill grey">&mdash;</span></div>
     </div>
     <div class="hint" id="u-hint">Waiting for /tmp/ups_status.json from upsPlus_power_daemon.py &hellip;</div>
+  </div>
+
+  <div class="panel" id="p-temp">
+    <h2>Temperature History <span style="font-weight:400;color:#8b93a3;">(°C · last 10 min)</span></h2>
+    <div class="temp-toolbar">
+      <div class="temp-legend" id="temp-legend" role="group" aria-label="Temperature series toggles"></div>
+      <div class="temp-meta" id="temp-meta">waiting for samples&hellip;</div>
+    </div>
+    <div class="temp-canvas-wrap">
+      <canvas id="temp-canvas" width="1000" height="280"
+              role="img" aria-label="Temperature history graph"
+              aria-describedby="temp-sr"></canvas>
+      <div class="temp-empty" id="temp-empty">No temperature samples yet</div>
+      <div class="temp-sr" id="temp-sr" aria-live="polite">No temperature samples yet</div>
+    </div>
+    <div class="hint">Click or press a series to toggle &middot; null / disconnected sensors leave gaps &middot;
+      in-memory ring buffer (no disk) &middot; Pi CPU from thermal_zone0</div>
   </div>
 
   <div class="panel">
@@ -1223,8 +1313,17 @@ sse.onmessage = function(e) {
   val('b-delta', cd == null ? '—' : cd + ' mV',
       cd == null ? 'grey' : cd <= 20 ? 'green' : cd <= 40 ? 'amber' : 'red');
   var tp = d.bms_temp_max_c;
-  val('b-temp', tp == null ? '—' : tp.toFixed(1) + '°C',
-      tp == null ? 'grey' : tp >= 50 ? 'red' : tp >= 40 ? 'amber' : 'green');
+  var tmin = d.bms_temp_min_c;
+  if (tp == null && tmin == null) {
+    val('b-temp', '—', 'grey');
+  } else if (tmin != null && tp != null && tmin !== tp) {
+    val('b-temp', tmin.toFixed(1) + '–' + tp.toFixed(1) + '°C',
+        tp >= 50 ? 'red' : tp >= 40 ? 'amber' : 'green');
+  } else {
+    var tshow = tp != null ? tp : tmin;
+    val('b-temp', tshow.toFixed(1) + '°C',
+        tshow >= 50 ? 'red' : tshow >= 40 ? 'amber' : 'green');
+  }
   var chg = d.bms_charging;
   pill('b-chg', chg == null ? '—' : (chg ? 'YES' : 'no'),
        chg == null ? 'grey' : (chg ? 'blue' : 'grey'));
@@ -1244,6 +1343,9 @@ sse.onmessage = function(e) {
   watch('bmsdfet', 'bms_discharge_fet', d.bms_discharge_fet_on, function(v){ return v ? 'on' : 'off'; }, function(v){ return v ? 'up' : 'down'; });
   var band = dist == null ? 'unknown' : dist < 0.5 ? 'STOP' : dist < 1.2 ? 'slow' : 'clear';
   watch('obsband', 'obstacle_band', band, null, function(v){ return v === 'clear' ? 'up' : v === 'STOP' ? 'down' : 'neu'; });
+
+  /* ---- Temperature history sample ---- */
+  pushTempSample(d, Date.now());
 };
 
 /* ── UPS poll (separate daemon via /api/ups) ───────────────────────── */
@@ -1315,6 +1417,368 @@ function pollUps() {
 }
 pollUps();
 setInterval(pollUps, 1000);
+
+/* ── Temperature history (canvas, bounded ring buffer, no deps) ─────── */
+var TEMP_WINDOW_MS = 10 * 60 * 1000;   // 10 minutes of history
+var TEMP_MAX_POINTS = 720;             // hard cap (~1.2 Hz × 10 min)
+var TEMP_MIN_SAMPLE_MS = 900;          // throttle samples for Pi CPU
+// Break stroke when consecutive samples are farther apart than this so an
+// SSE drop / tab freeze does not draw a misleading diagonal across the gap.
+var TEMP_GAP_MS = 5000;
+// Match controller open-loop fallback: any STATUS(9) age > 0.5 s is stale.
+var TEMP_VESC_STALE_S = 0.5;
+var TEMP_PAD = { l: 44, r: 12, t: 14, b: 28 };
+var TEMP_AXIS_COLOR = '#8b93a3';
+var TEMP_GRID_COLOR = '#1c2030';
+// Distinct hues (not two golds) so BMS min/max stay separable at a glance.
+var TEMP_SERIES = [
+  { key: 'bms_temp_max_c',          label: 'BMS Max',    color: '#f0b344', source: 'bms'  },
+  { key: 'bms_temp_min_c',          label: 'BMS Min',    color: '#86efac', source: 'bms'  },
+  { key: 'vesc_left_temp_c',        label: 'VESC L FET', color: '#6bb6ff', source: 'vesc' },
+  { key: 'vesc_right_temp_c',       label: 'VESC R FET', color: '#4ecdc4', source: 'vesc' },
+  { key: 'vesc_left_motor_temp_c',  label: 'VESC L Mot', color: '#a78bfa', source: 'vesc' },
+  { key: 'vesc_right_motor_temp_c', label: 'VESC R Mot', color: '#f472b6', source: 'vesc' },
+  { key: 'pi_cpu_temp_c',           label: 'Pi CPU',     color: '#ff8a65', source: 'pi'   }
+];
+var tempState = {
+  t: [],                               // sample times (Date.now ms)
+  series: {},                          // key -> { enabled, values:[], cur, min, max, stale }
+  lastSampleAt: 0,
+  drawPending: false,
+  legendBuilt: false
+};
+TEMP_SERIES.forEach(function(s) {
+  tempState.series[s.key] = {
+    enabled: true, values: [], cur: null, min: null, max: null, stale: false
+  };
+});
+
+var tempCanvas = document.getElementById('temp-canvas');
+var tempEmpty = document.getElementById('temp-empty');
+var tempMeta = document.getElementById('temp-meta');
+var tempLegend = document.getElementById('temp-legend');
+var tempSr = document.getElementById('temp-sr');
+var tempCtx = tempCanvas ? tempCanvas.getContext('2d') : null;
+
+function finiteOrNull(v) {
+  return (typeof v === 'number' && isFinite(v)) ? v : null;
+}
+function fmtTemp(v) {
+  return v == null ? '—' : v.toFixed(1) + '°';
+}
+function seriesTitle(s, st) {
+  return 'Toggle ' + s.label + (st.stale ? ' (stale/disconnected)' : '');
+}
+function seriesAria(s, st) {
+  var state = st.enabled ? 'shown' : 'hidden';
+  var val = st.cur == null ? 'no reading' : (st.cur.toFixed(1) + ' degrees C');
+  var stale = st.stale ? ', stale' : '';
+  return s.label + ', ' + state + ', ' + val + stale;
+}
+function chipClass(st) {
+  return 'temp-chip' + (st.enabled ? '' : ' off') + (st.stale ? ' stale' : '');
+}
+function mmText(st) {
+  if (st.min == null || st.max == null) return '';
+  return ' · ' + st.min.toFixed(1) + '–' + st.max.toFixed(1);
+}
+/** Build legend buttons once; later samples only patch values (keeps focus). */
+function ensureTempLegend() {
+  if (!tempLegend || tempState.legendBuilt) return;
+  var html = '';
+  TEMP_SERIES.forEach(function(s) {
+    var st = tempState.series[s.key];
+    html += '<button type="button" class="' + chipClass(st) + '" data-key="' + s.key + '" ' +
+            'aria-pressed="' + (st.enabled ? 'true' : 'false') + '" ' +
+            'title="' + esc(seriesTitle(s, st)) + '" ' +
+            'aria-label="' + esc(seriesAria(s, st)) + '">' +
+            '<span class="swatch" style="background:' + s.color + '" aria-hidden="true"></span>' +
+            '<span class="cname">' + esc(s.label) + '</span>' +
+            '<span class="cval">' + fmtTemp(st.cur) + '</span>' +
+            '<span class="cmm">' + esc(mmText(st)) + '</span></button>';
+  });
+  tempLegend.innerHTML = html;
+  tempState.legendBuilt = true;
+}
+function updateTempLegend() {
+  if (!tempLegend) return;
+  if (!tempState.legendBuilt) { ensureTempLegend(); return; }
+  TEMP_SERIES.forEach(function(s) {
+    var st = tempState.series[s.key];
+    var btn = tempLegend.querySelector('[data-key="' + s.key + '"]');
+    if (!btn) return;
+    btn.className = chipClass(st);
+    btn.setAttribute('aria-pressed', st.enabled ? 'true' : 'false');
+    btn.title = seriesTitle(s, st);
+    btn.setAttribute('aria-label', seriesAria(s, st));
+    var cval = btn.querySelector('.cval');
+    var cmm = btn.querySelector('.cmm');
+    if (cval) cval.textContent = fmtTemp(st.cur);
+    if (cmm) cmm.textContent = mmText(st);
+  });
+}
+if (tempLegend) {
+  tempLegend.addEventListener('click', function(ev) {
+    var btn = ev.target.closest('[data-key]');
+    if (!btn) return;
+    var key = btn.getAttribute('data-key');
+    var st = tempState.series[key];
+    if (!st) return;
+    st.enabled = !st.enabled;
+    updateTempLegend();
+    scheduleTempDraw();
+  });
+}
+ensureTempLegend();
+
+function trimTempHistory(now) {
+  var cutoff = now - TEMP_WINDOW_MS;
+  var t = tempState.t;
+  var drop = 0;
+  while (drop < t.length && t[drop] < cutoff) drop++;
+  // Also enforce hard point cap from the left.
+  var over = t.length - drop - TEMP_MAX_POINTS;
+  if (over > 0) drop += over;
+  if (drop <= 0) return;
+  tempState.t = t.slice(drop);
+  TEMP_SERIES.forEach(function(s) {
+    var st = tempState.series[s.key];
+    st.values = st.values.slice(drop);
+  });
+}
+function recomputeSeriesStats() {
+  TEMP_SERIES.forEach(function(s) {
+    var st = tempState.series[s.key];
+    var mn = null, mx = null;
+    for (var i = 0; i < st.values.length; i++) {
+      var v = st.values[i];
+      if (v == null) continue;
+      if (mn == null || v < mn) mn = v;
+      if (mx == null || v > mx) mx = v;
+    }
+    st.min = mn;
+    st.max = mx;
+    // Live current only — stale/disconnected shows "—" (not a frozen last value).
+    st.cur = null;
+    if (!st.stale) {
+      for (var j = st.values.length - 1; j >= 0; j--) {
+        if (st.values[j] != null) { st.cur = st.values[j]; break; }
+      }
+    }
+  });
+}
+function vescTempsStale(d) {
+  // Mirror controller: RX dead OR any STATUS age > 0.5 s clears temps.
+  if (d.vesc_rx_thread_alive === false) return true;
+  if (d.vesc_left_status_age_s != null && d.vesc_left_status_age_s > TEMP_VESC_STALE_S) return true;
+  if (d.vesc_right_status_age_s != null && d.vesc_right_status_age_s > TEMP_VESC_STALE_S) return true;
+  return false;
+}
+function pushTempSample(d, now) {
+  if (!tempCtx) return;
+  if (now - tempState.lastSampleAt < TEMP_MIN_SAMPLE_MS) return;
+  tempState.lastSampleAt = now;
+
+  var bmsOffline = d.bms_connected === false;
+  var bmsStale = bmsOffline || (d.bms_connected != null && d.bms_connected !== true);
+  var vescStale = vescTempsStale(d);
+
+  TEMP_SERIES.forEach(function(s) {
+    var st = tempState.series[s.key];
+    var raw = finiteOrNull(d[s.key]);
+    // When source is known-dead/stale, force a gap rather than hold a frozen value.
+    if (s.source === 'bms' && bmsOffline) raw = null;
+    if (s.source === 'vesc' && vescStale) raw = null;
+    st.values.push(raw);
+    st.stale = (s.source === 'bms' && bmsStale) ||
+               (s.source === 'vesc' && vescStale) ||
+               (s.source === 'pi' && raw == null);
+  });
+  tempState.t.push(now);
+  trimTempHistory(now);
+  recomputeSeriesStats();
+  updateTempLegend();
+
+  var n = tempState.t.length;
+  var spanMin = n > 1 ? ((tempState.t[n - 1] - tempState.t[0]) / 60000) : 0;
+  var meta = n + ' sample' + (n === 1 ? '' : 's') +
+    (spanMin > 0.05 ? (' · ' + spanMin.toFixed(1) + ' min window') : '') +
+    ' · °C';
+  if (tempMeta) tempMeta.textContent = meta;
+  if (tempEmpty) tempEmpty.classList.toggle('hidden', n > 0);
+  if (tempSr) {
+    var parts = [];
+    TEMP_SERIES.forEach(function(s) {
+      var st = tempState.series[s.key];
+      if (!st.enabled || st.cur == null) return;
+      parts.push(s.label + ' ' + st.cur.toFixed(1) + '°C');
+    });
+    tempSr.textContent = parts.length
+      ? ('Temperatures: ' + parts.join(', ') + '. ' + meta)
+      : (n ? 'Temperature samples recorded but no live readings.' : 'No temperature samples yet');
+  }
+  scheduleTempDraw();
+}
+
+function scheduleTempDraw() {
+  if (tempState.drawPending || !tempCtx) return;
+  tempState.drawPending = true;
+  requestAnimationFrame(function() {
+    tempState.drawPending = false;
+    drawTempChart();
+  });
+}
+function resizeTempCanvas() {
+  if (!tempCanvas || !tempCtx) return { w: 300, h: 220 };
+  var wrap = tempCanvas.parentElement;
+  var cssW = Math.max(200, (wrap && wrap.clientWidth) || 300);
+  var cssH = Math.max(160, (wrap && wrap.clientHeight) || 220);
+  // Cap DPR at 2 — Retina-sharp without 3× canvas cost on Pi browsers.
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  var w = Math.round(cssW * dpr);
+  var h = Math.round(cssH * dpr);
+  if (tempCanvas.width !== w || tempCanvas.height !== h) {
+    tempCanvas.width = w;
+    tempCanvas.height = h;
+  }
+  tempCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { w: cssW, h: cssH };
+}
+function drawTempChart() {
+  if (!tempCtx || !tempCanvas) return;
+  var size = resizeTempCanvas();
+  var W = size.w, H = size.h;
+  var pad = TEMP_PAD;
+  var plotW = Math.max(1, W - pad.l - pad.r);
+  var plotH = Math.max(1, H - pad.t - pad.b);
+  tempCtx.clearRect(0, 0, W, H);
+
+  var times = tempState.t;
+  if (!times.length) return;
+
+  var tMin = times[0];
+  var tMax = times[times.length - 1];
+  if (tMax <= tMin) tMax = tMin + 1000;
+  // Keep a fixed rolling window feel once we have enough history.
+  var windowStart = Math.max(tMin, tMax - TEMP_WINDOW_MS);
+  var yMin = null, yMax = null;
+  TEMP_SERIES.forEach(function(s) {
+    var st = tempState.series[s.key];
+    if (!st.enabled) return;
+    // Scale Y from points actually inside the visible window.
+    for (var i = 0; i < times.length; i++) {
+      if (times[i] < windowStart) continue;
+      var v = st.values[i];
+      if (v == null) continue;
+      if (yMin == null || v < yMin) yMin = v;
+      if (yMax == null || v > yMax) yMax = v;
+    }
+  });
+  if (yMin == null || yMax == null) {
+    tempCtx.fillStyle = TEMP_AXIS_COLOR;
+    tempCtx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
+    tempCtx.textAlign = 'left';
+    tempCtx.textBaseline = 'middle';
+    tempCtx.fillText('All series hidden or null', pad.l, H / 2);
+    return;
+  }
+  // Comfortable padding so lines don't hug the frame.
+  var padY = Math.max(2, (yMax - yMin) * 0.12);
+  if (yMax - yMin < 1) { padY = 2; }
+  yMin = Math.floor(yMin - padY);
+  yMax = Math.ceil(yMax + padY);
+  if (yMax <= yMin) yMax = yMin + 1;
+
+  function xOf(t) { return pad.l + ((t - windowStart) / (tMax - windowStart)) * plotW; }
+  function yOf(v) { return pad.t + (1 - (v - yMin) / (yMax - yMin)) * plotH; }
+
+  // Grid + axes
+  tempCtx.strokeStyle = TEMP_GRID_COLOR;
+  tempCtx.lineWidth = 1;
+  tempCtx.fillStyle = TEMP_AXIS_COLOR;
+  tempCtx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+  tempCtx.textAlign = 'right';
+  tempCtx.textBaseline = 'middle';
+  var yTicks = 4;
+  for (var gi = 0; gi <= yTicks; gi++) {
+    var gv = yMin + (gi / yTicks) * (yMax - yMin);
+    var gy = yOf(gv);
+    tempCtx.beginPath();
+    tempCtx.moveTo(pad.l, gy);
+    tempCtx.lineTo(pad.l + plotW, gy);
+    tempCtx.stroke();
+    tempCtx.fillText(gv.toFixed(0) + '°', pad.l - 6, gy);
+  }
+  tempCtx.textAlign = 'center';
+  tempCtx.textBaseline = 'top';
+  var xTicks = 4;
+  for (var xi = 0; xi <= xTicks; xi++) {
+    var tt = windowStart + (xi / xTicks) * (tMax - windowStart);
+    var gx = xOf(tt);
+    tempCtx.strokeStyle = TEMP_GRID_COLOR;
+    tempCtx.beginPath();
+    tempCtx.moveTo(gx, pad.t);
+    tempCtx.lineTo(gx, pad.t + plotH);
+    tempCtx.stroke();
+    var ageS = Math.max(0, (tMax - tt) / 1000);
+    var label = ageS < 60 ? ('-' + Math.round(ageS) + 's')
+                          : ('-' + (ageS / 60).toFixed(ageS < 600 ? 1 : 0) + 'm');
+    if (xi === xTicks) label = 'now';
+    tempCtx.fillStyle = TEMP_AXIS_COLOR;
+    tempCtx.fillText(label, gx, pad.t + plotH + 8);
+  }
+  // Plot border
+  tempCtx.strokeStyle = '#2a2d37';
+  tempCtx.strokeRect(pad.l + 0.5, pad.t + 0.5, plotW - 1, plotH - 1);
+
+  // Series lines (gap on null AND on large time jumps / SSE reconnect)
+  TEMP_SERIES.forEach(function(s) {
+    var st = tempState.series[s.key];
+    if (!st.enabled) return;
+    tempCtx.strokeStyle = s.color;
+    tempCtx.lineWidth = 1.8;
+    tempCtx.lineJoin = 'round';
+    tempCtx.lineCap = 'round';
+    tempCtx.globalAlpha = st.stale ? 0.45 : 1.0;
+    tempCtx.beginPath();
+    var penDown = false;
+    var prevT = null;
+    for (var i = 0; i < times.length; i++) {
+      var tv = times[i];
+      if (tv < windowStart) { penDown = false; prevT = null; continue; }
+      var val = st.values[i];
+      if (val == null) { penDown = false; prevT = tv; continue; }
+      if (prevT != null && (tv - prevT) > TEMP_GAP_MS) penDown = false;
+      var px = xOf(tv), py = yOf(val);
+      if (!penDown) { tempCtx.moveTo(px, py); penDown = true; }
+      else tempCtx.lineTo(px, py);
+      prevT = tv;
+    }
+    tempCtx.stroke();
+    // Current point marker (last non-null in window, even if series flagged stale)
+    if (times.length) {
+      var lastIdx = -1;
+      for (var k = st.values.length - 1; k >= 0; k--) {
+        if (st.values[k] != null && times[k] >= windowStart) { lastIdx = k; break; }
+      }
+      if (lastIdx >= 0) {
+        tempCtx.fillStyle = s.color;
+        tempCtx.beginPath();
+        tempCtx.arc(xOf(times[lastIdx]), yOf(st.values[lastIdx]), 2.6, 0, Math.PI * 2);
+        tempCtx.fill();
+      }
+    }
+    tempCtx.globalAlpha = 1.0;
+  });
+}
+
+var _tempResizeObs = null;
+if (typeof ResizeObserver !== 'undefined' && tempCanvas && tempCanvas.parentElement) {
+  _tempResizeObs = new ResizeObserver(function() { scheduleTempDraw(); });
+  _tempResizeObs.observe(tempCanvas.parentElement);
+} else if (tempCanvas) {
+  window.addEventListener('resize', scheduleTempDraw);
+}
 </script>
 </body>
 </html>"""
@@ -1531,6 +1995,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "bms_soc_pct": _finite_or_none(getattr(t, "bms_soc_pct", None), 1),
                     "bms_cell_delta_mv": getattr(t, "bms_cell_delta_mv", None),
                     "bms_temp_max_c": _finite_or_none(getattr(t, "bms_temp_max_c", None), 1),
+                    "bms_temp_min_c": _finite_or_none(getattr(t, "bms_temp_min_c", None), 1),
                     "bms_connected": getattr(t, "bms_connected", None),
                     "bms_charging": getattr(t, "bms_charging", None),
                     "bms_discharge_fet_on": getattr(t, "bms_discharge_fet_on", None),
@@ -1547,6 +2012,11 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "vesc_left_status_age_s": _finite_or_none(getattr(t, "vesc_left_status_age_s", None), 3),
                     "vesc_right_status_age_s": _finite_or_none(getattr(t, "vesc_right_status_age_s", None), 3),
                     "vesc_rx_thread_alive": getattr(t, "vesc_rx_thread_alive", None),
+                    "vesc_left_temp_c": _finite_or_none(getattr(t, "vesc_left_temp_c", None), 1),
+                    "vesc_right_temp_c": _finite_or_none(getattr(t, "vesc_right_temp_c", None), 1),
+                    "vesc_left_motor_temp_c": _finite_or_none(getattr(t, "vesc_left_motor_temp_c", None), 1),
+                    "vesc_right_motor_temp_c": _finite_or_none(getattr(t, "vesc_right_motor_temp_c", None), 1),
+                    "pi_cpu_temp_c": read_pi_cpu_temp_c(),
                     "wp_index": getattr(t, "wp_index", None),
                     "wp_total": getattr(t, "wp_total", None),
                     "wp_name": getattr(t, "wp_name", None),

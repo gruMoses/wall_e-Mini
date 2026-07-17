@@ -208,6 +208,54 @@ class TestFrameParsing(unittest.TestCase):
         with d._telem_lock:
             self.assertAlmostEqual(d._right_telem.temp_motor_c, 55.5, places=1)
 
+    def test_status4_decode_is_tenths_of_celsius(self):
+        """STATUS_4 packing is int16 ×10 → °C (both FET and motor winding)."""
+        d = self._driver()
+        # 12.3 °C FET, -5.0 °C motor (cold soak / sensor quirk) — signed int16.
+        d._parse_status4("left", _status4_frame(2, 12.3, -5.0, 0.0).data, time.monotonic())
+        with d._telem_lock:
+            self.assertAlmostEqual(d._left_telem.temp_fet_c, 12.3, places=1)
+            self.assertAlmostEqual(d._left_telem.temp_motor_c, -5.0, places=1)
+
+    def test_status4_short_frame_does_not_clobber_temps(self):
+        d = self._driver()
+        now = time.monotonic()
+        d._parse_status4("left", _status4_frame(2, 40.0, 50.0, 1.0).data, now)
+        d._parse_status4("left", b"\x00\x01\x02", now)  # too short — ignored
+        with d._telem_lock:
+            self.assertAlmostEqual(d._left_telem.temp_fet_c, 40.0, places=1)
+            self.assertAlmostEqual(d._left_telem.temp_motor_c, 50.0, places=1)
+
+    def test_get_telemetry_exposes_fet_and_motor_temps(self):
+        """STATUS_4 FET + motor temps must surface on VescTelemetry for the
+        debug temperature history graph (and follow-me logs)."""
+        d = self._driver()
+        now = time.monotonic()
+        # RPM frame required so get_telemetry() returns non-None.
+        d._parse_status("left", _status_frame(2, 100, 1.0, 0.1).data, now)
+        d._parse_status("right", _status_frame(1, 110, 1.1, 0.1).data, now)
+        d._parse_status4("left", _status4_frame(2, 41.5, 50.0, 2.0).data, now)
+        d._parse_status4("right", _status4_frame(1, 42.0, 51.5, 2.1).data, now)
+        telem = d.get_telemetry()
+        self.assertIsNotNone(telem)
+        self.assertAlmostEqual(telem.left_temp_c, 41.5, places=1)
+        self.assertAlmostEqual(telem.right_temp_c, 42.0, places=1)
+        self.assertAlmostEqual(telem.left_motor_temp_c, 50.0, places=1)
+        self.assertAlmostEqual(telem.right_motor_temp_c, 51.5, places=1)
+
+    def test_get_telemetry_temps_none_until_status4(self):
+        """RPM-only traffic must not invent temperatures."""
+        d = self._driver()
+        now = time.monotonic()
+        d._parse_status("left", _status_frame(2, 100, 1.0, 0.1).data, now)
+        d._parse_status("right", _status_frame(1, 110, 1.1, 0.1).data, now)
+        telem = d.get_telemetry()
+        self.assertIsNotNone(telem)
+        self.assertIsNone(telem.left_temp_c)
+        self.assertIsNone(telem.right_temp_c)
+        self.assertIsNone(telem.left_motor_temp_c)
+        self.assertIsNone(telem.right_motor_temp_c)
+
     def test_current_in_parsed(self):
         d = self._driver()
         d._parse_status4("left", _status4_frame(2, 30.0, 40.0, 8.9).data, time.monotonic())

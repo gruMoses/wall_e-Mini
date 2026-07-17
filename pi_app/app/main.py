@@ -646,6 +646,7 @@ def run() -> None:
                         bms_soc_pct=(bms_state.soc_pct if bms_state is not None else None),
                         bms_cell_delta_mv=(bms_state.cell_delta_mv if bms_state is not None else None),
                         bms_temp_max_c=(bms_state.temp_max_c if bms_state is not None else None),
+                        bms_temp_min_c=(bms_state.temp_min_c if bms_state is not None else None),
                         bms_connected=(bms_state.connected if bms_state is not None else None),
                         bms_charging=bms_charging,
                         bms_discharge_fet_on=(bms_state.discharge_fet_on if bms_state is not None else None),
@@ -662,6 +663,10 @@ def run() -> None:
                         vesc_left_status_age_s=telem.get("vesc_left_status_age_s"),
                         vesc_right_status_age_s=telem.get("vesc_right_status_age_s"),
                         vesc_rx_thread_alive=telem.get("vesc_rx_thread_alive"),
+                        vesc_left_temp_c=telem.get("vesc_left_temp_c"),
+                        vesc_right_temp_c=telem.get("vesc_right_temp_c"),
+                        vesc_left_motor_temp_c=telem.get("vesc_left_motor_temp_c"),
+                        vesc_right_motor_temp_c=telem.get("vesc_right_motor_temp_c"),
                         # Follow-Me visualization (Items 2 + 4)
                         follow_mode=telem.get("follow_mode"),
                         trail_points_xy=telem.get("trail_points_xy"),

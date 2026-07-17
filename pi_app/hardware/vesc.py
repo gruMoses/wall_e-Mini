@@ -87,8 +87,10 @@ class VescTelemetry:
     right_rpm: Optional[int] = None
     left_current_a: Optional[float] = None
     right_current_a: Optional[float] = None
-    left_temp_c: Optional[float] = None
+    left_temp_c: Optional[float] = None       # MOSFET / FET (°C)
     right_temp_c: Optional[float] = None
+    left_motor_temp_c: Optional[float] = None  # winding / motor (°C)
+    right_motor_temp_c: Optional[float] = None
     voltage_v: Optional[float] = None
     timestamp: float = 0.0
     can_send_alert: bool = False
@@ -285,6 +287,8 @@ class VescCanDriver:
                 right_current_a=r.current_a,
                 left_temp_c=l.temp_fet_c,
                 right_temp_c=r.temp_fet_c,
+                left_motor_temp_c=l.temp_motor_c,
+                right_motor_temp_c=r.temp_motor_c,
                 voltage_v=voltage,
                 timestamp=max(l.last_status_s, r.last_status_s),
                 left_status_age_s=(now - l.last_status_s) if l.last_status_s > 0.0 else None,

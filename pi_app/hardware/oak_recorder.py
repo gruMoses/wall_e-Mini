@@ -113,9 +113,15 @@ class RecordingTelemetry:
     bms_soc_pct: float | None = None
     bms_cell_delta_mv: int | None = None
     bms_temp_max_c: float | None = None
+    bms_temp_min_c: float | None = None
     bms_connected: bool | None = None
     bms_charging: bool | None = None
     bms_discharge_fet_on: bool | None = None
+    # VESC temperatures (°C) from CAN STATUS_4 — FET = MOSFET heatsink, motor = winding.
+    vesc_left_temp_c: float | None = None
+    vesc_right_temp_c: float | None = None
+    vesc_left_motor_temp_c: float | None = None
+    vesc_right_motor_temp_c: float | None = None
     # Controller charger_inhibit state this tick (2026-06-13 motor-cutout bug —
     # this was surfaced nowhere before, so a mid-drive stop looked like a
     # follow-me/obstacle bug instead of the real charger-inhibit cause).
