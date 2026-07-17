@@ -81,6 +81,38 @@ def test_debug_page_temperature_history_markers(client):
     assert "cdn." not in body.lower()
     assert "chart.js" not in body.lower()
     assert "googleapis" not in body.lower()
+    # Offline-safe: no external <script src=…> (all logic is inline).
+    assert "<script src=" not in body.lower()
+
+
+def test_debug_page_temperature_structural_invariants(client):
+    """Retention bounds, gap semantics, a11y hooks, and stale alignment with
+    the controller's 0.5 s STATUS-age cutoff must stay in the page source."""
+    body = client.get("/debug").get_data(as_text=True)
+    # Bounded 10-minute ring buffer hard caps.
+    assert "TEMP_WINDOW_MS = 10 * 60 * 1000" in body
+    assert "TEMP_MAX_POINTS = 720" in body
+    assert "TEMP_MIN_SAMPLE_MS = 900" in body
+    # SSE reconnect / tab freeze must not draw a diagonal across a time hole.
+    assert "TEMP_GAP_MS = 5000" in body
+    assert "(tv - prevT) > TEMP_GAP_MS" in body
+    # VESC stale matches controller open-loop fallback (>0.5 s any motor).
+    assert "TEMP_VESC_STALE_S = 0.5" in body
+    assert "function vescTempsStale" in body
+    # Null / disconnected sensors leave gaps (force raw = null).
+    assert "bmsOffline" in body
+    assert "vescStale" in body
+    # Accessibility: toggle state + live summary for screen readers.
+    assert 'aria-pressed="' in body
+    assert 'aria-live="polite"' in body
+    assert 'id="temp-sr"' in body
+    assert 'role="group"' in body
+    # High-DPI canvas capped at 2× for Pi cost.
+    assert "devicePixelRatio" in body
+    assert "Math.min(window.devicePixelRatio || 1, 2)" in body
+    # Legend updates in place (no full rebuild per sample → no focus steal).
+    assert "function updateTempLegend" in body
+    assert "legendBuilt" in body
 
 
 def test_root_dashboard_links_to_debug(client):
@@ -295,3 +327,50 @@ def test_read_pi_cpu_temp_c_missing_file(tmp_path):
     ov._pi_cpu_temp_cache = None
     val = read_pi_cpu_temp_c(now=time.monotonic(), path=str(tmp_path / "nope"))
     assert val is None
+
+
+def test_read_pi_cpu_temp_c_out_of_range_rejected(tmp_path):
+    """Garbage or implausible thermal_zone values must not reach the graph."""
+    from pi_app.web.oak_viewer import read_pi_cpu_temp_c
+    import pi_app.web.oak_viewer as ov
+
+    p = tmp_path / "temp"
+    # 200 °C is above the 125 °C sanity cap.
+    p.write_text("200000\n")
+    ov._pi_cpu_temp_cache = None
+    assert read_pi_cpu_temp_c(now=time.monotonic(), path=str(p)) is None
+    # Non-numeric
+    p.write_text("not-a-number\n")
+    ov._pi_cpu_temp_cache = None
+    assert read_pi_cpu_temp_c(now=time.monotonic(), path=str(p)) is None
+
+
+def test_sse_temperature_fields_reject_non_finite():
+    """NaN/Inf in RecordingTelemetry must serialize as null, not JSON null-ish
+    numbers that break the canvas finiteOrNull path."""
+    t = RecordingTelemetry(
+        timestamp=time.time(), mode="MANUAL", throttle_scale=1.0,
+        obstacle_distance_m=None, motor_left=128, motor_right=128, is_armed=False,
+        depth_stats=None, person_detections=[],
+        bms_temp_max_c=float("nan"),
+        vesc_left_temp_c=float("inf"),
+        vesc_right_motor_temp_c=float("-inf"),
+    )
+    d = _first_sse_payload(_OneShotRecorder(t))
+    assert d["bms_temp_max_c"] is None
+    assert d["vesc_left_temp_c"] is None
+    assert d["vesc_right_motor_temp_c"] is None
+
+
+def test_sse_bms_temp_min_is_independent_of_max():
+    """Min and max must both survive the SSE path (regression: only max was plumbed)."""
+    t = RecordingTelemetry(
+        timestamp=time.time(), mode="MANUAL", throttle_scale=1.0,
+        obstacle_distance_m=2.0, motor_left=128, motor_right=128, is_armed=True,
+        depth_stats=None, person_detections=[],
+        bms_temp_max_c=40, bms_temp_min_c=22,  # ints like Daly BmsState
+        bms_connected=True,
+    )
+    d = _first_sse_payload(_OneShotRecorder(t))
+    assert d["bms_temp_max_c"] == pytest.approx(40.0)
+    assert d["bms_temp_min_c"] == pytest.approx(22.0)

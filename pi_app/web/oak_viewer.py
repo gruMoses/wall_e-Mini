@@ -123,9 +123,11 @@ def read_pi_cpu_temp_c(now: float | None = None,
             raw = f.read().strip()
         milli = int(raw)
         # thermal_zone reports millidegrees C on Linux; reject nonsense.
+        # Typical Pi idle ~40–55 °C; 125 °C is the SoC hard limit band.
         c = milli / 1000.0
         if -40.0 <= c <= 125.0:
             val = round(c, 1)
+        # else: leave val None (out-of-range / garbage sysfs)
     except (OSError, ValueError, TypeError):
         val = None
     _pi_cpu_temp_cache = (mono, val)
@@ -1039,23 +1041,27 @@ _DEBUG_HTML = """<!DOCTYPE html>
                user-select: none; background: #12151d; border: 1px solid #2a2d37;
                border-radius: 999px; padding: 5px 10px 5px 8px; font-size: 11px;
                color: #c8ccd6; transition: opacity 0.12s, border-color 0.12s; }
-  .temp-chip.off { opacity: 0.38; }
-  .temp-chip.stale { border-color: #5a4a20; }
+  .temp-chip:focus-visible { outline: 2px solid #6bb6ff; outline-offset: 2px; }
+  .temp-chip.off { opacity: 0.45; }
+  .temp-chip.stale { border-color: #8a7020; }
   .temp-chip .swatch { width: 10px; height: 10px; border-radius: 50%;
-                       box-shadow: 0 0 0 1px rgba(255,255,255,0.08); flex-shrink: 0; }
+                       box-shadow: 0 0 0 1px rgba(255,255,255,0.12); flex-shrink: 0; }
   .temp-chip .cname { font-weight: 600; letter-spacing: 0.2px; }
   .temp-chip .cval { font-variant-numeric: tabular-nums; font-weight: 700;
                      color: #e8eaf0; min-width: 3.6em; text-align: right; }
-  .temp-chip .cmm { color: #5b6472; font-variant-numeric: tabular-nums; font-size: 10px; }
-  .temp-meta { font-size: 11px; color: #5b6472; white-space: nowrap; }
+  /* Secondary text: #8b93a3 on #12151d ≈ 5:1 contrast (was #5b6472, too dim). */
+  .temp-chip .cmm { color: #8b93a3; font-variant-numeric: tabular-nums; font-size: 10px; }
+  .temp-meta { font-size: 11px; color: #8b93a3; white-space: nowrap; }
   .temp-canvas-wrap { position: relative; width: 100%; height: 280px;
                       background: #0b0d13; border: 1px solid #22252f; border-radius: 8px;
                       overflow: hidden; }
   .temp-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
   .temp-empty { position: absolute; inset: 0; display: flex; align-items: center;
-                justify-content: center; color: #5b6472; font-size: 13px;
+                justify-content: center; color: #8b93a3; font-size: 13px;
                 pointer-events: none; }
   .temp-empty.hidden { display: none; }
+  .temp-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+             overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
   @media (max-width: 640px) {
     .temp-canvas-wrap { height: 220px; }
     .temp-chip .cmm { display: none; }
@@ -1134,16 +1140,19 @@ _DEBUG_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="panel" id="p-temp">
-    <h2>Temperature History <span style="font-weight:400;color:#5b6472;">(°C · last 10 min)</span></h2>
+    <h2>Temperature History <span style="font-weight:400;color:#8b93a3;">(°C · last 10 min)</span></h2>
     <div class="temp-toolbar">
-      <div class="temp-legend" id="temp-legend"></div>
+      <div class="temp-legend" id="temp-legend" role="group" aria-label="Temperature series toggles"></div>
       <div class="temp-meta" id="temp-meta">waiting for samples&hellip;</div>
     </div>
     <div class="temp-canvas-wrap">
-      <canvas id="temp-canvas" width="1000" height="280" aria-label="Temperature history graph"></canvas>
+      <canvas id="temp-canvas" width="1000" height="280"
+              role="img" aria-label="Temperature history graph"
+              aria-describedby="temp-sr"></canvas>
       <div class="temp-empty" id="temp-empty">No temperature samples yet</div>
+      <div class="temp-sr" id="temp-sr" aria-live="polite">No temperature samples yet</div>
     </div>
-    <div class="hint">Click a series to toggle &middot; null / disconnected sensors leave gaps &middot;
+    <div class="hint">Click or press a series to toggle &middot; null / disconnected sensors leave gaps &middot;
       in-memory ring buffer (no disk) &middot; Pi CPU from thermal_zone0</div>
   </div>
 
@@ -1393,21 +1402,30 @@ setInterval(pollUps, 1000);
 var TEMP_WINDOW_MS = 10 * 60 * 1000;   // 10 minutes of history
 var TEMP_MAX_POINTS = 720;             // hard cap (~1.2 Hz × 10 min)
 var TEMP_MIN_SAMPLE_MS = 900;          // throttle samples for Pi CPU
+// Break stroke when consecutive samples are farther apart than this so an
+// SSE drop / tab freeze does not draw a misleading diagonal across the gap.
+var TEMP_GAP_MS = 5000;
+// Match controller open-loop fallback: any STATUS(9) age > 0.5 s is stale.
+var TEMP_VESC_STALE_S = 0.5;
 var TEMP_PAD = { l: 44, r: 12, t: 14, b: 28 };
+var TEMP_AXIS_COLOR = '#8b93a3';
+var TEMP_GRID_COLOR = '#1c2030';
+// Distinct hues (not two golds) so BMS min/max stay separable at a glance.
 var TEMP_SERIES = [
-  { key: 'bms_temp_max_c',       label: 'BMS Max',    color: '#f0b344', source: 'bms'  },
-  { key: 'bms_temp_min_c',       label: 'BMS Min',    color: '#c9a227', source: 'bms'  },
-  { key: 'vesc_left_temp_c',     label: 'VESC L FET', color: '#6bb6ff', source: 'vesc' },
-  { key: 'vesc_right_temp_c',   label: 'VESC R FET', color: '#4ecdc4', source: 'vesc' },
+  { key: 'bms_temp_max_c',          label: 'BMS Max',    color: '#f0b344', source: 'bms'  },
+  { key: 'bms_temp_min_c',          label: 'BMS Min',    color: '#86efac', source: 'bms'  },
+  { key: 'vesc_left_temp_c',        label: 'VESC L FET', color: '#6bb6ff', source: 'vesc' },
+  { key: 'vesc_right_temp_c',       label: 'VESC R FET', color: '#4ecdc4', source: 'vesc' },
   { key: 'vesc_left_motor_temp_c',  label: 'VESC L Mot', color: '#a78bfa', source: 'vesc' },
   { key: 'vesc_right_motor_temp_c', label: 'VESC R Mot', color: '#f472b6', source: 'vesc' },
-  { key: 'pi_cpu_temp_c',        label: 'Pi CPU',     color: '#ff8a65', source: 'pi'   }
+  { key: 'pi_cpu_temp_c',           label: 'Pi CPU',     color: '#ff8a65', source: 'pi'   }
 ];
 var tempState = {
   t: [],                               // sample times (Date.now ms)
   series: {},                          // key -> { enabled, values:[], cur, min, max, stale }
   lastSampleAt: 0,
-  drawPending: false
+  drawPending: false,
+  legendBuilt: false
 };
 TEMP_SERIES.forEach(function(s) {
   tempState.series[s.key] = {
@@ -1419,6 +1437,7 @@ var tempCanvas = document.getElementById('temp-canvas');
 var tempEmpty = document.getElementById('temp-empty');
 var tempMeta = document.getElementById('temp-meta');
 var tempLegend = document.getElementById('temp-legend');
+var tempSr = document.getElementById('temp-sr');
 var tempCtx = tempCanvas ? tempCanvas.getContext('2d') : null;
 
 function finiteOrNull(v) {
@@ -1427,23 +1446,56 @@ function finiteOrNull(v) {
 function fmtTemp(v) {
   return v == null ? '—' : v.toFixed(1) + '°';
 }
-function rebuildTempLegend() {
-  if (!tempLegend) return;
+function seriesTitle(s, st) {
+  return 'Toggle ' + s.label + (st.stale ? ' (stale/disconnected)' : '');
+}
+function seriesAria(s, st) {
+  var state = st.enabled ? 'shown' : 'hidden';
+  var val = st.cur == null ? 'no reading' : (st.cur.toFixed(1) + ' degrees C');
+  var stale = st.stale ? ', stale' : '';
+  return s.label + ', ' + state + ', ' + val + stale;
+}
+function chipClass(st) {
+  return 'temp-chip' + (st.enabled ? '' : ' off') + (st.stale ? ' stale' : '');
+}
+function mmText(st) {
+  if (st.min == null || st.max == null) return '';
+  return ' · ' + st.min.toFixed(1) + '–' + st.max.toFixed(1);
+}
+/** Build legend buttons once; later samples only patch values (keeps focus). */
+function ensureTempLegend() {
+  if (!tempLegend || tempState.legendBuilt) return;
   var html = '';
   TEMP_SERIES.forEach(function(s) {
     var st = tempState.series[s.key];
-    var cls = 'temp-chip' + (st.enabled ? '' : ' off') + (st.stale ? ' stale' : '');
-    var mm = (st.min == null || st.max == null)
-      ? ''
-      : (' · ' + st.min.toFixed(1) + '–' + st.max.toFixed(1));
-    html += '<button type="button" class="' + cls + '" data-key="' + s.key + '" ' +
-            'title="Toggle ' + esc(s.label) + (st.stale ? ' (stale/disconnected)' : '') + '">' +
-            '<span class="swatch" style="background:' + s.color + '"></span>' +
+    html += '<button type="button" class="' + chipClass(st) + '" data-key="' + s.key + '" ' +
+            'aria-pressed="' + (st.enabled ? 'true' : 'false') + '" ' +
+            'title="' + esc(seriesTitle(s, st)) + '" ' +
+            'aria-label="' + esc(seriesAria(s, st)) + '">' +
+            '<span class="swatch" style="background:' + s.color + '" aria-hidden="true"></span>' +
             '<span class="cname">' + esc(s.label) + '</span>' +
             '<span class="cval">' + fmtTemp(st.cur) + '</span>' +
-            '<span class="cmm">' + esc(mm) + '</span></button>';
+            '<span class="cmm">' + esc(mmText(st)) + '</span></button>';
   });
   tempLegend.innerHTML = html;
+  tempState.legendBuilt = true;
+}
+function updateTempLegend() {
+  if (!tempLegend) return;
+  if (!tempState.legendBuilt) { ensureTempLegend(); return; }
+  TEMP_SERIES.forEach(function(s) {
+    var st = tempState.series[s.key];
+    var btn = tempLegend.querySelector('[data-key="' + s.key + '"]');
+    if (!btn) return;
+    btn.className = chipClass(st);
+    btn.setAttribute('aria-pressed', st.enabled ? 'true' : 'false');
+    btn.title = seriesTitle(s, st);
+    btn.setAttribute('aria-label', seriesAria(s, st));
+    var cval = btn.querySelector('.cval');
+    var cmm = btn.querySelector('.cmm');
+    if (cval) cval.textContent = fmtTemp(st.cur);
+    if (cmm) cmm.textContent = mmText(st);
+  });
 }
 if (tempLegend) {
   tempLegend.addEventListener('click', function(ev) {
@@ -1453,11 +1505,11 @@ if (tempLegend) {
     var st = tempState.series[key];
     if (!st) return;
     st.enabled = !st.enabled;
-    rebuildTempLegend();
+    updateTempLegend();
     scheduleTempDraw();
   });
 }
-rebuildTempLegend();
+ensureTempLegend();
 
 function trimTempHistory(now) {
   var cutoff = now - TEMP_WINDOW_MS;
@@ -1486,45 +1538,65 @@ function recomputeSeriesStats() {
     }
     st.min = mn;
     st.max = mx;
-    // Current = last non-null in window (may lag if sensor went null).
+    // Live current only — stale/disconnected shows "—" (not a frozen last value).
     st.cur = null;
-    for (var j = st.values.length - 1; j >= 0; j--) {
-      if (st.values[j] != null) { st.cur = st.values[j]; break; }
+    if (!st.stale) {
+      for (var j = st.values.length - 1; j >= 0; j--) {
+        if (st.values[j] != null) { st.cur = st.values[j]; break; }
+      }
     }
   });
+}
+function vescTempsStale(d) {
+  // Mirror controller: RX dead OR any STATUS age > 0.5 s clears temps.
+  if (d.vesc_rx_thread_alive === false) return true;
+  if (d.vesc_left_status_age_s != null && d.vesc_left_status_age_s > TEMP_VESC_STALE_S) return true;
+  if (d.vesc_right_status_age_s != null && d.vesc_right_status_age_s > TEMP_VESC_STALE_S) return true;
+  return false;
 }
 function pushTempSample(d, now) {
   if (!tempCtx) return;
   if (now - tempState.lastSampleAt < TEMP_MIN_SAMPLE_MS) return;
   tempState.lastSampleAt = now;
 
-  var bmsLive = d.bms_connected === true;
-  var vescLive = d.vesc_rx_thread_alive !== false &&
-                 !(d.vesc_left_status_age_s != null && d.vesc_left_status_age_s > 0.5 &&
-                   d.vesc_right_status_age_s != null && d.vesc_right_status_age_s > 0.5);
+  var bmsOffline = d.bms_connected === false;
+  var bmsStale = bmsOffline || (d.bms_connected != null && d.bms_connected !== true);
+  var vescStale = vescTempsStale(d);
 
   TEMP_SERIES.forEach(function(s) {
     var st = tempState.series[s.key];
     var raw = finiteOrNull(d[s.key]);
-    // When source is known-dead, force a gap rather than hold a frozen value.
-    if (s.source === 'bms' && d.bms_connected === false) raw = null;
-    if (s.source === 'vesc' && d.vesc_rx_thread_alive === false) raw = null;
+    // When source is known-dead/stale, force a gap rather than hold a frozen value.
+    if (s.source === 'bms' && bmsOffline) raw = null;
+    if (s.source === 'vesc' && vescStale) raw = null;
     st.values.push(raw);
-    st.stale = (s.source === 'bms' && !bmsLive && d.bms_connected != null) ||
-               (s.source === 'vesc' && !vescLive) ||
+    st.stale = (s.source === 'bms' && bmsStale) ||
+               (s.source === 'vesc' && vescStale) ||
                (s.source === 'pi' && raw == null);
   });
   tempState.t.push(now);
   trimTempHistory(now);
   recomputeSeriesStats();
-  rebuildTempLegend();
+  updateTempLegend();
 
   var n = tempState.t.length;
   var spanMin = n > 1 ? ((tempState.t[n - 1] - tempState.t[0]) / 60000) : 0;
-  tempMeta.textContent = n + ' sample' + (n === 1 ? '' : 's') +
+  var meta = n + ' sample' + (n === 1 ? '' : 's') +
     (spanMin > 0.05 ? (' · ' + spanMin.toFixed(1) + ' min window') : '') +
     ' · °C';
+  if (tempMeta) tempMeta.textContent = meta;
   if (tempEmpty) tempEmpty.classList.toggle('hidden', n > 0);
+  if (tempSr) {
+    var parts = [];
+    TEMP_SERIES.forEach(function(s) {
+      var st = tempState.series[s.key];
+      if (!st.enabled || st.cur == null) return;
+      parts.push(s.label + ' ' + st.cur.toFixed(1) + '°C');
+    });
+    tempSr.textContent = parts.length
+      ? ('Temperatures: ' + parts.join(', ') + '. ' + meta)
+      : (n ? 'Temperature samples recorded but no live readings.' : 'No temperature samples yet');
+  }
   scheduleTempDraw();
 }
 
@@ -1537,10 +1609,11 @@ function scheduleTempDraw() {
   });
 }
 function resizeTempCanvas() {
-  if (!tempCanvas || !tempCtx) return;
+  if (!tempCanvas || !tempCtx) return { w: 300, h: 220 };
   var wrap = tempCanvas.parentElement;
-  var cssW = Math.max(200, wrap.clientWidth || 300);
-  var cssH = Math.max(160, wrap.clientHeight || 220);
+  var cssW = Math.max(200, (wrap && wrap.clientWidth) || 300);
+  var cssH = Math.max(160, (wrap && wrap.clientHeight) || 220);
+  // Cap DPR at 2 — Retina-sharp without 3× canvas cost on Pi browsers.
   var dpr = Math.min(window.devicePixelRatio || 1, 2);
   var w = Math.round(cssW * dpr);
   var h = Math.round(cssH * dpr);
@@ -1572,12 +1645,20 @@ function drawTempChart() {
   TEMP_SERIES.forEach(function(s) {
     var st = tempState.series[s.key];
     if (!st.enabled) return;
-    if (st.min != null) yMin = (yMin == null) ? st.min : Math.min(yMin, st.min);
-    if (st.max != null) yMax = (yMax == null) ? st.max : Math.max(yMax, st.max);
+    // Scale Y from points actually inside the visible window.
+    for (var i = 0; i < times.length; i++) {
+      if (times[i] < windowStart) continue;
+      var v = st.values[i];
+      if (v == null) continue;
+      if (yMin == null || v < yMin) yMin = v;
+      if (yMax == null || v > yMax) yMax = v;
+    }
   });
   if (yMin == null || yMax == null) {
-    tempCtx.fillStyle = '#5b6472';
+    tempCtx.fillStyle = TEMP_AXIS_COLOR;
     tempCtx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
+    tempCtx.textAlign = 'left';
+    tempCtx.textBaseline = 'middle';
     tempCtx.fillText('All series hidden or null', pad.l, H / 2);
     return;
   }
@@ -1592,9 +1673,9 @@ function drawTempChart() {
   function yOf(v) { return pad.t + (1 - (v - yMin) / (yMax - yMin)) * plotH; }
 
   // Grid + axes
-  tempCtx.strokeStyle = '#1c2030';
+  tempCtx.strokeStyle = TEMP_GRID_COLOR;
   tempCtx.lineWidth = 1;
-  tempCtx.fillStyle = '#5b6472';
+  tempCtx.fillStyle = TEMP_AXIS_COLOR;
   tempCtx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
   tempCtx.textAlign = 'right';
   tempCtx.textBaseline = 'middle';
@@ -1614,7 +1695,7 @@ function drawTempChart() {
   for (var xi = 0; xi <= xTicks; xi++) {
     var tt = windowStart + (xi / xTicks) * (tMax - windowStart);
     var gx = xOf(tt);
-    tempCtx.strokeStyle = '#1c2030';
+    tempCtx.strokeStyle = TEMP_GRID_COLOR;
     tempCtx.beginPath();
     tempCtx.moveTo(gx, pad.t);
     tempCtx.lineTo(gx, pad.t + plotH);
@@ -1623,14 +1704,14 @@ function drawTempChart() {
     var label = ageS < 60 ? ('-' + Math.round(ageS) + 's')
                           : ('-' + (ageS / 60).toFixed(ageS < 600 ? 1 : 0) + 'm');
     if (xi === xTicks) label = 'now';
-    tempCtx.fillStyle = '#5b6472';
+    tempCtx.fillStyle = TEMP_AXIS_COLOR;
     tempCtx.fillText(label, gx, pad.t + plotH + 8);
   }
   // Plot border
   tempCtx.strokeStyle = '#2a2d37';
   tempCtx.strokeRect(pad.l + 0.5, pad.t + 0.5, plotW - 1, plotH - 1);
 
-  // Series lines (gap on null)
+  // Series lines (gap on null AND on large time jumps / SSE reconnect)
   TEMP_SERIES.forEach(function(s) {
     var st = tempState.series[s.key];
     if (!st.enabled) return;
@@ -1641,18 +1722,21 @@ function drawTempChart() {
     tempCtx.globalAlpha = st.stale ? 0.45 : 1.0;
     tempCtx.beginPath();
     var penDown = false;
+    var prevT = null;
     for (var i = 0; i < times.length; i++) {
       var tv = times[i];
-      if (tv < windowStart) { penDown = false; continue; }
+      if (tv < windowStart) { penDown = false; prevT = null; continue; }
       var val = st.values[i];
-      if (val == null) { penDown = false; continue; }
+      if (val == null) { penDown = false; prevT = tv; continue; }
+      if (prevT != null && (tv - prevT) > TEMP_GAP_MS) penDown = false;
       var px = xOf(tv), py = yOf(val);
       if (!penDown) { tempCtx.moveTo(px, py); penDown = true; }
       else tempCtx.lineTo(px, py);
+      prevT = tv;
     }
     tempCtx.stroke();
-    // Current point marker
-    if (st.cur != null && times.length) {
+    // Current point marker (last non-null in window, even if series flagged stale)
+    if (times.length) {
       var lastIdx = -1;
       for (var k = st.values.length - 1; k >= 0; k--) {
         if (st.values[k] != null && times[k] >= windowStart) { lastIdx = k; break; }
@@ -1672,7 +1756,7 @@ var _tempResizeObs = null;
 if (typeof ResizeObserver !== 'undefined' && tempCanvas && tempCanvas.parentElement) {
   _tempResizeObs = new ResizeObserver(function() { scheduleTempDraw(); });
   _tempResizeObs.observe(tempCanvas.parentElement);
-} else {
+} else if (tempCanvas) {
   window.addEventListener('resize', scheduleTempDraw);
 }
 </script>
