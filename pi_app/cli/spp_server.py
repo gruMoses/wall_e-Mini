@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
+import os
 import signal
 import sys
 import json
 import time
 from pathlib import Path
 
-try:
-    import bluetooth  # pybluez
-except Exception:
-    print("PyBluez not installed. Install with: sudo apt-get install -y python3-bluez", file=sys.stderr)
-    raise
+# NOTE: ``import bluetooth`` (pybluez) is deliberately deferred into
+# ``run_server()`` so this module stays importable on dev/CI hosts without
+# pybluez. That lets the control-output gate below (and its tests) be exercised
+# without a Bluetooth stack.
 
 try:
     from pi_app.io.bt_proto import parse_cmd2, accept_cmd2, parse_v1, floats_to_bytes
@@ -20,6 +20,60 @@ except ModuleNotFoundError:
     from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT  # type: ignore
 
 SPP_UUID = "00001101-0000-1000-8000-00805F9B34FB"
+
+# Shared override file that ``pi_app/app/main.py`` polls on a 600 ms freshness
+# window and feeds straight into ``controller.process(bt_override_bytes=...)``
+# (main.py:435,527 -> controller.py:827). Writing here is equivalent to
+# commanding the tracks whenever RC has the robot armed.
+SHARED_OVERRIDE_PATH = "/tmp/wall_e_bt_latest.json"
+
+# Opt-in gate for the SPP -> motor-override channel. Default OFF.
+#
+# With the gate OFF (the default) the SPP server still accepts connections and
+# parses / ACKs / logs commands for bench diagnostics, but it does NOT write the
+# shared override file — so Bluetooth SPP data cannot reach
+# ``controller.process`` or the motors. This retires the historical
+# "uncoordinated third writer" of the override file: the RC transmitter (via the
+# Arduino, the safety authority) and the session-gated web teleop
+# (``pi_app/web/teleop.py`` — arming ceremony, latched e-stop, 250 ms deadman,
+# speed cap, stale guard) remain the only two writers that can command motion.
+#
+# Set ``WALL_E_SPP_CONTROL_ENABLED=1`` to re-enable the legacy Android/BT
+# bench-drive path. That path bypasses the entire web-teleop session-safety
+# layer and is gated only by RC arming + the 600 ms file-freshness fallback, so
+# enable it only for supervised bench testing.
+SPP_CONTROL_ENV_VAR = "WALL_E_SPP_CONTROL_ENABLED"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def control_output_enabled() -> bool:
+    """Return True only if the SPP -> motor-override channel is explicitly enabled."""
+    return os.environ.get(SPP_CONTROL_ENV_VAR, "").strip().lower() in _TRUTHY
+
+
+def write_control_override(left_byte: int, right_byte: int, *,
+                           path: str = SHARED_OVERRIDE_PATH,
+                           now=time.time) -> bool:
+    """Write the shared motor-override file consumed by ``main.py``.
+
+    Returns ``True`` if the file was written. Returns ``False`` — writing
+    nothing — when the SPP control channel is disabled (the default), which is
+    the mechanism that keeps Bluetooth SPP data from reaching the motors. Write
+    errors are swallowed and reported as ``False``.
+    """
+    if not control_output_enabled():
+        return False
+    try:
+        with open(path, "w") as sf:
+            json.dump({
+                "left_byte": int(left_byte),
+                "right_byte": int(right_byte),
+                "last_update_epoch_s": now(),
+            }, sf)
+        return True
+    except Exception as e:
+        print(f"Error writing shared file: {e}", flush=True)
+        return False
 
 
 def ints_to_bytes(left_i: int, right_i: int):
@@ -44,6 +98,19 @@ def ints_to_bytes(left_i: int, right_i: int):
 
 
 def run_server() -> int:
+    try:
+        import bluetooth  # pybluez
+    except Exception:
+        print("PyBluez not installed. Install with: sudo apt-get install -y python3-bluez", file=sys.stderr)
+        raise
+
+    if control_output_enabled():
+        print(f"SPP control output ENABLED ({SPP_CONTROL_ENV_VAR}=1) — "
+              f"Bluetooth commands will drive the motors when RC is armed", flush=True)
+    else:
+        print(f"SPP control output DISABLED (default; set {SPP_CONTROL_ENV_VAR}=1 to enable) — "
+              f"commands are parsed/ACKed/logged but will NOT reach the motors", flush=True)
+
     server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
     server_sock.bind(("", bluetooth.PORT_ANY))
     server_sock.listen(1)
@@ -131,29 +198,19 @@ def run_server() -> int:
                             left_byte, right_byte = ints_to_bytes(cmd.left_i, cmd.right_i)
                             print(f"V2 DEBUG: Converted {cmd.left_i},{cmd.right_i} -> {left_byte},{right_byte}", flush=True)
 
-                            # Write latest command to shared file for Wall-E app.
-                            #
-                            # NOTE: this is a THIRD, uncoordinated writer of
-                            # /tmp/wall_e_bt_latest.json — alongside the /drive
-                            # TeleopSession watchdog (pi_app/web/teleop.py, the
-                            # sole session-gated writer with deadman/lock/e-stop)
-                            # and main.py's 600ms freshness read. This SPP path
-                            # has no arming ceremony, no e-stop, no deadman of
-                            # its own beyond file staleness. Left as-is (BT
-                            # bench-test path, not addressed by this hardening
-                            # pass) — do not add a fourth writer without also
-                            # reconciling this one.
-                            try:
-                                shared_data = {
-                                    "left_byte": left_byte,
-                                    "right_byte": right_byte,
-                                    "last_update_epoch_s": time.time()
-                                }
-                                with open("/tmp/wall_e_bt_latest.json", "w") as sf:
-                                    json.dump(shared_data, sf)
+                            # Forward to the shared motor-override file ONLY when
+                            # the SPP control channel is explicitly enabled
+                            # (default OFF). See write_control_override /
+                            # SPP_CONTROL_ENV_VAR above: this used to be an
+                            # uncoordinated THIRD writer of the override file
+                            # (bypassing the web-teleop session-safety layer);
+                            # it is now retired to a supervised, opt-in
+                            # bench-test path.
+                            if write_control_override(left_byte, right_byte):
                                 print(f"Wrote to shared file: L={left_byte} R={right_byte}", flush=True)
-                            except Exception as e:
-                                print(f"Error writing shared file: {e}", flush=True)
+                            else:
+                                print(f"SPP control disabled ({SPP_CONTROL_ENV_VAR} unset) — "
+                                      f"dropped L={left_byte} R={right_byte}", flush=True)
                         else:
                             client_sock.send(f"NAK2:{cmd.seq};code={reason}\n".encode("utf-8"))
                             print(f"V2 NAK seq={cmd.seq} reason={reason}", flush=True)
@@ -168,19 +225,12 @@ def run_server() -> int:
                             left_byte, right_byte = floats_to_bytes(left_f, right_f)
                             print(f"V1 DEBUG: Converted {left_f},{right_f} -> {left_byte},{right_byte}", flush=True)
 
-                            # Write latest command to shared file for Wall-E app.
-                            # Same third-writer caveat as the V2 path above.
-                            try:
-                                shared_data = {
-                                    "left_byte": left_byte,
-                                    "right_byte": right_byte,
-                                    "last_update_epoch_s": time.time()
-                                }
-                                with open("/tmp/wall_e_bt_latest.json", "w") as sf:
-                                    json.dump(shared_data, sf)
+                            # Same default-OFF gate as the V2 path above.
+                            if write_control_override(left_byte, right_byte):
                                 print(f"V1 Wrote to shared file: L={left_byte} R={right_byte}", flush=True)
-                            except Exception as e:
-                                print(f"V1 Error writing shared file: {e}", flush=True)
+                            else:
+                                print(f"V1 SPP control disabled ({SPP_CONTROL_ENV_VAR} unset) — "
+                                      f"dropped L={left_byte} R={right_byte}", flush=True)
                         elif line_to_parse == "PING":
                             print("V1 PING received", flush=True)
                         elif line_to_parse.startswith("ARM:"):
