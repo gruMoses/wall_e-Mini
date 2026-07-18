@@ -751,6 +751,17 @@ def shed_usb_load() -> None:
                 )
                 if result.returncode == 0:
                     logging.info("USB power off: %s (location %s port %s).", label, loc, port)
+                elif "No compatible devices" in (result.stderr or ""):
+                    # uhubctl found nothing enumerated at this location. Expected
+                    # on the USB3.0 companion hub: the OAK negotiates USB2, so no
+                    # USB3 device is present to switch. This is NOT a shed failure
+                    # — there is simply nothing to power off here. Genuine uhubctl
+                    # failures (any other nonzero exit) stay WARNINGs below.
+                    logging.info(
+                        "no device enumerated at %s (location %s port %s) — "
+                        "nothing to shed there",
+                        label, loc, port,
+                    )
                 else:
                     logging.warning(
                         "uhubctl power off failed for %s: %s", label, result.stderr.strip()
@@ -1015,8 +1026,10 @@ def main(detect_only: bool | None = None) -> None:
         ina_batt = None
 
     # Log initial observed config for traceability.
+    initial_snapshot = None
     try:
         snap = read_ups_snapshot(bus, device_addr, ina_batt)
+        initial_snapshot = snap
         logging.info(
             "UPS initial snapshot: typec=%smV microusb=%smV protect=%smV auto_on=%s "
             "countdown=%ss sample=%smin batt=%sV %smA",
@@ -1031,6 +1044,46 @@ def main(detect_only: bool | None = None) -> None:
         )
     except Exception as error:
         logging.warning("Unable to read UPS initial snapshot: %s", error)
+
+    # STARTUP STALE-COUNTDOWN CLEAR: an armed shutdown-countdown (reg 0x18) is
+    # NOT cleared by AC returning — it keeps ticking and can hard-cut the 5V
+    # rail mid-recovery-boot (documented gotcha, hardware-proven). If we are
+    # back up WITH AC present and the countdown register still reads non-zero,
+    # it is a stale arm from a prior shutdown attempt; clear it to 0 now. If AC
+    # is ABSENT we must NOT clear: a live outage may legitimately be counting
+    # down and disarming it would strand the shutdown. Uses the initial-snapshot
+    # values already read above (no extra I2C read).
+    # ACTION SITE (startup): UPS register write, suppressed in detect-only.
+    if initial_snapshot is not None:
+        startup_countdown = initial_snapshot["shutdown_countdown_s"]
+        startup_ac_present = is_ac_present_instant(
+            initial_snapshot["typec_mv"], initial_snapshot["microusb_mv"]
+        )
+        if startup_ac_present and startup_countdown:
+            if detect_only:
+                logging.info(
+                    "DETECT-ONLY: would clear stale UPS shutdown countdown "
+                    "(reg %d reads %ss with AC present) — write suppressed.",
+                    REG_SHUTDOWN_COUNTDOWN,
+                    startup_countdown,
+                )
+            else:
+                logging.info(
+                    "Stale UPS shutdown countdown found at startup (reg %d=%ss) "
+                    "with AC present; clearing to 0 to avoid a mid-boot power cut.",
+                    REG_SHUTDOWN_COUNTDOWN,
+                    startup_countdown,
+                )
+                if write_reg_verified(bus, device_addr, REG_SHUTDOWN_COUNTDOWN, 0):
+                    logging.info(
+                        "Stale UPS shutdown countdown cleared (reg %d=0).",
+                        REG_SHUTDOWN_COUNTDOWN,
+                    )
+                else:
+                    logging.warning(
+                        "Failed to clear stale UPS shutdown countdown after retries; "
+                        "it may still be armed."
+                    )
 
     # Ensure auto power-on when AC returns.
     # ACTION SITE (startup): UPS register write, suppressed in detect-only so
