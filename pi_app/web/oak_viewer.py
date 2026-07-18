@@ -1841,6 +1841,107 @@ def sse_detection_dict(d) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Streaming connection caps
+# ---------------------------------------------------------------------------
+#
+# Every live MJPEG stream (/stream/rgb, /stream/depth) and every SSE subscriber
+# (/api/telemetry) pins a Flask worker thread that wakes several times a second
+# to fan out a JPEG frame (the depth *fallback* even re-encodes per client) or
+# serialize the telemetry blob. On the Pi 5 those threads compete with the
+# control loop, so a handful of forgotten browser tabs can measurably degrade
+# autonomy. We cap concurrent *streaming* clients and turn excess connections
+# away with 503 + Retry-After instead of letting them pile up. The MJPEG cap is
+# a single shared pool across rgb+depth because that is what actually costs the
+# host (one dashboard tab opens BOTH, i.e. 2 slots). Plain request/response
+# routes (/api/ups, /api/recordings, ...) are bounded already and are
+# deliberately NOT capped, so the /debug board's UPS polling always works even
+# when the SSE budget is exhausted.
+
+MAX_MJPEG_CLIENTS = 3    # shared across /stream/rgb + /stream/depth
+MAX_SSE_CLIENTS = 6      # concurrent /api/telemetry subscribers
+STREAM_CAP_RETRY_AFTER_S = 5
+
+
+class _StreamClientCap:
+    """Thread-safe concurrent-client limiter for a streaming endpoint.
+
+    ``acquire(endpoint)`` atomically checks the cap and, if there is room,
+    reserves a slot and returns a single-use ``release`` callable; if the cap
+    is already reached it returns ``None`` so the caller can answer 503 without
+    ever reserving a slot. The returned ``release`` is idempotent, so it is
+    safe to wire it to BOTH the streaming generator's ``finally`` (frees the
+    slot when a client dies mid-stream) and the Flask response's
+    ``call_on_close`` (frees it when the response is torn down before the
+    generator ever iterates) without double-counting — whichever fires first
+    wins and the rest are no-ops. That belt-and-suspenders is what makes the
+    counter leak-proof regardless of how the connection ends.
+    """
+
+    def __init__(self, cap: int, name: str) -> None:
+        self._cap = int(cap)
+        self._name = name
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def acquire(self, endpoint: str):
+        with self._lock:
+            if self._count >= self._cap:
+                logger.warning(
+                    "%s cap reached (%d/%d) — refusing %s with 503",
+                    self._name, self._count, self._cap, endpoint,
+                )
+                return None
+            self._count += 1
+            count = self._count
+        logger.info("%s slot acquired by %s (%d/%d in use)",
+                    self._name, endpoint, count, self._cap)
+
+        released = threading.Event()
+
+        def release() -> None:
+            # Idempotent: only the first caller actually decrements.
+            if released.is_set():
+                return
+            with self._lock:
+                if released.is_set():
+                    return
+                released.set()
+                if self._count > 0:
+                    self._count -= 1
+                remaining = self._count
+            logger.info("%s slot released by %s (%d/%d in use)",
+                        self._name, endpoint, remaining, self._cap)
+
+        return release
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+    @property
+    def cap(self) -> int:
+        return self._cap
+
+
+def _stream_cap_response(kind: str, cap: int) -> "Response":
+    """Build the 503 an over-cap streaming client receives.
+
+    Carries a ``Retry-After`` header so well-behaved clients back off instead
+    of hammering, plus a JSON body naming which cap was hit.
+    """
+    body = json.dumps({
+        "error": "stream client cap reached",
+        "kind": kind,
+        "cap": cap,
+        "retry_after_s": STREAM_CAP_RETRY_AFTER_S,
+    })
+    resp = Response(body, status=503, content_type="application/json")
+    resp.headers["Retry-After"] = str(STREAM_CAP_RETRY_AFTER_S)
+    return resp
+
+
+# ---------------------------------------------------------------------------
 # Flask app factory
 # ---------------------------------------------------------------------------
 
@@ -1861,6 +1962,11 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
     app = Flask(__name__)
     app.config["PROPAGATE_EXCEPTIONS"] = False
     placeholder = _placeholder_jpeg()
+    # Per-app streaming budgets (read the module caps at build time so tests can
+    # monkeypatch them before create_app). Fresh counters per app keep test
+    # isolation clean — each app instance has its own pool.
+    mjpeg_cap = _StreamClientCap(MAX_MJPEG_CLIENTS, "MJPEG stream")
+    sse_cap = _StreamClientCap(MAX_SSE_CLIENTS, "SSE telemetry")
     rec_cache_lock = threading.Lock()
     rec_cache: list[dict] = []
     rec_cache_ts = 0.0
@@ -1898,7 +2004,8 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
 
     # -- MJPEG streams -------------------------------------------------------
 
-    def _mjpeg_generator(get_jpeg_fn, fps: float = 10.0, stream_name: str | None = None):
+    def _mjpeg_generator(get_jpeg_fn, fps: float = 10.0, stream_name: str | None = None,
+                          on_close=None):
         interval = 1.0 / fps
         try:
             if recorder is not None and stream_name is not None and hasattr(recorder, "set_stream_client_connected"):
@@ -1914,18 +2021,36 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         finally:
             if recorder is not None and stream_name is not None and hasattr(recorder, "set_stream_client_connected"):
                 recorder.set_stream_client_connected(stream_name, False)
+            # Free the connection-cap slot when the client dies mid-stream
+            # (GeneratorExit) or the stream otherwise ends. Idempotent with the
+            # response's call_on_close, so double-firing never over-decrements.
+            if on_close is not None:
+                on_close()
+
+    def _mjpeg_response(get_jpeg_fn, fps, stream_name, endpoint):
+        """Cap-enforced MJPEG Response, or 503 when the shared pool is full."""
+        release = mjpeg_cap.acquire(endpoint)
+        if release is None:
+            return _stream_cap_response("mjpeg", mjpeg_cap.cap)
+        resp = Response(
+            _mjpeg_generator(get_jpeg_fn, fps=fps, stream_name=stream_name,
+                             on_close=release),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+        )
+        # Belt-and-suspenders: also release if the response is torn down before
+        # the generator ever iterates (never-entered leak window).
+        resp.call_on_close(release)
+        return resp
 
     @app.route("/stream/rgb")
     def stream_rgb():
         if recorder is None:
             return Response(placeholder, mimetype="image/jpeg")
-        return Response(
-            _mjpeg_generator(
-                recorder.get_latest_annotated_jpeg,
-                fps=max(0.5, float(getattr(config, "rgb_stream_fps", 6.0))),
-                stream_name="rgb",
-            ),
-            mimetype="multipart/x-mixed-replace; boundary=frame",
+        return _mjpeg_response(
+            recorder.get_latest_annotated_jpeg,
+            fps=max(0.5, float(getattr(config, "rgb_stream_fps", 6.0))),
+            stream_name="rgb",
+            endpoint="/stream/rgb",
         )
 
     @app.route("/stream/depth")
@@ -1941,13 +2066,11 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                 except Exception:
                     return None
             return None
-        return Response(
-            _mjpeg_generator(
-                _get_depth_jpeg,
-                fps=max(0.5, float(getattr(config, "depth_stream_fps", 3.0))),
-                stream_name="depth",
-            ),
-            mimetype="multipart/x-mixed-replace; boundary=frame",
+        return _mjpeg_response(
+            _get_depth_jpeg,
+            fps=max(0.5, float(getattr(config, "depth_stream_fps", 3.0))),
+            stream_name="depth",
+            endpoint="/stream/depth",
         )
 
     # -- Telemetry SSE -------------------------------------------------------
@@ -1961,7 +2084,8 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
             return None
         return round(v, ndigits)
 
-    def _sse_generator():
+    def _sse_generator(on_close=None):
+      try:
         while True:
             t = recorder.get_latest_telemetry() if recorder is not None else None
             if t is not None:
@@ -2077,13 +2201,31 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                             obj["camera_health"] = get_health()
                     except Exception:
                         obj["camera_health"] = None
+                # Live streaming-cap gauges (two atomic int reads — trivially
+                # cheap) so the /debug board can show why a stream got 503'd.
+                obj["stream_clients"] = {
+                    "mjpeg": mjpeg_cap.count,
+                    "mjpeg_max": mjpeg_cap.cap,
+                    "sse": sse_cap.count,
+                    "sse_max": sse_cap.cap,
+                }
                 yield f"data: {json.dumps(obj)}\n\n"
             telemetry_hz = max(0.5, float(getattr(config, "telemetry_hz", 4.0)))
             time.sleep(1.0 / telemetry_hz)
+      finally:
+        # Free the SSE cap slot on client disconnect (GeneratorExit) or any
+        # other end. Idempotent with the response's call_on_close.
+        if on_close is not None:
+            on_close()
 
     @app.route("/api/telemetry")
     def api_telemetry():
-        return Response(_sse_generator(), mimetype="text/event-stream")
+        release = sse_cap.acquire("/api/telemetry")
+        if release is None:
+            return _stream_cap_response("sse", sse_cap.cap)
+        resp = Response(_sse_generator(on_close=release), mimetype="text/event-stream")
+        resp.call_on_close(release)
+        return resp
 
     # -- Follow Me toggle API ------------------------------------------------
 
