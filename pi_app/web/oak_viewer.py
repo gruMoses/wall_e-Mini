@@ -1857,7 +1857,7 @@ def sse_detection_dict(d) -> dict:
 # deliberately NOT capped, so the /debug board's UPS polling always works even
 # when the SSE budget is exhausted.
 
-MAX_MJPEG_CLIENTS = 3    # shared across /stream/rgb + /stream/depth
+MAX_MJPEG_CLIENTS = 5    # shared across /stream/rgb + /stream/depth; one dashboard tab = 2 slots, so 5 allows two full dashboards (phone + desktop) + one spare
 MAX_SSE_CLIENTS = 6      # concurrent /api/telemetry subscribers
 STREAM_CAP_RETRY_AFTER_S = 5
 
