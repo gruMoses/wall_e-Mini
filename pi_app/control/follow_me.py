@@ -117,7 +117,13 @@ class DetectionFilter:
         edge_margin: float = 0.0,
         min_bbox_width: float = 0.0,
         min_person_height_m: float = 0.0,
-        camera_vfov_deg: float = 65.3,
+        # Sourced from config so it can never drift from the measured value.
+        # This used to be a literal 65.3 — the stale, pre-2026-07-26 number
+        # derived from the wrong 81 deg FOV. Production always passed the config
+        # value, so the literal was only reachable from callers that omitted the
+        # argument, but that is exactly how the recorder's hfov_deg=81.0 default
+        # survived unnoticed for months. Bind it to config instead.
+        camera_vfov_deg: float = FollowMeConfig().detect_camera_vfov_deg,
     ) -> None:
         self._conf = conf_threshold
         self._min_depth = min_depth_m

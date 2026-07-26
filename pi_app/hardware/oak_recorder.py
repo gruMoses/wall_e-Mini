@@ -247,7 +247,7 @@ _COLOR_TEXT_BG = (0, 0, 0)
 def _world_to_pixel(
     wx, wy, robot_x, robot_y, robot_theta,
     img_w, img_h,
-    camera_height_m=0.497, intrinsics=None,
+    camera_height_m=ObstacleAvoidanceConfig().camera_height_m, intrinsics=None,
 ):
     """Project a world-coordinate ground point to image pixel coords.
 
@@ -397,7 +397,7 @@ def _draw_trail_overlay(img, telemetry, camera_height_m, intrinsics=None):
     if not trail_pts or robot_x is None or robot_y is None or robot_theta is None:
         return
     if camera_height_m <= 0:
-        camera_height_m = 0.497
+        camera_height_m = ObstacleAvoidanceConfig().camera_height_m
 
     n_pts = len(trail_pts)
     extrap_active = getattr(telemetry, "extrapolation_active", False)
