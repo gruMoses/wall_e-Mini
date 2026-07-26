@@ -1577,7 +1577,14 @@ class OakDepthReader:
 
             if robot_half_mm > 0:
                 import math
-                fx, cx = self._depth_intrinsics_for(w, band.shape[0])
+                # Query with the FULL depth-frame height, not band.shape[0].
+                # `band` is a vertical CROP of the frame (frame[y0:y1, :]), so
+                # asking for intrinsics at the band height would describe a
+                # differently-cropped sensor readout. Only fx/cx are used here
+                # and both are horizontal, so the distinction does not change
+                # today's numbers — but it would silently corrupt fy/cy for any
+                # future caller.
+                fx, cx = self._depth_intrinsics_for(w, frame.shape[0])
                 threshold = fx * robot_half_mm
 
                 x_offsets = np.abs(np.arange(w, dtype=np.float32) - cx)
