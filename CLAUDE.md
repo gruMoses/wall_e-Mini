@@ -28,6 +28,46 @@ VESC over CAN (`can0`) is the primary drive path; Arduino motor-driver fallback 
 - IMU feeds `ImuSteeringCompensator` (PID heading-hold, differential byte correction).
 - GPS COG heading alignment is **implemented** (software) — one-shot locks IMU heading to true north during a forward, straight manual RTK-fixed run, then freezes the offset for the armed session; field validation pending (`docs/gps_heading_alignment.md`).
 
+### Camera calibration — READ THIS BEFORE TOUCHING ANY CAMERA GEOMETRY
+
+Geometry comes from the device's per-unit factory EEPROM, **not** from a
+hand-entered field of view. `OakDepthReader.get_intrinsics(w, h)` is the single
+source; the obstacle corridor, person position and the recorder overlay all go
+through it. Never re-derive a focal length from an FOV constant — that is
+exactly how the overlay ended up drawing different geometry from the corridor.
+
+Measured on this unit (`python3 -m pi_app.cli.oak_intrinsics`, read-only; stop
+`wall-e.service` first because the OAK allows one process at a time):
+
+| | |
+|---|---|
+| CAM_A @ 640×400 | fx = 456.89, cx = 334.95 |
+| Horizontal FOV | **70.01°** (EEPROM spec 68.794°) |
+| Principal point | **+14.9 px off centre** — never assume cx = w/2 |
+| VFOV at the 640×352 detection frame | **42.13°** |
+
+Startup logs the numbers in use at WARNING level (the app installs no logging
+handler, so INFO is dropped). A silent fallback to the config constant changes
+safety geometry, so it is logged loudly.
+
+**Three defects this replaced (2026-07-26), all from one wrong constant:**
+`camera_hfov_deg` was 81.0 — the *diagonal* FOV in a horizontal field.
+1. Corridor threshold 18% too small: guarded a ~0.67 m robot instead of 0.82 m.
+2. `detect_camera_vfov_deg` 65.3 → 42.13. Implied heights had been inflated
+   1.66×, so the 1.20 m "reject short ground blobs" gate was really 0.72 m.
+3. DetectionFilter Rule 3 now **skips boxes clipped by the top frame edge** —
+   height is unmeasurable on a truncated box. Bottom contact is deliberately
+   NOT excused, because ground animals rest against the frame bottom.
+
+WARNING: (1) and (2) were cancelling each other. Fixing either alone makes the
+robot worse — correcting the FOV without (3) filters the operator out at
+`follow_distance_m`. Expect this pattern elsewhere; see
+`~/Documents/screenshots/WALLE-constant-audit.md`.
+
+Open: `detect_min_person_height_m = 1.20` was tuned against implied heights
+recorded under the inflated VFOV, so it may now be too aggressive. Needs one
+recorded walk replayed through `tools/replay_follow_me_log.py`.
+
 ### OAK-D Lite Camera
 - Obstacle avoidance: depth corridor, valid-pixel % threshold, tiered speed reduction/stop.
 - Follow Me: **YOLOv8n** blob via `NeuralNetwork` node + host-side NMS (depthai v3). Do **not** use `SpatialDetectionNetwork` / `YoloDetectionNetwork` / `DetectionParser` — those silently yield zero detections with ultralytics blobs in depthai v3.

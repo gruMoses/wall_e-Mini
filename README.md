@@ -86,8 +86,18 @@ GPS COG heading alignment is **implemented** (software); field validation is pen
 
 ## Known Issues
 
-- **VESC telemetry / RPM**: CAN STATUS frames are parsed (voltage threshold shutdown works) but RPM readback is stuck at 0. Root cause not yet investigated.
+- **VESC telemetry / RPM** — *resolved 2026-06-11*, bench-verified with
+  `tools/vesc_rpm_bench.py` (wheels off ground): commanded +1500 eRPM read back
+  with −1.0% / −0.4% steady-state error and zero parse errors. The old "always
+  0" reading did not reproduce. Still open: confirm nonzero readback on a real
+  drive, then decide whether to re-enable the velocity PID (`speed_kp/ki/kd`
+  are currently 0).
 - **IMU heading drift**: OAK-D Lite BMI270 is gyro+accel only (no magnetometer). Heading drifts over time and is relative to startup orientation.
+- **Camera corridor — field check pending.** The camera geometry was measured
+  from the device EEPROM on 2026-07-26 and several constants were corrected
+  (see "Camera calibration" below). The obstacle corridor is now *wider* than
+  it was, which is the safe direction, but it has not been checked against the
+  physical robot. Do not run an autonomous mode until it has.
 
 ## Documentation Index
 
