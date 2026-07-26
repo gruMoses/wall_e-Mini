@@ -24,7 +24,7 @@ class TestFollowMeController(unittest.TestCase):
         return FollowMeController(cfg)
 
     def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
-                bbox=(0.4, 0.3, 0.6, 0.8), track_id=None) -> PersonDetection:
+                bbox=(0.4, 0.0, 0.6, 0.8), track_id=None) -> PersonDetection:
         return PersonDetection(
             x_m=x_m,
             z_m=z_m,
@@ -66,14 +66,14 @@ class TestFollowMeController(unittest.TestCase):
 
     def test_person_at_follow_distance_stops(self):
         fm = self._make(follow_distance_m=1.5)
-        det = self._person(x_m=0.0, z_m=1.5, bbox=(0.45, 0.3, 0.55, 0.8))
+        det = self._person(x_m=0.0, z_m=1.5, bbox=(0.45, 0.0, 0.55, 0.8))
         left, right = fm.compute([det])
         self.assertEqual(left, NEUTRAL)
         self.assertEqual(right, NEUTRAL)
 
     def test_person_far_away_drives_forward(self):
         fm = self._make(follow_distance_m=1.5, max_follow_speed_byte=60)
-        det = self._person(x_m=0.0, z_m=4.0, bbox=(0.45, 0.3, 0.55, 0.8))
+        det = self._person(x_m=0.0, z_m=4.0, bbox=(0.45, 0.0, 0.55, 0.8))
         left, right = fm.compute([det])
         self.assertGreater(left, NEUTRAL)
         self.assertGreater(right, NEUTRAL)
@@ -82,14 +82,14 @@ class TestFollowMeController(unittest.TestCase):
 
     def test_person_right_steers_right(self):
         fm = self._make(follow_distance_m=1.0, steering_gain=0.8)
-        det = self._person(x_m=1.0, z_m=3.0, bbox=(0.7, 0.3, 0.9, 0.8))
+        det = self._person(x_m=1.0, z_m=3.0, bbox=(0.7, 0.0, 0.9, 0.8))
         left, right = fm.compute([det])
         # Right turn: left > right
         self.assertGreater(left, right)
 
     def test_person_left_steers_left(self):
         fm = self._make(follow_distance_m=1.0, steering_gain=0.8)
-        det = self._person(x_m=-1.0, z_m=3.0, bbox=(0.1, 0.3, 0.3, 0.8))
+        det = self._person(x_m=-1.0, z_m=3.0, bbox=(0.1, 0.0, 0.3, 0.8))
         left, right = fm.compute([det])
         # Left turn: right > left
         self.assertGreater(right, left)
@@ -98,33 +98,36 @@ class TestFollowMeController(unittest.TestCase):
 
     def test_selects_centered_person_over_edge(self):
         fm = self._make()
-        centered = self._person(x_m=0.0, z_m=2.0, bbox=(0.4, 0.3, 0.6, 0.8))
-        edge = self._person(x_m=2.0, z_m=2.0, bbox=(0.8, 0.3, 1.0, 0.8))
+        centered = self._person(x_m=0.0, z_m=2.0, bbox=(0.4, 0.0, 0.6, 0.8))
+        edge = self._person(x_m=2.0, z_m=2.0, bbox=(0.8, 0.0, 1.0, 0.8))
         left1, right1 = fm.compute([centered, edge])
         # Should follow centered person -> roughly symmetric
         self.assertAlmostEqual(left1, right1, delta=10)
 
     def test_selects_closer_person_when_similar_position(self):
         fm = self._make()
-        # close at z_m=1.5: bbox_h must be tall enough to pass the implied-height check
-        # (detect_min_person_height_m=1.20 m default).  Need bbox_h >= 1.20/(1.5*2*tan(32.65°))
-        # = 1.20/1.922 ≈ 0.624 → use ymin=0.05, ymax=0.95 (height=0.90 → implied 1.73 m ok).
-        close = self._person(x_m=0.1, z_m=1.5, bbox=(0.45, 0.05, 0.55, 0.95))
-        far = self._person(x_m=0.1, z_m=4.5, bbox=(0.45, 0.3, 0.55, 0.8))
+        # close at z_m=1.5: with the measured 42.13° VFOV a 1.75 m adult subtends
+        # bbox_h=1.51 at this range, i.e. their head is out of frame. The correct
+        # fixture is therefore TOP-CLIPPED (ymin=0.0), which is also what makes
+        # the implied-height rule correctly decline to judge it. The old
+        # ymin=0.05 fixture assumed the stale 65.3° VFOV (see its tan(32.65°)
+        # arithmetic) and is not a geometry this camera can produce.
+        close = self._person(x_m=0.1, z_m=1.5, bbox=(0.45, 0.0, 0.55, 0.95))
+        far = self._person(x_m=0.1, z_m=4.5, bbox=(0.45, 0.0, 0.55, 0.8))
         fm.compute([close, far])
         status = fm.get_status()
         self.assertAlmostEqual(status["follow_me_target_z_m"], 1.5)
 
     def test_prefers_previous_track_id_for_continuity(self):
         fm = self._make()
-        first = self._person(x_m=0.0, z_m=2.0, bbox=(0.45, 0.3, 0.55, 0.8), track_id=11)
+        first = self._person(x_m=0.0, z_m=2.0, bbox=(0.45, 0.0, 0.55, 0.8), track_id=11)
         fm.compute([first])
         status = fm.get_status()
         self.assertEqual(status["follow_me_target_track_id"], 11)
 
         # Frame 2: new ID is slightly better centered, but old tracked target remains valid.
-        prev_target = self._person(x_m=0.4, z_m=2.0, bbox=(0.62, 0.3, 0.78, 0.8), track_id=11)
-        newcomer = self._person(x_m=0.0, z_m=2.0, bbox=(0.45, 0.3, 0.55, 0.8), track_id=22)
+        prev_target = self._person(x_m=0.4, z_m=2.0, bbox=(0.62, 0.0, 0.78, 0.8), track_id=11)
+        newcomer = self._person(x_m=0.0, z_m=2.0, bbox=(0.45, 0.0, 0.55, 0.8), track_id=22)
         fm.compute([prev_target, newcomer])
         status = fm.get_status()
         self.assertEqual(status["follow_me_target_track_id"], 11)
@@ -146,7 +149,7 @@ class TestFollowMeController(unittest.TestCase):
 
     def test_output_clamped_to_byte_range(self):
         fm = self._make(max_follow_speed_byte=200, steering_gain=5.0)
-        det = self._person(x_m=3.0, z_m=4.9, bbox=(0.9, 0.3, 1.0, 0.8))
+        det = self._person(x_m=3.0, z_m=4.9, bbox=(0.9, 0.0, 1.0, 0.8))
         left, right = fm.compute([det])
         self.assertGreaterEqual(left, 0)
         self.assertLessEqual(left, 255)
@@ -169,7 +172,7 @@ class TestSteerDeadband(unittest.TestCase):
             x_m=norm_x * z_m,
             z_m=z_m,
             confidence=0.9,
-            bbox=(cx - half, 0.3, cx + half, 0.8),
+            bbox=(cx - half, 0.0, cx + half, 0.8),
         )
 
     def test_deadband_suppresses_error_inside_band(self):
@@ -243,7 +246,7 @@ class TestSteerSlewCap(unittest.TestCase):
         """Detection far to the right to saturate PID output."""
         return PersonDetection(
             x_m=2.0, z_m=2.0, confidence=0.9,
-            bbox=(0.85, 0.3, 1.0, 0.8),  # cx=0.925, norm_x=0.85
+            bbox=(0.85, 0.0, 1.0, 0.8),  # cx=0.925, norm_x=0.85
         )
 
     def test_slew_cap_limits_first_emission(self):
@@ -314,7 +317,7 @@ class TestSteerSlewCap(unittest.TestCase):
         # norm_x ≈ 0.1 → PID raw = 0.1, scaled = 0.1 * 20 = 2.0 bytes < slew_limit 10.0
         det = PersonDetection(
             x_m=0.2, z_m=2.0, confidence=0.9,
-            bbox=(0.55, 0.3, 0.65, 0.8),  # cx=0.60, norm_x=0.20
+            bbox=(0.55, 0.0, 0.65, 0.8),  # cx=0.60, norm_x=0.20
         )
         fm.compute([det])
         emitted = fm._last_emitted_steer
@@ -339,17 +342,39 @@ class TestTrackingModeByteIdentical(unittest.TestCase):
     pre-Wave-2 code at commit 912bb34 (see wave2/fm-lost-path branch base).
     """
 
+    # REGENERATED 2026-07-26 — the previous golden encoded a BUG, not tracking.
+    #
+    # detect_camera_vfov_deg was 65.3 (derived from the wrong 81 deg
+    # diagonal-as-horizontal figure) while these fixtures used a 0.5-tall bbox.
+    # That combination silently failed the implied-height rule for every tick
+    # at z <= 1.8:
+    #
+    #     idx 4  z=1.8 -> implied 1.153 m  REJECTED (gate 1.20)
+    #     idx 5  z=1.6 -> implied 1.025 m  REJECTED
+    #     idx 6-9 z=1.5-1.7 -> 0.961-1.089 m  REJECTED
+    #
+    # So the old tail (184,170) (156,147) (128,124) (126,126)x3 was the
+    # LOST-TARGET decay to neutral — directly contradicting this test's own
+    # docstring ("every tick is a fresh, in-range, high-confidence detection so
+    # the controller stays in pure tracking mode"). The golden was pinning the
+    # regression in place.
+    #
+    # With the measured 42.13 deg VFOV and top-clipped fixtures (a 1.75 m adult
+    # genuinely overflows the frame below ~2.27 m) all ten ticks now track: full
+    # closing speed through idx 6, then settling toward neutral as the target
+    # reaches follow_distance_m=1.5 with small steering corrections. That is
+    # what this test always meant to assert.
     EXPECTED_BYTES = [
-        (216, 216),
-        (213, 210),
-        (207, 199),
-        (209, 196),
-        (184, 170),
-        (156, 147),
-        (128, 124),
-        (126, 126),
-        (126, 126),
-        (126, 126),
+        (216, 216),   # idx 0  z=3.0  closing
+        (213, 210),   # idx 1  z=2.8
+        (207, 199),   # idx 2  z=2.5
+        (209, 196),   # idx 3  z=2.0
+        (212, 194),   # idx 4  z=1.8  (was lost-decay 184,170)
+        (209, 196),   # idx 5  z=1.6  (was lost-decay 156,147)
+        (207, 199),   # idx 6  z=1.5  (was lost-decay 128,124)
+        (128, 124),   # idx 7  z=1.5  at follow distance, drifting left
+        (125, 127),   # idx 8  z=1.7  left edge
+        (128, 124),   # idx 9  z=1.5  back to centre
     ]
 
     def test_tracking_mode_output_byte_identical_to_pre_wave2(self):
@@ -363,16 +388,16 @@ class TestTrackingModeByteIdentical(unittest.TestCase):
         # (x_m, z_m, bbox) per tick -- every tick is a fresh, in-range, high-
         # confidence detection so the controller stays in pure tracking mode.
         seq = [
-            (0.0, 3.0, (0.40, 0.3, 0.60, 0.8)),   # centered, far
-            (0.3, 2.8, (0.55, 0.3, 0.72, 0.8)),   # drifting right
-            (0.6, 2.5, (0.65, 0.3, 0.85, 0.8)),   # further right, closer
-            (0.9, 2.0, (0.75, 0.3, 0.95, 0.8)),   # near right edge
-            (0.9, 1.8, (0.75, 0.3, 0.95, 0.8)),   # hold near edge
-            (0.5, 1.6, (0.60, 0.3, 0.80, 0.8)),   # coming back
-            (0.0, 1.5, (0.40, 0.3, 0.60, 0.8)),   # centered, at follow distance
-            (-0.4, 1.5, (0.25, 0.3, 0.45, 0.8)),  # drift left
-            (-0.8, 1.7, (0.10, 0.3, 0.30, 0.8)),  # left edge
-            (0.0, 1.5, (0.40, 0.3, 0.60, 0.8)),   # back to center
+            (0.0, 3.0, (0.40, 0.0, 0.60, 0.8)),   # centered, far
+            (0.3, 2.8, (0.55, 0.0, 0.72, 0.8)),   # drifting right
+            (0.6, 2.5, (0.65, 0.0, 0.85, 0.8)),   # further right, closer
+            (0.9, 2.0, (0.75, 0.0, 0.95, 0.8)),   # near right edge
+            (0.9, 1.8, (0.75, 0.0, 0.95, 0.8)),   # hold near edge
+            (0.5, 1.6, (0.60, 0.0, 0.80, 0.8)),   # coming back
+            (0.0, 1.5, (0.40, 0.0, 0.60, 0.8)),   # centered, at follow distance
+            (-0.4, 1.5, (0.25, 0.0, 0.45, 0.8)),  # drift left
+            (-0.8, 1.7, (0.10, 0.0, 0.30, 0.8)),  # left edge
+            (0.0, 1.5, (0.40, 0.0, 0.60, 0.8)),   # back to center
         ]
 
         results = []
@@ -410,7 +435,7 @@ class TestLostSearchSlewContinuity(unittest.TestCase):
         return FollowMeController(cfg)
 
     def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
-                bbox=(0.4, 0.3, 0.6, 0.8), track_id=None) -> PersonDetection:
+                bbox=(0.4, 0.0, 0.6, 0.8), track_id=None) -> PersonDetection:
         return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence,
                                bbox=bbox, track_id=track_id)
 
@@ -511,7 +536,7 @@ class TestLostSearchSlewContinuity(unittest.TestCase):
         # Reacquire: a hard-right detection whose direct-PID output saturates
         # far past the current commanded steer, in the OPPOSITE-leaning frame
         # position to stress the slew (person far to the LEFT this time).
-        det = self._person(x_m=-2.0, z_m=2.0, bbox=(0.05, 0.3, 0.25, 0.8), track_id=1)
+        det = self._person(x_m=-2.0, z_m=2.0, bbox=(0.05, 0.0, 0.25, 0.8), track_id=1)
         with patch("pi_app.control.follow_me.time") as mt:
             mt.monotonic.return_value = valid + 2.9
             fm.compute([det])
@@ -562,7 +587,7 @@ class TestRecorder(unittest.TestCase):
         return FollowMeController(cfg)
 
     def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
-                bbox=(0.4, 0.3, 0.6, 0.8)) -> PersonDetection:
+                bbox=(0.4, 0.0, 0.6, 0.8)) -> PersonDetection:
         return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence, bbox=bbox)
 
     # ── (1) Recorder rotation ────────────────────────────────────────────────
@@ -802,7 +827,7 @@ class TestRecorderHonestyFields(unittest.TestCase):
     """
 
     def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
-                bbox=(0.4, 0.3, 0.6, 0.8)) -> PersonDetection:
+                bbox=(0.4, 0.0, 0.6, 0.8)) -> PersonDetection:
         return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence, bbox=bbox)
 
     def _run_sequence(self, steps):
@@ -870,9 +895,9 @@ class TestRecorderHonestyFields(unittest.TestCase):
         steer_want equal to the pre-slip/pre-slew steer the branch produced."""
         recs = self._run_sequence([
             # Prime two fresh ticks so the reacq ramp is past and a real steer forms.
-            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 0.0),
-            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 0.5),
-            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 1.5),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.0, 0.95, 0.8))], 0.0),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.0, 0.95, 0.8))], 0.5),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.0, 0.95, 0.8))], 1.5),
         ])
         fresh = recs[-1]
         self.assertEqual(fresh["steer_src"], "direct")
@@ -885,9 +910,9 @@ class TestRecorderHonestyFields(unittest.TestCase):
         window (target still held, not fresh) records steer_src == 'persist' —
         distinct from a true lost tick."""
         recs = self._run_sequence([
-            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 0.0),
-            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 0.5),
-            ([self._person(x_m=2.0, bbox=(0.75, 0.3, 0.95, 0.8))], 1.0),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.0, 0.95, 0.8))], 0.0),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.0, 0.95, 0.8))], 0.5),
+            ([self._person(x_m=2.0, bbox=(0.75, 0.0, 0.95, 0.8))], 1.0),
             # Empty detections at t=1.2: within target_persistence_s (2.0) of last
             # fresh (1.0), so the tracker holds the target → persistence/decay tick.
             ([], 1.2),
@@ -953,7 +978,7 @@ class TestRecorderCurrentTempFields(unittest.TestCase):
         return FollowMeController(cfg)
 
     def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
-                bbox=(0.4, 0.3, 0.6, 0.8)) -> PersonDetection:
+                bbox=(0.4, 0.0, 0.6, 0.8)) -> PersonDetection:
         return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence, bbox=bbox)
 
     def _run_with_telem(self, left_current_a=None, right_current_a=None,
@@ -1072,7 +1097,7 @@ class TestEdgeBoostSteering(unittest.TestCase):
             x_m=norm_x * z_m,
             z_m=z_m,
             confidence=0.9,
-            bbox=(cx - half, 0.3, cx + half, 0.8),
+            bbox=(cx - half, 0.0, cx + half, 0.8),
         )
 
     def _make_direct(self, **overrides) -> FollowMeController:
@@ -1395,7 +1420,7 @@ class TestStickyTargetLock(unittest.TestCase):
             x_m=normalized_x,  # value irrelevant to selection here
             depth_m=depth_m,
             confidence=confidence,
-            bbox=(0.4, 0.3, 0.6, 0.8),
+            bbox=(0.4, 0.0, 0.6, 0.8),
             track_id=track_id,
         )
 
@@ -1519,7 +1544,7 @@ class TestStickyLockComputeIntegration(unittest.TestCase):
         return FollowMeController(FollowMeConfig(**overrides))
 
     def _person(self, x_m=0.0, z_m=3.0, confidence=0.9,
-                bbox=(0.45, 0.3, 0.55, 0.8), track_id=1) -> PersonDetection:
+                bbox=(0.45, 0.0, 0.55, 0.8), track_id=1) -> PersonDetection:
         return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence,
                                bbox=bbox, track_id=track_id)
 
@@ -1540,7 +1565,7 @@ class TestStickyLockComputeIntegration(unittest.TestCase):
         self.assertEqual(fm.get_status()["follow_me_target_track_id"], 1)
         # Chicken: low conf 0.54, edge bbox, closer — must be ignored (grace-hold).
         chicken = PersonDetection(x_m=2.0, z_m=1.3, confidence=0.54,
-                                  bbox=(0.85, 0.3, 1.0, 0.8), track_id=None)
+                                  bbox=(0.85, 0.0, 1.0, 0.8), track_id=None)
         fm.compute([chicken])
         self.assertIsNone(fm._tracker.fresh_raw_x_norm,
                           "grace-hold frame must not be fresh")
@@ -1737,7 +1762,7 @@ class TestDetectionFilterGeometric(unittest.TestCase):
         flt = self._make_filter()
         # Standard test person used throughout the rest of the test suite
         det = PersonDetection(x_m=0.0, z_m=2.0, confidence=0.9,
-                              bbox=(0.4, 0.3, 0.6, 0.8))
+                              bbox=(0.4, 0.0, 0.6, 0.8))
         result = flt.process([det])
         self.assertEqual(len(result), 1,
                          "Standard centered person must pass all active geometric rules")

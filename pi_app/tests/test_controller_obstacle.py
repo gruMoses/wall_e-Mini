@@ -192,7 +192,7 @@ class TestControllerFollowMe(unittest.TestCase):
     # introduced in a1bbe22: controller refuses to enter FOLLOW_ME unless a
     # candidate detection is already present.
     _FAKE_TARGET = PersonDetection(x_m=0.0, z_m=2.0, confidence=0.9,
-                                   bbox=(0.45, 0.3, 0.55, 0.8))
+                                   bbox=(0.45, 0.0, 0.55, 0.8))
 
     def _enter_follow_me(self, ctrl, t):
         """Arm, register a fake target, and flip ch4 high.  Returns time after.
@@ -274,7 +274,7 @@ class TestControllerFollowMe(unittest.TestCase):
 
             ctrl.set_person_detections([
                 PersonDetection(x_m=0.0, z_m=3.0, confidence=0.9,
-                                bbox=(0.45, 0.3, 0.55, 0.8))
+                                bbox=(0.45, 0.0, 0.55, 0.8))
             ])
 
             armed_fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900,

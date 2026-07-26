@@ -17,7 +17,7 @@ from pi_app.control.follow_me import FollowMeController, PersonDetection
 
 
 def _person(x_m=0.0, z_m=3.0, confidence=0.9,
-            bbox=(0.4, 0.3, 0.6, 0.8), track_id=None) -> PersonDetection:
+            bbox=(0.4, 0.0, 0.6, 0.8), track_id=None) -> PersonDetection:
     return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence,
                            bbox=bbox, track_id=track_id)
 

@@ -64,7 +64,7 @@ def _person(
     x_m: float = 0.0,
     z_m: float = 3.0,
     confidence: float = 0.9,
-    bbox: tuple = (0.45, 0.3, 0.55, 0.8),
+    bbox: tuple = (0.45, 0.0, 0.55, 0.8),
 ) -> PersonDetection:
     return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence, bbox=bbox)
 
@@ -222,7 +222,7 @@ class TestSlipDetection(unittest.TestCase):
         fm._prev_fresh_detection = True
         fm._reacq_time = 0.0
         # Provide a strongly off-centre person to force large steer output (≥5 bytes)
-        det = _person(x_m=2.0, z_m=3.0, bbox=(0.75, 0.3, 0.95, 0.8))
+        det = _person(x_m=2.0, z_m=3.0, bbox=(0.75, 0.0, 0.95, 0.8))
         # Seed the emitted/commanded steer so the straight guard sees a turn. The
         # new guard reads _last_emitted_steer (the prior command), not this tick's
         # raw PID value — so a genuine commanded turn must keep the guard disengaged.

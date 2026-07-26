@@ -62,6 +62,13 @@ TUNABLE_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "steer_slew_per_tick": (0.03, 0.4),
 }
 
+# How close to a normalized frame edge (0.0 / 1.0) a bbox boundary must sit
+# before we treat the box as CLIPPED by that edge. YOLO reports boxes in
+# normalized frame coords, and a subject overflowing the frame yields a
+# boundary pinned at (or a hair inside) 0.0 / 1.0. Used by DetectionFilter
+# Rule 3, which cannot measure the height of a truncated box.
+_FRAME_EDGE_EPS = 0.02
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public dataclass — API contract with oak_depth.py; do not rename fields.
@@ -143,13 +150,37 @@ class DetectionFilter:
                 if width < self._min_bbox_width:
                     continue
             # Rule 3: Minimum implied physical height — reject short ground blobs (animals).
+            #
+            # Only valid when the box FULLY CONTAINS the subject's height. A box
+            # truncated by the TOP of frame measures the visible slice, not the
+            # object — and the rule would then reject the very thing it exists to
+            # keep. A 1.75 m adult overflows the 42.13 deg vertical frame closer
+            # than ~2.27 m, and once its head is cut off, implied_h
+            # saturates at z * 2 * tan(vfov/2) = 0.77 * z, which falls under the
+            # 1.20 m gate for anything nearer than ~1.56 m — i.e. at
+            # follow_distance_m (1.5 m) the operator would be filtered out.
+            #
+            # This went unnoticed while camera_vfov_deg was 65.3: that value
+            # inflated every implied height by 1.66x and masked the clipping. Both
+            # bugs were fixed together on 2026-07-26; fixing only the FOV would
+            # have broken close-range Follow Me. See pi_app/cli/oak_intrinsics.py.
             if self._min_person_height_m > 0:
-                bbox_h = det.bbox[3] - det.bbox[1]
-                implied_h_m = bbox_h * det.z_m * 2.0 * math.tan(
-                    math.radians(self._camera_vfov_deg) / 2.0
-                )
-                if implied_h_m < self._min_person_height_m:
-                    continue
+                # TOP edge only. The two edges are not symmetric on a ground
+                # robot whose camera sits at 0.497 m and looks forward:
+                #   - Too close => the head leaves the TOP of frame while the
+                #     feet stay in view. Height is unmeasurable; skip the rule.
+                #   - Anything RESTING ON THE GROUND (the animals this rule
+                #     exists to reject) naturally has its bottom edge at or
+                #     near the frame bottom. Treating that as "unmeasurable"
+                #     would disable the rule for exactly its intended targets.
+                top_clipped = det.bbox[1] <= _FRAME_EDGE_EPS
+                if not top_clipped:
+                    bbox_h = det.bbox[3] - det.bbox[1]
+                    implied_h_m = bbox_h * det.z_m * 2.0 * math.tan(
+                        math.radians(self._camera_vfov_deg) / 2.0
+                    )
+                    if implied_h_m < self._min_person_height_m:
+                        continue
             cx = (det.bbox[0] + det.bbox[2]) * 0.5
             normalized_x = (cx - 0.5) * 2.0  # map [0, 1] → [-1, +1]
             out.append(_FilteredDetection(

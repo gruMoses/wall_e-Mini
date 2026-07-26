@@ -375,6 +375,13 @@ class OakDepthReader:
         # while no gesture can have any effect. Defaults True so standalone /
         # CLI users keep the previous behavior.
         self._hand_poll_enabled = True
+        # Factory camera calibration for the socket the depth frame lives in.
+        # Set at session start, cleared on teardown. _depth_intrinsics_for()
+        # caches the resolution-specific (fx, cx) derived from it.
+        self._calib = None
+        self._calib_socket = None
+        self._intrinsics_cache: dict[tuple[int, int], tuple[float, float]] = {}
+        self._intrinsics_warned = False
         self._lm_net = None  # lazy-loaded OpenCV DNN for host-side LM
         self._imu_state = _ImuState()
         self._imu_metrics = _ImuMetrics()
@@ -1191,6 +1198,12 @@ class OakDepthReader:
                 logger.info("OAK ObjectTracker enabled for person detections")
             if hand_queues is not None:
                 logger.info("Hand-gesture tracking enabled (PD on-device, LM on host)")
+            # Load the device's factory calibration for the socket the depth
+            # frame is expressed in. Every OAK ships per-device intrinsics in
+            # EEPROM; deriving fx from a hand-entered FOV constant is strictly
+            # worse and is currently wrong (see _depth_intrinsics_for).
+            self._load_calibration(pipeline, dai, _use_yolo)
+
             self._device_ready.set()
             with self._lock:
                 self._pipeline_running = True
@@ -1266,6 +1279,12 @@ class OakDepthReader:
             except Exception:
                 pass
             self._device = None
+            # Drop calibration with the session: a reconnect re-reads it, and a
+            # stale handle must never outlive the device it came from.
+            with self._lock:
+                self._calib = None
+                self._calib_socket = None
+                self._intrinsics_cache = {}
             with self._lock:
                 self._pipeline_running = False
                 self._connected = False
@@ -1277,6 +1296,92 @@ class OakDepthReader:
         return True
 
     # -- Hand-tracking pipeline helpers -----------------------------------------
+
+    def _load_calibration(self, pipeline, dai, use_yolo: bool) -> None:
+        """Cache the device CalibrationHandler for the depth frame's socket.
+
+        Which socket the depth frame is expressed in depends on alignment:
+
+          * ``setDepthAlign(CAM_A)`` is applied on the YOLO path, so depth is
+            warped into the RGB frame and carries CAM_A intrinsics.
+          * Otherwise StereoDepth outputs in the rectified right mono frame,
+            which is CAM_C on the OAK-D Lite.
+
+        Failure is non-fatal: the callers fall back to the configured HFOV.
+        """
+        try:
+            device = pipeline.getDefaultDevice()
+            socket = (
+                dai.CameraBoardSocket.CAM_A if use_yolo
+                else dai.CameraBoardSocket.CAM_C
+            )
+            calib = device.readCalibration()
+            with self._lock:
+                self._calib = calib
+                self._calib_socket = socket
+                self._intrinsics_cache = {}
+                self._intrinsics_warned = False
+            logger.info(
+                "OAK calibration loaded for %s (depth %s RGB)",
+                socket, "aligned to" if use_yolo else "not aligned to",
+            )
+        except Exception:
+            with self._lock:
+                self._calib = None
+                self._calib_socket = None
+            logger.warning(
+                "Could not read OAK factory calibration; falling back to "
+                "configured camera_hfov_deg", exc_info=True,
+            )
+
+    def _depth_intrinsics_for(self, width: int, height: int) -> tuple[float, float]:
+        """Return (fx, cx) in pixels for a depth frame of this size.
+
+        Prefers the device's factory calibration, which is per-unit and already
+        accounts for the crop/scale between the sensor's native resolution and
+        the requested one. Falls back to the old trig on ``camera_hfov_deg``.
+
+        WARNING: that fallback is believed wrong. ``config.py`` sets
+        ``camera_hfov_deg = 81.0``, but 81 deg is the OAK-D Lite colour sensor's
+        DIAGONAL FOV; horizontal is ~69 deg. This file's own default in both
+        call sites is 73.0, and the board measurement in
+        docs/obstacle_avoidance_ground_plane_plan.md derived 73 deg. Too large an
+        HFOV yields too small an fx, which shrinks the obstacle corridor
+        threshold (fx * robot_half_mm) and makes the robot mask out obstacles
+        inside its real swept path. Reading calibration removes the guess.
+        """
+        key = (int(width), int(height))
+        with self._lock:
+            cached = self._intrinsics_cache.get(key)
+            calib = self._calib
+            socket = self._calib_socket
+        if cached is not None:
+            return cached
+
+        if calib is not None and socket is not None:
+            try:
+                intr = calib.getCameraIntrinsics(
+                    socket, resizeWidth=int(width), resizeHeight=int(height),
+                )
+                fx = float(intr[0][0])
+                cx = float(intr[0][2])
+                if fx > 0.0:
+                    with self._lock:
+                        self._intrinsics_cache[key] = (fx, cx)
+                    return fx, cx
+            except Exception:
+                with self._lock:
+                    already = self._intrinsics_warned
+                    self._intrinsics_warned = True
+                if not already:
+                    logger.warning(
+                        "getCameraIntrinsics failed for %dx%d; using "
+                        "camera_hfov_deg fallback", width, height, exc_info=True,
+                    )
+
+        hfov = getattr(self._obs_cfg, "camera_hfov_deg", 73.0)
+        fx = (width / 2.0) / math.tan(math.radians(hfov / 2.0))
+        return fx, width / 2.0
 
     def _build_hand_tracking_nodes(self, pipeline, dai, cam_rgb):
         """Create a camera output for host-side hand tracking via MediaPipe.
@@ -1456,9 +1561,7 @@ class OakDepthReader:
 
             if robot_half_mm > 0:
                 import math
-                hfov = getattr(self._obs_cfg, "camera_hfov_deg", 73.0)
-                fx = (w / 2.0) / math.tan(math.radians(hfov / 2.0))
-                cx = w / 2.0
+                fx, cx = self._depth_intrinsics_for(w, band.shape[0])
                 threshold = fx * robot_half_mm
 
                 x_offsets = np.abs(np.arange(w, dtype=np.float32) - cx)
@@ -1732,9 +1835,8 @@ class OakDepthReader:
             return 0.0, 0.0
 
         z_m = float(np.median(valid)) / 1000.0
-        hfov = getattr(self._obs_cfg, "camera_hfov_deg", 73.0)
-        fx = (dw / 2.0) / math.tan(math.radians(hfov / 2.0))
-        x_m = ((cx_d - dw / 2.0) / fx) * z_m
+        fx, cx_principal = self._depth_intrinsics_for(dw, depth_frame.shape[0])
+        x_m = ((cx_d - cx_principal) / fx) * z_m
         return x_m, z_m
 
     def _assign_track_ids(self, persons: list) -> list:

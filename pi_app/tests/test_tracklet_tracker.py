@@ -148,7 +148,7 @@ class TestPartAVelocityPidDisabled(unittest.TestCase):
 
 
 def _make_det(x_m=0.0, z_m=2.0, confidence=0.85,
-              bbox=(0.4, 0.3, 0.6, 0.8), track_id=None) -> PersonDetection:
+              bbox=(0.4, 0.0, 0.6, 0.8), track_id=None) -> PersonDetection:
     """Build a PersonDetection for serialization tests."""
     return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence,
                            bbox=bbox, track_id=track_id)
@@ -230,13 +230,13 @@ class TestDetectionTrackIdSerialization(unittest.TestCase):
     def test_person_detection_track_id_defaults_to_none(self):
         """PersonDetection.track_id defaults to None when not supplied."""
         det = PersonDetection(x_m=0.0, z_m=1.0, confidence=0.9,
-                              bbox=(0.4, 0.3, 0.6, 0.8))
+                              bbox=(0.4, 0.0, 0.6, 0.8))
         self.assertIsNone(det.track_id)
 
     def test_person_detection_track_id_accepts_int(self):
         """PersonDetection.track_id stores a positive integer correctly."""
         det = PersonDetection(x_m=0.0, z_m=1.0, confidence=0.9,
-                              bbox=(0.4, 0.3, 0.6, 0.8), track_id=42)
+                              bbox=(0.4, 0.0, 0.6, 0.8), track_id=42)
         self.assertEqual(det.track_id, 42)
 
 

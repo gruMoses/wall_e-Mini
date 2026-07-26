@@ -181,7 +181,20 @@ class ObstacleAvoidanceConfig:
     roi_vertical_offset_pct: float = 0.0  # 0.0 for next test run (was -0.20; shifted up causing sky/horizon hits)
     camera_height_m: float = 0.497
     robot_width_m: float = 0.820
-    camera_hfov_deg: float = 81.0
+    # MEASURED from this camera's factory EEPROM 2026-07-26 via
+    # `python3 -m pi_app.cli.oak_intrinsics`: CAM_A @ 640x400 gives fx=456.89,
+    # implied HFOV 70.01 deg (EEPROM spec FOV 68.794 deg).
+    #
+    # This was 81.0, which is the OAK-D Lite colour sensor's DIAGONAL FOV pasted
+    # into a HORIZONTAL field. That produced fx=374.67 — 18% too small — which
+    # shrank the corridor threshold (fx * robot_half_mm) by the same 18%, so the
+    # mask guarded a ~0.67 m wide robot instead of the real 0.82 m and ignored
+    # obstacles ~7 cm inside each edge of its own swept path.
+    #
+    # This value is now only a FALLBACK: oak_depth._depth_intrinsics_for() reads
+    # the per-unit calibration off the device and uses that. It matters only if
+    # the EEPROM read fails.
+    camera_hfov_deg: float = 70.0
     min_depth_mm: int = 350            # OAK-D Lite extended disparity minimum (~0.35m)
     min_valid_pct: float = 8.0         # ignore corridor if fewer than this % of pixels are valid
     update_rate_hz: float = 15.0
@@ -218,7 +231,25 @@ class FollowMeConfig:
     detect_edge_margin: float = 0.15       # reject xmin > (1-margin) or xmax < margin; 0 = disabled
     detect_min_bbox_width: float = 0.09   # reject normalized bbox width < this; 0 = disabled
     detect_min_person_height_m: float = 1.20  # reject implied physical height < this (m); 0 = disabled
-    detect_camera_vfov_deg: float = 65.3  # OAK-D Lite RGB vfov: 2*atan((240/320)*tan(81°/2))=65.3°
+    # MEASURED from the factory EEPROM 2026-07-26 (`pi_app.cli.oak_intrinsics`):
+    # CAM_A at the 640x352 YOLO input frame gives fy=456.89 -> VFOV 42.13 deg.
+    #
+    # This was 65.3, derived as 2*atan((240/320)*tan(81/2)) from the same wrong
+    # 81 deg diagonal-as-horizontal value. Because implied_h scales with
+    # tan(vfov/2), that inflated EVERY implied height by
+    # tan(32.65)/tan(21.065) = 1.66x.
+    #
+    # Consequence: Rule 3 in DetectionFilter ("reject short ground blobs
+    # (animals)") nominally rejects anything under detect_min_person_height_m
+    # = 1.20 m, but at 1.66x inflation the real cutoff was 1.20/1.66 = 0.72 m.
+    # A large dog clears 0.72 m. That is the same failure mode the sticky-lock
+    # knobs above were added to defend against ("a chicken YOLO labels person").
+    # At 42.13 deg the 1.20 m gate is finally the gate it claims to be, and a
+    # 1.75 m adult still clears it across the whole 0.5-6.0 m follow range.
+    #
+    # NOTE: this is the VFOV of the DETECTION frame (640x352), not of the RGB
+    # preview (640x480 -> 54.88 deg). If the NN input size changes, remeasure.
+    detect_camera_vfov_deg: float = 42.13
 
     # ── Layer 2: Target tracker ───────────────────────────────────────────────
     target_ema_alpha: float = 0.5        # EMA smoothing on normalized horizontal offset (0=heavy, 1=none)

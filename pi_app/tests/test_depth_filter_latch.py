@@ -64,7 +64,7 @@ class TestTargetSwitchReseed(unittest.TestCase):
         return FollowMeController(FollowMeConfig(**overrides))
 
     def _person(self, x_m=0.0, z_m=2.0, confidence=0.9,
-                bbox=(0.4, 0.3, 0.6, 0.8), track_id=None) -> PersonDetection:
+                bbox=(0.4, 0.0, 0.6, 0.8), track_id=None) -> PersonDetection:
         return PersonDetection(x_m=x_m, z_m=z_m, confidence=confidence,
                                bbox=bbox, track_id=track_id)
 
