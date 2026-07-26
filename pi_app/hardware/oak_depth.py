@@ -1321,8 +1321,13 @@ class OakDepthReader:
                 self._calib_socket = socket
                 self._intrinsics_cache = {}
                 self._intrinsics_warned = False
-            logger.info(
-                "OAK calibration loaded for %s (depth %s RGB)",
+            # WARNING level on purpose: the root logger has no handler config,
+            # so it sits at WARNING and INFO is dropped. This line is the only
+            # runtime proof of where the corridor's focal length came from, and
+            # a silent fallback to the config constant changes safety geometry.
+            # Once per device session, not a hot path.
+            logger.warning(
+                "OAK calibration loaded from EEPROM for %s (depth %s RGB)",
                 socket, "aligned to" if use_yolo else "not aligned to",
             )
         except Exception:
@@ -1368,6 +1373,17 @@ class OakDepthReader:
                 if fx > 0.0:
                     with self._lock:
                         self._intrinsics_cache[key] = (fx, cx)
+                    # Once per resolution per session — records the numbers the
+                    # corridor is actually running on, so a field check can be
+                    # tied to real intrinsics instead of assumed ones.
+                    logger.warning(
+                        "OAK intrinsics %dx%d: fx=%.2f cx=%.2f (implied HFOV %.2f deg, "
+                        "principal point %+.1f px off centre) — config fallback was %.1f deg",
+                        width, height, fx, cx,
+                        math.degrees(2.0 * math.atan((width / 2.0) / fx)),
+                        cx - width / 2.0,
+                        float(getattr(self._obs_cfg, "camera_hfov_deg", 73.0)),
+                    )
                     return fx, cx
             except Exception:
                 with self._lock:
