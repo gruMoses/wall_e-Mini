@@ -202,6 +202,32 @@ class TestFrameParsing(unittest.TestCase):
         with d._telem_lock:
             self.assertAlmostEqual(d._left_telem.duty_cycle, 0.75, places=2)
 
+    def test_duty_cycle_reaches_telemetry_snapshot(self):
+        """Duty was parsed but dropped before VescTelemetry, so no consumer
+        could ever see it. It is the cheapest load proxy available (high duty at
+        low eRPM == loaded/stalling) and is wanted for the velocity-PID re-enable
+        (docs/gearing_memo.md section e, item 3)."""
+        d = self._driver()
+        now = time.monotonic()
+        # RPM must be present on at least one motor or get_telemetry() returns None.
+        d._parse_status("left", _status_frame(2, 1500, 4.0, 0.62).data, now)
+        d._parse_status("right", _status_frame(1, 1490, 3.8, -0.31).data, now)
+
+        telem = d.get_telemetry()
+        self.assertIsNotNone(telem)
+        self.assertAlmostEqual(telem.left_duty_cycle, 0.62, places=2)
+        self.assertAlmostEqual(telem.right_duty_cycle, -0.31, places=2)
+
+    def test_duty_cycle_absent_before_any_status(self):
+        """No STATUS frame for a motor -> duty stays None rather than 0.0, so a
+        consumer can tell 'not reported' from 'genuinely zero duty'."""
+        d = self._driver()
+        d._parse_status("left", _status_frame(2, 900, 1.0, 0.4).data, time.monotonic())
+        telem = d.get_telemetry()
+        self.assertIsNotNone(telem)
+        self.assertAlmostEqual(telem.left_duty_cycle, 0.4, places=2)
+        self.assertIsNone(telem.right_duty_cycle)
+
     def test_motor_temp_parsed(self):
         d = self._driver()
         d._parse_status4("right", _status4_frame(1, 35.0, 55.5, 3.0).data, time.monotonic())

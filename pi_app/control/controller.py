@@ -178,6 +178,8 @@ class Controller:
         self._actual_right_temp_c: Optional[float] = None
         self._actual_left_motor_temp_c: Optional[float] = None
         self._actual_right_motor_temp_c: Optional[float] = None
+        self._actual_left_duty: Optional[float] = None
+        self._actual_right_duty: Optional[float] = None
         self._vesc_rx_frame_count: int = 0
         self._vesc_rx_parse_error_count: int = 0
         self._vesc_rx_recv_error_count: int = 0
@@ -574,6 +576,8 @@ class Controller:
                 self._actual_right_temp_c = getattr(_telem, "right_temp_c", None)
                 self._actual_left_motor_temp_c = getattr(_telem, "left_motor_temp_c", None)
                 self._actual_right_motor_temp_c = getattr(_telem, "right_motor_temp_c", None)
+                self._actual_left_duty = getattr(_telem, "left_duty_cycle", None)
+                self._actual_right_duty = getattr(_telem, "right_duty_cycle", None)
                 # Convert average eRPM to wheel speed (m/s)
                 _lr, _rr = _telem.left_rpm, _telem.right_rpm
                 _valid_rpms = [abs(r) for r in (_lr, _rr) if r is not None]
@@ -645,6 +649,8 @@ class Controller:
                     self._actual_right_temp_c = None
                     self._actual_left_motor_temp_c = None
                     self._actual_right_motor_temp_c = None
+                    self._actual_left_duty = None
+                    self._actual_right_duty = None
                 else:
                     self._telem_stale_warned = False
             elif (self._telem_last_valid > 0.0
@@ -1235,6 +1241,8 @@ class Controller:
         telemetry["vesc_left_rpm"] = self._actual_left_rpm
         telemetry["vesc_right_rpm"] = self._actual_right_rpm
         telemetry["vesc_actual_speed_mps"] = self._actual_speed_mps
+        telemetry["vesc_left_duty"] = self._actual_left_duty
+        telemetry["vesc_right_duty"] = self._actual_right_duty
         telemetry["vesc_rx_frame_count"] = self._vesc_rx_frame_count
         telemetry["vesc_rx_parse_error_count"] = self._vesc_rx_parse_error_count
         telemetry["vesc_rx_recv_error_count"] = self._vesc_rx_recv_error_count

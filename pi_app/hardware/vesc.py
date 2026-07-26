@@ -91,6 +91,13 @@ class VescTelemetry:
     right_temp_c: Optional[float] = None
     left_motor_temp_c: Optional[float] = None  # winding / motor (°C)
     right_motor_temp_c: Optional[float] = None
+    # Duty cycle (fraction, -1.0..1.0) from STATUS(9). Parsed since the original
+    # STATUS decoder but previously dropped here, so nothing downstream could see
+    # it. It is the cheapest available load proxy: duty high while eRPM stays low
+    # means the motor is loaded or stalling. Needed as a plausibility signal for
+    # the velocity-PID re-enable (see docs/gearing_memo.md §e item 3).
+    left_duty_cycle: Optional[float] = None
+    right_duty_cycle: Optional[float] = None
     voltage_v: Optional[float] = None
     timestamp: float = 0.0
     can_send_alert: bool = False
@@ -289,6 +296,8 @@ class VescCanDriver:
                 right_temp_c=r.temp_fet_c,
                 left_motor_temp_c=l.temp_motor_c,
                 right_motor_temp_c=r.temp_motor_c,
+                left_duty_cycle=l.duty_cycle,
+                right_duty_cycle=r.duty_cycle,
                 voltage_v=voltage,
                 timestamp=max(l.last_status_s, r.last_status_s),
                 left_status_age_s=(now - l.last_status_s) if l.last_status_s > 0.0 else None,

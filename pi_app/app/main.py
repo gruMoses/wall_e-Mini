@@ -536,6 +536,13 @@ def run() -> None:
                 if isinstance(yr, (int, float)):
                     last_imu_yaw_rate_dps = float(yr)
 
+            # Gate host-side MediaPipe Hands on arm state. No gesture can take
+            # effect while disarmed (ACTIVATE requires armed; DEACTIVATE only
+            # applies in FOLLOW_ME), and disarmed is most of the robot's uptime,
+            # so this frees Pi CPU for the control loop with no behavior change.
+            if oak_reader is not None and gesture_ctrl is not None:
+                oak_reader.set_hand_poll_enabled(cmd.is_armed)
+
             # P3: BMS discharge FET safety — rate-limited warning + post-grace safety timeout.
             if bms_service is not None and cmd.is_armed:
                 _bms_st = bms_service.get_state()

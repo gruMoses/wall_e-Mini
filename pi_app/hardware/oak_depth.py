@@ -370,6 +370,11 @@ class OakDepthReader:
         self._all_dets_state = _AllDetsState(detections=[])
         self._rgb_state = _RgbState()
         self._hand_state = _HandState()
+        # Host-side MediaPipe Hands is the most expensive per-frame CPU consumer
+        # in this loop. Gate it (see set_hand_poll_enabled) so it does not run
+        # while no gesture can have any effect. Defaults True so standalone /
+        # CLI users keep the previous behavior.
+        self._hand_poll_enabled = True
         self._lm_net = None  # lazy-loaded OpenCV DNN for host-side LM
         self._imu_state = _ImuState()
         self._imu_metrics = _ImuMetrics()
@@ -508,6 +513,31 @@ class OakDepthReader:
         """Enable/disable host RGB preview polling to reduce host copy load."""
         with self._lock:
             self._rgb_poll_enabled = bool(enabled)
+
+    def set_hand_poll_enabled(self, enabled: bool) -> None:
+        """Enable/disable host-side MediaPipe Hands inference.
+
+        MediaPipe runs on the Pi CPU every poll iteration and competes with the
+        ~30 Hz control loop. No gesture can produce an effect while the robot is
+        disarmed: ACTIVATE requires ``safety_state.is_armed`` and DEACTIVATE only
+        applies in FOLLOW_ME, which itself requires armed (see
+        ``Controller.compute``). Disarmed is most of WALL-E's uptime, so gating
+        on arm state is free CPU with no behavior change.
+
+        Disabling clears the cached hand data, so a stale half-finished gesture
+        sequence cannot survive across an arm cycle. ``GestureStateMachine.update``
+        treats ``None`` as "no hand" and resets its hold counter.
+
+        NOTE: while gestures are configured, the hand queue IS the RGB preview
+        queue. The poll loop therefore keeps polling it for RGB when hand
+        inference is off, so camera liveness and the web stream do not age out.
+        """
+        with self._lock:
+            changed = bool(enabled) != self._hand_poll_enabled
+            self._hand_poll_enabled = bool(enabled)
+            if changed and not enabled:
+                self._hand_state.hand_data = None
+                self._hand_state.timestamp = time.monotonic()
 
     def get_imu_data(self) -> tuple[_ImuState, float]:
         """Return (imu_state_copy, age_s). Thread-safe.
@@ -1189,10 +1219,18 @@ class OakDepthReader:
                     self._last_pipeline_loop_ts = time.monotonic()
                 self._poll_depth(depth_q, spatial_depth_q, np)
                 self._poll_detections(det_q)
-                if hand_queues is not None:
+                with self._lock:
+                    hand_enabled = self._hand_poll_enabled
+                if hand_queues is not None and hand_enabled:
                     self._poll_hand(hand_queues)
                 with self._lock:
                     rgb_enabled = self._rgb_poll_enabled or self._rgb_always_poll
+                if hand_queues is not None and not hand_enabled:
+                    # The hand queue and the RGB preview queue are the same object
+                    # when gestures are configured. _poll_hand normally refreshes
+                    # RGB liveness; with it gated off, poll RGB instead so camera
+                    # health and the web stream do not falsely age out.
+                    rgb_enabled = True
                 if rgb_enabled and rgb_preview_q is not None:
                     self._poll_rgb(rgb_preview_q)
                 # IMU polling can run at a different cadence than depth polling.
