@@ -376,7 +376,7 @@ class OakDepthReader:
         # CLI users keep the previous behavior.
         self._hand_poll_enabled = True
         # Factory camera calibration for the socket the depth frame lives in.
-        # Set at session start, cleared on teardown. _depth_intrinsics_for()
+        # Set at session start, cleared on teardown. _intrinsics_for()
         # caches the resolution-specific (fx, cx) derived from it.
         self._calib = None
         self._calib_socket = None
@@ -1339,21 +1339,29 @@ class OakDepthReader:
                 "configured camera_hfov_deg", exc_info=True,
             )
 
-    def _depth_intrinsics_for(self, width: int, height: int) -> tuple[float, float]:
-        """Return (fx, cx) in pixels for a depth frame of this size.
+    def get_intrinsics(self, width: int, height: int) -> tuple[float, float, float, float]:
+        """Public: (fx, fy, cx, cy) in pixels for a CAM_A frame of this size.
+
+        THE single source of camera geometry for the whole stack. Anything that
+        projects between world and image — the obstacle corridor, person
+        position, the recorder's overlay — must come through here rather than
+        re-deriving a focal length from a hand-entered field of view. Deriving
+        it separately is exactly how the overlay ended up drawing 81 deg
+        geometry while the corridor ran on 70 deg.
+        """
+        return self._intrinsics_for(width, height)
+
+    def _intrinsics_for(self, width: int, height: int) -> tuple[float, float, float, float]:
+        """Return (fx, fy, cx, cy) in pixels for a frame of this size.
 
         Prefers the device's factory calibration, which is per-unit and already
         accounts for the crop/scale between the sensor's native resolution and
-        the requested one. Falls back to the old trig on ``camera_hfov_deg``.
+        the requested one. Falls back to trig on ``camera_hfov_deg``.
 
-        WARNING: that fallback is believed wrong. ``config.py`` sets
-        ``camera_hfov_deg = 81.0``, but 81 deg is the OAK-D Lite colour sensor's
-        DIAGONAL FOV; horizontal is ~69 deg. This file's own default in both
-        call sites is 73.0, and the board measurement in
-        docs/obstacle_avoidance_ground_plane_plan.md derived 73 deg. Too large an
-        HFOV yields too small an fx, which shrinks the obstacle corridor
-        threshold (fx * robot_half_mm) and makes the robot mask out obstacles
-        inside its real swept path. Reading calibration removes the guess.
+        NOTE: the fallback is a last resort and is strictly worse — it assumes a
+        centred principal point, which is wrong by ~15 px on this unit. It
+        exists only so a failed EEPROM read degrades instead of crashing; the
+        failure is logged loudly because it silently changes safety geometry.
         """
         key = (int(width), int(height))
         with self._lock:
@@ -1369,10 +1377,12 @@ class OakDepthReader:
                     socket, resizeWidth=int(width), resizeHeight=int(height),
                 )
                 fx = float(intr[0][0])
+                fy = float(intr[1][1])
                 cx = float(intr[0][2])
-                if fx > 0.0:
+                cy = float(intr[1][2])
+                if fx > 0.0 and fy > 0.0:
                     with self._lock:
-                        self._intrinsics_cache[key] = (fx, cx)
+                        self._intrinsics_cache[key] = (fx, fy, cx, cy)
                     # Once per resolution per session — records the numbers the
                     # corridor is actually running on, so a field check can be
                     # tied to real intrinsics instead of assumed ones.
@@ -1382,9 +1392,9 @@ class OakDepthReader:
                         width, height, fx, cx,
                         math.degrees(2.0 * math.atan((width / 2.0) / fx)),
                         cx - width / 2.0,
-                        float(getattr(self._obs_cfg, "camera_hfov_deg", 73.0)),
+                        float(getattr(self._obs_cfg, "camera_hfov_deg", 70.0)),
                     )
-                    return fx, cx
+                    return fx, fy, cx, cy
             except Exception:
                 with self._lock:
                     already = self._intrinsics_warned
@@ -1395,9 +1405,12 @@ class OakDepthReader:
                         "camera_hfov_deg fallback", width, height, exc_info=True,
                     )
 
-        hfov = getattr(self._obs_cfg, "camera_hfov_deg", 73.0)
+        hfov = getattr(self._obs_cfg, "camera_hfov_deg", 70.0)
         fx = (width / 2.0) / math.tan(math.radians(hfov / 2.0))
-        return fx, width / 2.0
+        # Square pixels assumed in the fallback: fy == fx. Principal point taken
+        # as frame centre, which is measurably wrong (+14.9 px on this unit) but
+        # is the only guess available without calibration.
+        return fx, fx, width / 2.0, height / 2.0
 
     def _build_hand_tracking_nodes(self, pipeline, dai, cam_rgb):
         """Create a camera output for host-side hand tracking via MediaPipe.
@@ -1584,7 +1597,7 @@ class OakDepthReader:
                 # and both are horizontal, so the distinction does not change
                 # today's numbers — but it would silently corrupt fy/cy for any
                 # future caller.
-                fx, cx = self._depth_intrinsics_for(w, frame.shape[0])
+                fx, _fy, cx, _cy = self._intrinsics_for(w, frame.shape[0])
                 threshold = fx * robot_half_mm
 
                 x_offsets = np.abs(np.arange(w, dtype=np.float32) - cx)
@@ -1858,7 +1871,7 @@ class OakDepthReader:
             return 0.0, 0.0
 
         z_m = float(np.median(valid)) / 1000.0
-        fx, cx_principal = self._depth_intrinsics_for(dw, depth_frame.shape[0])
+        fx, _fy, cx_principal, _cy = self._intrinsics_for(dw, depth_frame.shape[0])
         x_m = ((cx_d - cx_principal) / fx) * z_m
         return x_m, z_m
 

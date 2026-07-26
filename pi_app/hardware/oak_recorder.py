@@ -247,9 +247,21 @@ _COLOR_TEXT_BG = (0, 0, 0)
 def _world_to_pixel(
     wx, wy, robot_x, robot_y, robot_theta,
     img_w, img_h,
-    camera_height_m=0.497, hfov_deg=81.0,
+    camera_height_m=0.497, intrinsics=None,
 ):
     """Project a world-coordinate ground point to image pixel coords.
+
+    ``intrinsics`` is (fx, fy, cx, cy) from OakDepthReader.get_intrinsics() —
+    the same per-unit factory calibration the obstacle corridor runs on.
+
+    WHY IT IS A PARAMETER (fixed 2026-07-26): this function used to derive fx
+    itself from a hardcoded ``hfov_deg=81.0`` that no caller ever overrode, and
+    assumed the principal point sat at the frame centre. 81 deg is the colour
+    sensor's DIAGONAL FOV; the measured horizontal is 70.01 deg, so every
+    projection was ~18% off, and the principal point is +14.9 px off centre on
+    this unit. That made the recorded overlay disagree with the corridor the
+    robot was actually enforcing — which would have quietly invalidated any
+    field check done by eyeballing the overlay against the physical robot.
 
     Returns (px, py) or None if behind camera / off-screen.
     """
@@ -261,15 +273,31 @@ def _world_to_pixel(
     x_cam = dx * sin_t - dy * cos_t      # rightward offset
     if z_cam < 0.15:
         return None
-    hfov_rad = math.radians(hfov_deg)
-    fx = (img_w / 2.0) / math.tan(hfov_rad / 2.0)
-    vfov_rad = 2.0 * math.atan(img_h / img_w * math.tan(hfov_rad / 2.0))
-    fy = (img_h / 2.0) / math.tan(vfov_rad / 2.0)
-    px = int(img_w / 2.0 + fx * x_cam / z_cam)
-    py = int(img_h / 2.0 + fy * camera_height_m / z_cam)
+    fx, fy, cx, cy = _resolve_intrinsics(intrinsics, img_w, img_h)
+    px = int(cx + fx * x_cam / z_cam)
+    py = int(cy + fy * camera_height_m / z_cam)
     if 0 <= px < img_w and 0 <= py < img_h:
         return (px, py)
     return None
+
+
+def _resolve_intrinsics(intrinsics, img_w, img_h):
+    """(fx, fy, cx, cy), falling back to the config FOV if none were supplied.
+
+    The fallback is strictly worse — centred principal point, square pixels —
+    and exists only so annotation still renders when the device calibration is
+    unavailable (replaying a log offline, for instance).
+    """
+    if intrinsics:
+        try:
+            fx, fy, cx, cy = intrinsics
+            if fx > 0 and fy > 0:
+                return float(fx), float(fy), float(cx), float(cy)
+        except Exception:
+            pass
+    hfov_rad = math.radians(getattr(ObstacleAvoidanceConfig(), "camera_hfov_deg", 70.0))
+    fx = (img_w / 2.0) / math.tan(hfov_rad / 2.0)
+    return fx, fx, img_w / 2.0, img_h / 2.0
 
 
 def _annotate_rgb(
@@ -277,6 +305,7 @@ def _annotate_rgb(
     detections: list[PersonDetection],
     telemetry: RecordingTelemetry,
     obs_cfg: ObstacleAvoidanceConfig | None = None,
+    intrinsics: tuple | None = None,
 ) -> np.ndarray:
     """Draw bounding boxes, trail overlay, and enhanced status text."""
     if cv2 is None or np is None:
@@ -344,7 +373,7 @@ def _annotate_rgb(
 
     # ── Item 2: Trail visualization on RGB feed ──────────────────────────
     try:
-        _draw_trail_overlay(img, telemetry, cam_h)
+        _draw_trail_overlay(img, telemetry, cam_h, intrinsics=intrinsics)
     except Exception:
         pass  # never crash the video stream for overlay bugs
 
@@ -357,7 +386,7 @@ def _annotate_rgb(
     return img
 
 
-def _draw_trail_overlay(img, telemetry, camera_height_m):
+def _draw_trail_overlay(img, telemetry, camera_height_m, intrinsics=None):
     """Item 2: Draw trail points, lookahead carrot, and consume radius."""
     h, w = img.shape[:2]
     trail_pts = getattr(telemetry, "trail_points_xy", None)
@@ -381,6 +410,7 @@ def _draw_trail_overlay(img, telemetry, camera_height_m):
         pix = _world_to_pixel(
             pt[0], pt[1], robot_x, robot_y, robot_theta, w, h,
             camera_height_m=camera_height_m,
+            intrinsics=intrinsics,
         )
         projected.append(pix)
         if pix is not None:
@@ -412,6 +442,7 @@ def _draw_trail_overlay(img, telemetry, camera_height_m):
         la_pix = _world_to_pixel(
             la_pt[0], la_pt[1], robot_x, robot_y, robot_theta, w, h,
             camera_height_m=camera_height_m,
+            intrinsics=intrinsics,
         )
         if la_pix is not None:
             cv2.circle(img, la_pix, 6, (0, 140, 255), 2, cv2.LINE_AA)
@@ -424,8 +455,7 @@ def _draw_trail_overlay(img, telemetry, camera_height_m):
     # Consume radius (faint red arc at bottom of frame)
     consume_r = getattr(telemetry, "consume_radius_m", 0.4)
     if consume_r > 0:
-        hfov_rad = math.radians(81.0)
-        fx = (w / 2.0) / math.tan(hfov_rad / 2.0)
+        fx, _fy, _cx, _cy = _resolve_intrinsics(intrinsics, w, h)
         radius_px = max(3, int(fx * consume_r / 1.0))
         cx = w // 2
         cy = h - 10
@@ -650,6 +680,10 @@ class OakRecorder:
 
     def start(self, oak_reader) -> None:
         """Begin monitoring. Call after oak_reader.start()."""
+        # Kept so annotation can source the SAME per-unit intrinsics the
+        # obstacle corridor runs on. Deriving geometry separately is how the
+        # overlay ended up drawing 81 deg while the corridor used 70 deg.
+        self._oak_reader = oak_reader
         self._stop_event.clear()
         try:
             self._base_dir.mkdir(parents=True, exist_ok=True)
@@ -869,6 +903,22 @@ class OakRecorder:
 
         # (RGB and depth previews are now handled directly in update())
 
+    def _live_intrinsics(self, frame) -> tuple | None:
+        """(fx, fy, cx, cy) from the device for this frame's size, or None.
+
+        Sourced from OakDepthReader so annotation and the obstacle corridor
+        share one calibration. Returning None makes the overlay fall back to
+        the config FOV, which is what happens when replaying offline.
+        """
+        reader = getattr(self, "_oak_reader", None)
+        if reader is None or frame is None:
+            return None
+        try:
+            h, w = frame.shape[:2]
+            return reader.get_intrinsics(w, h)
+        except Exception:
+            return None
+
     def _update_rgb_preview(self, frame, telemetry: RecordingTelemetry) -> None:
         """Annotate an RGB frame and store JPEG for web viewer (rate-limited)."""
         if cv2 is None or frame is None or telemetry is None:
@@ -883,6 +933,7 @@ class OakRecorder:
                 telemetry.person_detections,
                 telemetry,
                 obs_cfg=self._obs_cfg,
+                intrinsics=self._live_intrinsics(frame),
             )
             annotated = cv2.resize(annotated, (320, 240), interpolation=cv2.INTER_AREA)
             _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 50])
