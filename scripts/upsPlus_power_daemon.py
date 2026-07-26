@@ -188,6 +188,70 @@ UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
 # for protection regs 0x11/0x12 is 0-4500mV.
 BATTERY_PROTECTION_MV = 3400
 
+# --- Marginal-boot-supply warning ------------------------------------------
+#
+# WHY (diagnosed 2026-07-26): the 5V rail feeding this UPS is a 3A buck off the
+# 13S pack. When the 18650 has gone flat from sitting, the UPS demands ~2.9A to
+# charge it ON TOP OF the Pi 5 + OAK-D boot load, which pushes total demand past
+# the buck's 3A limit. The buck falls out of regulation and the Pi dies with no
+# OS shutdown and no log — the boot on 2026-07-26 08:44 lasted 115s and left a
+# dirty journal.
+#
+# The failure is CURRENT DELIVERY, not stored energy: 3.9V is ~50% SoC, plenty
+# of runtime. Measured knee on the input rail vs 18650 charge draw:
+#     0.19A -> 4893mV    1.24A -> 4864mV    2.0A -> ~4.8V    2.88A -> 4184mV
+# The first three are a gentle ~0.06 ohm resistive droop (cable + connector);
+# the last is the regulator dropping out. A healthy boot has the cell at
+# 4.19-4.20V and draws under ~2A.
+#
+# These thresholds only WARN. They never gate or delay anything — a marginal
+# boot that survives must behave exactly as before.
+MARGINAL_BATT_V = 4.0            # below this the cell is flat enough to gulp current
+MARGINAL_CHARGE_MA = 2000.0      # above this, total demand is near the 3A buck limit
+MARGINAL_INPUT_MV = 4500         # input already sagging => little headroom left
+
+
+def warn_marginal_boot_supply(snap: dict) -> bool:
+    """Log a warning when this boot looks likely to brown out. Returns True if warned.
+
+    Best-effort and fully isolated: any failure here must never perturb the
+    daemon's AC-detection or shutdown logic, so everything is guarded.
+    """
+    try:
+        reasons = []
+        batt_v = snap.get("battery_v")
+        batt_ma = snap.get("battery_i_ma")
+        typec_mv = snap.get("typec_mv")
+
+        if isinstance(batt_v, (int, float)) and batt_v < MARGINAL_BATT_V:
+            reasons.append(
+                "18650 at %.3fV (< %.2fV) — flat from sitting" % (batt_v, MARGINAL_BATT_V)
+            )
+        if isinstance(batt_ma, (int, float)) and batt_ma > MARGINAL_CHARGE_MA:
+            reasons.append(
+                "charge draw %.0fmA (> %.0fmA) — near the 3A buck limit"
+                % (batt_ma, MARGINAL_CHARGE_MA)
+            )
+        if isinstance(typec_mv, (int, float)) and 0 < typec_mv < MARGINAL_INPUT_MV:
+            reasons.append(
+                "input already sagging to %smV (< %smV)" % (typec_mv, MARGINAL_INPUT_MV)
+            )
+
+        if not reasons:
+            return False
+
+        logging.warning(
+            "MARGINAL BOOT SUPPLY — this boot may brown out: %s. "
+            "The 5V buck is rated 3A; a flat 18650 plus the Pi/OAK-D boot load can "
+            "exceed it and hard-cut the Pi with no shutdown and no log. "
+            "Mitigation: leave it on charge ~30-60 min, then power-cycle.",
+            "; ".join(reasons),
+        )
+        return True
+    except Exception:
+        logging.debug("marginal-supply warning failed", exc_info=True)
+        return False
+
 # --- I2C politeness: minimize supplemental traffic to the UPS MCU ----------
 #
 # PROPHYLACTIC load reduction, NOT a proven root-cause fix (n=1 field death).
@@ -1042,6 +1106,7 @@ def main(detect_only: bool | None = None) -> None:
             snap["battery_v"],
             snap["battery_i_ma"],
         )
+        warn_marginal_boot_supply(snap)
     except Exception as error:
         logging.warning("Unable to read UPS initial snapshot: %s", error)
 
