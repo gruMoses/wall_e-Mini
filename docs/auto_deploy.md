@@ -23,7 +23,10 @@ cd /home/pi/wall_e-Mini && git pull --ff-only origin main
 chmod +x bin/auto_deploy.sh
 ( crontab -l 2>/dev/null | grep -v auto_deploy.sh; echo '*/5 * * * * /home/pi/wall_e-Mini/bin/auto_deploy.sh >/dev/null 2>&1' ) | crontab -
 crontab -l
+sudo systemctl restart wall-e.service
 ```
+
+NOTE: The manual `git pull` moves the checkout to `origin/main` before cron runs. The script then sees nothing to deploy, so the running service keeps the old code. The last line restarts the service one time. Every later push to `main` deploys through the script.
 
 `sudo -n systemctl restart wall-e.service` must work without a password for user `pi`. `run_main.sh` already uses `sudo`, so this is the case on this Pi.
 
