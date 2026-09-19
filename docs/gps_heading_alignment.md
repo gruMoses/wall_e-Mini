@@ -97,3 +97,19 @@ Dashboard heading card shows `raw° → corrected°` when locked.
 
 Disable the gate temporarily with `gps_heading_align.enabled = False` in
 `config.py` (service restart required).
+
+## Per-epoch course-over-ground lock (2026-09-19)
+
+The displacement method above needs a straight command on both tracks and a straight path for 8 s. A single mixed RC stick and uneven ground make that unreliable. The receiver reports its own Doppler course over ground each epoch (`GpsReading.cog_deg`, from `$GNRMC`). `GpsHeadingAligner.update_cog()` pairs each epoch's course with the IMU heading at that instant. Each pair gives one offset sample; a wobble moves the course and the heading together, so the samples still agree.
+
+Gates (all fail-closed):
+
+- RTK fixed only (`min_fix_quality`). A fix loss clears the candidate samples.
+- Forward intent: both tracks last commanded above neutral + 6 bytes, in MANUAL mode, from the RC or the phone. A reverse run would give a course 180 degrees from the heading.
+- Speed over ground at least `cog_min_speed_mps` (0.3 m/s). The Doppler course is noise below that.
+- Yaw rate at most `cog_max_yaw_rate_dps` (6 degrees per second).
+- Lock when `cog_min_samples` (6) samples inside `cog_window_s` (20 s) have a circular standard deviation at most `cog_max_spread_deg` (8 degrees). The circular mean becomes the frozen offset; `lock_source` reports `"cog"`.
+
+Procedure: with the robot armed and the fix at 4, drive forward at walking pace for about 10 seconds. The path does not need to be straight. The nav page shows "GPS heading alignment locked" and the journal shows the lock line with the sample count and the spread.
+
+The displacement method stays in place; either method can lock first. The offset stays frozen until the armed session ends (`reset()`).

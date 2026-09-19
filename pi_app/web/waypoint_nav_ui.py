@@ -736,7 +736,7 @@ function getRouteValidation() {
         ? (headingAlignFrozen
           ? 'GPS heading alignment locked (frozen)'
           : 'GPS heading alignment locked')
-        : 'Drive straight in manual mode on RTK fixed to lock GPS heading alignment',
+        : 'Drive forward at walking pace for ~10 s on RTK fixed (RC or phone) to lock GPS heading alignment',
       status: headingAlignLocked ? 'ok' : 'err',
     });
   }

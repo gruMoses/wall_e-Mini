@@ -25,6 +25,22 @@ class GpsHeadingAlignConfig:
     # and while body yaw rate remains below this threshold.
     max_lock_yaw_rate_dps: float = 3.0
 
+    # ── Per-epoch course-over-ground lock (2026-09-19) ─────────────────────
+    # The receiver reports its own Doppler course over ground each epoch
+    # (GpsReading.cog_deg). Pairing each epoch's course with the IMU heading
+    # at that same instant gives an offset sample that does not depend on a
+    # straight path or a straight command: wobble cancels sample by sample.
+    # Lock when enough samples agree. Works from the RC or the phone; the only
+    # requirements are RTK fixed, moving forward at walking pace, and not
+    # pivoting. A single mixed stick and uneven ground made the displacement
+    # method above a coin flip (Kevin, 2026-09-19).
+    cog_lock_enabled: bool = True
+    cog_min_speed_mps: float = 0.3        # Doppler course is noisy below this
+    cog_max_yaw_rate_dps: float = 6.0     # ~1 deg of GPS-latency error per sample
+    cog_min_samples: int = 6              # epochs (1 Hz) that must agree
+    cog_max_spread_deg: float = 8.0       # circular std of the samples
+    cog_window_s: float = 20.0            # samples older than this expire
+
 
 @dataclass(frozen=True)
 class ImuSteeringConfig:

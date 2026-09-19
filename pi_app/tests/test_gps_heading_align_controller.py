@@ -357,3 +357,42 @@ class TestWaypointHeadingTargetOwnership(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCourseOverGroundLockThroughController(unittest.TestCase):
+    """Web/BT teleop forward drive can lock via the receiver's course over ground."""
+
+    def _aligner(self):
+        return GpsHeadingAligner(
+            GpsHeadingAlignConfig(
+                enabled=True, min_fix_quality=4, min_distance_m=100.0,  # displacement path cannot lock
+                min_speed_mps=0.1, max_lock_yaw_rate_dps=3.0,
+                cog_lock_enabled=True, cog_min_speed_mps=0.3, cog_max_yaw_rate_dps=6.0,
+                cog_min_samples=6, cog_max_spread_deg=8.0, cog_window_s=20.0,
+            )
+        )
+
+    def test_bt_forward_drive_locks_from_cog(self):
+        aligner = self._aligner()
+        ctrl = _make_controller(aligner=aligner, imu=FakeImu(heading_deg=30.0))
+        ctrl._safety_state.is_armed = True
+        rc = _fresh_armed_rc()
+        # Web/BT teleop forward at a moderate byte offset; the slew ramps the
+        # emitted bytes above neutral+6 within a few ticks.
+        for i in range(40):
+            ctrl._gps_reading = replace(_gps(lat=40.0, ts=1_000.0 + i), cog_deg=120.0, sog_mps=0.6)
+            ctrl.process(rc, bt_override_bytes=(160, 160))
+        self.assertTrue(aligner.locked)
+        self.assertEqual(aligner.lock_source, "cog")
+        self.assertAlmostEqual(aligner.offset_deg, 90.0, places=1)
+
+    def test_reverse_drive_never_locks_from_cog(self):
+        aligner = self._aligner()
+        ctrl = _make_controller(aligner=aligner, imu=FakeImu(heading_deg=30.0))
+        ctrl._safety_state.is_armed = True
+        rc = _fresh_armed_rc()
+        for i in range(40):
+            ctrl._gps_reading = replace(_gps(lat=40.0, ts=1_000.0 + i), cog_deg=300.0, sog_mps=0.6)
+            ctrl.process(rc, bt_override_bytes=(90, 90))
+        self.assertFalse(aligner.locked)
+        self.assertEqual(aligner.status().cog_samples, 0)

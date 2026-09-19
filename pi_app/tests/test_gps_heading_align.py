@@ -363,3 +363,87 @@ class TestGpsHeadingAligner(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCourseOverGroundLock(unittest.TestCase):
+    """Per-epoch course-over-ground lock (2026-09-19): no straight run needed."""
+
+    def _cfg(self, **over):
+        base = dict(
+            cog_lock_enabled=True, cog_min_speed_mps=0.3, cog_max_yaw_rate_dps=6.0,
+            cog_min_samples=6, cog_max_spread_deg=8.0, cog_window_s=20.0,
+        )
+        base.update(over)
+        return _cfg(**base)
+
+    def _feed(self, aligner, pairs, *, fix=4, sog=0.6, fwd=True, yaw=0.0, t0=1_000.0):
+        for i, (raw, cog) in enumerate(pairs):
+            aligner.update_cog(raw, cog, sog, fix, t0 + i, forward_intent=fwd, yaw_rate_dps=yaw)
+
+    def test_locks_from_consistent_epochs_with_wobble(self):
+        aligner = GpsHeadingAligner(self._cfg())
+        # A wobbly path: heading and course move together, offset stays +90.
+        pairs = [(30 + w, 120 + w) for w in (0, 4, -3, 6, -5, 2)]
+        self._feed(aligner, pairs)
+        self.assertTrue(aligner.locked)
+        self.assertEqual(aligner.lock_source, "cog")
+        self.assertAlmostEqual(aligner.offset_deg, 90.0, places=3)
+        self.assertEqual(aligner.status().cog_samples, 6)
+
+    def test_wraparound_offset(self):
+        aligner = GpsHeadingAligner(self._cfg())
+        self._feed(aligner, [(350.0, 5.0)] * 6)
+        self.assertTrue(aligner.locked)
+        self.assertAlmostEqual(aligner.offset_deg, 15.0, places=3)
+
+    def test_disagreeing_epochs_never_lock(self):
+        aligner = GpsHeadingAligner(self._cfg())
+        self._feed(aligner, [(30.0, 120.0), (30.0, 140.0)] * 5)
+        self.assertFalse(aligner.locked)
+        self.assertGreater(aligner.status().cog_spread_deg, 8.0)
+
+    def test_reverse_and_slow_and_pivot_epochs_are_skipped(self):
+        aligner = GpsHeadingAligner(self._cfg())
+        self._feed(aligner, [(30.0, 300.0)] * 6, fwd=False)          # reverse: course flipped
+        self.assertEqual(aligner.status().cog_samples, 0)
+        self._feed(aligner, [(30.0, 120.0)] * 6, sog=0.1, t0=2_000.0)  # too slow
+        self.assertEqual(aligner.status().cog_samples, 0)
+        self._feed(aligner, [(30.0, 120.0)] * 6, yaw=20.0, t0=3_000.0)  # pivoting
+        self.assertEqual(aligner.status().cog_samples, 0)
+        self._feed(aligner, [(30.0, None)] * 6, t0=4_000.0)             # stationary: no course
+        self.assertFalse(aligner.locked)
+
+    def test_rtk_float_clears_samples(self):
+        aligner = GpsHeadingAligner(self._cfg())
+        self._feed(aligner, [(30.0, 120.0)] * 4)
+        self.assertEqual(aligner.status().cog_samples, 4)
+        aligner.update_cog(30.0, 120.0, 0.6, 5, 1_010.0, forward_intent=True, yaw_rate_dps=0.0)
+        self.assertEqual(aligner.status().cog_samples, 0)
+        self.assertFalse(aligner.locked)
+
+    def test_duplicate_epoch_counts_once_and_lock_is_frozen(self):
+        aligner = GpsHeadingAligner(self._cfg())
+        for _ in range(10):
+            aligner.update_cog(30.0, 120.0, 0.6, 4, 1_000.0, forward_intent=True, yaw_rate_dps=0.0)
+        self.assertEqual(aligner.status().cog_samples, 1)
+        self._feed(aligner, [(30.0, 120.0)] * 6, t0=1_001.0)
+        self.assertTrue(aligner.locked)
+        # Frozen: a later, different course does not move the offset.
+        aligner.update_cog(30.0, 200.0, 0.6, 4, 1_100.0, forward_intent=True, yaw_rate_dps=0.0)
+        self.assertAlmostEqual(aligner.offset_deg, 90.0, places=3)
+        aligner.reset()
+        self.assertFalse(aligner.locked)
+        self.assertIsNone(aligner.lock_source)
+        self.assertEqual(aligner.status().cog_samples, 0)
+
+    def test_window_expiry(self):
+        aligner = GpsHeadingAligner(self._cfg(cog_window_s=5.0))
+        self._feed(aligner, [(30.0, 120.0)] * 3, t0=1_000.0)
+        self._feed(aligner, [(30.0, 120.0)] * 3, t0=1_030.0)  # the first 3 expired
+        self.assertEqual(aligner.status().cog_samples, 3)
+        self.assertFalse(aligner.locked)
+
+    def test_disabled_knob(self):
+        aligner = GpsHeadingAligner(self._cfg(cog_lock_enabled=False))
+        self._feed(aligner, [(30.0, 120.0)] * 8)
+        self.assertFalse(aligner.locked)

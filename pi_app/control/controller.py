@@ -396,6 +396,9 @@ class Controller:
                 "last_cog_deg": None,
                 "last_speed_mps": None,
                 "history_samples": 0,
+                "cog_samples": 0,
+                "cog_spread_deg": None,
+                "lock_source": None,
             }
         st = aligner.status()
         corrected = aligner.correct(raw_heading) if raw_heading is not None else None
@@ -409,6 +412,9 @@ class Controller:
             "last_cog_deg": st.last_cog_deg,
             "last_speed_mps": st.last_speed_mps,
             "history_samples": st.history_samples,
+            "cog_samples": st.cog_samples,
+            "cog_spread_deg": st.cog_spread_deg,
+            "lock_source": st.lock_source,
         }
 
     @staticmethod
@@ -1064,6 +1070,24 @@ class Controller:
                         and is_moving_straight
                         and manual_rc_forward_intent
                     ),
+                    yaw_rate_dps=float(align_imu.yaw_rate_dps),
+                )
+                # Per-epoch course-over-ground lock: source-agnostic (RC or
+                # web/BT teleop) and tolerant of a wobbly path. Forward intent
+                # comes from the bytes last emitted to the motors, so a reverse
+                # run (course 180 deg from heading) can never contribute.
+                _rd = self._gps_reading
+                _fwd = (
+                    int(self._slew_last_left) > CENTER_OUTPUT_VALUE + 6
+                    and int(self._slew_last_right) > CENTER_OUTPUT_VALUE + 6
+                )
+                self._gps_heading_aligner.update_cog(
+                    float(align_imu.heading_deg),
+                    getattr(_rd, "cog_deg", None),
+                    getattr(_rd, "sog_mps", None),
+                    _rd.fix_quality,
+                    _rd.timestamp,
+                    forward_intent=(self._mode == "MANUAL" and _fwd),
                     yaw_rate_dps=float(align_imu.yaw_rate_dps),
                 )
             except Exception:

@@ -41,6 +41,10 @@ class GpsHeadingAlignStatus:
     last_speed_mps: Optional[float]
     last_displacement_m: Optional[float]
     history_samples: int
+    # Per-epoch course-over-ground path (2026-09-19).
+    cog_samples: int = 0
+    cog_spread_deg: Optional[float] = None
+    lock_source: Optional[str] = None   # "displacement" | "cog" | None
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -64,6 +68,28 @@ def _signed_error_deg(target: float, current: float) -> float:
     return ((target - current + 180.0) % 360.0) - 180.0
 
 
+def _circular_mean_deg(values_deg: list[float]) -> float:
+    """Circular mean in (-180, 180]."""
+    sx = sum(math.cos(math.radians(v)) for v in values_deg)
+    sy = sum(math.sin(math.radians(v)) for v in values_deg)
+    return _signed_error_deg(math.degrees(math.atan2(sy, sx)), 0.0)
+
+
+def _circular_spread_deg(values_deg: list[float]) -> float:
+    """Circular standard deviation (degrees) from the mean resultant length."""
+    n = len(values_deg)
+    if n == 0:
+        return float("inf")
+    sx = sum(math.cos(math.radians(v)) for v in values_deg) / n
+    sy = sum(math.sin(math.radians(v)) for v in values_deg) / n
+    r = math.hypot(sx, sy)
+    if r <= 1e-12:
+        return float("inf")
+    if r >= 1.0:
+        return 0.0
+    return math.degrees(math.sqrt(-2.0 * math.log(r)))
+
+
 class GpsHeadingAligner:
     """One-shot IMU-to-true-north alignment from gated forward GPS motion."""
 
@@ -80,6 +106,15 @@ class GpsHeadingAligner:
         self._last_cog_deg: Optional[float] = None
         self._last_speed_mps: Optional[float] = None
         self._last_displacement_m: Optional[float] = None
+        # Per-epoch course-over-ground lock path: (sample_ts, offset_deg).
+        self._cog_samples: list[tuple[float, float]] = []
+        self._last_cog_sample_ts: Optional[float] = None
+        self._cog_spread_deg: Optional[float] = None
+        self._lock_source: Optional[str] = None
+
+    @property
+    def lock_source(self) -> Optional[str]:
+        return self._lock_source
 
     @property
     def offset_deg(self) -> float:
@@ -108,6 +143,9 @@ class GpsHeadingAligner:
             last_speed_mps=self._last_speed_mps,
             last_displacement_m=self._last_displacement_m,
             history_samples=len(self._history),
+            cog_samples=len(self._cog_samples),
+            cog_spread_deg=self._cog_spread_deg,
+            lock_source=self._lock_source,
         )
 
     def reset(self) -> None:
@@ -119,6 +157,10 @@ class GpsHeadingAligner:
         self._last_cog_deg = None
         self._last_speed_mps = None
         self._last_displacement_m = None
+        self._cog_samples.clear()
+        self._last_cog_sample_ts = None
+        self._cog_spread_deg = None
+        self._lock_source = None
 
     def correct(self, raw_imu_heading_deg: float) -> float:
         """Return true-frame heading for a raw-IMU reading."""
@@ -219,6 +261,7 @@ class GpsHeadingAligner:
         new_offset = _signed_error_deg(gps_cog, raw_imu_heading_deg)
         self._offset_deg = new_offset
         self._locked = True
+        self._lock_source = "displacement"
         _logger.warning(
             "GPS heading aligner LOCKED (frozen): offset=%+.1f° "
             "(gps_cog=%.1f° raw_imu=%.1f° displacement=%.2fm "
@@ -230,4 +273,99 @@ class GpsHeadingAligner:
             speed,
             yaw_rate_dps,
             fix_quality,
+        )
+
+    def update_cog(
+        self,
+        raw_imu_heading_deg: float,
+        cog_deg: Optional[float],
+        sog_mps: Optional[float],
+        fix_quality: int,
+        sample_ts: float,
+        *,
+        forward_intent: bool,
+        yaw_rate_dps: Optional[float] = None,
+    ) -> None:
+        """Per-epoch course-over-ground lock (2026-09-19).
+
+        Each GPS epoch that qualifies contributes one offset sample,
+        ``course_over_ground - raw_imu_heading``, taken at the same instant.
+        Because every sample is paired, the path does not need to be straight
+        and the command does not need to be perfectly equal on both tracks:
+        a wobble moves the course and the heading together. The lock happens
+        when ``cog_min_samples`` samples inside ``cog_window_s`` agree to
+        within ``cog_max_spread_deg`` (circular standard deviation); their
+        circular mean becomes the frozen offset.
+
+        Gates, all fail-closed: the offset is frozen once locked; RTK fixed
+        only (a fix loss clears the candidate samples); ``forward_intent``
+        (both tracks commanded forward — a reverse run would give a course
+        180 deg from the heading); ``sog_mps >= cog_min_speed_mps`` (Doppler
+        course is noise when slow); ``|yaw_rate| <= cog_max_yaw_rate_dps``
+        (GPS latency during a pivot skews the pair). Non-qualifying epochs are
+        skipped, not fatal: each accepted sample was taken under qualifying
+        conditions on its own.
+        """
+        cfg = self._cfg
+        if not cfg.enabled or not bool(getattr(cfg, "cog_lock_enabled", True)):
+            return
+        if self._locked:
+            return
+        if self._last_cog_sample_ts is not None:
+            if sample_ts == self._last_cog_sample_ts:
+                return
+            if sample_ts < self._last_cog_sample_ts:
+                self._cog_samples.clear()
+                self._last_cog_sample_ts = None
+                return
+        self._last_cog_sample_ts = sample_ts
+
+        if fix_quality != cfg.min_fix_quality:
+            self._cog_samples.clear()
+            self._cog_spread_deg = None
+            return
+
+        window_s = float(getattr(cfg, "cog_window_s", 20.0))
+        cutoff = sample_ts - window_s
+        self._cog_samples = [(t, v) for (t, v) in self._cog_samples if t >= cutoff]
+
+        min_speed = float(getattr(cfg, "cog_min_speed_mps", 0.3))
+        max_yaw = float(getattr(cfg, "cog_max_yaw_rate_dps", 6.0))
+        if (
+            not forward_intent
+            or cog_deg is None
+            or sog_mps is None
+            or float(sog_mps) < min_speed
+            or yaw_rate_dps is None
+            or abs(float(yaw_rate_dps)) > max_yaw
+        ):
+            self._cog_spread_deg = (
+                _circular_spread_deg([v for (_, v) in self._cog_samples])
+                if len(self._cog_samples) >= 2 else None
+            )
+            return
+
+        self._last_cog_deg = float(cog_deg)
+        self._last_speed_mps = float(sog_mps)
+        self._cog_samples.append(
+            (sample_ts, _signed_error_deg(float(cog_deg), raw_imu_heading_deg))
+        )
+        values = [v for (_, v) in self._cog_samples]
+        spread = _circular_spread_deg(values) if len(values) >= 2 else None
+        self._cog_spread_deg = spread
+
+        min_samples = int(getattr(cfg, "cog_min_samples", 6))
+        max_spread = float(getattr(cfg, "cog_max_spread_deg", 8.0))
+        if len(values) < min_samples or spread is None or spread > max_spread:
+            return
+
+        self._offset_deg = _circular_mean_deg(values)
+        self._locked = True
+        self._lock_source = "cog"
+        _logger.warning(
+            "GPS heading aligner LOCKED (frozen) from %d course-over-ground "
+            "epochs: offset=%+.1f° spread=%.1f° (last cog=%.1f° raw_imu=%.1f° "
+            "sog=%.2fm/s yaw_rate=%.1f°/s fix=%d)",
+            len(values), self._offset_deg, spread, float(cog_deg),
+            raw_imu_heading_deg, float(sog_mps), float(yaw_rate_dps), fix_quality,
         )

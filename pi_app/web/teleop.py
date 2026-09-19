@@ -416,6 +416,14 @@ class TeleopSession:
                 self.tripped_reason = "deadman"
                 self._driver_id = None      # release the single-driver lock
                 self._stop_motor_if_driving()
+                # WARNING, not INFO: the app installs no logging handler, and a
+                # deadman trip is a safety event the operator sees as a
+                # mysterious lock (2026-09-19: a backgrounded phone tab).
+                logger.warning(
+                    "teleop deadman tripped: %.0f ms since last heartbeat "
+                    "(timeout %.0f ms); session disarmed, press-and-hold ARM required",
+                    (now - self._last_hb) * 1000.0, self._deadman_s * 1000.0,
+                )
                 return "deadman_trip"
 
             # 5. Armed + fresh: drive the capped intent.
