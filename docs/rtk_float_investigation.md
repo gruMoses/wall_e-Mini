@@ -1,6 +1,6 @@
 # RTK float investigation (2026-09-19)
 
-The rover reports RTK float (fix quality 5) and never RTK fixed (4). The seven JSON logs on the Pi (oldest 2026-07-30) contain no epoch with quality 4. Kevin has seen a fix in the past. This document gives the hardware identity, the evidence, the ranked causes, the decisive test, and the base-station checklist. A 13-agent research pass produced the causes; a Grok cross-check corrected one of them.
+The rover reported RTK float (fix quality 5) and never RTK fixed (4) until 15:27 on this date; the seven JSON logs on the Pi before that (oldest 2026-07-30) contain no epoch with quality 4 (section 2.1). Kevin has seen a fix in the past. This document gives the hardware identity, the evidence, the ranked causes, the decisive test, and the base-station checklist. A 13-agent research pass produced the causes; a Grok cross-check corrected one of them.
 
 ## 1. Hardware
 
@@ -23,6 +23,10 @@ The rover reports RTK float (fix quality 5) and never RTK fixed (4). The seven J
 | Register 94 (LoRa serial baud index) | 4 | 19,200 baud between the LoRa radio and the receiver; the air rate is not visible from the rover |
 | Register 113 (connect state) | 0 | Meaning undocumented in LoRa mode |
 | OAK-D Lite USB link | 480 Mb/s (USB 2) | No USB 3 harmonic near L1/L5 |
+
+### 2.1 First fix, 15:27 (after this document was started)
+
+Kevin drove the robot about 23 m west of its usual parking spot and stopped at 15:07. At 15:27:34, after 20 minutes stationary, the rover reported quality 4 for the first time in any log. It fell back to 5 at 15:27:49, fixed again at 15:34:30, fell to 5 at 15:47:08, and fixed at 15:47:18; it then held 4 with `$GNRMC` mode R, course 324.1, position scatter about 1 cm. Conclusions: the base, the link and the rover can produce a fixed solution; the convergence time (20 minutes against a specification of under 10 seconds) and the drop-outs say the corrections or the carrier-phase quality are marginal, which points at causes 1, 2 and 4 in section 3; the old parking spot never fixed in hours, so it is worse (obstruction, multipath, or LoRa margin) than the new one. The short-baseline test in section 4 and the base checklist in section 5 stay the next steps; the GPS heading aligner can now lock during a straight manual run for the first time.
 
 ## 3. Ranked causes
 

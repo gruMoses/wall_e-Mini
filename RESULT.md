@@ -68,7 +68,7 @@ Tests: 703 at a0a2776 → 781 on the branch, all pass, 4 skipped. Changed tests 
 ### B.5 Not done
 
 - GPS course over ground and speed from the DFRobot receiver registers (needs a bench read first; a DFRobot audit is in progress).
-- RTK stays float: fix 4 has never appeared in any log on the Pi since 2026-07-30. Runbook: `docs/rtk_float_investigation.md`; next step is Kevin's short-baseline test.
+- RTK: fix 4 had never appeared in any log since 2026-07-30; at 15:27 today the rover fixed for the first time at a spot 23 m from the usual parking place, after 20 minutes stationary, with drop-outs. Runbook: `docs/rtk_float_investigation.md`; next steps are the short-baseline test and the base checklist.
 - The external 9DoF board is parked (`docs/external_imu_postmortem.md`).
 - Auto-deploy: script and runbook are on `main` (5a3e41d). The install on the Pi (cron + one restart) is Kevin's step; the classifier blocks it from this session.
 
