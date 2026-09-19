@@ -49,7 +49,7 @@ A 57-agent audit of the pipeline found the same two root causes plus three more 
 
 Grok reviewed the full diff: the sign chain is consistent from packet to motor bytes; its one finding (the witness polarity) became commit 8.
 
-Tests: 703 at a0a2776 → 781 on the branch, all pass, 4 skipped. Changed tests and their reasons are in each commit message.
+Tests: 703 at a0a2776 → 890 on main, all pass, 4 skipped. Changed tests and their reasons are in each commit message.
 
 ### B.4 Validation plan on the robot
 
@@ -64,6 +64,14 @@ Tests: 703 at a0a2776 → 781 on the branch, all pass, 4 skipped. Changed tests 
 - Boot log: "OAK IMU gyro bias measured over 3.00s from 273 samples: x=0.22 y=-0.72 z=0.14 dps"; "+Y points DOWN (ay=-0.99 g): gyro_y is clockwise-positive, yaw_axis_sign=+1"; "IMU steering compensation enabled (source: oak_d)".
 - Parked and disarmed for 70 s: heading 0.0 throughout; `zupt_active` true, witness true, tracked bias −0.733 (boot −0.717). Before the fix the same 70 s drifted about 60 degrees.
 - Kevin then drove the robot to reposition it (no planned maneuver). In every segment the heading moved with the sign of the track differential: left track faster → heading increased; right track faster → heading decreased; straight → heading held. That is the sign validation from real driving.
+
+### B.4b First autonomous waypoint run (2026-09-19 18:44 CDT)
+
+1. 18:19: first attempt after the sign fix. ALIGN pivoted the correct way, but the fixed 0.5 pivot (about 74 degrees per second) overshot 25–30 degrees on every pivot and ALIGN/DRIVE oscillated left-right (commit 9838203 made the pivot proportional).
+2. 18:43:39: GPS heading locked at −33.9 degrees after a short forward drive (lock now persists across disarm, commit f424f74).
+3. 18:44:37: nav start accepted. ALIGN error +49.6 → pivot right at ±23 bytes → 43.8 → 34.7 → 10.4 degrees in 3 s → DRIVE. One −12.5 degree correction, then the heading held within ±2 degrees for 30 s while the distance closed 9.6 m → 0.6 m. Arrival inside 1.0 m; mission complete.
+
+This is the first waypoint run on this robot that turned toward the target and arrived.
 
 ### B.5 Not done
 
