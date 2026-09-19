@@ -7,6 +7,7 @@ This module implements a PID controller that uses IMU data to:
 3. Provide smooth corrections for external disturbances
 """
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
@@ -18,6 +19,13 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from config import ImuSteeringConfig
+
+# The app installs no logging handler, so INFO is dropped: anything that must be
+# visible in journalctl is logged at WARNING.
+logger = logging.getLogger(__name__)
+
+# A dead IMU is retried this often instead of staying dead for the session.
+IMU_RECOVERY_RETRY_S = 5.0
 
 
 @runtime_checkable
@@ -125,7 +133,11 @@ class ImuSteeringCompensator:
         self._yaw_rate_ema: Optional[float] = None
         # Track saturation from previous iteration to apply simple anti-windup
         self._last_saturated: bool = False
-        
+        # Last initialization / recovery failure, surfaced to startup logging so
+        # "IMU steering enabled" is never printed over a dead IMU.
+        self.init_error: Optional[str] = None
+        self._last_recovery_attempt_s: Optional[float] = None
+
         # Initialize IMU if provided
         if self.imu_reader is not None:
             self._initialize_imu()
@@ -158,13 +170,50 @@ class ImuSteeringCompensator:
                 self.state.is_calibrated = True
                 self.state.is_available = True
                 self.state.last_update_time = time.monotonic()
-                
-        except Exception:
-            print("IMU initialization failed")
+                self.init_error = None
+
+        except Exception as exc:
+            # WARNING with the traceback, not a bare print: a bare
+            # "IMU initialization failed" told us nothing about why, and main.py
+            # printed "IMU steering compensation enabled" right after it.
+            self.init_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("IMU steering initialization failed", exc_info=True)
             with self.lock:
                 self.state.is_available = False
                 self.state.is_calibrated = False
-    
+
+    def _try_recover_imu(self) -> bool:
+        """Retry a dead IMU at most every IMU_RECOVERY_RETRY_S. Returns availability.
+
+        Before this, eleven consecutive read errors latched is_available=False
+        for the rest of the session, so a transient USB drop (the OAK supervisor
+        reconnects on its own) permanently disabled heading hold.
+        """
+        if self.state.is_available:
+            return True
+        if self.imu_reader is None:
+            return False
+        now = time.monotonic()
+        last = self._last_recovery_attempt_s
+        if last is not None and (now - last) < IMU_RECOVERY_RETRY_S:
+            return False
+        self._last_recovery_attempt_s = now
+        try:
+            data = self.imu_reader.read()
+            with self.lock:
+                self.state.heading_deg = data['heading_deg']
+                self.state.target_heading_deg = data['heading_deg']
+                self.state.is_available = True
+                self.state.error_count = 0
+                self.state.last_update_time = now
+            self.init_error = None
+            logger.warning("IMU steering recovered: reads are succeeding again")
+            return True
+        except Exception as exc:
+            self.init_error = f"{type(exc).__name__}: {exc}"
+            return False
+
+
     def update(self, steering_input: float, dt: float) -> Optional[float]:
         """
         Update IMU state and compute steering compensation.
@@ -178,7 +227,10 @@ class ImuSteeringCompensator:
             Steering correction in byte units (-max_correction to +max_correction),
             or None if IMU is not available or compensation is disabled
         """
-        if not self.config.enabled or not self.state.is_available:
+        if not self.config.enabled:
+            return None
+
+        if not self.state.is_available and not self._try_recover_imu():
             return None
 
         if dt <= 0.0:
@@ -245,11 +297,20 @@ class ImuSteeringCompensator:
             else:
                 return None
                 
-        except Exception:
+        except Exception as exc:
             self.state.error_count += 1
             if self.state.error_count > 10:
+                self.init_error = f"{type(exc).__name__}: {exc}"
                 with self.lock:
                     self.state.is_available = False
+                # Let _try_recover_imu fire on the next call rather than after
+                # another full retry interval.
+                self._last_recovery_attempt_s = None
+                logger.warning(
+                    "IMU steering disabled after %d consecutive read errors; "
+                    "will retry every %.0fs",
+                    self.state.error_count, IMU_RECOVERY_RETRY_S,
+                )
             return None
     
     def _compute_heading_hold_correction(self, dt: float) -> float:
@@ -347,6 +408,8 @@ class ImuSteeringCompensator:
         are updated on every call so the AHRS library receives its normal cadence
         of read() calls and heading quality does not degrade over time.
         """
+        if self.imu_reader is not None and not self.state.is_available:
+            self._try_recover_imu()
         if self.imu_reader is not None and self.state.is_available:
             try:
                 data = self.imu_reader.read()

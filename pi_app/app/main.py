@@ -303,7 +303,16 @@ def run() -> None:
         if imu is not None:
             try:
                 imu_compensator = ImuSteeringCompensator(config.imu_steering, imu)
-                print(f"  IMU steering compensation enabled (source: {imu_source_used})")
+                # Only claim the source when the IMU actually came up. The
+                # compensator swallows init failures, so this line used to print
+                # "enabled (source: oak_d)" over a dead IMU.
+                if imu_compensator.get_status().is_available:
+                    print(f"  IMU steering compensation enabled (source: {imu_source_used})")
+                else:
+                    print(
+                        "  IMU steering: init FAILED "
+                        f"({imu_compensator.init_error or 'unknown error'})"
+                    )
             except Exception as e:
                 print(f"  IMU steering init failed: {e}")
                 if not config.imu_steering.fallback_on_error:
@@ -714,6 +723,8 @@ def run() -> None:
                         wp_name=telem.get("wp_name"),
                         wp_bearing_deg=telem.get("wp_bearing_deg"),
                         wp_distance_m=telem.get("wp_distance_m"),
+                        wp_heading_error_deg=telem.get("wp_heading_error_deg"),
+                        nav_state=telem.get("nav_state"),
                         wp_completed=telem.get("wp_completed"),
                         heading_offset_deg=telem.get("heading_offset_deg"),
                         heading_offset_locked=telem.get("heading_offset_locked"),

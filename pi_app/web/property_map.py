@@ -518,7 +518,15 @@ function connectSSE() {
 
         if (calibration && d.gps_lat != null && d.gps_lon != null) {
             const [opx, opy] = gpsToPixel(d.gps_lat, d.gps_lon);
-            wallePos = {px: opx, py: opy, heading: d.imu_heading_deg || 0};
+            // The marker contract is TRUE NORTH, clockwise-positive. The raw
+            // IMU heading is CW-positive but relative to boot orientation, so
+            // it is only true-north once the GPS heading aligner has locked an
+            // offset. Prefer the corrected value when it exists, exactly as the
+            // waypoint UI does; otherwise fall back to the raw heading.
+            const heading = (d.heading_offset_locked && d.corrected_heading_deg != null)
+                ? d.corrected_heading_deg
+                : (d.imu_heading_deg || 0);
+            wallePos = {px: opx, py: opy, heading: heading};
             trail.push({px: opx, py: opy});
             if (trail.length > MAX_TRAIL) trail.shift();
         }

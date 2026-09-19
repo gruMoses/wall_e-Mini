@@ -2146,6 +2146,11 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "wp_name": getattr(t, "wp_name", None),
                     "wp_bearing_deg": _finite_or_none(getattr(t, "wp_bearing_deg", None), 1),
                     "wp_distance_m": _finite_or_none(getattr(t, "wp_distance_m", None), 2),
+                    # waypoint_nav_ui reads these two at the top level.
+                    "wp_heading_error_deg": _finite_or_none(
+                        getattr(t, "wp_heading_error_deg", None), 1
+                    ),
+                    "nav_state": getattr(t, "nav_state", None),
                     "wp_completed": getattr(t, "wp_completed", None),
                     "heading_offset_deg": _finite_or_none(getattr(t, "heading_offset_deg", None), 1),
                     "heading_offset_locked": getattr(t, "heading_offset_locked", None),

@@ -162,6 +162,13 @@ class RecordingTelemetry:
     wp_name: str | None = None
     wp_bearing_deg: float | None = None
     wp_distance_m: float | None = None
+    # Signed shortest-arc error (bearing - heading), both clockwise-positive:
+    # positive means "the waypoint is clockwise of me, turn right". The
+    # waypoint UI reads this and nav_state at the top level of the telemetry
+    # SSE, so both must be serialized there (they were missing until
+    # 2026-09-19, which left the nav panel showing IDLE / 0 error).
+    wp_heading_error_deg: float | None = None
+    nav_state: str | None = None
     wp_completed: bool | None = None
     heading_offset_deg: float | None = None
     heading_offset_locked: bool | None = None
