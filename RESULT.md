@@ -36,15 +36,24 @@ The changes are on branch `fable-follow-fixes`. They are not pushed and not depl
 
 ## Tests
 
-- New test files: `pi_app/tests/test_target_lock_steal.py` (19 tests) and `pi_app/tests/test_rpm_plausibility.py` (23 tests).
+- New test files: `pi_app/tests/test_target_lock_steal.py` (19 tests) and `pi_app/tests/test_rpm_plausibility.py` (28 tests).
 - Changed: `test_depth_filter_latch` (it expected the one-frame switch) and `test_tracklet_tracker` (it expected the gains to be 0).
-- Full suite: `python3 -m unittest discover -s pi_app/tests -p "test_*.py"` gives 698 tests OK, with 4 skipped.
+- Full suite: `python3 -m unittest discover -s pi_app/tests -p "test_*.py"` gives 703 tests OK, with 4 skipped.
 
 ## Open items
 
 1. Validate on the hardware. Watch `vesc_rpm_plausible` and `vesc_rpm_gate_trips` during the first follow-me drive. If the gate trips on normal drives, the window or the eRPM floor is too tight.
-2. During a pivot, the average of the absolute eRPM values is higher than the forward speed. The loop then decreases the throttle a small amount. The ±0.20 m/s limit bounds this effect. Examine the effect again if the robot is slow in turns.
+2. Decide finding 3 of the Fable review (refer to the section "Fable review").
 3. Walk test with a second person: a person walks between the robot and the operator. The expected result: the robot coasts for less than 1 s and keeps the operator.
+
+## Fable review
+
+A Fable agent reviewed commits 71fce18 and 33635bc. It found no blockers.
+
+- Finding 1 (fixed): `actual_speed_mps` used the mean of the absolute eRPM values. A turn then looked like overspeed, and the loop decreased the throttle in each low-speed arc. The controller now uses the signed mean of the two wheels. The steering difference cancels. The bench test of 2026-06-11 read positive eRPM on the two sides at +1500.
+- Finding 2 (fixed): the PID integral stayed after a telemetry loss. The integral now goes to zero on each open-loop tick, when the target is too close, and on a full target-loss reset.
+- Finding 3 (open, design decision): after an occlusion, the operator can come back with a new tentative id and more than 0.30 normalized-x away from the held position. The tracker then treats the operator as a challenger, and the robot coasts for up to 1.0 s more.
+- Findings 4 to 6 (not changed): ROI depth noise can cause a short hesitation. Some tests prove less than their names say. The gate stays tripped while the robot is parked until the next real motion.
 
 ## Technical Names
 

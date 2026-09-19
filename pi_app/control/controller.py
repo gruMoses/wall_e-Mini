@@ -598,9 +598,14 @@ class Controller:
                 self._actual_right_motor_temp_c = getattr(_telem, "right_motor_temp_c", None)
                 self._actual_left_duty = getattr(_telem, "left_duty_cycle", None)
                 self._actual_right_duty = getattr(_telem, "right_duty_cycle", None)
-                # Convert average eRPM to wheel speed (m/s)
+                # Convert the SIGNED mean eRPM to forward wheel speed (m/s). The
+                # signed mean cancels the steering differential (left = v + yaw,
+                # right = v − yaw), so a turn does not read as overspeed to the
+                # velocity loop. An average of |eRPM| reads max(|v|, |yaw|).
+                # Both sides report positive eRPM driving forward (bench
+                # 2026-06-11, tools/vesc_rpm_bench.py).
                 _lr, _rr = _telem.left_rpm, _telem.right_rpm
-                _valid_rpms = [abs(r) for r in (_lr, _rr) if r is not None]
+                _valid_rpms = [r for r in (_lr, _rr) if r is not None]
                 if _valid_rpms:
                     _avg_erpm = sum(_valid_rpms) / len(_valid_rpms)
                     # Same kinematics as FollowMeConfig.speed_loop_mps_per_byte

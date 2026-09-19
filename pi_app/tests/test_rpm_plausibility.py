@@ -374,5 +374,68 @@ class TestSpeedLayerWithShippedGains(unittest.TestCase):
         self.assertLessEqual(out, min(cfg.max_follow_speed_byte, open_loop + max_bytes) + 1e-6)
 
 
+    def test_integral_dropped_on_open_loop_tick(self):
+        """Telemetry lost (gate tripped / stale) → integral cleared, so the
+        first closed-loop tick after recovery carries no stale I-term."""
+        layer, cfg = self._layer()
+        depth = cfg.follow_distance_m + 1.0
+        for _ in range(40):  # wind the integral: wheel reads 0
+            layer.compute(depth, actual_speed_mps=0.0, dt=0.05)
+        self.assertNotEqual(layer._velocity_pid._integral, 0.0)
+        layer.compute(depth, actual_speed_mps=None, dt=0.05)
+        self.assertEqual(layer._velocity_pid._integral, 0.0)
+
+    def test_follow_me_tracking_reset_clears_velocity_integral(self):
+        fm = FollowMeController(FollowMeConfig())
+        pid = fm._speed._velocity_pid
+        pid.compute(0.5, 0.05)
+        self.assertNotEqual(pid._integral, 0.0)
+        fm._reset_tracking_state()  # full lost-target timeout
+        self.assertEqual(pid._integral, 0.0)
+
+
+class TestActualSpeedIsForwardComponent(unittest.TestCase):
+    """actual_speed_mps is the SIGNED mean of the two wheels, so the steering
+    differential cancels. avg |eRPM| read a turn as overspeed and made the
+    velocity loop cut throttle in every low-speed arc (Fable review)."""
+
+    def _speed_for(self, lrpm, rrpm):
+        class T:
+            left_rpm = lrpm
+            right_rpm = rrpm
+            voltage_v = 48.0
+            timestamp = 0.0
+            left_status_age_s = 0.01
+            right_status_age_s = 0.01
+            rx_thread_alive = True
+
+        class FakeMotor:
+            def set_tracks(self, l, r): pass
+            def stop(self): pass
+            def get_telemetry(self): return T()
+
+        ctrl = Controller(motor_driver=FakeMotor())
+        ctrl._rpm_gate = None  # isolate the kinematics from the gate
+        ctrl._telem_last_poll = 0.0
+        _, _, telem = ctrl.process(_arm_rc(), now_epoch_s=time.time())
+        return telem["vesc_actual_speed_mps"]
+
+    def _mps(self, erpm):
+        v = VescConfig()
+        return erpm_to_wheel_mps(erpm, motor_poles=v.motor_poles,
+                                 drive_gear_ratio=v.drive_gear_ratio,
+                                 wheel_radius_m=v.wheel_radius_m)
+
+    def test_arc_reads_forward_component(self):
+        # v = 1000, yaw = 1500 → L = 2500, R = −500. Forward = 1000 eRPM.
+        self.assertAlmostEqual(self._speed_for(2500, -500), self._mps(1000), places=6)
+
+    def test_pivot_reads_zero_forward_speed(self):
+        self.assertAlmostEqual(self._speed_for(1500, -1500), 0.0, places=6)
+
+    def test_straight_line_unchanged(self):
+        self.assertAlmostEqual(self._speed_for(1500, 1500), self._mps(1500), places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -790,17 +790,29 @@ class SpeedLayer:
                 self._velocity_pid.reset()
             return 0.0
         if error <= 0.0:
+            self.reset()
             return 0.0  # too close — stop (backing up not implemented here)
         open_loop = min(self._max_speed, error * self._gain)
 
+        if actual_speed_mps is None:
+            # Open-loop tick (no telemetry, stale, or plausibility gate
+            # tripped): drop the integral so a stale I-term is not applied
+            # when closed-loop resumes.
+            self.reset()
+            return open_loop
+
         # Closed-loop velocity correction when telemetry is available
-        if self._velocity_pid is not None and actual_speed_mps is not None:
+        if self._velocity_pid is not None:
             target_speed_mps = open_loop * self._speed_scale
             velocity_error = target_speed_mps - actual_speed_mps
             correction_mps = self._velocity_pid.compute(velocity_error, dt)
             correction_byte = correction_mps / self._speed_scale
             return max(0.0, min(self._max_speed, open_loop + correction_byte))
         return open_loop
+
+    def reset(self) -> None:
+        if self._velocity_pid is not None:
+            self._velocity_pid.reset()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1919,6 +1931,7 @@ class FollowMeController:
         self._depth_filter.reset()
         self._tracker.reset()
         self._steering.reset()
+        self._speed.reset()
         self._safety.reset()
         if self._trail is not None:
             self._trail.clear()
