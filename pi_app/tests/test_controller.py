@@ -1,3 +1,4 @@
+import time
 import unittest
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
@@ -5,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from pi_app.control.controller import Controller, RCInputs, MotorDriver, ArmRelay, ShutdownScheduler, RC_STALE_TIMEOUT_S
 from pi_app.control.mapping import MIN_PULSE_WIDTH_US, MAX_PULSE_WIDTH_US, MAX_OUTPUT, MIN_OUTPUT, CENTER_OUTPUT_VALUE
 from pi_app.control.safety import SafetyEvent, SafetyParams
+from pi_app.hardware.rtk_gps import GpsReading
 from config import config as default_config
 
 
@@ -104,6 +106,49 @@ class TestController(unittest.TestCase):
         # Reset the timestamp via helper and ensure the internal value changes
         c._reset_imu_timestamp(123.0)
         self.assertEqual(c._last_imu_update, 123.0)
+
+
+class TestControllerTelemetryAdditions(unittest.TestCase):
+    """2026-09-19 logging-audit additions: gps_age_s and imu 'saturated'."""
+
+    def test_gps_age_s_none_without_reading(self):
+        c = Controller(motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown())
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
+        _, _, telem = c.process(rc, now_epoch_s=0.0)
+        self.assertIsNone(telem.get("gps_age_s"))
+
+    def test_gps_age_s_reflects_monotonic_delta(self):
+        c = Controller(motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown())
+        t0 = time.monotonic()
+        reading = GpsReading(
+            latitude=1.0, longitude=2.0, altitude_m=0.0, fix_quality=4,
+            satellites_used=8, hdop=1.0, diff_age_s=0.0, station_id=0,
+            timestamp=t0,
+        )
+        c.set_gps_reading(reading)
+        time.sleep(0.05)
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
+        _, _, telem = c.process(rc, now_epoch_s=0.0)
+        age = telem.get("gps_age_s")
+        self.assertIsNotNone(age)
+        self.assertGreaterEqual(age, 0.04)
+        self.assertLess(age, 1.0)
+
+    def test_get_imu_status_carries_saturated_key(self):
+        from pi_app.control.imu_steering import ImuSteeringCompensator, ImuSteeringConfig
+        # Controller() with no explicit imu_compensator wires up none
+        # (_imu_compensator stays None, get_imu_status() returns None) --
+        # inject a real compensator (no imu_reader; no hardware needed) to
+        # exercise the get_imu_status() -> ImuSteeringState.saturated path.
+        comp = ImuSteeringCompensator(ImuSteeringConfig(), imu_reader=None)
+        c = Controller(
+            motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown(),
+            imu_compensator=comp,
+        )
+        status = c.get_imu_status()
+        self.assertIsNotNone(status)
+        self.assertIn("saturated", status)
+        self.assertFalse(status["saturated"])
 
 
 class TestRCStaleness(unittest.TestCase):

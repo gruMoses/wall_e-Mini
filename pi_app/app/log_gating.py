@@ -6,7 +6,9 @@ imports at module load time.
 """
 from __future__ import annotations
 
+import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 
@@ -64,3 +66,377 @@ def cleanup_old_logs(log_dir: Path, days: int = 7) -> None:
                     pass
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Value formatting helpers, shared by the console heartbeat gate and the
+# structured-log builders below.
+# ---------------------------------------------------------------------------
+
+def to_int(val):
+    """Recursively round numeric leaves to the nearest int (bools untouched)."""
+    if isinstance(val, dict):
+        return {k: to_int(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [to_int(v) for v in val]
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return int(round(val))
+    return val
+
+
+def round1(val):
+    """Recursively round numeric leaves to 1 decimal place (bools untouched)."""
+    if isinstance(val, dict):
+        return {k: round1(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [round1(v) for v in val]
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return round(float(val), 1)
+    return val
+
+
+def round_floats(val, ndigits: int):
+    """Recursively round numeric leaves to ``ndigits`` (bools untouched).
+
+    Unlike ``round1``/``to_int`` this also rounds tuple leaves (e.g. the OAK
+    IMU's ``gyro_bias_dps`` / ``accel_mean_g`` 3-tuples), which are common in
+    the ``imu`` block but never appeared in the blocks ``round1`` was written
+    for.
+    """
+    if isinstance(val, dict):
+        return {k: round_floats(v, ndigits) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        rounded = [round_floats(v, ndigits) for v in val]
+        return tuple(rounded) if isinstance(val, tuple) else rounded
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return round(float(val), ndigits)
+    return val
+
+
+# ---------------------------------------------------------------------------
+# Console heartbeat gate
+# ---------------------------------------------------------------------------
+
+def should_print_console_line(
+    is_tty: bool, now: float, last_print_t: float, min_interval_s: float = 5.0
+) -> bool:
+    """Decide whether to print the per-tick console heartbeat line.
+
+    An interactive TTY gets it at loop rate (the ``\\r``-overwritten status
+    line CLI users expect). Under systemd, stdout is the journal: nothing
+    overwrites, ``flush=True`` makes every call its own journal entry, and a
+    30 Hz loop cost ~21 MB/h of "[blob data]" lines for no operational
+    benefit. A non-TTY is throttled to at most one line per
+    ``min_interval_s``.
+    """
+    if is_tty:
+        return True
+    return (now - last_print_t) >= min_interval_s
+
+
+# ---------------------------------------------------------------------------
+# Session header (first line of every run_*.log / arm_*.log)
+# ---------------------------------------------------------------------------
+
+def _git_sha(timeout_s: float = 2.0) -> str:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=timeout_s, check=True,
+        )
+        sha = out.stdout.strip()
+        return sha if sha else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _git_dirty(timeout_s: float = 2.0):
+    """True if tracked files have uncommitted changes, else False; None if
+    the check itself failed (e.g. git missing, not a repo, timed out)."""
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=timeout_s, check=True,
+        )
+        return bool(out.stdout.strip())
+    except Exception:
+        return None
+
+
+def _session_header(config, path) -> dict:
+    """Build the JSON session-header object written as the first line of
+    every new structured log file (run_*.log and arm_*.log).
+
+    Captures the git commit + dirty flag and the tunable config values in
+    effect for this session, so a log can be interpreted -- and PID gains
+    derived offline -- without cross-referencing config.py history. A pure
+    function of (config, path) so it's unit-testable by patching subprocess.
+    """
+    imu_steering = getattr(config, "imu_steering", None)
+    follow_me = getattr(config, "follow_me", None)
+    vesc = getattr(config, "vesc", None)
+    waypoint_nav = getattr(config, "waypoint_nav", None)
+    gps_heading_align = getattr(config, "gps_heading_align", None)
+    now = time.time()
+    return {
+        "type": "session_header",
+        "schema": 1,
+        "ts": round(now, 3),
+        "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+        "file": str(path) if path is not None else None,
+        "config": {
+            "imu_steering": {
+                "kp": getattr(imu_steering, "kp", None),
+                "ki": getattr(imu_steering, "ki", None),
+                "kd": getattr(imu_steering, "kd", None),
+                "max_correction": getattr(imu_steering, "max_correction", None),
+                "invert_output": getattr(imu_steering, "invert_output", None),
+                "deadband_deg": getattr(imu_steering, "deadband_deg", None),
+                "oak_yaw_rate_source": getattr(imu_steering, "oak_yaw_rate_source", None),
+                "oak_yaw_rate_scale": getattr(imu_steering, "oak_yaw_rate_scale", None),
+                "oak_stationary_bias_tracking_enabled": getattr(
+                    imu_steering, "oak_stationary_bias_tracking_enabled", None
+                ),
+                "oak_stationary_window_s": getattr(imu_steering, "oak_stationary_window_s", None),
+                "oak_stationary_gyro_std_dps": getattr(
+                    imu_steering, "oak_stationary_gyro_std_dps", None
+                ),
+                "oak_stationary_accel_std_g": getattr(
+                    imu_steering, "oak_stationary_accel_std_g", None
+                ),
+                "oak_stationary_max_rate_dps": getattr(
+                    imu_steering, "oak_stationary_max_rate_dps", None
+                ),
+                "oak_stationary_bias_tau_s": getattr(imu_steering, "oak_stationary_bias_tau_s", None),
+                "oak_zupt_enabled": getattr(imu_steering, "oak_zupt_enabled", None),
+                "oak_yaw_axis_sign_auto": getattr(imu_steering, "oak_yaw_axis_sign_auto", None),
+            },
+            "follow_me": {
+                "speed_kp": getattr(follow_me, "speed_kp", None),
+                "speed_ki": getattr(follow_me, "speed_ki", None),
+                "speed_kd": getattr(follow_me, "speed_kd", None),
+                "speed_integral_limit": getattr(follow_me, "speed_integral_limit", None),
+                "speed_pid_max_correction_mps": getattr(
+                    follow_me, "speed_pid_max_correction_mps", None
+                ),
+                "speed_loop_mps_per_byte": getattr(follow_me, "speed_loop_mps_per_byte", None),
+                "follow_distance_m": getattr(follow_me, "follow_distance_m", None),
+                "max_follow_speed_byte": getattr(follow_me, "max_follow_speed_byte", None),
+            },
+            "vesc": {
+                "rpm_plausibility_enabled": getattr(vesc, "rpm_plausibility_enabled", None),
+                "rpm_plausibility_min_cmd_bytes": getattr(
+                    vesc, "rpm_plausibility_min_cmd_bytes", None
+                ),
+                "rpm_plausibility_min_erpm": getattr(vesc, "rpm_plausibility_min_erpm", None),
+                "rpm_plausibility_window_s": getattr(vesc, "rpm_plausibility_window_s", None),
+                "rpm_plausibility_hold_s": getattr(vesc, "rpm_plausibility_hold_s", None),
+            },
+            "waypoint_nav": {
+                "min_rtk_quality": getattr(waypoint_nav, "min_rtk_quality", None),
+                "align_threshold_deg": getattr(waypoint_nav, "align_threshold_deg", None),
+                "recovery_threshold_deg": getattr(waypoint_nav, "recovery_threshold_deg", None),
+                "pivot_yaw_cmd": getattr(waypoint_nav, "pivot_yaw_cmd", None),
+            },
+            "gps_heading_align": {
+                "max_lock_yaw_rate_dps": getattr(gps_heading_align, "max_lock_yaw_rate_dps", None),
+            },
+            "imu_source": getattr(config, "imu_source", None),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-tick structured log object
+# ---------------------------------------------------------------------------
+
+def build_log_obj(
+    *,
+    now_ts: float,
+    src: str,
+    s,
+    bt_override,
+    bt_age,
+    imu_status,
+    telem: dict,
+    oak_depth_stats,
+    oak_persons,
+    gps_reading,
+    bms_state,
+    bms_charging,
+    recording_state,
+    cmd,
+    loop_dt_ms,
+    imu_dt_ms,
+    imu_pipeline,
+    imu_motion_witness_still,
+    oak_camera_health,
+    events,
+) -> dict:
+    """Build the per-tick structured JSON log object.
+
+    Pure/stdlib-only (duck-types every argument) so it's unit-testable
+    without the hardware stack that ``pi_app.app.main`` imports at module
+    load time. Callers pass already-resolved tick state: ``telem`` is
+    ``controller.process()``'s telemetry dict, ``bms_state``/``bms_charging``
+    are already pulled from the live ``BmsService``, ``recording_state`` is
+    ``oak_recorder.recording_state`` (a string or None), and ``events`` is
+    the list of ``SafetyEvent`` members fired this tick.
+    """
+    return {
+        "ts": round(now_ts, 3),
+        "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        "src": src,
+        "mode": telem.get("mode", "MANUAL"),
+        "charger_inhibit": telem.get("charger_inhibit", False),
+        "vesc_pack_low_latched": telem.get("vesc_pack_low_latched", False),
+        "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
+        "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
+        "imu": imu_status if imu_status else None,
+        "imu_steering": {
+            "steering_input": telem.get("steering_input"),
+            "correction_raw": telem.get("imu_correction_raw"),
+            "correction_applied": telem.get("imu_correction_applied"),
+            "correction_blend": telem.get("correction_blend"),
+            "speed_gain_scale": telem.get("speed_gain_scale"),
+            "saturated": (imu_status or {}).get("saturated"),
+        },
+        "pid": round1({
+            "error_deg": telem.get("pid_error_deg"),
+            "p": telem.get("pid_p"),
+            "i": telem.get("pid_i"),
+            "d": telem.get("pid_d"),
+            "correction": telem.get("pid_correction"),
+            "integral_error": (imu_status or {}).get("integral_error"),
+        }),
+        "obstacle": round1({
+            "distance_m": telem.get("obstacle_distance_m"),
+            "throttle_scale": telem.get("obstacle_throttle_scale"),
+            "depth_p5_mm": oak_depth_stats.p5_mm if oak_depth_stats else None,
+            "depth_p50_mm": oak_depth_stats.p50_mm if oak_depth_stats else None,
+            "depth_valid_pct": oak_depth_stats.valid_pixel_pct if oak_depth_stats else None,
+        }),
+        "follow_me": round1({
+            "tracking": telem.get("follow_me_tracking"),
+            "target_z_m": telem.get("follow_me_target_z_m"),
+            "target_x_m": telem.get("follow_me_target_x_m"),
+            "target_track_id": telem.get("follow_me_target_track_id"),
+            "num_persons": telem.get("follow_me_num_detections"),
+            "distance_error_m": telem.get("follow_me_distance_error_m"),
+            "speed_offset": telem.get("follow_me_speed_offset"),
+            "steer_offset": telem.get("follow_me_steer_offset"),
+            "actual_speed_mps": telem.get("follow_me_actual_speed_mps"),
+            "pursuit_mode": telem.get("follow_me_pursuit_mode"),
+            "trail_length": telem.get("trail_length"),
+            "trail_distance_m": telem.get("trail_distance_m"),
+            "trail_rejected_jump_count": telem.get("trail_rejected_jump_count"),
+            "trail_rejected_speed_count": telem.get("trail_rejected_speed_count"),
+            "trail_lookahead_x": telem.get("trail_lookahead_x"),
+            "trail_lookahead_y": telem.get("trail_lookahead_y"),
+            "target_world_x": telem.get("follow_me_target_world_x"),
+            "target_world_y": telem.get("follow_me_target_world_y"),
+            "odom_x": telem.get("odom_x"),
+            "odom_y": telem.get("odom_y"),
+            "odom_theta_deg": telem.get("odom_theta_deg"),
+            "odom_source": telem.get("odom_source"),
+            "gps_speed_mps": telem.get("gps_speed_mps"),
+            "confidence": telem.get("follow_me_target_confidence"),
+            "num_detections": telem.get("follow_me_num_detections"),
+            "steer_decay_factor": telem.get("follow_me_steer_decay_factor"),
+            "fresh_detection": telem.get("follow_me_fresh_detection"),
+            "steer_hold_active": telem.get("follow_me_steer_hold_active"),
+        }),
+        "detections": [
+            {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
+             "conf": round(d.confidence, 2),
+             "bbox": [round(b, 3) for b in d.bbox]}
+            for d in oak_persons
+        ] if oak_persons else None,
+        "gps": {
+            "lat": round(gps_reading.latitude, 8) if gps_reading else None,
+            "lon": round(gps_reading.longitude, 8) if gps_reading else None,
+            "alt_m": round(gps_reading.altitude_m, 1) if gps_reading else None,
+            "fix": gps_reading.fix_quality if gps_reading else None,
+            "sats": gps_reading.satellites_used if gps_reading else None,
+            "hdop": round(gps_reading.hdop, 2) if gps_reading else None,
+            "diff_age_s": round(gps_reading.diff_age_s, 1) if gps_reading else None,
+            "station_id": gps_reading.station_id if gps_reading else None,
+            # Sourced from controller telemetry (time.monotonic() -
+            # reading.timestamp, both monotonic clocks -- computed here from
+            # wall-clock now_ts would be wrong), but gated on THIS tick's
+            # gps_reading like every other field above: the controller's
+            # self._gps_reading can lag a tick behind (set_gps_reading() is
+            # only called when gps_reader is not None), and a stale age_s
+            # next to five None siblings would be misleading.
+            "age_s": telem.get("gps_age_s") if gps_reading else None,
+        },
+        "waypoint_nav": round1({
+            "wp_index": telem.get("wp_index"),
+            "wp_total": telem.get("wp_total"),
+            "wp_name": telem.get("wp_name"),
+            "wp_bearing_deg": telem.get("wp_bearing_deg"),
+            "wp_distance_m": telem.get("wp_distance_m"),
+            "wp_heading_error_deg": telem.get("wp_heading_error_deg"),
+            "wp_completed": telem.get("wp_completed"),
+            "nav_state": telem.get("nav_state"),
+            "wp_v_cmd": telem.get("wp_v_cmd"),
+            "wp_yaw_cmd": telem.get("wp_yaw_cmd"),
+            "wp_in_align": telem.get("wp_in_align"),
+        }),
+        "straight_intent": telem.get("straight_intent"),
+        "heading_offset_deg": round1(telem.get("heading_offset_deg")),
+        "heading_offset_locked": telem.get("heading_offset_locked"),
+        "heading_offset_frozen": telem.get("heading_offset_frozen"),
+        "heading_offset_refining": telem.get("heading_offset_refining"),
+        "corrected_heading_deg": round1(telem.get("corrected_heading_deg")),
+        "heading_align": round1(telem.get("heading_align") or {}),
+        "recording_state": recording_state,
+        "bms": {
+            "voltage_v": bms_state.pack_voltage_v,
+            "current_a": bms_state.pack_current_a,
+            "soc_pct": bms_state.soc_pct,
+            "cell_min_mv": bms_state.cell_min_mv,
+            "cell_max_mv": bms_state.cell_max_mv,
+            "cell_delta_mv": bms_state.cell_delta_mv,
+            "temp_max_c": bms_state.temp_max_c,
+            "charge_fet_on": bms_state.charge_fet_on,
+            "discharge_fet_on": bms_state.discharge_fet_on,
+            "cycle_count": bms_state.cycle_count,
+            "error_flags": bms_state.error_flags,
+            "connected": bms_state.connected,
+            "charging": bms_charging,
+        } if bms_state is not None else None,
+        "vesc": {
+            "left_rpm": telem.get("vesc_left_rpm"),
+            "right_rpm": telem.get("vesc_right_rpm"),
+            "speed_mps": round(telem.get("vesc_actual_speed_mps"), 3)
+                         if telem.get("vesc_actual_speed_mps") is not None else None,
+            "rx_frame_count": telem.get("vesc_rx_frame_count"),
+            "rx_parse_error_count": telem.get("vesc_rx_parse_error_count"),
+            "rx_recv_error_count": telem.get("vesc_rx_recv_error_count"),
+            "rx_reopen_count": telem.get("vesc_rx_reopen_count"),
+            "rx_last_frame_age_s": (
+                round(telem.get("vesc_rx_last_frame_age_s"), 3)
+                if isinstance(telem.get("vesc_rx_last_frame_age_s"), (int, float))
+                else None
+            ),
+            "rpm_plausible": telem.get("vesc_rpm_plausible"),
+            "gate_trips": telem.get("vesc_rpm_gate_trips"),
+            "l_temp_c": telem.get("vesc_left_temp_c"),
+            "r_temp_c": telem.get("vesc_right_temp_c"),
+            "l_motor_temp_c": telem.get("vesc_left_motor_temp_c"),
+            "r_motor_temp_c": telem.get("vesc_right_motor_temp_c"),
+            "l_duty": telem.get("vesc_left_duty"),
+            "r_duty": telem.get("vesc_right_duty"),
+        },
+        "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
+        "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
+        "loop_dt_ms": loop_dt_ms,
+        "imu_dt_ms": imu_dt_ms,
+        "imu_pipeline": imu_pipeline,
+        "imu_motion_witness_still": imu_motion_witness_still,
+        "oak_camera_health": oak_camera_health,
+        "events": [e.name for e in events] if events else [],
+    }

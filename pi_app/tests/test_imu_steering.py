@@ -94,6 +94,32 @@ class TestImuSteering(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(comp.get_status().error_count, 0)
 
+    def test_saturated_flag_reflects_max_correction_clamp(self):
+        # First read (during __init__) locks target_heading_deg at 0.0; the
+        # second read (from update()) jumps heading to 90.0. With default
+        # kp=1.2, |p_term| = 108 >> max_correction=35, so the correction
+        # clamps and get_status().saturated must report it.
+        imu_reader = FakeImuReader(headings=[0.0, 90.0])
+        cfg = ImuSteeringConfig()
+        comp = ImuSteeringCompensator(cfg, imu_reader)
+        self.assertFalse(comp.get_status().saturated)
+
+        correction = comp.update(0.0, 0.1)
+
+        self.assertIsNotNone(correction)
+        self.assertAlmostEqual(abs(correction), cfg.max_correction)
+        self.assertTrue(comp.get_status().saturated)
+
+    def test_saturated_flag_false_within_authority(self):
+        # A small heading error stays well under max_correction=35.
+        imu_reader = FakeImuReader(headings=[0.0, 1.0])
+        cfg = ImuSteeringConfig()
+        comp = ImuSteeringCompensator(cfg, imu_reader)
+
+        comp.update(0.0, 0.1)
+
+        self.assertFalse(comp.get_status().saturated)
+
 
 if __name__ == "__main__":
     unittest.main()

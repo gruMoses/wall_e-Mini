@@ -95,6 +95,10 @@ class ImuSteeringState:
     is_calibrated: bool = False
     is_available: bool = False
     error_count: int = 0
+    # True when the last correction hit the max_correction clamp (anti-windup
+    # gate for the integral term). Surfaced to telemetry so a saturated loop
+    # is visible without cross-referencing correction_raw vs max_correction.
+    saturated: bool = False
 
 
 class ImuSteeringCompensator:
@@ -394,7 +398,8 @@ class ImuSteeringCompensator:
                 pid_correction=self._last_pid.get("correction", 0.0),
                 is_calibrated=self.state.is_calibrated,
                 is_available=self.state.is_available,
-                error_count=self.state.error_count
+                error_count=self.state.error_count,
+                saturated=self._last_saturated,
             )
     
     def get_heading_deg(self) -> float:

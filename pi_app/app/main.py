@@ -37,7 +37,10 @@ try:
     from pi_app.control.gps_heading_align import GpsHeadingAligner
     from pi_app.control.rpm_plausibility import wheels_stopped
     from pi_app.control.mapping import CENTER_OUTPUT_VALUE
-    from pi_app.app.log_gating import should_log_tick, cleanup_old_logs as _cleanup_old_logs
+    from pi_app.app.log_gating import (
+        should_log_tick, cleanup_old_logs as _cleanup_old_logs,
+        should_print_console_line, _session_header, build_log_obj,
+    )
     from config import config
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -62,28 +65,11 @@ except ModuleNotFoundError:
     from pi_app.control.gps_heading_align import GpsHeadingAligner  # type: ignore
     from pi_app.control.rpm_plausibility import wheels_stopped  # type: ignore
     from pi_app.control.mapping import CENTER_OUTPUT_VALUE  # type: ignore
-    from pi_app.app.log_gating import should_log_tick, cleanup_old_logs as _cleanup_old_logs  # type: ignore
+    from pi_app.app.log_gating import (  # type: ignore
+        should_log_tick, cleanup_old_logs as _cleanup_old_logs,
+        should_print_console_line, _session_header, build_log_obj,
+    )
     from config import config  # type: ignore
-
-
-def to_int(val):
-    if isinstance(val, dict):
-        return {k: to_int(v) for k, v in val.items()}
-    if isinstance(val, list):
-        return [to_int(v) for v in val]
-    if isinstance(val, (int, float)) and not isinstance(val, bool):
-        return int(round(val))
-    return val
-
-
-def round1(val):
-    if isinstance(val, dict):
-        return {k: round1(v) for k, v in val.items()}
-    if isinstance(val, list):
-        return [round1(v) for v in val]
-    if isinstance(val, (int, float)) and not isinstance(val, bool):
-        return round(float(val), 1)
-    return val
 
 
 _PID_CSV_COLS = (
@@ -442,6 +428,11 @@ def run() -> None:
 
     # Open a per-run structured log file (e.g., run_20250821_132230.log)
     log_fh, log_path = _open_log_file(logs_dir, "run")
+    if log_fh is not None:
+        try:
+            log_fh.write(json.dumps(_session_header(config, log_path)) + "\n")
+        except Exception:
+            pass
 
     # High-rate PID tuning CSV (optional; every loop tick, full precision)
     pid_csv_fh = None
@@ -468,6 +459,7 @@ def run() -> None:
         _prev_tick_charger_inhibit = None   # previous tick's charger_inhibit, for flip detection
         prev_loop_ts = time.monotonic()
         _vesc_debug_last_t = 0.0
+        _console_last_print_t = 0.0
         prev_imu_ts = getattr(controller, "_last_imu_update", None)
         bt_shared_path = Path("/tmp/wall_e_bt_latest.json")
         bt_cached_data = None
@@ -645,6 +637,11 @@ def run() -> None:
                 except Exception:
                     pass
                 log_fh, log_path = _open_log_file(logs_dir, "arm")
+                if log_fh is not None:
+                    try:
+                        log_fh.write(json.dumps(_session_header(config, log_path)) + "\n")
+                    except Exception:
+                        pass
                 if pid_csv_enabled and pid_csv_fh is not None:
                     try:
                         pid_csv_fh.flush()
@@ -832,6 +829,20 @@ def run() -> None:
                             errs = [oak_camera_health.get(k) for k in err_keys if oak_camera_health.get(k)]
                             if errs:
                                 print(f"OAK last errors: {' | '.join(str(e) for e in errs)}")
+                        # Structured mirror of the console transition line, so
+                        # a health flap is visible in the JSON log even when
+                        # nobody was watching the console at the time.
+                        if log_fh is not None:
+                            try:
+                                log_fh.write(json.dumps({
+                                    "type": "event",
+                                    "event": "oak_health",
+                                    "from": "STALE" if oak_prev_stale else "HEALTHY",
+                                    "to": state,
+                                    "ts": round(time.time(), 3),
+                                }) + "\n")
+                            except Exception:
+                                pass
                         oak_prev_stale = is_stale
             mode_info = f"  [{mode_str}]" if mode_str != "MANUAL" else ""
 
@@ -887,7 +898,18 @@ def run() -> None:
                 )
                 print(pid_line)
             else:
-                print(line_cli, end="\r", flush=True)
+                # Under systemd, stdout is the journal: nothing overwrites the
+                # \r, and flush=True makes every call its own journal entry
+                # (~21 MB/h of "[blob data]" lines at loop rate for no
+                # operational benefit). A real TTY still gets the familiar
+                # overwritten status line at full rate.
+                _is_tty = sys.stdout.isatty()
+                if should_print_console_line(_is_tty, loop_now, _console_last_print_t):
+                    _console_last_print_t = loop_now
+                    if _is_tty:
+                        print(line_cli, end="\r", flush=True)
+                    else:
+                        print(line_cli, flush=True)
 
             if vesc_telem_debug and (loop_now - _vesc_debug_last_t) >= 1.0:
                 _vesc_debug_last_t = loop_now
@@ -948,141 +970,30 @@ def run() -> None:
                                     imu_pipeline.update(vars(imu_metrics))
                             except Exception:
                                 pass
-                    log_obj = {
-                        "ts": round(now_ts, 3),
-                        "ts_iso": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-                        "src": src,
-                        "mode": telem.get("mode", "MANUAL"),
-                        "charger_inhibit": telem.get("charger_inhibit", False),
-                        "vesc_pack_low_latched": telem.get("vesc_pack_low_latched", False),
-                        "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
-                        "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
-                        "imu": imu_status if imu_status else None,
-                        "imu_steering": {
-                            "steering_input": telem.get("steering_input"),
-                            "correction_raw": telem.get("imu_correction_raw"),
-                            "correction_applied": telem.get("imu_correction_applied"),
-                        },
-                        "pid": round1({
-                            "error_deg": telem.get("pid_error_deg"),
-                            "p": telem.get("pid_p"),
-                            "i": telem.get("pid_i"),
-                            "d": telem.get("pid_d"),
-                            "correction": telem.get("pid_correction"),
-                            "integral_error": (imu_status or {}).get("integral_error"),
-                        }),
-                        "obstacle": round1({
-                            "distance_m": telem.get("obstacle_distance_m"),
-                            "throttle_scale": telem.get("obstacle_throttle_scale"),
-                            "depth_p5_mm": oak_depth_stats.p5_mm if oak_depth_stats else None,
-                            "depth_p50_mm": oak_depth_stats.p50_mm if oak_depth_stats else None,
-                            "depth_valid_pct": oak_depth_stats.valid_pixel_pct if oak_depth_stats else None,
-                        }),
-                        "follow_me": round1({
-                            "tracking": telem.get("follow_me_tracking"),
-                            "target_z_m": telem.get("follow_me_target_z_m"),
-                            "target_x_m": telem.get("follow_me_target_x_m"),
-                            "target_track_id": telem.get("follow_me_target_track_id"),
-                            "num_persons": telem.get("follow_me_num_detections"),
-                            "distance_error_m": telem.get("follow_me_distance_error_m"),
-                            "speed_offset": telem.get("follow_me_speed_offset"),
-                            "steer_offset": telem.get("follow_me_steer_offset"),
-                            "actual_speed_mps": telem.get("follow_me_actual_speed_mps"),
-                            "pursuit_mode": telem.get("follow_me_pursuit_mode"),
-                            "trail_length": telem.get("trail_length"),
-                            "trail_distance_m": telem.get("trail_distance_m"),
-                            "trail_rejected_jump_count": telem.get("trail_rejected_jump_count"),
-                            "trail_rejected_speed_count": telem.get("trail_rejected_speed_count"),
-                            "trail_lookahead_x": telem.get("trail_lookahead_x"),
-                            "trail_lookahead_y": telem.get("trail_lookahead_y"),
-                            "target_world_x": telem.get("follow_me_target_world_x"),
-                            "target_world_y": telem.get("follow_me_target_world_y"),
-                            "odom_x": telem.get("odom_x"),
-                            "odom_y": telem.get("odom_y"),
-                            "odom_theta_deg": telem.get("odom_theta_deg"),
-                            "odom_source": telem.get("odom_source"),
-                            "gps_speed_mps": telem.get("gps_speed_mps"),
-                            "confidence": telem.get("follow_me_target_confidence"),
-                            "num_detections": telem.get("follow_me_num_detections"),
-                            "steer_decay_factor": telem.get("follow_me_steer_decay_factor"),
-                            "fresh_detection": telem.get("follow_me_fresh_detection"),
-                            "steer_hold_active": telem.get("follow_me_steer_hold_active"),
-                        }),
-                        "detections": [
-                            {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
-                             "conf": round(d.confidence, 2),
-                             "bbox": [round(b, 3) for b in d.bbox]}
-                            for d in oak_persons
-                        ] if oak_persons else None,
-                        "gps": {
-                            "lat": round(gps_reading.latitude, 8) if gps_reading else None,
-                            "lon": round(gps_reading.longitude, 8) if gps_reading else None,
-                            "alt_m": round(gps_reading.altitude_m, 1) if gps_reading else None,
-                            "fix": gps_reading.fix_quality if gps_reading else None,
-                            "sats": gps_reading.satellites_used if gps_reading else None,
-                            "hdop": round(gps_reading.hdop, 2) if gps_reading else None,
-                            "diff_age_s": round(gps_reading.diff_age_s, 1) if gps_reading else None,
-                            "station_id": gps_reading.station_id if gps_reading else None,
-                        },
-                        "waypoint_nav": round1({
-                            "wp_index": telem.get("wp_index"),
-                            "wp_total": telem.get("wp_total"),
-                            "wp_name": telem.get("wp_name"),
-                            "wp_bearing_deg": telem.get("wp_bearing_deg"),
-                            "wp_distance_m": telem.get("wp_distance_m"),
-                            "wp_heading_error_deg": telem.get("wp_heading_error_deg"),
-                            "wp_completed": telem.get("wp_completed"),
-                            "nav_state": telem.get("nav_state"),
-                            "wp_v_cmd": telem.get("wp_v_cmd"),
-                            "wp_yaw_cmd": telem.get("wp_yaw_cmd"),
-                            "wp_in_align": telem.get("wp_in_align"),
-                        }),
-                        "heading_offset_deg": round1(telem.get("heading_offset_deg")),
-                        "heading_offset_locked": telem.get("heading_offset_locked"),
-                        "heading_offset_frozen": telem.get("heading_offset_frozen"),
-                        "heading_offset_refining": telem.get("heading_offset_refining"),
-                        "corrected_heading_deg": round1(telem.get("corrected_heading_deg")),
-                        "heading_align": round1(telem.get("heading_align") or {}),
-                        "recording_state": oak_recorder.recording_state if oak_recorder is not None else None,
-                        "bms": (lambda s: {
-                            "voltage_v": s.pack_voltage_v,
-                            "current_a": s.pack_current_a,
-                            "soc_pct": s.soc_pct,
-                            "cell_min_mv": s.cell_min_mv,
-                            "cell_max_mv": s.cell_max_mv,
-                            "cell_delta_mv": s.cell_delta_mv,
-                            "temp_max_c": s.temp_max_c,
-                            "charge_fet_on": s.charge_fet_on,
-                            "discharge_fet_on": s.discharge_fet_on,
-                            "cycle_count": s.cycle_count,
-                            "error_flags": s.error_flags,
-                            "connected": s.connected,
-                            "charging": bms_service.is_charging(),
-                        })(bms_service.get_state()) if bms_service is not None else None,
-                        "vesc": {
-                            "left_rpm": telem.get("vesc_left_rpm"),
-                            "right_rpm": telem.get("vesc_right_rpm"),
-                            "speed_mps": round(telem.get("vesc_actual_speed_mps"), 3)
-                                         if telem.get("vesc_actual_speed_mps") is not None else None,
-                            "rx_frame_count": telem.get("vesc_rx_frame_count"),
-                            "rx_parse_error_count": telem.get("vesc_rx_parse_error_count"),
-                            "rx_recv_error_count": telem.get("vesc_rx_recv_error_count"),
-                            "rx_reopen_count": telem.get("vesc_rx_reopen_count"),
-                            "rx_last_frame_age_s": (
-                                round(telem.get("vesc_rx_last_frame_age_s"), 3)
-                                if isinstance(telem.get("vesc_rx_last_frame_age_s"), (int, float))
-                                else None
-                            ),
-                        },
-                        "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
-                        "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
-                        "loop_dt_ms": loop_dt_ms,
-                        "imu_dt_ms": imu_dt_ms,
-                        "imu_pipeline": imu_pipeline,
-                        "imu_motion_witness_still": imu_motion_witness_still,
-                        "oak_camera_health": oak_camera_health,
-                        "events": [e.name for e in events] if events else [],
-                    }
+                    _bms_state_for_log = bms_service.get_state() if bms_service is not None else None
+                    _bms_charging_for_log = bms_service.is_charging() if bms_service is not None else None
+                    log_obj = build_log_obj(
+                        now_ts=now_ts,
+                        src=src,
+                        s=s,
+                        bt_override=bt_override,
+                        bt_age=bt_age,
+                        imu_status=imu_status,
+                        telem=telem,
+                        oak_depth_stats=oak_depth_stats,
+                        oak_persons=oak_persons,
+                        gps_reading=gps_reading,
+                        bms_state=_bms_state_for_log,
+                        bms_charging=_bms_charging_for_log,
+                        recording_state=(oak_recorder.recording_state if oak_recorder is not None else None),
+                        cmd=cmd,
+                        loop_dt_ms=loop_dt_ms,
+                        imu_dt_ms=imu_dt_ms,
+                        imu_pipeline=imu_pipeline,
+                        imu_motion_witness_still=imu_motion_witness_still,
+                        oak_camera_health=oak_camera_health,
+                        events=events,
+                    )
                     line = json.dumps(log_obj)
                     # Do not print structured JSON to console; keep file logging only
                     if log_fh is not None:

@@ -1325,6 +1325,13 @@ class Controller:
         telemetry["vesc_right_temp_c"] = self._actual_right_temp_c
         telemetry["vesc_left_motor_temp_c"] = self._actual_left_motor_temp_c
         telemetry["vesc_right_motor_temp_c"] = self._actual_right_motor_temp_c
+        # Age of the current GPS fix, for troubleshooting a stale reading that
+        # is still non-None (e.g. the reader stopped updating but the last
+        # good reading is still sitting in self._gps_reading).
+        telemetry["gps_age_s"] = (
+            round(time.monotonic() - self._gps_reading.timestamp, 2)
+            if self._gps_reading is not None else None
+        )
         raw_heading_telem: Optional[float] = None
         if self._imu_compensator is not None:
             try:
@@ -1405,6 +1412,7 @@ class Controller:
                 'is_available': status.is_available,
                 'is_calibrated': status.is_calibrated,
                 'error_count': status.error_count,
+                'saturated': status.saturated,
             }
             # OakImuReader (and future readers) may expose get_health() with
             # sample-identity / axis / scale diagnostics for field chalk tests.
