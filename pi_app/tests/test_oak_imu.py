@@ -187,7 +187,12 @@ class TestOakImuIntegrationHardening(unittest.TestCase):
         d2 = imu.read()
         self.assertEqual(d2["integrate_status"], "duplicate")
         self.assertAlmostEqual(d2["heading_deg"], h1, places=8)
-        self.assertEqual(d2["gz_dps"], 0.0)  # frozen rate for D-term
+        # Legacy sparse-snapshot path (this fake exposes no producer cum
+        # channels), which still reports a frozen rate on a duplicate. The
+        # PRODUCER path reports the live rate instead — see
+        # test_oak_imu_yaw_producer.test_double_read_reports_live_yaw_rate.
+        self.assertEqual(d2["integration_path"], "legacy_snapshot")
+        self.assertEqual(d2["gz_dps"], 0.0)
         self.assertEqual(imu.get_health()["count_duplicate"], 1)
 
         # Controller tick double-read of same packet.

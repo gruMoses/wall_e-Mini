@@ -372,7 +372,81 @@ class TestOakImuReaderProducerPath(unittest.TestCase):
         d2 = imu.read()  # same cum
         self.assertEqual(d2["integrate_status"], "duplicate")
         self.assertAlmostEqual(d2["heading_deg"], h1, places=8)
-        self.assertEqual(d2["gz_dps"], 0.0)
+
+    def test_double_read_reports_live_yaw_rate(self):
+        """A duplicate read must report the LIVE rate, not 0.
+
+        Changed 2026-09-19 (was ``assertEqual(d2["gz_dps"], 0.0)``): the heading
+        must freeze on a duplicate cum, but the yaw RATE is a separate, still
+        valid instantaneous measurement. controller.py calls
+        get_heading_deg() every tick (consuming the cum delta) and heading-hold
+        update() then reads again in the same tick, so at a 10 ms packet cadence
+        the second read normally lands in the duplicate branch. Returning 0
+        there made the PID D-term and the GPS aligner's turning gate see a rate
+        that flickered between the real value and zero on alternate reads.
+        """
+        oak, imu = self._reader()
+        oak.push(device_ts=1.0, gy_dps=50.0)
+        imu.read()
+        oak.push(device_ts=1.02, gy_dps=50.0)
+        d1 = imu.read()
+        self.assertEqual(d1["integrate_status"], "fresh")
+        self.assertAlmostEqual(d1["gz_dps"], 50.0, places=6)
+
+        d2 = imu.read()  # same cum, no new packets
+        self.assertEqual(d2["integrate_status"], "duplicate")
+        self.assertAlmostEqual(d2["heading_deg"], d1["heading_deg"], places=8)
+        self.assertAlmostEqual(d2["gz_dps"], d1["gz_dps"], places=6)
+        self.assertAlmostEqual(d2["yaw_rate_world_dps"], 50.0, places=6)
+        # get_health() must agree with read() — the aligner reads health too.
+        self.assertAlmostEqual(imu.get_health()["yaw_rate_world_dps"], 50.0, places=6)
+
+    def test_duplicate_read_honours_nmni_and_scale(self):
+        """The duplicate-branch rate is the gated, scaled selected channel."""
+        oak, imu = self._reader(
+            yaw_rate_scale=0.5, nmni_enabled=True, nmni_threshold_dps=0.3
+        )
+        oak.push(device_ts=1.0, gy_dps=40.0)
+        imu.read()
+        oak.push(device_ts=1.02, gy_dps=40.0)
+        imu.read()
+        d2 = imu.read()
+        self.assertEqual(d2["integrate_status"], "duplicate")
+        self.assertAlmostEqual(d2["gz_dps"], 20.0, places=6)  # 40 * 0.5
+
+        # Sub-threshold rate is NMNI-gated to exactly zero, duplicate or not.
+        oak.push(device_ts=1.04, gy_dps=0.2)
+        imu.read()
+        d4 = imu.read()
+        self.assertEqual(d4["integrate_status"], "duplicate")
+        self.assertEqual(d4["gz_dps"], 0.0)
+
+    def test_stale_reports_zero_rate_and_logs_once(self):
+        """Stale keeps 0.0 (frozen heading) and logs once per episode."""
+        oak, imu = self._reader()
+        oak.push(device_ts=3.0, gy_dps=40.0)
+        imu.read()
+        oak.push(device_ts=3.02, gy_dps=40.0)
+        imu.read()
+
+        with self.assertLogs("pi_app.hardware.oak_imu", level="WARNING") as cm:
+            oak.push(device_ts=3.04, gy_dps=40.0, age_s=1.5)
+            d_stale = imu.read()
+            # Still stale on the next read: must NOT log again.
+            oak.push(device_ts=3.06, gy_dps=40.0, age_s=1.6)
+            imu.read()
+        self.assertEqual(d_stale["integrate_status"], "stale")
+        self.assertEqual(d_stale["gz_dps"], 0.0)
+        self.assertEqual(len(cm.records), 1)
+        self.assertIn("stale", cm.records[0].getMessage())
+
+        # Fresh samples resume, then a second stale episode logs again.
+        oak.push(device_ts=3.08, gy_dps=40.0)
+        imu.read()
+        with self.assertLogs("pi_app.hardware.oak_imu", level="WARNING") as cm2:
+            oak.push(device_ts=3.10, gy_dps=40.0, age_s=2.0)
+            imu.read()
+        self.assertEqual(len(cm2.records), 1)
 
     def test_scale_applied_once(self):
         oak, imu = self._reader(yaw_rate_scale=0.5)

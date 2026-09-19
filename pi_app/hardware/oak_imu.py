@@ -36,12 +36,17 @@ See ``pi_app.hardware.oak_imu_yaw_producer`` and ``docs/heading_tuning.md``.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pi_app.hardware.oak_depth import OakDepthReader
+
+# The app installs no logging handler, so INFO is dropped: anything that must be
+# visible in journalctl is logged at WARNING.
+logger = logging.getLogger(__name__)
 
 G_MSS = 9.80665
 
@@ -135,6 +140,8 @@ class OakImuReader:
         self._count_producer_packets: int = 0
         self._count_generation_change: int = 0
         self._count_cum_reset: int = 0
+        # One WARNING per stale episode, not per read (30 Hz would flood).
+        self._stale_episode_logged: bool = False
 
         # Push bias + NMNI into producer. NMNI may be on before the first
         # calibrate_gyro; calibrate temporarily clears it so bias estimation
@@ -832,9 +839,22 @@ class OakImuReader:
             self._count_stale += 1
             self._integrate_status = "stale"
             self._last_dt_s = 0.0
+            # Stale keeps returning 0.0: the heading is frozen, so reporting a
+            # moving rate would let the PID damp against a turn the heading
+            # cannot see. Log once per stale episode (WARNING — the app installs
+            # no handler, so INFO would be dropped).
             self._last_yaw_rate_world_dps = 0.0
+            if not self._stale_episode_logged:
+                self._stale_episode_logged = True
+                logger.warning(
+                    "OAK IMU samples stale (age=%.3fs > %.3fs): heading frozen, "
+                    "yaw rate reported as 0 until samples resume",
+                    age_s,
+                    self._stale_age_s,
+                )
             self._blend_attitude(roll_acc, pitch_acc)
             return 0.0
+        self._stale_episode_logged = False
 
         if self._last_cum_y is None or self._last_yaw_generation is None:
             self._seed_producer_cums(
@@ -894,8 +914,20 @@ class OakImuReader:
                 "generation_reseed" if generation_changed else "duplicate"
             )
             self._last_dt_s = 0.0
-            self._last_yaw_rate_world_dps = 0.0
-            return 0.0
+            # Report the LIVE rate, not zero. The heading correctly freezes (no
+            # new producer cum), but the rate is a separate, still-valid
+            # measurement: it is the instantaneous bias-corrected, NMNI-gated,
+            # scaled selected-channel rate computed in read().
+            #
+            # Why this matters: controller.py calls
+            # imu_compensator.get_heading_deg() every tick, which consumes the
+            # producer cum delta, and heading-hold update() then calls read()
+            # again in the same tick. At a 10 ms packet cadence the second read
+            # usually lands here, so before this change the PID D-term and the
+            # GPS heading-aligner's "am I turning?" gate saw a rate that
+            # flickered between the real value and 0 on alternate reads.
+            self._last_yaw_rate_world_dps = yaw_rate_world_dps
+            return yaw_rate_world_dps
 
         return self._apply_producer_delta(
             delta_unscaled=delta_unscaled,
