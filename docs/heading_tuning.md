@@ -141,21 +141,48 @@ That is **thermal gyro-bias drift**, and before 2026-09-19 nothing tracked it:
   (`oak_bias_adapt_enabled` / `oak_bias_adapt_alpha` are gone), because leaving
   it would have meant two bias integrators fighting.
 
+### Motion witness: an IMU cannot vouch for its own stillness (2026-09-19)
+
+Two independent reviewers found the same BLOCKER in the detector below: a
+genuine slow steady rotation (a cross-slope creep, a gentle arc) satisfies the
+raw gyro/accel window's std and rate gates exactly as well as a truly parked
+robot — measured, a true 1.5 deg/s turn was frozen 39 of 40 s, and a
+0.08 deg/s² ramp ratcheted the bias to 70 deg/s. Gyro and accel alone cannot
+tell the difference; the fix is an independent signal.
+
+`ImuYawProducer.set_motion_witness(still, host_ts)` records a wheels-stopped
+witness pushed once per control-loop tick from `pi_app.app.main`, derived from
+VESC RPM / commanded drive bytes via
+`pi_app.control.rpm_plausibility.wheels_stopped()` (prefers RPM readback;
+falls back to commanded bytes when RPM is unavailable or the plausibility gate
+has already flagged it dead). The robot is **stationary** only when the window
+below is quiet **and** the witness is fresh and says `still=True`
+(`oak_witness_timeout_s`, default 1.0 s). No witness ever received, a stale
+one, or one that says the wheels are turning: never stationary — no bias
+tracking, no ZUPT, regardless of how quiet the gyro looks. When tracking is
+enabled but no fresh witness has been seen for over 5 s, a rate-limited (one
+per 60 s) WARNING says so: `stationary bias tracking idle: no motion witness
+(wheels-stopped signal) received`.
+
 ### How it works now (producer side)
 
 `ImuYawProducer` keeps a rolling window of the last `oak_stationary_window_s`
 of **raw** samples, with running sums so mean/std are O(1) per packet (no numpy
-on the Pi). The robot counts as **stationary** only when **all** of these hold:
+on the Pi). The window looks **quiet** only when **all** of these hold:
 
 1. the window is full (spans the configured length, ≥ 3 samples);
 2. every raw gyro axis has std < `oak_stationary_gyro_std_dps`;
 3. the accel norm has std < `oak_stationary_accel_std_g`;
-4. every axis mean is within `oak_stationary_max_rate_dps` of the current bias.
+4. every axis RAW mean has absolute value < `oak_stationary_max_rate_dps`.
 
-The std gates do the real work. The max-rate bound exists only to reject a
-steady slow turn that would otherwise look quiet, and it must stay well above
-the measured hot bias (~1.3 deg/s) or it would veto exactly the drift it is
-supposed to let through — hence the 2.0 deg/s default.
+The std gates do the real work. The max-rate bound is an **absolute** bound on
+the raw mean (not a residual against the current bias estimate — residual-to-
+bias was chicken-and-egg: it could never learn a bias larger than the bound
+itself). Raised 2.0 → 5.0 deg/s on 2026-09-19: a raw mean above 5 deg/s while
+the wheels are stopped and the sensor is quiet is not bias; a hot bias
+(measured up to ~2.6 deg/s) must stay learnable. **`stationary` = window quiet
+AND fresh witness** — see the subsection above; the window alone is
+necessary but no longer sufficient.
 
 While stationary and tracking is enabled, each packet relaxes the bias toward
 the window mean: `bias += (dt / oak_stationary_bias_tau_s) * (mean - bias)`.
@@ -200,9 +227,12 @@ Healthy parked signature: `zupt_active=true`, `window_gyro_std_dps` ≈ 0.1,
 - Body triad: `gx_body_dps`, `gy_body_dps`, `gz_body_dps`
 - Selected path: `yaw_rate_source_cfg`, `yaw_rate_source_selected`, `yaw_rate_scale`, `yaw_rate_sign`
 - Stationary / ZUPT: `stationary`, `zupt_active`, `zupt_engage_count`,
-  `bias_updates`, `bias_gx_dps` / `gy` / `gz`, `gyro_bias_dps`,
-  `window_gyro_std_dps`, `window_accel_std_g`, `last_bias_update_host_ts`,
+  `bias_updates`, `bias_gx_dps` / `gy` / `gz`, `gyro_bias_dps` (boot
+  calibration copy), `tracked_bias_dps` (the producer's live tracked bias —
+  what body-rate diagnostics actually subtract), `window_gyro_std_dps`,
+  `window_accel_std_g`, `last_bias_update_host_ts`,
   `stationary_tracking_enabled`, `zupt_enabled`
+- Motion witness: `witness_still`, `witness_age_s` (in `get_imu_metrics()`)
 - Integration path: `integration_path` (`producer` vs `legacy_snapshot`)
 - Sample identity: `sample_age_s`, `device_timestamp_s`, `last_dt_s`
 - Consumer counters: `count_duplicate`, `count_stale`, `count_regressed`,

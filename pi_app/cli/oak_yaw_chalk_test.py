@@ -724,13 +724,23 @@ def print_results(
         )
 
     # SIGN is its own pass criterion, independent of the magnitude band above.
-    sign_ok = heading_sign_matches_direction(d_prod_free, direction)
-    want = "positive" if str(direction).lower() == "cw" else "negative"
-    print_fn(
-        f"  SIGN check: physical {direction} requires a {want} production "
-        f"heading Δ; measured {d_prod_free:+.2f}°  "
-        f"[{'PASS' if sign_ok else 'FAIL'}]"
-    )
+    # heading_sign_matches_direction() always returns False for a ~0° delta
+    # (no sign to check), which is correct for a real chalk turn that failed
+    # to move — but for the documented `--expected 0` stationary check that
+    # same ~0° delta is the SUCCESS case, not a sign failure. Report it as n/a
+    # instead of a misleading FAIL.
+    if abs(expected) < 1e-12:
+        print_fn(
+            f"  SIGN check: n/a (stationary check) — measured {d_prod_free:+.2f}°"
+        )
+    else:
+        sign_ok = heading_sign_matches_direction(d_prod_free, direction)
+        want = "positive" if str(direction).lower() == "cw" else "negative"
+        print_fn(
+            f"  SIGN check: physical {direction} requires a {want} production "
+            f"heading Δ; measured {d_prod_free:+.2f}°  "
+            f"[{'PASS' if sign_ok else 'FAIL'}]"
+        )
 
     print_fn()
     print_fn("Interpretation:")

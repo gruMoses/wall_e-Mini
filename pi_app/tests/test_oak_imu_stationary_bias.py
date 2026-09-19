@@ -65,11 +65,15 @@ def _tracking_producer(**kwargs) -> ImuYawProducer:
 
 class TestStationaryDetection(unittest.TestCase):
     def test_quiet_stream_becomes_stationary_after_about_one_window(self):
+        """A quiet gyro/accel window is necessary but no longer sufficient:
+        stationary also requires a fresh wheels-stopped witness (2026-09-19),
+        so this test now feeds one every packet (the robot really is parked)."""
         rng = random.Random(SEED)
         prod = _tracking_producer()
         seen_stationary_at: Optional[float] = None
         for i in range(400):  # 4 s
             t = i * DT
+            prod.set_motion_witness(True, t)
             prod.ingest([_packet(t, rng)])
             if prod.stationary and seen_stationary_at is None:
                 seen_stationary_at = t
@@ -98,10 +102,13 @@ class TestStationaryDetection(unittest.TestCase):
         rng = random.Random(SEED)
         prod = _tracking_producer()
         for i in range(200):
-            prod.ingest([_packet(i * DT, rng)])
+            t = i * DT
+            prod.set_motion_witness(True, t)
+            prod.ingest([_packet(t, rng)])
         self.assertTrue(prod.stationary)
         # A gap longer than max_integrate_dt_s must drop the window, not leave
         # two samples straddling it and claim a "full" window.
+        prod.set_motion_witness(True, 2.0 + 5.0)
         prod.ingest([_packet(2.0 + 5.0, rng)])
         self.assertFalse(prod.stationary)
 
@@ -143,6 +150,8 @@ class TestBiasTracking(unittest.TestCase):
         ramp_s: float = RAMP_S,
         batch: int = 1,
     ) -> None:
+        """A PARKED robot whose gyro bias itself drifts (thermal), not a real
+        turn — the wheels-stopped witness is genuinely True throughout."""
         rng = random.Random(SEED)
         n = int(ramp_s / DT)
         i = 0
@@ -154,6 +163,7 @@ class TestBiasTracking(unittest.TestCase):
                 t = i * DT
                 packets.append(_packet(t, rng, gy_dps=ramp_end_dps * (t / ramp_s)))
                 i += 1
+            prod.set_motion_witness(True, packets[-1].host_ts_s)
             prod.ingest(packets)
 
     def test_tracking_on_keeps_the_heading_still(self):
@@ -218,12 +228,16 @@ class TestZupt(unittest.TestCase):
         rng = random.Random(SEED)
         prod = _tracking_producer(zupt_enabled=True)
         for i in range(300):
-            prod.ingest([_packet(i * DT, rng, gy_dps=-1.2)])
+            t = i * DT
+            prod.set_motion_witness(True, t)
+            prod.ingest([_packet(t, rng, gy_dps=-1.2)])
         self.assertTrue(prod.zupt_active)
         self.assertGreaterEqual(prod.zupt_engage_count, 1)
         frozen_at = prod.cum_y_rad
         for i in range(300, 600):
-            prod.ingest([_packet(i * DT, rng, gy_dps=-1.2)])
+            t = i * DT
+            prod.set_motion_witness(True, t)
+            prod.ingest([_packet(t, rng, gy_dps=-1.2)])
         self.assertAlmostEqual(prod.cum_y_rad, frozen_at, places=12)
         # The packet counter still advances: consumers rely on it being
         # monotonic to detect a producer replacement.
@@ -234,10 +248,16 @@ class TestZupt(unittest.TestCase):
         prod = _tracking_producer(zupt_enabled=True)
         # 3 s parked
         for i in range(300):
-            prod.ingest([_packet(i * DT, rng)])
+            t = i * DT
+            prod.set_motion_witness(True, t)
+            prod.ingest([_packet(t, rng)])
         self.assertTrue(prod.zupt_active)
 
-        # 30 dps turn for 3 s, starting mid-window.
+        # 30 dps turn for 3 s, starting mid-window. Wheels turning now — the
+        # witness alone would already prevent stationary, but the point of
+        # this test is that the std/rate gates resume integration on their
+        # own even before a witness update; leave the witness at its last
+        # (still-fresh) True value to isolate that.
         turn_start = 300
         resumed_at: Optional[int] = None
         for i in range(turn_start, turn_start + 300):
@@ -258,10 +278,14 @@ class TestZupt(unittest.TestCase):
         prod = _tracking_producer(zupt_enabled=True)
         with self.assertLogs("pi_app.hardware.oak_imu_yaw_producer", "WARNING") as cm:
             for i in range(300):
-                prod.ingest([_packet(i * DT, rng)])
+                t = i * DT
+                prod.set_motion_witness(True, t)
+                prod.ingest([_packet(t, rng)])
             self.assertTrue(prod.zupt_active)
             for i in range(300, 500):
-                prod.ingest([_packet(i * DT, rng, gy_dps=90.0)])
+                t = i * DT
+                prod.set_motion_witness(False, t)  # wheels turning
+                prod.ingest([_packet(t, rng, gy_dps=90.0)])
             self.assertFalse(prod.zupt_active)
         messages = [r.getMessage() for r in cm.records]
         self.assertTrue(any("zupt_engage" in m for m in messages), messages)
@@ -274,7 +298,9 @@ class TestZupt(unittest.TestCase):
             # we want here (the re-engage is rate-limited into silence).
             with self.assertLogs("pi_app.hardware.oak_imu_yaw_producer", "WARNING"):
                 for i in range(500, 800):
-                    prod.ingest([_packet(i * DT, rng)])
+                    t = i * DT
+                    prod.set_motion_witness(True, t)  # parked again
+                    prod.ingest([_packet(t, rng)])
         self.assertTrue(prod.zupt_active)
         self.assertGreaterEqual(prod.zupt_engage_count, 2)
         self.assertEqual(len(cm.records), before)
@@ -357,7 +383,15 @@ class _ZuptFakeOak:
         self.producer.configure_stationary_tracking(**kwargs)
 
     # --- test helper ------------------------------------------------------
-    def feed(self, packets: List[ImuPacket]) -> None:
+    def feed(self, packets: List[ImuPacket], *, still: bool = True) -> None:
+        """Feed packets, pushing a wheels-stopped witness alongside them.
+
+        Default True: every existing caller in this file represents a parked
+        robot (that was the implicit assumption before the motion-witness
+        gate existed), so the default preserves those tests unchanged.
+        """
+        if packets:
+            self.producer.set_motion_witness(bool(still), packets[-1].host_ts_s)
         self.producer.ingest(packets)
 
 

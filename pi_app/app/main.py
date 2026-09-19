@@ -35,6 +35,8 @@ try:
         WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
     )
     from pi_app.control.gps_heading_align import GpsHeadingAligner
+    from pi_app.control.rpm_plausibility import wheels_stopped
+    from pi_app.control.mapping import CENTER_OUTPUT_VALUE
     from pi_app.app.log_gating import should_log_tick, cleanup_old_logs as _cleanup_old_logs
     from config import config
 except ModuleNotFoundError:
@@ -58,6 +60,8 @@ except ModuleNotFoundError:
         WaypointNavController, WaypointNavConfig as WpNavCfg, load_waypoints,
     )
     from pi_app.control.gps_heading_align import GpsHeadingAligner  # type: ignore
+    from pi_app.control.rpm_plausibility import wheels_stopped  # type: ignore
+    from pi_app.control.mapping import CENTER_OUTPUT_VALUE  # type: ignore
     from pi_app.app.log_gating import should_log_tick, cleanup_old_logs as _cleanup_old_logs  # type: ignore
     from config import config  # type: ignore
 
@@ -555,6 +559,26 @@ def run() -> None:
                     charge_fet_on=_bms_st_for_inhibit.charge_fet_on if _bms_st_for_inhibit else None,
                 )
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
+            # Wheels-stopped witness for the IMU stationary-bias / ZUPT gate: an
+            # IMU cannot vouch for its own stillness (a slow steady turn looks
+            # exactly like quiet gyro/accel noise), so push an independent
+            # motion signal derived from VESC RPM / commanded drive bytes. A
+            # witness failure must never break the control loop.
+            imu_motion_witness_still = None
+            if oak_reader is not None:
+                try:
+                    imu_motion_witness_still = wheels_stopped(
+                        telem.get("vesc_left_rpm"),
+                        telem.get("vesc_right_rpm"),
+                        telem.get("vesc_rpm_plausible", True),
+                        telem.get("motor_left_byte", CENTER_OUTPUT_VALUE),
+                        telem.get("motor_right_byte", CENTER_OUTPUT_VALUE),
+                        neutral=CENTER_OUTPUT_VALUE,
+                        min_erpm=config.vesc.rpm_plausibility_min_erpm,
+                    )
+                    oak_reader.set_motion_witness(imu_motion_witness_still)
+                except Exception:
+                    imu_motion_witness_still = None
             # Snapshot IMU status early in loop and retain last-good values for telemetry
             # so brief status fetch hiccups do not blank heading in the UI.
             imu_status = controller.get_imu_status()
@@ -1052,6 +1076,7 @@ def run() -> None:
                         "loop_dt_ms": loop_dt_ms,
                         "imu_dt_ms": imu_dt_ms,
                         "imu_pipeline": imu_pipeline,
+                        "imu_motion_witness_still": imu_motion_witness_still,
                         "oak_camera_health": oak_camera_health,
                         "events": [e.name for e in events] if events else [],
                     }

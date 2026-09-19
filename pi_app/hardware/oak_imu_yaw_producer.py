@@ -35,6 +35,18 @@ Safety
   with the host message buffer (512 at ~1 pkt/msg) so a full host backlog is
   not silently halved. Soft backlog drop of oldest samples is last-resort only.
 - Bias and NMNI are applied at integrate time when configured; scale is not.
+
+Motion witness (stationary bias tracking / ZUPT)
+-------------------------------------------------
+An IMU cannot vouch for its own stillness: a genuine slow steady rotation (a
+cross-slope creep, a gentle arc) looks exactly like quiet noise to the raw
+gyro/accel window, so the stationary detector alone would freeze real rotation
+as "bias". ``set_motion_witness`` accepts an independent wheels-stopped signal
+(pushed by ``pi_app.app.main`` from VESC RPM / commanded drive bytes via
+``pi_app.control.rpm_plausibility.wheels_stopped``). The robot is declared
+stationary only when the window is quiet **and** a fresh witness says the
+wheels are stopped; no witness, or a stale one, means never stationary — no
+bias tracking, no ZUPT.
 """
 
 from __future__ import annotations
@@ -145,6 +157,10 @@ class ImuYawProducerSnapshot:
     window_accel_std_g: float = 0.0
     last_bias_update_host_ts: float = 0.0
 
+    # Motion witness (wheels-stopped signal; see module docstring).
+    witness_still: Optional[bool] = None
+    witness_age_s: float = float("inf")
+
 
 @dataclass
 class ImuYawProducer:
@@ -171,6 +187,9 @@ class ImuYawProducer:
     stationary_accel_std_g: float = 0.03
     stationary_max_rate_dps: float = 2.0
     stationary_bias_tau_s: float = 15.0
+    # Motion witness freshness bound (see module docstring). A witness older
+    # than this is treated as absent: no witness, no stationary declaration.
+    witness_timeout_s: float = 1.0
 
     _ax_ema: Optional[float] = field(default=None, init=False, repr=False)
     _ay_ema: Optional[float] = field(default=None, init=False, repr=False)
@@ -224,6 +243,14 @@ class ImuYawProducer:
     window_accel_std_g: float = field(default=0.0, init=False)
     last_bias_update_host_ts: float = field(default=0.0, init=False)
 
+    # Motion witness (wheels-stopped signal; see module docstring). None means
+    # "never received one". host_ts is whatever clock the caller passes to
+    # set_motion_witness (production: time.monotonic(), matching packet host
+    # timestamps in oak_depth._poll_imu).
+    witness_still: Optional[bool] = field(default=None, init=False)
+    witness_host_ts: float = field(default=0.0, init=False)
+    _last_idle_log_mono: Optional[float] = field(default=None, init=False, repr=False)
+
     # Rolling window of RAW samples: (t_s, gx_dps, gy_dps, gz_dps, a_norm_g).
     # Running sums keep mean/std O(1) per packet (no numpy on the Pi).
     _win: Deque[Tuple[float, float, float, float, float]] = field(
@@ -253,6 +280,7 @@ class ImuYawProducer:
         accel_std_g: Optional[float] = None,
         max_rate_dps: Optional[float] = None,
         bias_tau_s: Optional[float] = None,
+        witness_timeout_s: Optional[float] = None,
     ) -> None:
         """Set the stationary detector knobs (None leaves a knob unchanged)."""
         if enabled is not None:
@@ -269,6 +297,60 @@ class ImuYawProducer:
             self.stationary_max_rate_dps = max(0.0, float(max_rate_dps))
         if bias_tau_s is not None:
             self.stationary_bias_tau_s = max(0.1, float(bias_tau_s))
+        if witness_timeout_s is not None:
+            self.witness_timeout_s = max(0.05, float(witness_timeout_s))
+
+    def set_motion_witness(self, still: bool, host_ts: float) -> None:
+        """Record the latest wheels-stopped witness (see module docstring).
+
+        Called from ``OakDepthReader.set_motion_witness``, itself called from
+        the main control loop with ``pi_app.control.rpm_plausibility.
+        wheels_stopped()``. ``host_ts`` must be on the same clock as the
+        ``host_ts_s`` passed to :meth:`ingest` (production: ``time.monotonic()``)
+        so freshness comparisons are meaningful.
+        """
+        self.witness_still = bool(still)
+        if math.isfinite(float(host_ts)):
+            self.witness_host_ts = float(host_ts)
+
+    def _witness_age_s(self, host_now: float) -> float:
+        if not math.isfinite(host_now) or not math.isfinite(self.witness_host_ts):
+            return float("inf")
+        return host_now - self.witness_host_ts
+
+    def _witness_ok(self, host_now: float) -> bool:
+        """True only for a FRESH witness that says the wheels are stopped.
+
+        No witness ever received, a stale one, or one that says the wheels are
+        turning are all treated the same: not stationary. An IMU cannot vouch
+        for its own stillness — see the module docstring.
+        """
+        if self.witness_still is not True:
+            return False
+        return self._witness_age_s(host_now) <= float(self.witness_timeout_s)
+
+    def _check_witness_idle(self, host_now: float) -> None:
+        """WARNING once per 60 s while tracking is enabled but the witness is stale/absent.
+
+        Uses the same age computation as ``_witness_ok`` (relative to
+        ``host_now``, the sample's own clock) so the message reflects real
+        elapsed time even if packets keep arriving. The rate limit itself uses
+        ``time.monotonic()`` — a different, wall-clock question ("have I
+        logged this recently") from "how old is the witness".
+        """
+        if not self.stationary_tracking_enabled or not math.isfinite(host_now):
+            return
+        if self._witness_age_s(host_now) <= 5.0:
+            return
+        now_mono = time.monotonic()
+        last = self._last_idle_log_mono
+        if last is not None and (now_mono - last) < 60.0:
+            return
+        self._last_idle_log_mono = now_mono
+        logger.warning(
+            "stationary bias tracking idle: no motion witness (wheels-stopped "
+            "signal) received"
+        )
 
     def _reset_stationary_window(self) -> None:
         """Drop the window on any non-fresh packet (gap / reseed / regression).
@@ -291,14 +373,21 @@ class ImuYawProducer:
         return math.sqrt(var) if var > 0.0 else 0.0
 
     def _update_stationary_window(self, pkt: ImuPacket, dt: float) -> bool:
-        """Push one RAW sample and return whether the robot looks stationary.
+        """Push one RAW sample and return whether the WINDOW looks quiet.
 
-        Stationary iff the window is FULL **and** every raw gyro axis has a
+        This is necessary but not sufficient for ``stationary`` — see
+        ``_ingest_one``, which also requires a fresh wheels-stopped witness.
+
+        Window-quiet iff the window is FULL **and** every raw gyro axis has a
         standard deviation below ``stationary_gyro_std_dps``, **and** the accel
         norm has a standard deviation below ``stationary_accel_std_g``, **and**
-        every axis mean sits within ``stationary_max_rate_dps`` of the current
-        bias estimate. The std gates do the real work; the max-rate bound only
-        rejects a steady slow turn that would otherwise look quiet.
+        every axis RAW mean has absolute value below ``stationary_max_rate_dps``.
+        The std gates do the real work; the max-rate bound is an ABSOLUTE bound
+        on the raw mean (not a residual against the current bias estimate) —
+        residual-to-bias is chicken-and-egg: it can never learn a bias larger
+        than the bound itself. A raw mean above the bound while the window is
+        otherwise quiet is not bias (e.g. a genuine slow steady turn); a hot
+        bias (measured up to ~1.3 deg/s on this unit) must stay learnable.
         """
         self._win_clock_s += dt
         t = self._win_clock_s
@@ -345,10 +434,9 @@ class ImuYawProducer:
         if accel_std >= self.stationary_accel_std_g:
             return False
 
-        bias_dps = (self.bias_gx_dps, self.bias_gy_dps, self.bias_gz_dps)
         for i in range(3):
             mean_i = self._win_sum[i] / n
-            if abs(mean_i - bias_dps[i]) >= self.stationary_max_rate_dps:
+            if abs(mean_i) >= self.stationary_max_rate_dps:
                 return False
         return True
 
@@ -485,6 +573,16 @@ class ImuYawProducer:
             window_gyro_std_dps=self.window_gyro_std_dps,
             window_accel_std_g=self.window_accel_std_g,
             last_bias_update_host_ts=self.last_bias_update_host_ts,
+            witness_still=self.witness_still,
+            # Relative to the latest processed sample's own host clock (the
+            # same domain _witness_ok uses per packet), not wall time.monotonic
+            # — deterministic for tests and identical in production, since
+            # both host_ts values come from the same clock there.
+            witness_age_s=(
+                self._witness_age_s(self.timestamp)
+                if self.witness_still is not None
+                else float("inf")
+            ),
         )
 
     @staticmethod
@@ -671,6 +769,8 @@ class ImuYawProducer:
         self.timestamp = host_ts if self._ts_valid(host_ts) else float(host_now_s or 0.0)
         self.device_timestamp_s = dev_ts if self._ts_valid(dev_ts) else 0.0
 
+        self._check_witness_idle(host_ts)
+
         dt, status = self._resolve_dt(dev_ts, host_ts)
         self.last_status = status
         if dt is None or status != "fresh":
@@ -685,8 +785,11 @@ class ImuYawProducer:
         self.last_dt_s = dt
         self._note_cadence(dt)
 
-        # Stationary detection runs on RAW rates (bias must stay measurable).
-        self.stationary = self._update_stationary_window(pkt, dt)
+        # Stationary requires BOTH a quiet window (raw gyro/accel alone) AND a
+        # fresh wheels-stopped witness — the window alone cannot tell a quiet
+        # slow turn from bias (see module docstring / _witness_ok).
+        window_quiet = self._update_stationary_window(pkt, dt)
+        self.stationary = bool(window_quiet and self._witness_ok(host_ts))
         tracking = self.stationary and self.stationary_tracking_enabled
         if tracking:
             self._update_bias_from_window(dt, host_ts)

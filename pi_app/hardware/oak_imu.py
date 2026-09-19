@@ -132,6 +132,16 @@ class OakImuReader:
         self._last_yaw_generation: Optional[int] = None
         self._last_producer_integrated: int = 0
         self._has_producer_cum = False
+        # The cum delta actually applied to yaw_rad on the most recent
+        # _consume_producer_yaw call (rad). Used to decide whether the ZUPT
+        # status relabel is safe (see read()'s "elif use_producer" block): a
+        # real non-zero delta this read must never be swallowed as "zupt", even
+        # when the producer is currently frozen (engage mid-batch).
+        self._last_consumed_delta_rad: float = 0.0
+        # Producer's TRACKED gyro bias (dps), read back from the snapshot each
+        # read(). Diverges from self.gyro_bias_dps once stationary tracking has
+        # adapted it; see get_health()'s tracked_bias_dps.
+        self._last_tracked_bias_dps: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
         # Observability (field diagnostics / chalk tests).
         self._integrate_status: str = "init"
@@ -211,10 +221,17 @@ class OakImuReader:
         sy: float,
         sz: float,
         source: str,
-        auto_axis: str,
-        use_gravity_projected: bool,
     ) -> float:
-        """Compute world-yaw rate from gyro, optionally using gravity projection.
+        """Compute world-yaw rate from gyro, given an ALREADY-RESOLVED source.
+
+        ``source`` must be the final channel name ("gyro_x" / "gyro_y" /
+        "gyro_z" / "gravity_projected") — never "auto". Resolving "auto" and
+        the gravity-projected override belongs to :meth:`_selected_source`
+        alone, which both this method and :meth:`_select_cum` (the cum-delta
+        counterpart) call, so the instantaneous rate and the cumulative
+        integral can never pick different channels (they used to: this method
+        resolved gravity_projected before auto, `_selected_source` resolved
+        auto first, and the two could diverge).
 
         Every channel returned here is "rotation about the body-DOWN axis,
         clockwise-positive viewed from above" — the convention documented on
@@ -231,9 +248,7 @@ class OakImuReader:
 
         ``gyro_x`` / ``gyro_z`` are diagnostics: their sign depends on mounting.
         """
-        if source == "auto":
-            source = auto_axis
-        if source == "gravity_projected" or use_gravity_projected:
+        if source == "gravity_projected":
             a_norm_sq = sx * sx + sy * sy + sz * sz
             if a_norm_sq > 0.25:
                 # Negate: accel points UP at rest, gy's axis points DOWN.
@@ -405,8 +420,16 @@ class OakImuReader:
         returns raw latest rates; this is then a no-op on sample values but
         keeps calibration correct if that contract ever changes. Prefer
         ``get_imu_raw_gyro_dps`` when present.
+
+        Stationary bias tracking / ZUPT are also paused for the window: left
+        running, the tracker would keep relaxing bias toward the raw window
+        mean while this method has just forced bias to 0, fighting the
+        explicit collection with its own estimate. Restored in the same
+        ``finally`` as everything else.
         """
         prior_bias = self.gyro_bias_dps
+        prior_stationary_tracking_enabled = self._stationary_bias_tracking_enabled
+        prior_zupt_enabled = self._zupt_enabled
         measured: Optional[tuple] = None
         xs: list[float] = []
         ys: list[float] = []
@@ -416,6 +439,9 @@ class OakImuReader:
             self.gyro_bias_dps = (0.0, 0.0, 0.0)
             self._push_producer_bias_dps(0.0, 0.0, 0.0)
             self._push_producer_nmni(False, self._nmni_threshold_dps)
+            self._stationary_bias_tracking_enabled = False
+            self._zupt_enabled = False
+            self._push_producer_stationary_config()
 
             end = time.monotonic() + float(duration_s)
             while time.monotonic() < end:
@@ -439,8 +465,11 @@ class OakImuReader:
             # a zeroed bias would silently reintroduce the residual-integrate
             # skew this whole path exists to remove.
             self.gyro_bias_dps = measured if measured is not None else prior_bias
-            # Restore NMNI + measured/prior bias on the producer. The measured
-            # bias seeds the producer's stationary bias tracker from here.
+            self._stationary_bias_tracking_enabled = prior_stationary_tracking_enabled
+            self._zupt_enabled = prior_zupt_enabled
+            # Restore NMNI + measured/prior bias + stationary tracking / ZUPT on
+            # the producer. The measured bias seeds the producer's stationary
+            # bias tracker from here.
             self._sync_producer_config()
             # WARNING level on purpose: the app installs no logging handler, so
             # INFO is dropped and a silent no-op calibration would be invisible.
@@ -557,6 +586,7 @@ class OakImuReader:
             "zupt_active": self._last_zupt_active,
             "stationary": self._last_stationary,
             "gyro_bias_dps": tuple(self.gyro_bias_dps),
+            "tracked_bias_dps": tuple(self._last_tracked_bias_dps),
             "integrate_status": self._integrate_status,
             "integration_path": "producer" if self._has_producer_cum else "legacy_snapshot",
             "sample_age_s": self._last_sample_age_s,
@@ -650,14 +680,29 @@ class OakImuReader:
         gx_raw_dps = math.degrees(imu_state.gx_rads)
         gy_raw_dps = math.degrees(imu_state.gy_rads)
         gz_raw_dps = math.degrees(imu_state.gz_rads)
-        # Body rates for diagnostics: subtract local bias view. Producer already
-        # integrates with its own bias copy (kept in sync via calibrate / adapt).
-        gx_dps = gx_raw_dps - self.gyro_bias_dps[0]
-        gy_dps = gy_raw_dps - self.gyro_bias_dps[1]
-        gz_dps = gz_raw_dps - self.gyro_bias_dps[2]
+        # Body rates for diagnostics: subtract the producer's TRACKED bias when
+        # the snapshot exposes it (real OakDepthReader / producer-backed
+        # fakes) — it is the bias the producer actually integrated with, which
+        # drifts away from self.gyro_bias_dps once stationary tracking has
+        # adapted it. self.gyro_bias_dps stays the calibration seed / config
+        # owner (see calibrate_gyro / _sync_producer_config) and is only the
+        # fallback here, for legacy stubs that don't expose bias_g*_dps.
+        if hasattr(imu_state, "bias_gy_dps"):
+            bias_dps = (
+                float(getattr(imu_state, "bias_gx_dps", 0.0) or 0.0),
+                float(getattr(imu_state, "bias_gy_dps", 0.0) or 0.0),
+                float(getattr(imu_state, "bias_gz_dps", 0.0) or 0.0),
+            )
+        else:
+            bias_dps = tuple(self.gyro_bias_dps)
+        self._last_tracked_bias_dps = bias_dps
+        gx_dps = gx_raw_dps - bias_dps[0]
+        gy_dps = gy_raw_dps - bias_dps[1]
+        gz_dps = gz_raw_dps - bias_dps[2]
         self._last_gx_body_dps = gx_dps
         self._last_gy_body_dps = gy_dps
         self._last_gz_body_dps = gz_dps
+        cadence_avg_s = float(getattr(imu_state, "producer_cadence_avg_s", 0.0) or 0.0)
 
         if self._yaw_rate_source == "auto":
             now = time.monotonic()
@@ -698,7 +743,13 @@ class OakImuReader:
 
         sx, sy, sz = self._ax_ema, self._ay_ema, self._az_ema
 
-        # Instantaneous yaw rate for telemetry (scale once).
+        # Instantaneous yaw rate for telemetry (scale once). _selected_source()
+        # is the SINGLE resolver for "auto" and the gravity-projected override
+        # — both the rate here and the cum selection in _select_cum call it, so
+        # they can never diverge (they used to: this method resolved
+        # gravity_projected before auto while _selected_source resolved auto
+        # first).
+        resolved_source = self._selected_source()
         yaw_rate_rads = self._compute_yaw_rate_rads(
             gx,
             gy,
@@ -706,9 +757,7 @@ class OakImuReader:
             sx if sx is not None else 0.0,
             sy if sy is not None else 0.0,
             sz if sz is not None else 0.0,
-            self._yaw_rate_source,
-            self._auto_axis,
-            self._use_gravity_projected_yaw_rate,
+            resolved_source,
         )
         yaw_rate_rads *= self._yaw_rate_scale
         yaw_rate_world_dps = math.degrees(yaw_rate_rads)
@@ -747,11 +796,27 @@ class OakImuReader:
                 gy=gy,
                 gz=gz,
                 yaw_rate_world_dps=yaw_rate_world_dps,
+                cadence_avg_s=cadence_avg_s,
             )
-            if zupt_active and self._integrate_status not in (
-                "stale",
-                "cum_reset",
-                "restart",
+            # The "zupt" relabel is only safe when THIS read applied no real
+            # cum delta. A ZUPT engage can land mid-batch: the producer freezes
+            # partway through the packets folded into this one read, so the
+            # delta up to the freeze point is real motion and must not be
+            # zeroed (see _last_consumed_delta_rad / _apply_producer_delta).
+            # The next (duplicate) read under a still-active freeze correctly
+            # relabels to "zupt". Never override a status that already means
+            # "no new data this read" for an unrelated reason.
+            applied_real_delta = self._last_consumed_delta_rad != 0.0
+            if (
+                zupt_active
+                and not applied_real_delta
+                and self._integrate_status not in (
+                    "stale",
+                    "cum_reset",
+                    "restart",
+                    "gap_freeze",
+                    "regressed",
+                )
             ):
                 # The producer proved the robot is stationary and deliberately
                 # froze cum, so the heading cannot move. Report a yaw rate of
@@ -860,6 +925,7 @@ class OakImuReader:
     ) -> float:
         """Apply scale-once cum delta and advance roll/pitch. Returns yaw rate dps."""
         delta_scaled = delta_unscaled * self._yaw_rate_scale
+        self._last_consumed_delta_rad = delta_scaled
         self.yaw_rad += delta_scaled
         self._count_integrated += 1
         self._count_producer_packets += max(0, packets_delta)
@@ -898,6 +964,7 @@ class OakImuReader:
         gy: float,
         gz: float,
         yaw_rate_world_dps: float,
+        cadence_avg_s: float = 0.0,
     ) -> float:
         """Advance heading from producer cum deltas; scale applied once here.
 
@@ -913,6 +980,7 @@ class OakImuReader:
             self._count_stale += 1
             self._integrate_status = "stale"
             self._last_dt_s = 0.0
+            self._last_consumed_delta_rad = 0.0
             # Stale keeps returning 0.0: the heading is frozen, so reporting a
             # moving rate would let the PID damp against a turn the heading
             # cannot see. Log once per stale episode (WARNING — the app installs
@@ -938,6 +1006,7 @@ class OakImuReader:
             self._count_restart += 1
             self._integrate_status = "restart"
             self._last_dt_s = 0.0
+            self._last_consumed_delta_rad = 0.0
             self._last_yaw_rate_world_dps = 0.0
             return 0.0
 
@@ -953,6 +1022,7 @@ class OakImuReader:
             self._seed_sample_clocks(dev_ts, host_ts)
             self._integrate_status = "cum_reset"
             self._last_dt_s = 0.0
+            self._last_consumed_delta_rad = 0.0
             self._last_yaw_rate_world_dps = 0.0
             self._blend_attitude(roll_acc, pitch_acc)
             return 0.0
@@ -988,10 +1058,12 @@ class OakImuReader:
                 "generation_reseed" if generation_changed else "duplicate"
             )
             self._last_dt_s = 0.0
-            # Report the LIVE rate, not zero. The heading correctly freezes (no
-            # new producer cum), but the rate is a separate, still-valid
-            # measurement: it is the instantaneous bias-corrected, NMNI-gated,
-            # scaled selected-channel rate computed in read().
+            self._last_consumed_delta_rad = 0.0
+            # Report the LIVE rate, not zero — but ONLY while the sample is
+            # fresh. The heading correctly freezes (no new producer cum), but
+            # the rate is a separate, still-valid measurement: it is the
+            # instantaneous bias-corrected, NMNI-gated, scaled selected-channel
+            # rate computed in read().
             #
             # Why this matters: controller.py calls
             # imu_compensator.get_heading_deg() every tick, which consumes the
@@ -1000,8 +1072,21 @@ class OakImuReader:
             # usually lands here, so before this change the PID D-term and the
             # GPS heading-aligner's "am I turning?" gate saw a rate that
             # flickered between the real value and 0 on alternate reads.
-            self._last_yaw_rate_world_dps = yaw_rate_world_dps
-            return yaw_rate_world_dps
+            #
+            # Freshness bound: without one, a wedged camera thread that stops
+            # producing new packets can hold this branch (delta stays ~0
+            # forever) and report a stale non-zero rate for up to
+            # stale_age_s (0.5 s) before the stale path above takes over. Bound
+            # it much tighter — a few packet periods — since this branch's
+            # whole justification is "two reads of the same fresh sample in
+            # one control tick", not "the producer stopped talking to us".
+            cadence = cadence_avg_s if cadence_avg_s and cadence_avg_s > 0.0 else 0.01
+            freshness_bound_s = max(0.05, 3.0 * cadence)
+            if age_s <= freshness_bound_s:
+                self._last_yaw_rate_world_dps = yaw_rate_world_dps
+                return yaw_rate_world_dps
+            self._last_yaw_rate_world_dps = 0.0
+            return 0.0
 
         return self._apply_producer_delta(
             delta_unscaled=delta_unscaled,

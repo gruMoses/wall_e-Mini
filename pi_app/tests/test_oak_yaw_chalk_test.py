@@ -644,6 +644,41 @@ class TestProductionProducerYMatch(unittest.TestCase):
         sign_line = [ln for ln in lines if "SIGN check" in ln][0]
         self.assertIn("FAIL", sign_line)
 
+    def test_report_prints_sign_na_for_stationary_check(self):
+        """--expected 0 (stationary check): the SIGN row must not print FAIL.
+
+        heading_sign_matches_direction() always returns False for a ~0° delta
+        (there is no sign to check), which used to make the SIGN row print
+        FAIL on every successful stationary run — the exact bug this test
+        pins the fix for.
+        """
+        lines: List[str] = []
+        chalk.print_results(
+            expected=0.0,
+            direction="cw",
+            src="gyro_y",
+            scale=1.0,
+            triad=TriadIntegrator(),
+            start=_blank_mark(),
+            end=_blank_mark(),
+            d_prod_free=0.03,  # a real, successful stationary run
+            d_x=0.0,
+            d_y=0.03,
+            d_z=0.0,
+            d_producer_y=0.03,
+            rate_window=RateWindow(),
+            nmni_enabled=True,
+            nmni_threshold_dps=0.3,
+            nmni_source="config",
+            abs_tol_deg=8.0,
+            rel_tol=0.10,
+            print_fn=lambda *a, **k: lines.append(" ".join(str(x) for x in a)),
+        )
+        sign_line = [ln for ln in lines if "SIGN check" in ln][0]
+        self.assertIn("n/a", sign_line)
+        self.assertNotIn("FAIL", sign_line)
+        self.assertNotIn("PASS", sign_line)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,6 +49,38 @@ def byte_offset_to_erpm(offset_bytes: float, *, max_erpm: int) -> float:
     return float(offset_bytes) / float(_BYTE_SPAN_UP) * float(max_erpm)
 
 
+def wheels_stopped(
+    left_rpm: Optional[float],
+    right_rpm: Optional[float],
+    rpm_plausible: bool,
+    left_byte: int,
+    right_byte: int,
+    *,
+    neutral: int,
+    min_erpm: int,
+    byte_tol: int = 2,
+) -> bool:
+    """True when the drivetrain looks physically stopped — the IMU motion witness.
+
+    Prefers RPM readback (it proves the wheels are not turning even if a
+    command is still pending); falls back to commanded bytes when RPM is
+    unavailable or the plausibility gate has already flagged it dead (see
+    ``RpmPlausibilityGate`` — a tripped gate means "do not trust this RPM").
+
+    This is deliberately independent of the stationary IMU window: an IMU
+    cannot vouch for its own stillness (a slow steady turn looks exactly like
+    quiet gyro/accel noise), so the wheels-stopped signal has to come from
+    somewhere else. See ``ImuYawProducer.set_motion_witness`` /
+    docs/heading_tuning.md.
+    """
+    if rpm_plausible and left_rpm is not None and right_rpm is not None:
+        return abs(float(left_rpm)) < float(min_erpm) and abs(float(right_rpm)) < float(min_erpm)
+    return (
+        abs(int(left_byte) - int(neutral)) <= int(byte_tol)
+        and abs(int(right_byte) - int(neutral)) <= int(byte_tol)
+    )
+
+
 def wheel_mps_per_byte(
     *,
     max_erpm: int,

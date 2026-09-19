@@ -66,7 +66,7 @@ class TestOakImuYawRateMode(unittest.TestCase):
         sx, sy, sz = 0.3, 0.4, 0.2
         got = OakImuReader._compute_yaw_rate_rads(
             gx, gy, gz, sx, sy, sz,
-            source="gyro_z", auto_axis="gyro_z", use_gravity_projected=False,
+            source="gyro_z",
         )
         self.assertAlmostEqual(got, gz, places=8)
 
@@ -82,7 +82,7 @@ class TestOakImuYawRateMode(unittest.TestCase):
         sx, sy, sz = 0.0, 0.0, 1.0
         got = OakImuReader._compute_yaw_rate_rads(
             gx, gy, gz, sx, sy, sz,
-            source="gravity_projected", auto_axis="gyro_y", use_gravity_projected=True,
+            source="gravity_projected",
         )
         self.assertAlmostEqual(got, -gz, places=8)
 
@@ -93,7 +93,7 @@ class TestOakImuYawRateMode(unittest.TestCase):
         sx, sy, sz = 0.01, 0.01, 0.01
         got = OakImuReader._compute_yaw_rate_rads(
             gx, gy, gz, sx, sy, sz,
-            source="gravity_projected", auto_axis="gyro_y", use_gravity_projected=True,
+            source="gravity_projected",
         )
         self.assertAlmostEqual(got, gy, places=8)
 
@@ -168,7 +168,7 @@ class TestOakImuIntegrationHardening(unittest.TestCase):
         sx, sy, sz = 0.0, -1.0, 0.0
         got = OakImuReader._compute_yaw_rate_rads(
             gx, gy, gz, sx, sy, sz,
-            source="gravity_projected", auto_axis="gyro_y", use_gravity_projected=True,
+            source="gravity_projected",
         )
         self.assertAlmostEqual(got, gy, places=8)
 

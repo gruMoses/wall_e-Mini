@@ -110,10 +110,16 @@ class ImuSteeringConfig:
     # Accel-norm std gate: catches bumps/vibration that gyro std alone can miss.
     # Tune this one on the robot — it is the most mounting-dependent threshold.
     oak_stationary_accel_std_g: float = 0.03
-    # Bound on |window mean - current bias| per axis. The std gates do the real
+    # ABSOLUTE bound on the raw window mean per axis (not a residual against
+    # the current bias estimate — that was chicken-and-egg: it could never
+    # learn a bias larger than the bound itself). The std gates do the real
     # work; this only rejects a steady slow turn that would otherwise look
-    # quiet. It must stay well above the measured hot bias (~1.3 deg/s).
-    oak_stationary_max_rate_dps: float = 2.0
+    # quiet AND passes a fresh wheels-stopped witness (see
+    # ImuYawProducer.set_motion_witness / docs/heading_tuning.md — the witness
+    # is what actually rejects a genuine slow turn now). Raised 2.0 -> 5.0 on
+    # 2026-09-19: a raw mean above 5 deg/s while the wheels are stopped and the
+    # sensor is quiet is not bias; a 2.6 deg/s hot bias must stay learnable.
+    oak_stationary_max_rate_dps: float = 5.0
     # Bias relaxation time constant toward the stationary window mean.
     oak_stationary_bias_tau_s: float = 15.0
     # Freeze yaw integration entirely while provably stationary.

@@ -121,6 +121,15 @@ class _ImuState:
     # frozen heading.
     stationary: bool = False
     zupt_active: bool = False
+    # Producer's TRACKED gyro bias (dps) — diverges from the reader's boot
+    # calibration copy once stationary tracking has adapted it. See
+    # OakImuReader.read, which now sources body-rate bias from here.
+    bias_gx_dps: float = 0.0
+    bias_gy_dps: float = 0.0
+    bias_gz_dps: float = 0.0
+    # Producer packet cadence (avg seconds/packet) — used by OakImuReader to
+    # bound how long the "duplicate read" branch may report a live rate.
+    producer_cadence_avg_s: float = 0.0
 
 
 @dataclass
@@ -632,6 +641,10 @@ class OakDepthReader:
                 last_integrated_device_ts_s=self._imu_state.last_integrated_device_ts_s,
                 stationary=self._imu_state.stationary,
                 zupt_active=self._imu_state.zupt_active,
+                bias_gx_dps=self._imu_state.bias_gx_dps,
+                bias_gy_dps=self._imu_state.bias_gy_dps,
+                bias_gz_dps=self._imu_state.bias_gz_dps,
+                producer_cadence_avg_s=self._imu_state.producer_cadence_avg_s,
             ), age
 
     def get_imu_raw_gyro_dps(self) -> tuple[tuple[float, float, float], float]:
@@ -666,6 +679,16 @@ class OakDepthReader:
         """Configure per-packet NMNI on the producer integrator."""
         with self._lock:
             self._imu_yaw_producer.set_nmni(enabled, threshold_dps)
+
+    def set_motion_witness(self, still: bool) -> None:
+        """Forward a wheels-stopped witness to the IMU yaw producer.
+
+        Pushed once per control-loop tick from ``pi_app.app.main`` via
+        ``pi_app.control.rpm_plausibility.wheels_stopped()``. See
+        ``ImuYawProducer.set_motion_witness`` / docs/heading_tuning.md.
+        """
+        with self._lock:
+            self._imu_yaw_producer.set_motion_witness(bool(still), time.monotonic())
 
     def configure_stationary_tracking(
         self,
@@ -781,6 +804,9 @@ class OakDepthReader:
                     self._imu_yaw_producer.stationary_tracking_enabled
                 ),
                 "zupt_enabled": bool(self._imu_yaw_producer.zupt_enabled),
+                # Motion witness (wheels-stopped signal; see docs/heading_tuning.md).
+                "witness_still": snap.witness_still,
+                "witness_age_s": snap.witness_age_s,
             }
 
     def get_health(self) -> dict:
@@ -2360,6 +2386,10 @@ class OakDepthReader:
                 self._imu_state.last_integrated_device_ts_s = snap.last_integrated_device_ts_s
                 self._imu_state.stationary = snap.stationary
                 self._imu_state.zupt_active = snap.zupt_active
+                self._imu_state.bias_gx_dps = snap.bias_gx_dps
+                self._imu_state.bias_gy_dps = snap.bias_gy_dps
+                self._imu_state.bias_gz_dps = snap.bias_gz_dps
+                self._imu_state.producer_cadence_avg_s = snap.cadence_avg_s
 
                 sample_ts = (
                     snap.device_timestamp_s
