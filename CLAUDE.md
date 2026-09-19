@@ -70,8 +70,9 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
 
 ### OAK-D Lite Camera
 - Obstacle avoidance: depth corridor, valid-pixel % threshold, tiered speed reduction/stop.
-- Follow Me: **YOLOv8n** blob via `NeuralNetwork` node + host-side NMS (depthai v3). Do **not** use `SpatialDetectionNetwork` / `YoloDetectionNetwork` / `DetectionParser` — those silently yield zero detections with ultralytics blobs in depthai v3.
+- Follow Me: **YOLOv8n** blob via `NeuralNetwork` node + host-side NMS (depthai v3). `SpatialDetectionNetwork` / `YoloDetectionNetwork` / `DetectionParser` yield zero detections with the CURRENT blob because it comes from a plain ultralytics ONNX export through blobconverter (decode head kept, no NN Archive `heads` metadata). The supported path is the Luxonis conversion tool → NN Archive, which also unblocks on-device `ObjectTracker` and spatial coordinates. Refer to `docs/oak_d_lite_capability_audit.md` before you re-convert the model.
 - Depth EMA filter on person position for smoothing.
+- The onboard IMU is a **BMI270**: raw/calibrated accel + gyro only. `ROTATION_VECTOR` / `GAME_ROTATION_VECTOR` / magnetometer are BNO08x-only and return nothing on this device. Do not try them. Refer to `docs/oak_d_lite_capability_audit.md`.
 
 ### Waypoint Navigation
 State machine in `pi_app/control/waypoint_nav.py`:
