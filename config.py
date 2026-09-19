@@ -782,7 +782,13 @@ class Config:
     
     # IMU source: "auto" (try external I2C first, fall back to OAK-D),
     # "external" (I2C breakout only), "oak_d" (OAK-D onboard BMI270 only), "none"
-    imu_source: str = "auto"
+    # Pinned to the OAK BMI270 on 2026-09-19. The external ISM330DHCX +
+    # MMC5983MA path (pi_app/hardware/imu_reader.py) is unvalidated, has no
+    # tests, and publishes the opposite yaw-rate sign convention to the OAK
+    # path, so "auto" (external first) must not be able to hijack heading if
+    # that board is plugged in. Re-enable only after the bench protocol in
+    # docs/external_imu_postmortem.md.
+    imu_source: str = "oak_d"
 
     # File paths
     imu_calibration_path: str = "imu_calibration.json"
