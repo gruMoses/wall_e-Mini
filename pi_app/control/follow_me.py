@@ -739,9 +739,15 @@ class SpeedLayer:
 
     If a velocity_pid and speed_scale_mps_per_byte are supplied, and
     actual_speed_mps is passed to compute(), the layer closes the speed loop:
-      velocity_error = target_speed_mps − actual_speed_mps
-      correction_byte = PID(velocity_error) / speed_scale_mps_per_byte
-    Falls back gracefully to open-loop when actual_speed_mps is None.
+      target_speed_mps = open_loop_byte × speed_scale_mps_per_byte
+      velocity_error   = target_speed_mps − actual_speed_mps
+      correction_byte  = PID(velocity_error) / speed_scale_mps_per_byte
+    ``speed_scale_mps_per_byte`` must be the WHEEL-speed scale that produced
+    ``actual_speed_mps`` (FollowMeConfig.speed_loop_mps_per_byte), and the PID's
+    output_limit bounds the correction in m/s. Falls back to pure open-loop when
+    actual_speed_mps is None (no VESC telemetry, stale frames, or the RPM
+    plausibility gate tripped) — the open-loop path is byte-identical to the
+    gains-zeroed behaviour that shipped from 2026-06-11 to 2026-09-19.
     """
 
     def __init__(
@@ -923,12 +929,18 @@ class FollowMeController:
         # ── Layer 4: Speed (depth-based, closed-loop when telemetry available) ──
         max_speed = float(config.max_follow_speed_byte)
         max_speed_err = float(config.max_speed_error_m)
-        _speed_scale = float(config.trail_speed_scale_mps_per_byte)
+        # Velocity loop scale = kinematic WHEEL m/s per byte (the same drivetrain
+        # numbers that produce actual_speed_mps in controller.py). NOT the
+        # GPS-calibrated ground-speed trail scale — mixing the two put a
+        # permanent ~20 % bias into the loop. See FollowMeConfig SCALE note.
+        _speed_scale = float(config.speed_loop_mps_per_byte)
         _velocity_pid = PIDController(
             kp=float(config.speed_kp),
             ki=float(config.speed_ki),
             kd=float(config.speed_kd),
             integral_limit=float(config.speed_integral_limit),
+            # Bound the loop's authority so a wrong error can nudge, never lunge.
+            output_limit=float(config.speed_pid_max_correction_mps),
         )
         self._speed = SpeedLayer(
             target_dist_m=config.follow_distance_m,

@@ -134,11 +134,25 @@ class TestTrackletTracker(unittest.TestCase):
 
 class TestPartAVelocityPidDisabled(unittest.TestCase):
 
-    def test_speed_pid_gains_zeroed(self):
+    def test_speed_pid_gains_enabled_with_guards(self):
+        """2026-09-19: the velocity PID is re-enabled. It was zeroed 2026-06-11
+        because dead RPM readback drove a lunge/stall cycle; the re-enable ships
+        with the RPM plausibility gate (VescConfig) and a bounded correction, so
+        the gains must be non-zero AND both guards must be present in config."""
         cfg = FollowMeConfig()
-        self.assertEqual(cfg.speed_kp, 0.0)
-        self.assertEqual(cfg.speed_ki, 0.0)
-        self.assertEqual(cfg.speed_kd, 0.0)
+        self.assertGreater(cfg.speed_kp, 0.0)
+        self.assertGreater(cfg.speed_ki, 0.0)
+        self.assertEqual(cfg.speed_kd, 0.0, "no derivative on 20 Hz eRPM — too noisy")
+        self.assertGreater(cfg.speed_pid_max_correction_mps, 0.0)
+        self.assertLessEqual(cfg.speed_pid_max_correction_mps, 0.3,
+                             "closed-loop authority must stay a nudge, not a lunge")
+        self.assertLessEqual(cfg.speed_ki * cfg.speed_integral_limit,
+                             cfg.speed_pid_max_correction_mps,
+                             "integral authority must fit inside the correction clamp")
+        from config import VescConfig
+        vcfg = VescConfig()
+        self.assertTrue(vcfg.rpm_plausibility_enabled)
+        self.assertGreater(vcfg.rpm_plausibility_window_s, 0.0)
 
     def test_tracklet_knobs_present(self):
         cfg = FollowMeConfig()

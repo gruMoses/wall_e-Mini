@@ -24,6 +24,11 @@ from pi_app.control.follow_me import FollowMeController, PersonDetection
 from pi_app.control.gesture_control import GestureStateMachine, GestureEvent, HandData
 from pi_app.control.waypoint_nav import WaypointNavController, NavState, mix_to_bytes
 from pi_app.control.gps_heading_align import GpsHeadingAligner
+from pi_app.control.rpm_plausibility import (
+    RpmPlausibilityConfig,
+    RpmPlausibilityGate,
+    erpm_to_wheel_mps,
+)
 from pi_app.hardware.rtk_gps import GpsReading
 from config import config
 
@@ -169,6 +174,21 @@ class Controller:
         self._telem_last_poll: float = 0.0
         self._telem_last_valid: float = 0.0
         self._telem_stale_warned: bool = False
+        # RPM plausibility gate: "commanded to move, eRPM says 0" for a sustained
+        # window → RPM/speed nulled (open-loop) until real RPM returns. Guards the
+        # velocity PID and slip detector against dead readback (2026-06-11 lunge).
+        _vcfg = getattr(config, "vesc", None)
+        self._rpm_gate: Optional[RpmPlausibilityGate] = None
+        if bool(getattr(_vcfg, "rpm_plausibility_enabled", True)):
+            self._rpm_gate = RpmPlausibilityGate(RpmPlausibilityConfig(
+                enabled=True,
+                min_cmd_bytes=int(getattr(_vcfg, "rpm_plausibility_min_cmd_bytes", 12)),
+                min_erpm=int(getattr(_vcfg, "rpm_plausibility_min_erpm", 150)),
+                window_s=float(getattr(_vcfg, "rpm_plausibility_window_s", 0.5)),
+                hold_s=float(getattr(_vcfg, "rpm_plausibility_hold_s", 2.0)),
+            ))
+        self._rpm_gate_warned: bool = False
+        self._vesc_rpm_plausible: bool = True
         self._actual_left_rpm: Optional[int] = None
         self._actual_right_rpm: Optional[int] = None
         self._actual_speed_mps: Optional[float] = None
@@ -583,12 +603,15 @@ class Controller:
                 _valid_rpms = [abs(r) for r in (_lr, _rr) if r is not None]
                 if _valid_rpms:
                     _avg_erpm = sum(_valid_rpms) / len(_valid_rpms)
-                    _poles = int(getattr(_vesc_cfg, "motor_poles", 14))
-                    _radius = float(getattr(_vesc_cfg, "wheel_radius_m", 0.085))
-                    _gear = float(getattr(_vesc_cfg, "drive_gear_ratio", 1.0))
-                    _pole_pairs = max(_poles // 2, 1)
-                    _mech_rpm = _avg_erpm / max(_pole_pairs * max(_gear, 1e-6), 1e-6)
-                    self._actual_speed_mps = (_mech_rpm / 60.0) * 2.0 * math.pi * _radius
+                    # Same kinematics as FollowMeConfig.speed_loop_mps_per_byte
+                    # (pi_app/control/rpm_plausibility.py) — one scale for
+                    # feedback and command, or the velocity loop carries a bias.
+                    self._actual_speed_mps = erpm_to_wheel_mps(
+                        _avg_erpm,
+                        motor_poles=int(getattr(_vesc_cfg, "motor_poles", 14)),
+                        drive_gear_ratio=float(getattr(_vesc_cfg, "drive_gear_ratio", 1.0)),
+                        wheel_radius_m=float(getattr(_vesc_cfg, "wheel_radius_m", 0.085)),
+                    )
                 else:
                     self._actual_speed_mps = None
                 self._vesc_rx_frame_count = int(getattr(_telem, "can_rx_frame_count", self._vesc_rx_frame_count))
@@ -653,6 +676,41 @@ class Controller:
                     self._actual_right_duty = None
                 else:
                     self._telem_stale_warned = False
+
+                # ── RPM plausibility gate ────────────────────────────────────
+                # Compare the bytes we most recently EMITTED (slew output of the
+                # previous tick) with the eRPM just read back. Commanded to move
+                # but reading ~0 for rpm_plausibility_window_s → the readback is
+                # dead or the wheel is stalled; either way the velocity PID must
+                # not chase it. Null the closed-loop inputs (same open-loop
+                # fallback as stale telemetry) until real RPM returns.
+                if self._rpm_gate is not None:
+                    _plausible = self._rpm_gate.update(
+                        mono_now,
+                        left_cmd_byte=int(self._slew_last_left),
+                        right_cmd_byte=int(self._slew_last_right),
+                        left_rpm=self._actual_left_rpm,
+                        right_rpm=self._actual_right_rpm,
+                    )
+                    self._vesc_rpm_plausible = _plausible
+                    if not _plausible:
+                        if not self._rpm_gate_warned:
+                            _logger.warning(
+                                "VESC RPM implausible: commanded L=%d R=%d bytes but eRPM "
+                                "L=%s R=%s for >%.1fs (motors=%s) — treating telemetry as "
+                                "invalid, falling back to open-loop",
+                                int(self._slew_last_left), int(self._slew_last_right),
+                                self._actual_left_rpm, self._actual_right_rpm,
+                                self._rpm_gate.window_s,
+                                ",".join(self._rpm_gate.tripped_motors),
+                            )
+                            self._rpm_gate_warned = True
+                        self._actual_left_rpm = None
+                        self._actual_right_rpm = None
+                        self._actual_speed_mps = None
+                    elif self._rpm_gate_warned:
+                        _logger.warning("VESC RPM plausible again — closed-loop re-enabled")
+                        self._rpm_gate_warned = False
             elif (self._telem_last_valid > 0.0
                   and (mono_now - self._telem_last_valid) > 0.5
                   and not self._telem_stale_warned):
@@ -1241,6 +1299,10 @@ class Controller:
         telemetry["vesc_left_rpm"] = self._actual_left_rpm
         telemetry["vesc_right_rpm"] = self._actual_right_rpm
         telemetry["vesc_actual_speed_mps"] = self._actual_speed_mps
+        telemetry["vesc_rpm_plausible"] = self._vesc_rpm_plausible
+        telemetry["vesc_rpm_gate_trips"] = (
+            self._rpm_gate.trip_count if self._rpm_gate is not None else 0
+        )
         telemetry["vesc_left_duty"] = self._actual_left_duty
         telemetry["vesc_right_duty"] = self._actual_right_duty
         telemetry["vesc_rx_frame_count"] = self._vesc_rx_frame_count

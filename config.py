@@ -169,6 +169,18 @@ class VescConfig:
     # Set False to disable all closed-loop telemetry features (pure open-loop fallback).
     vesc_telemetry_enabled: bool = True
 
+    # ── RPM plausibility gate (pi_app/control/rpm_plausibility.py) ──────────
+    # "Commanded to move but eRPM reads ~0" for a sustained window means the
+    # readback is dead (the 2026-06-11 lunge/stall cycle) or the wheel is
+    # physically stalled. Either way the velocity PID must NOT act on it, so the
+    # controller nulls rpm/actual_speed_mps (open-loop fallback, same path as
+    # stale telemetry) until real RPM returns. Independent of the PID gains.
+    rpm_plausibility_enabled: bool = True
+    rpm_plausibility_min_cmd_bytes: int = 12   # |byte − 126| ≥ this is "non-trivial" (~1400 eRPM)
+    rpm_plausibility_min_erpm: int = 150       # |eRPM| below this counts as "not moving"
+    rpm_plausibility_window_s: float = 0.5     # implausible for this long → trip (covers spin-up)
+    rpm_plausibility_hold_s: float = 2.0       # stay tripped at least this long (no chatter)
+
 
 @dataclass(frozen=True)
 class ObstacleAvoidanceConfig:
@@ -317,21 +329,45 @@ class FollowMeConfig:
     speed_dead_zone_m: float = 0.2       # ±dead_zone around follow_distance_m → speed = 0 (no oscillation)
 
     # Velocity PID — closes the speed loop using measured wheel RPM.
-    # Error = target_speed_mps (derived from depth) − actual_speed_mps.
-    # Output (m/s) is converted to a byte correction via trail_speed_scale_mps_per_byte.
-    # Disabled automatically when VESC telemetry is unavailable (open-loop fallback).
+    # Error = target_wheel_speed_mps − actual_speed_mps, where
+    #   target_wheel_speed_mps = open_loop_bytes × speed_loop_mps_per_byte
+    #   actual_speed_mps       = avg |eRPM| → m/s (controller.py, same kinematics)
+    # Output (m/s) is converted back to a byte correction with the SAME scale and
+    # added to the open-loop feed-forward. Falls back to open-loop whenever
+    # actual_speed_mps is None (no VESC, stale frames, or the RPM plausibility
+    # gate in VescConfig tripped).
     #
-    # DISABLED 2026-06-11 (gains zeroed): the wheel-RPM telemetry feeding this loop
-    # is dead/unreliable, so the PID integrates garbage and drives the lunge/stall
-    # cycle (target_speed_mps is computed against a bogus actual_speed_mps). Zeroing
-    # all three gains makes PIDController.compute() return 0.0 (verified: p+i+d all
-    # collapse to 0, no divide-by-gain), so SpeedLayer.compute() falls back to the
-    # pure open-loop throttle-vs-distance mapping (error * gain). Restore the 0.8/0.2/
-    # 0.05 values once VESC eRPM telemetry is trustworthy again.
-    speed_kp: float = 0.0
-    speed_ki: float = 0.0
+    # HISTORY: gains were zeroed 2026-06-11 because dead RPM readback (always 0)
+    # made the loop integrate a bogus "not moving" error → lunge/stall cycle.
+    # Bench 2026-06-11 (tools/vesc_rpm_bench.py) then proved ERPM readback works
+    # (−1 % / −0.4 % steady-state error at 1500 eRPM, 0 parse errors).
+    # RE-ENABLED 2026-09-19 with two guards that make the old failure impossible:
+    #   1. VescConfig.rpm_plausibility_*: commanded-but-0-eRPM → telemetry nulled
+    #      → open-loop. The PID never sees the bogus zero for more than window_s.
+    #   2. speed_pid_max_correction_mps clamps the loop's authority to ±0.20 m/s
+    #      (≈ ±21 bytes), so even a wrong error can only nudge, never lunge.
+    #
+    # SCALE: the old loop mixed two scales — target from the GPS-measured GROUND
+    # speed (trail_speed_scale 0.0075 m/s/byte, gravel scrub included) against a
+    # measured WHEEL speed. That is a permanent ~20 % "too fast" error that the
+    # integrator would pull the throttle down against. speed_loop_mps_per_byte is
+    # the kinematic wheel speed per byte (VescConfig max_erpm / poles / gearing /
+    # radius; docs/gearing_memo.md §a) — the same numbers that produce
+    # actual_speed_mps — so target and feedback agree by construction.
+    # test_rpm_plausibility pins it to the VescConfig derivation.
+    #
+    # GAINS: the VESC already runs its own eRPM loop (CAN_PACKET_SET_RPM), so in
+    # free running the wheel tracks the command and this outer loop sees ~0 error.
+    # It only works when the VESC cannot reach the commanded eRPM (load, current
+    # limit, soft ground). Gentle gains, no derivative (eRPM at 20 Hz poll is too
+    # noisy to differentiate). kp 0.6: a 0.1 m/s shortfall adds 0.06 m/s ≈ 6 bytes.
+    # ki 0.15 with a 1.0 m/s·s integral clamp: ≤ 0.15 m/s of integral authority.
+    speed_kp: float = 0.6
+    speed_ki: float = 0.15
     speed_kd: float = 0.0
-    speed_integral_limit: float = 50.0   # anti-windup clamp (m/s accumulated)
+    speed_integral_limit: float = 1.0    # anti-windup clamp (m/s·s); was 50 — absurd with a 0.2 m/s clamp
+    speed_pid_max_correction_mps: float = 0.20   # |closed-loop correction| ceiling (≈ 21 bytes)
+    speed_loop_mps_per_byte: float = 0.009416    # kinematic WHEEL m/s per byte — see SCALE above
 
     # ── Slip detection & compensation ─────────────────────────────────────────
     # Hard off-switch. When False the slip compensator is a TRUE no-op: it returns
