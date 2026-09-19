@@ -870,6 +870,40 @@ def _mix_commands(speed_offset: float, steer_offset: float) -> tuple[int, int]:
     )
 
 
+def _trail_tangent_steer_sign(tdx: float, tdy: float, theta: float) -> float:
+    """Unnormalized steer sign toward a world-frame trail tangent (blind
+    search rotation in ``_handle_lost_target``).
+
+    Positive means "steer right" (``SteeringLayer``'s convention: positive
+    steer offset = turn right). ``(tdx, tdy)`` is the trail's world-frame
+    direction vector — trail points are recorded via
+    ``DeadReckonOdometry.camera_to_world``, so they share its world frame.
+    ``theta`` is the robot's heading in radians, CW-positive (heading_deg
+    increases on a RIGHT turn — see ``OakImuReader.read``'s canonical
+    convention).
+
+    ``(-sin(theta), cos(theta))`` is the world-frame direction the robot's
+    forward vector points after a further +90 deg of heading — i.e.
+    PHYSICALLY RIGHT, because increasing heading is a right turn. This is the
+    exact vector ``camera_to_world`` multiplies its ``x_cam`` argument by, so
+    a trail tangent's dot product with it directly measures "how much of the
+    tangent points right" — no sign flip needed to go from that dot product
+    to a right-positive steer sign.
+
+    2026-09-19 bug this replaced: this formula was written when heading was
+    CCW-positive (before the "Show the heading state honestly in the UI"
+    fix), when ``(-sin, cos)`` pointed LEFT and the caller negated the dot
+    product to turn "points left" into "steer right = positive". The heading
+    fix flipped what ``(-sin, cos)`` physically means (see
+    ``DeadReckonOdometry.camera_to_world``) without this site being updated:
+    a real trail tangent confirmed to go right via ``camera_to_world`` (x_cam
+    increasing over successive trail points) produced a NEGATIVE (left)
+    steer. Do not reintroduce a negation here — see
+    ``pi_app/tests/test_trail_search_steer_sign.py``.
+    """
+    return -tdx * math.sin(theta) + tdy * math.cos(theta)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main controller — orchestrates all layers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1884,11 +1918,14 @@ class FollowMeController:
                         _tdist = math.hypot(_tdx, _tdy)
                         if _tdist > 1e-6:
                             _p = odom.pose
-                            _s = math.sin(_p.theta)
-                            _c = math.cos(_p.theta)
-                            # local_y > 0 → tangent going robot-left → search left → steer < 0
-                            _local_y = -_tdx * _s + _tdy * _c
-                            steer_sign = -_local_y / _tdist
+                            # Positive -> tangent points robot-right -> search
+                            # right -> steer > 0 (SteeringLayer convention).
+                            # See _trail_tangent_steer_sign's docstring for
+                            # the 2026-09-19 sign-convention fix this is.
+                            steer_sign = (
+                                _trail_tangent_steer_sign(_tdx, _tdy, _p.theta)
+                                / _tdist
+                            )
 
                 # Fall back to last known lateral position when no tangent
                 if abs(steer_sign) < 0.05:

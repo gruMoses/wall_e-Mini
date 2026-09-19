@@ -185,7 +185,7 @@ class ImuYawProducer:
     stationary_window_s: float = 1.0
     stationary_gyro_std_dps: float = 0.3
     stationary_accel_std_g: float = 0.03
-    stationary_max_rate_dps: float = 2.0
+    stationary_max_rate_dps: float = 5.0
     stationary_bias_tau_s: float = 15.0
     # Motion witness freshness bound (see module docstring). A witness older
     # than this is treated as absent: no witness, no stationary declaration.

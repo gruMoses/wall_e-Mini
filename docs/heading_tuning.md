@@ -134,8 +134,10 @@ BMI270 @ 100 Hz ──► DepthAI host IMU queue (maxSize=512 msgs, nonblocking)
 | `oak_stationary_window_s` | `1.0` | |
 | `oak_stationary_gyro_std_dps` | `0.3` | Per-axis raw-gyro std gate |
 | `oak_stationary_accel_std_g` | `0.03` | **Tune this one on the robot** |
-| `oak_stationary_max_rate_dps` | `2.0` | Must stay above the hot bias (~1.3 dps) |
+| `oak_stationary_max_rate_dps` | `5.0` | Absolute bound on the raw window mean; a real turn is also gated by the motion witness (see below), not this alone |
 | `oak_stationary_bias_tau_s` | `15.0` | Bias relaxation time constant |
+| `oak_yaw_axis_sign_auto` | `True` | Derive `yaw_axis_sign` from gravity at calibration — see "Mount orientation" |
+| `rpm_witness_min_erpm` (`VescConfig`) | `30` | Motion-witness RPM floor — far tighter than `rpm_plausibility_min_erpm` (150) on purpose |
 | IMU host queue | `maxSize=512` msgs, `blocking=False` | message slots, not seconds |
 | Producer drain cap | `max_packets_per_drain=512` | aligned with host msg capacity @ ~1 pkt/msg |
 
@@ -179,13 +181,21 @@ tell the difference; the fix is an independent signal.
 
 `ImuYawProducer.set_motion_witness(still, host_ts)` records a wheels-stopped
 witness pushed once per control-loop tick from `pi_app.app.main`, derived from
-VESC RPM / commanded drive bytes via
-`pi_app.control.rpm_plausibility.wheels_stopped()` (prefers RPM readback;
-falls back to commanded bytes when RPM is unavailable or the plausibility gate
-has already flagged it dead). The robot is **stationary** only when the window
-below is quiet **and** the witness is fresh and says `still=True`
+commanded drive bytes and VESC RPM via
+`pi_app.control.rpm_plausibility.wheels_stopped()`. STOPPED requires BOTH,
+command bytes checked first: (a) commanded bytes within `byte_tol` of neutral
+on both sides, AND (b) when RPM is trusted (plausible, both readings
+present), both `|rpm| < rpm_witness_min_erpm` (30, deliberately far tighter
+than `rpm_plausibility_min_erpm`'s 150 — that floor answers "is this RPM
+reading credible", not "are the wheels stopped"). If RPM is unavailable or
+flagged implausible, (a) alone decides. **Command bytes gate first, 2026-09-19
+fix**: RPM alone used to decide, but on this drivetrain the old 150 eRPM floor
+is ~1.68 deg/s per wheel, so a real 1.5 deg/s in-place pivot (~133 eRPM,
+opposite signs) read as "stopped" and froze real rotation — exactly the bug
+this witness exists to prevent. The robot is **stationary** only when the
+window below is quiet **and** the witness is fresh and says `still=True`
 (`oak_witness_timeout_s`, default 1.0 s). No witness ever received, a stale
-one, or one that says the wheels are turning: never stationary — no bias
+one, or one that says the wheels are moving: never stationary — no bias
 tracking, no ZUPT, regardless of how quiet the gyro looks. When tracking is
 enabled but no fresh witness has been seen for over 5 s, a rate-limited (one
 per 60 s) WARNING says so: `stationary bias tracking idle: no motion witness

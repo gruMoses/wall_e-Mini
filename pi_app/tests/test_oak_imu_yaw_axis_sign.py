@@ -190,6 +190,19 @@ class TestYawAxisSignFromGravity(unittest.TestCase):
         self.assertAlmostEqual(d["heading_deg"], (h0 + 30.0) % 360.0, delta=0.5)
         self.assertGreater(d["gz_dps"], 0.0)
 
+    def test_near_level_gravity_still_resolves_positive_sign(self):
+        """A real mount is never perfectly flat. A near-level reading
+        (ax=0.17, ay=-0.98, az=0.05 g — |ay|/|a| ~= 0.984 >= the 0.7 gate)
+        must still resolve +1, not fall into the "Y not vertical" branch."""
+        rng = random.Random(SEED)
+        oak = _FakeOak()
+        imu = OakImuReader(oak, yaw_rate_source="gyro_y", yaw_rate_scale=1.0)
+        with self.assertLogs("pi_app.hardware.oak_imu", "WARNING") as cm:
+            _calibrate_with_fixed_gravity(imu, oak, rng, ax_g=0.17, ay_g=-0.98, az_g=0.05)
+        self.assertAlmostEqual(imu.yaw_axis_sign, 1.0)
+        joined = "\n".join(r.getMessage() for r in cm.records)
+        self.assertIn("+Y points DOWN", joined)
+
     def test_y_not_vertical_keeps_sign_positive_and_warns(self):
         rng = random.Random(SEED)
         oak = _FakeOak()

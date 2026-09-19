@@ -57,15 +57,36 @@ def wheels_stopped(
     right_byte: int,
     *,
     neutral: int,
-    min_erpm: int,
+    witness_min_erpm: int = 30,
     byte_tol: int = 2,
 ) -> bool:
     """True when the drivetrain looks physically stopped — the IMU motion witness.
 
-    Prefers RPM readback (it proves the wheels are not turning even if a
-    command is still pending); falls back to commanded bytes when RPM is
-    unavailable or the plausibility gate has already flagged it dead (see
-    ``RpmPlausibilityGate`` — a tripped gate means "do not trust this RPM").
+    STOPPED requires BOTH, in this order:
+      (a) commanded bytes within ``byte_tol`` of neutral on BOTH sides, AND
+      (b) when RPM is trusted (``rpm_plausible`` and both readings present),
+          both ``|rpm| < witness_min_erpm`` too.
+    If RPM is unavailable or the plausibility gate has flagged it dead,
+    (a) alone decides.
+
+    Command bytes gate FIRST (2026-09-19 fix): checking RPM alone used to
+    declare "stopped" whenever both wheels read a low eRPM, but a genuine
+    slow in-place pivot reads a low eRPM too — on this drivetrain (14 poles,
+    34.2857:1, r=0.18415 m, 0.82 m track) the OLD plausibility floor
+    (150 eRPM) corresponds to about 1.68 deg/s per wheel, so a real 1.5 deg/s
+    pivot (~133 eRPM, opposite signs) was declared "stopped": the IMU window
+    looked quiet too, and ZUPT froze the real rotation. Gating on commanded
+    bytes first means a real pivot (which must be actively commanded to
+    happen) is never mistaken for stationary. ``witness_min_erpm`` (default
+    30 — VESC eRPM reads exactly 0 at rest; 30 eRPM is about 0.3 deg/s) is
+    intentionally far tighter than ``RpmPlausibilityGate``'s 150 eRPM
+    plausibility floor, which answers a different question ("is this RPM
+    reading credible at all") — reusing it here would reopen the same hole.
+
+    The polarity is deliberately asymmetric: a false "stopped" freezes the
+    heading and lets the bias tracker walk (the reviewed bug); a false
+    "moving" only skips a little parked bias tracking for a tick. Erring
+    toward "moving" is cheap; erring toward "stopped" is not.
 
     This is deliberately independent of the stationary IMU window: an IMU
     cannot vouch for its own stillness (a slow steady turn looks exactly like
@@ -73,12 +94,18 @@ def wheels_stopped(
     somewhere else. See ``ImuYawProducer.set_motion_witness`` /
     docs/heading_tuning.md.
     """
-    if rpm_plausible and left_rpm is not None and right_rpm is not None:
-        return abs(float(left_rpm)) < float(min_erpm) and abs(float(right_rpm)) < float(min_erpm)
-    return (
+    bytes_stopped = (
         abs(int(left_byte) - int(neutral)) <= int(byte_tol)
         and abs(int(right_byte) - int(neutral)) <= int(byte_tol)
     )
+    if not bytes_stopped:
+        return False
+    if rpm_plausible and left_rpm is not None and right_rpm is not None:
+        return (
+            abs(float(left_rpm)) < float(witness_min_erpm)
+            and abs(float(right_rpm)) < float(witness_min_erpm)
+        )
+    return True
 
 
 def wheel_mps_per_byte(

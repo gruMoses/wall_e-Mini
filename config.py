@@ -230,6 +230,14 @@ class VescConfig:
     rpm_plausibility_window_s: float = 0.5     # implausible for this long → trip (covers spin-up)
     rpm_plausibility_hold_s: float = 2.0       # stay tripped at least this long (no chatter)
 
+    # ── IMU motion witness (pi_app/control/rpm_plausibility.wheels_stopped) ──
+    # Much tighter than rpm_plausibility_min_erpm (150) on purpose: that floor
+    # answers "is this RPM reading credible", not "are the wheels stopped". A
+    # real slow pivot (~1.5 deg/s ≈ 133 eRPM on this drivetrain) must read as
+    # NOT stopped, so the ZUPT witness never freezes real rotation. VESC eRPM
+    # reads exactly 0 at rest; 30 eRPM ≈ 0.3 deg/s per wheel.
+    rpm_witness_min_erpm: int = 30
+
 
 @dataclass(frozen=True)
 class ObstacleAvoidanceConfig:

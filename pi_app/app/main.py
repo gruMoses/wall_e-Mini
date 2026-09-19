@@ -294,7 +294,7 @@ def run() -> None:
                         getattr(config.imu_steering, "oak_stationary_accel_std_g", 0.03)
                     ),
                     stationary_max_rate_dps=float(
-                        getattr(config.imu_steering, "oak_stationary_max_rate_dps", 2.0)
+                        getattr(config.imu_steering, "oak_stationary_max_rate_dps", 5.0)
                     ),
                     stationary_bias_tau_s=float(
                         getattr(config.imu_steering, "oak_stationary_bias_tau_s", 15.0)
@@ -577,7 +577,7 @@ def run() -> None:
                         telem.get("motor_left_byte", CENTER_OUTPUT_VALUE),
                         telem.get("motor_right_byte", CENTER_OUTPUT_VALUE),
                         neutral=CENTER_OUTPUT_VALUE,
-                        min_erpm=config.vesc.rpm_plausibility_min_erpm,
+                        witness_min_erpm=config.vesc.rpm_witness_min_erpm,
                     )
                     oak_reader.set_motion_witness(imu_motion_witness_still)
                 except Exception:

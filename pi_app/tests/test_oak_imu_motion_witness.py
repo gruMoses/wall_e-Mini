@@ -230,6 +230,35 @@ class TestSlowTurnIsNeverAbsorbedAsBias(unittest.TestCase):
         measured_deg = abs(math.degrees(prod.cum_y_rad))
         self.assertLess(abs(measured_deg - truth_deg) / truth_deg, 0.03)
 
+    def test_d2_end_to_end_witness_from_wheels_stopped_on_a_real_pivot(self):
+        """Same physical scenario as test_d, but the witness is DERIVED from
+        wheels_stopped() itself (live opposite-sign RPM ~133/-133 eRPM, the
+        commanded pivot bytes) rather than hand-set to False — the exact
+        hole the independent review found in wheels_stopped()'s old polarity
+        (RPM alone, ignoring command bytes)."""
+        rng = random.Random(SEED)
+        prod = _tracking_producer(zupt_enabled=True, max_rate_dps=5.0)
+        rate_dps = 1.5
+        n = 4000  # 40 s at 100 Hz
+        left_byte, right_byte = 140, 110  # in-place pivot command
+        left_rpm, right_rpm = 133.0, -133.0  # live readback for the same pivot
+        for i in range(n):
+            t = i * DT
+            still = wheels_stopped(
+                left_rpm, right_rpm, True, left_byte, right_byte,
+                neutral=126, witness_min_erpm=30,
+            )
+            self.assertFalse(still, "wheels_stopped() must not call a real pivot stopped")
+            prod.set_motion_witness(still, t)
+            prod.ingest([_packet(t, rng, gy_dps=rate_dps, gyro_noise_dps=0.1)])
+            self.assertFalse(prod.stationary)
+        self.assertFalse(prod.zupt_active)
+        self.assertEqual(prod.bias_updates, 0)
+        self.assertEqual(prod.bias_gy_dps, 0.0)
+        truth_deg = rate_dps * n * DT
+        measured_deg = abs(math.degrees(prod.cum_y_rad))
+        self.assertLess(abs(measured_deg - truth_deg) / truth_deg, 0.03)
+
     def test_e_hand_turn_with_witness_still_is_rejected_by_std_gate(self):
         """A jittery 1.5 dps nudge with the wheels genuinely stopped (witness
         True) must still be rejected — by the std gate on its own, so the
@@ -347,32 +376,56 @@ class TestDuplicateBranchFreshnessBound(unittest.TestCase):
 
 
 class TestWheelsStopped(unittest.TestCase):
+    """Command bytes gate FIRST (2026-09-19): a plausible-but-nonzero RPM used
+    to be enough on its own, but on this drivetrain (14 poles, 34.2857:1,
+    r=0.18415 m, 0.82 m track) the old 150 eRPM floor is ~1.68 deg/s per
+    wheel, so a real 1.5 deg/s in-place pivot (~133 eRPM, opposite signs) was
+    declared "stopped" — freezing the IMU heading mid-turn."""
+
     def test_i_rpm_plausible_both_below_threshold_is_stopped(self):
         self.assertTrue(
-            wheels_stopped(10.0, -5.0, True, 126, 126, neutral=126, min_erpm=150)
+            wheels_stopped(10.0, -5.0, True, 126, 126, neutral=126, witness_min_erpm=30)
         )
 
     def test_i_rpm_plausible_one_above_threshold_is_not_stopped(self):
         self.assertFalse(
-            wheels_stopped(200.0, 0.0, True, 126, 126, neutral=126, min_erpm=150)
+            wheels_stopped(200.0, 0.0, True, 126, 126, neutral=126, witness_min_erpm=30)
         )
 
     def test_i_rpm_none_falls_back_to_commanded_bytes(self):
         self.assertTrue(
-            wheels_stopped(None, None, True, 127, 125, neutral=126, min_erpm=150, byte_tol=2)
+            wheels_stopped(None, None, True, 127, 125, neutral=126, witness_min_erpm=30, byte_tol=2)
         )
         self.assertFalse(
-            wheels_stopped(None, None, True, 140, 126, neutral=126, min_erpm=150, byte_tol=2)
+            wheels_stopped(None, None, True, 140, 126, neutral=126, witness_min_erpm=30, byte_tol=2)
         )
 
     def test_i_implausible_rpm_falls_back_to_commanded_bytes(self):
         """rpm_plausible False (gate tripped): never trust the RPM reading,
         even if it looks like a clean 0 — fall back to commanded bytes."""
         self.assertTrue(
-            wheels_stopped(0.0, 0.0, False, 126, 127, neutral=126, min_erpm=150)
+            wheels_stopped(0.0, 0.0, False, 126, 127, neutral=126, witness_min_erpm=30)
         )
         self.assertFalse(
-            wheels_stopped(0.0, 0.0, False, 200, 126, neutral=126, min_erpm=150)
+            wheels_stopped(0.0, 0.0, False, 200, 126, neutral=126, witness_min_erpm=30)
+        )
+
+    def test_i_real_slow_pivot_with_plausible_rpm_is_not_stopped(self):
+        """THE HOLE THE REVIEW FOUND: opposite-sign commanded bytes (an
+        in-place pivot) with plausible RPM at ~133 eRPM (a real 1.5 deg/s
+        pivot on this drivetrain) must never read as stopped — the command
+        bytes alone already say the wheels are being driven."""
+        self.assertFalse(
+            wheels_stopped(133.0, -133.0, True, 140, 110, neutral=126, witness_min_erpm=30)
+        )
+
+    def test_i_spin_up_with_zero_rpm_and_off_neutral_bytes_is_not_stopped(self):
+        """A command was just issued (bytes off neutral) but RPM hasn't
+        caught up yet (still reads 0, plausibly — within the plausibility
+        gate's spin-up window): the command bytes must gate this as moving,
+        not the not-yet-caught-up RPM."""
+        self.assertFalse(
+            wheels_stopped(0.0, 0.0, True, 140, 126, neutral=126, witness_min_erpm=30)
         )
 
 

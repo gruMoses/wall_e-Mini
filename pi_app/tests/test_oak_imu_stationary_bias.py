@@ -424,6 +424,30 @@ class TestReaderZuptIntegration(unittest.TestCase):
         self.assertAlmostEqual(oak.producer.stationary_max_rate_dps, 1.5)
         self.assertAlmostEqual(oak.producer.stationary_bias_tau_s, 20.0)
 
+    def test_production_config_max_rate_dps_pushes_5_onto_the_producer(self):
+        """The three places this knob's default lives (config.py's
+        ImuSteeringConfig, OakImuReader.__init__'s own kwarg default, and
+        ImuYawProducer's own dataclass field default) must all agree — a
+        stale one of these is exactly how oak_stationary_max_rate_dps went
+        from 2.0 to 5.0 in config.py without the others following."""
+        import config as cfg_mod
+
+        self.assertEqual(cfg_mod.ImuSteeringConfig().oak_stationary_max_rate_dps, 5.0)
+
+        oak, _imu = self._reader(
+            stationary_max_rate_dps=cfg_mod.ImuSteeringConfig().oak_stationary_max_rate_dps,
+        )
+        self.assertAlmostEqual(oak.producer.stationary_max_rate_dps, 5.0)
+
+        # OakImuReader's own default (no override) must also be 5.0.
+        oak2, _imu2 = self._reader()
+        self.assertAlmostEqual(oak2.producer.stationary_max_rate_dps, 5.0)
+
+        # And ImuYawProducer's bare dataclass default must agree too.
+        from pi_app.hardware.oak_imu_yaw_producer import ImuYawProducer
+
+        self.assertAlmostEqual(ImuYawProducer().stationary_max_rate_dps, 5.0)
+
     def test_reader_reports_zero_rate_and_zupt_status(self):
         rng = random.Random(SEED)
         oak, imu = self._reader()
