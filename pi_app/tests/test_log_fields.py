@@ -35,6 +35,20 @@ def _rc(ch1=1500, ch2=1500, ch3=1500, ch4=1500, ch5=1000):
     return SimpleNamespace(ch1_us=ch1, ch2_us=ch2, ch3_us=ch3, ch4_us=ch4, ch5_us=ch5)
 
 
+def _gps_reading(**overrides):
+    # A GpsReading-shaped fake with every field defaulted, so tests that
+    # only care about a subset don't break when build_log_obj starts
+    # reading a field they didn't set (as happened with utc_iso/cog_deg/
+    # sog_mps/nmea_mode/geoid_sep_m, added 2026-09-19 Commit D).
+    fields = dict(
+        latitude=1.0, longitude=2.0, altitude_m=3.0, fix_quality=4,
+        satellites_used=12, hdop=0.9, diff_age_s=1.1, station_id=7,
+        utc_iso=None, cog_deg=None, sog_mps=None, nmea_mode=None, geoid_sep_m=None,
+    )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
 def _cmd(left=126, right=126, armed=True, emergency=False):
     return SimpleNamespace(left_byte=left, right_byte=right, is_armed=armed, emergency_active=emergency)
 
@@ -120,10 +134,7 @@ class BuildLogObjImuSteeringBlockTests(unittest.TestCase):
 
 class BuildLogObjGpsBlockTests(unittest.TestCase):
     def test_age_s_from_controller_telemetry(self):
-        gps_reading = SimpleNamespace(
-            latitude=1.0, longitude=2.0, altitude_m=3.0, fix_quality=4,
-            satellites_used=12, hdop=0.9, diff_age_s=1.1, station_id=7,
-        )
+        gps_reading = _gps_reading()
         obj = build_log_obj(**_base_kwargs(telem={"gps_age_s": 0.42}, gps_reading=gps_reading))
         self.assertEqual(obj["gps"]["age_s"], 0.42)
         self.assertEqual(obj["gps"]["fix"], 4)
@@ -132,6 +143,23 @@ class BuildLogObjGpsBlockTests(unittest.TestCase):
         obj = build_log_obj(**_base_kwargs(telem={"gps_age_s": 0.42}, gps_reading=None))
         self.assertIsNone(obj["gps"]["age_s"])
         self.assertIsNone(obj["gps"]["fix"])
+
+    def test_utc_cog_sog_mode_geoid_present_with_reading(self):
+        gps_reading = _gps_reading(
+            utc_iso="2026-09-19T12:00:00Z", cog_deg=84.4, sog_mps=11.52,
+            nmea_mode="A", geoid_sep_m=-33.456,
+        )
+        obj = build_log_obj(**_base_kwargs(gps_reading=gps_reading))
+        self.assertEqual(obj["gps"]["utc"], "2026-09-19T12:00:00Z")
+        self.assertEqual(obj["gps"]["cog_deg"], 84.4)
+        self.assertEqual(obj["gps"]["sog_mps"], 11.52)
+        self.assertEqual(obj["gps"]["nmea_mode"], "A")
+        self.assertEqual(obj["gps"]["geoid_sep_m"], -33.5)
+
+    def test_utc_cog_sog_mode_geoid_none_without_reading(self):
+        obj = build_log_obj(**_base_kwargs(gps_reading=None))
+        for key in ("utc", "cog_deg", "sog_mps", "nmea_mode", "geoid_sep_m"):
+            self.assertIsNone(obj["gps"][key])
 
 
 class BuildLogObjTopLevelTests(unittest.TestCase):
@@ -255,6 +283,15 @@ class BuildSlowObjTests(unittest.TestCase):
         self.assertIsNone(obj["imu_pipeline"])
         self.assertIsNone(obj["oak_camera_health"])
         self.assertIsNone(obj["oak"]["chip_temp_c"])
+        self.assertIsNone(obj["gps_health"])
+
+    def test_gps_health_carried_when_provided(self):
+        health = {"reconnect_count": 1, "rmc_errors": 0, "mode_register_value": 10}
+        obj = build_slow_obj(
+            now_ts=1.0, imu_pipeline=None, oak_camera_health=None, chip_temp_c=None,
+            gps_health=health,
+        )
+        self.assertEqual(obj["gps_health"], health)
 
 
 class OakImuFilterTests(unittest.TestCase):

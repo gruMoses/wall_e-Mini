@@ -639,9 +639,23 @@ class GpsConfig:
     enabled: bool = True
     i2c_bus: int = 1
     i2c_addr: int = 0x20
-    update_rate_hz: float = 1.0
-    min_quality: int = 1         # 0=invalid, 1=GPS, 2=DGPS, 4=RTK fixed, 5=RTK float
+    # Renamed from update_rate_hz 2026-09-19 (Commit D): the GPS module
+    # itself updates at ~1 Hz. Polling at 5 Hz and deduping on the UTC
+    # second (not the data-flush register) reliably catches every epoch
+    # without the old poll-rate aliasing. See rtk_gps.py's _poll().
+    poll_hz: float = 5.0
     stale_timeout_s: float = 3.0
+    # How often (in epochs, not poll ticks) to read the RMC/VTG sentence for
+    # course/speed over ground. 1 = every epoch.
+    cog_read_every: int = 1
+    read_nmea_sentences: bool = True
+    # min_quality removed 2026-09-19 (Commit D): the reader used to silently
+    # drop any epoch below this quality. Every reading now publishes with
+    # its real fix_quality; consumers already gate themselves
+    # (WaypointNavController.accepts_fix_quality, GpsHeadingAligner's
+    # fix_quality != min_fix_quality check), so a blanket reader-side drop
+    # just hid low-quality fixes from anything that might want to see them
+    # (e.g. this logging work). Grepped for other readers first: none.
 
 
 @dataclass(frozen=True)

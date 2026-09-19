@@ -442,6 +442,15 @@ def build_log_obj(
             # only called when gps_reader is not None), and a stale age_s
             # next to five None siblings would be misleading.
             "age_s": telem.get("gps_age_s") if gps_reading else None,
+            # Commit D (2026-09-19): UTC/COG/SOG/mode/geoid separation, now
+            # read from the receiver. cog_deg/sog_mps are logging only in
+            # this commit -- not fed into the heading aligner or any control
+            # path.
+            "utc": gps_reading.utc_iso if gps_reading else None,
+            "cog_deg": gps_reading.cog_deg if gps_reading else None,
+            "sog_mps": gps_reading.sog_mps if gps_reading else None,
+            "nmea_mode": gps_reading.nmea_mode if gps_reading else None,
+            "geoid_sep_m": round(gps_reading.geoid_sep_m, 1) if gps_reading and gps_reading.geoid_sep_m is not None else None,
         },
         "waypoint_nav": round1({
             "wp_index": telem.get("wp_index"),
@@ -522,15 +531,18 @@ def should_write_slow_line(now: float, last_write_t: float, interval_s: float = 
     return (now - last_write_t) >= interval_s
 
 
-def build_slow_obj(*, now_ts: float, imu_pipeline, oak_camera_health, chip_temp_c) -> dict:
+def build_slow_obj(
+    *, now_ts: float, imu_pipeline, oak_camera_health, chip_temp_c, gps_health=None
+) -> dict:
     """Build the 1 Hz "slow" diagnostics line.
 
     imu_pipeline and oak_camera_health are slowly-changing (their counters
     move over seconds, not ticks) and were previously logged at the full
     armed 10 Hz tick rate for no benefit -- imu_pipeline alone was ~1.5 KB/
-    line. Both, plus the OAK chip temperature, now get one line per second
-    regardless of arm state, at full float precision (unlike the per-tick
-    "imu" block, which is rounded to 3 decimals).
+    line. Both, plus the OAK chip temperature and (Commit D, 2026-09-19)
+    RtkGpsReader.get_health(), now get one line per second regardless of
+    arm state, at full float precision (unlike the per-tick "imu" block,
+    which is rounded to 3 decimals).
     """
     return {
         "type": "slow",
@@ -539,4 +551,5 @@ def build_slow_obj(*, now_ts: float, imu_pipeline, oak_camera_health, chip_temp_
         "imu_pipeline": imu_pipeline,
         "oak_camera_health": oak_camera_health,
         "oak": {"chip_temp_c": chip_temp_c},
+        "gps_health": gps_health,
     }

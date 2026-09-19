@@ -143,3 +143,23 @@ Written immediately when something happens, not on a timer. Currently one
 kind: `{"type":"event","event":"oak_health","from":"HEALTHY"|"STALE",
 "to":"HEALTHY"|"STALE","ts":...}`, mirroring the console
 "OAK camera health transition" print.
+
+### GPS (2026-09-19, Commit D)
+
+The per-tick `gps` block gains `utc` (ISO 8601 string, `None` before the
+receiver has a time fix), `cog_deg` and `sog_mps` (course/speed over
+ground; `None` when the receiver reports no course, e.g. stationary),
+`nmea_mode` (the RMC/VTG mode-indicator character), and `geoid_sep_m`.
+`cog_deg`/`sog_mps` are logged only -- nothing in the control path reads
+them yet.
+
+The slow line gains `gps_health`: `RtkGpsReader.get_health()` --
+`reconnect_count`, `poll_error_count`, `consecutive_i2c_errors`,
+`last_poll_age_s`, `rmc_errors`, `mode_register_value` (the raw value last
+read from operation-mode register 93).
+
+A fix-quality change (e.g. RTK float -> RTK fixed) is logged separately at
+WARNING with UTC/sats/HDOP/diff-age/station-id context, independent of the
+JSON log -- `journalctl -u wall-e.service | grep 'fix_quality'` finds it
+even without a copy of the run log. See `docs/rtk_gps_module.md` for the
+register map and the read protocol this is built on.

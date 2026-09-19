@@ -1021,11 +1021,18 @@ def run() -> None:
                         oak_camera_health.get("chip_temp_c")
                         if isinstance(oak_camera_health, dict) else None
                     )
+                    _gps_health = None
+                    if gps_reader is not None:
+                        try:
+                            _gps_health = gps_reader.get_health()
+                        except Exception:
+                            _gps_health = None
                     slow_obj = build_slow_obj(
                         now_ts=time.time(),
                         imu_pipeline=imu_pipeline,
                         oak_camera_health=oak_camera_health,
                         chip_temp_c=_chip_temp_c,
+                        gps_health=_gps_health,
                     )
                     if log_fh is not None:
                         try:
