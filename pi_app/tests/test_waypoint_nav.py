@@ -292,5 +292,98 @@ class TestQualityGating(unittest.TestCase):
         self.assertEqual(v_cmd, 0.0)
 
 
+class TestPivotYawSign(unittest.TestCase):
+    """ALIGN / DRIVE-recovery pivot direction.
+
+    Both frames are clockwise-positive: ``bearing_deg`` is CW from north and the
+    IMU heading is CW-positive (``OakImuReader.read``). A positive signed
+    heading error therefore means "the bearing is clockwise of me, turn RIGHT",
+    and ``mix_to_bytes`` turns right on a POSITIVE yaw_cmd.
+
+    Before 2026-09-19 this returned a NEGATIVE yaw_cmd for a positive error — a
+    compensator for the reader's inverted heading. These cases pin the sign so
+    the pair cannot silently invert again.
+    """
+
+    PIVOT = 0.5
+
+    def _nav(self) -> WaypointNavController:
+        cfg = WaypointNavConfig(
+            arrival_radius_m=0.5,
+            cruise_speed_byte=40,
+            approach_speed_byte=20,
+            slow_radius_m=2.0,
+            min_rtk_quality=4,
+            stale_timeout_s=3.0,
+            align_threshold_deg=8.0,
+            recovery_threshold_deg=25.0,
+            pivot_yaw_cmd=self.PIVOT,
+        )
+        # Target ~111 m due north of (0, 0): bearing = 0°.
+        return WaypointNavController(cfg, [Waypoint(lat=0.001, lon=0.0, name="N")])
+
+    def test_align_positive_error_turns_right(self):
+        nav = self._nav()
+        # Heading 300° with bearing 0° → error = +60° (bearing is CW of us).
+        v_cmd, yaw_cmd, state = nav.compute(
+            0.0, 0.0, fix_quality=4, gps_age_s=0.0, current_heading_deg=300.0
+        )
+        self.assertEqual(state, NavState.ALIGN)
+        self.assertEqual(v_cmd, 0.0)
+        self.assertGreater(yaw_cmd, 0.0)
+        self.assertAlmostEqual(yaw_cmd, self.PIVOT, places=6)
+        self.assertAlmostEqual(nav.get_status().heading_error_deg, 60.0, places=6)
+
+    def test_align_negative_error_turns_left(self):
+        nav = self._nav()
+        # Heading 60° with bearing 0° → error = −60° (bearing is CCW of us).
+        v_cmd, yaw_cmd, state = nav.compute(
+            0.0, 0.0, fix_quality=4, gps_age_s=0.0, current_heading_deg=60.0
+        )
+        self.assertEqual(state, NavState.ALIGN)
+        self.assertEqual(v_cmd, 0.0)
+        self.assertLess(yaw_cmd, 0.0)
+        self.assertAlmostEqual(yaw_cmd, -self.PIVOT, places=6)
+        self.assertAlmostEqual(nav.get_status().heading_error_deg, -60.0, places=6)
+
+    def _into_drive(self) -> WaypointNavController:
+        nav = self._nav()
+        v_cmd, yaw_cmd, state = nav.compute(
+            0.0, 0.0, fix_quality=4, gps_age_s=0.0, current_heading_deg=0.0
+        )
+        self.assertEqual(state, NavState.DRIVE)
+        return nav
+
+    def test_drive_recovery_positive_error_turns_right(self):
+        nav = self._into_drive()
+        # 40° error > recovery_threshold_deg=25 → back to ALIGN, pivot right.
+        v_cmd, yaw_cmd, state = nav.compute(
+            0.0, 0.0, fix_quality=4, gps_age_s=0.0, current_heading_deg=320.0
+        )
+        self.assertEqual(state, NavState.ALIGN)
+        self.assertEqual(v_cmd, 0.0)
+        self.assertGreater(yaw_cmd, 0.0)
+
+    def test_drive_recovery_negative_error_turns_left(self):
+        nav = self._into_drive()
+        v_cmd, yaw_cmd, state = nav.compute(
+            0.0, 0.0, fix_quality=4, gps_age_s=0.0, current_heading_deg=40.0
+        )
+        self.assertEqual(state, NavState.ALIGN)
+        self.assertEqual(v_cmd, 0.0)
+        self.assertLess(yaw_cmd, 0.0)
+
+    def test_pivot_bytes_actually_favour_the_left_track_when_turning_right(self):
+        """A positive yaw_cmd must reach the motors as left > right."""
+        from pi_app.control.waypoint_nav import mix_to_bytes
+
+        nav = self._nav()
+        _v, yaw_cmd, state = nav.compute(
+            0.0, 0.0, fix_quality=4, gps_age_s=0.0, current_heading_deg=300.0
+        )
+        left, right = mix_to_bytes(0.0, yaw_cmd, deadband_byte=12, neutral=126)
+        self.assertGreater(left, right)
+
+
 if __name__ == "__main__":
     unittest.main()

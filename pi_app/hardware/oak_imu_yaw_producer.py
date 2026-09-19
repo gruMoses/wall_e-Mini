@@ -17,6 +17,14 @@ free-yaw channels (body X/Y/Z + gravity projection). Consumers read the
 cumulative integrals and apply scale **once**; they never re-integrate gyro×dt
 from snapshots (no double-integrate).
 
+Sign convention
+---------------
+``cum_y_rad`` and ``cum_grav_rad`` are both "rotation about the body-DOWN axis,
+clockwise-positive viewed from above" — the canonical statement lives on
+``OakImuReader.read``. ``gyro_y`` is already CW-positive (BMI270 +Y points
+down); the gravity projection is negated to match. ``cum_x_rad`` / ``cum_z_rad``
+are diagnostics whose sign depends on mounting.
+
 Safety
 ------
 - Duplicate / zero / regressed device timestamps reseed without jumps.
@@ -363,9 +371,21 @@ class ImuYawProducer:
         return self._ax_ema, self._ay_ema, self._az_ema
 
     def _gravity_rate(self, gx: float, gy: float, gz: float, sx: float, sy: float, sz: float) -> float:
+        """Gravity-projected yaw rate in the shared CW-positive convention.
+
+        ``cum_grav_rad`` must share the convention of ``cum_y_rad`` so a
+        consumer can switch channels without a sign flip: "rotation about the
+        body-DOWN axis, clockwise-positive viewed from above" (the canonical
+        statement lives on ``OakImuReader.read``).
+
+        The accelerometer vector is specific force, which at rest points **UP**
+        (about -Y in the OAK camera frame, where +Y is down). Projecting onto it
+        is therefore counter-clockwise-positive, so the projection is negated.
+        The ``gy`` fallback is already CW-positive and is returned unchanged.
+        """
         a_norm_sq = sx * sx + sy * sy + sz * sz
         if a_norm_sq > 0.25:
-            return (gx * sx + gy * sy + gz * sz) / a_norm_sq
+            return -(gx * sx + gy * sy + gz * sz) / a_norm_sq
         return gy
 
     def _note_cadence(self, dt: float) -> None:

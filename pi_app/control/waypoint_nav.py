@@ -1,6 +1,11 @@
 """
 Pure-logic waypoint navigation controller.
 
+Heading frame: ``current_heading_deg`` and ``bearing_deg`` are both
+clockwise-positive from north (see ``OakImuReader.read`` for the IMU contract),
+so a positive signed heading error means "turn right" and ALIGN commands a
+POSITIVE ``yaw_cmd`` (``mix_to_bytes``: +yaw = right).
+
 State machine:
 - IDLE: no active waypoint sequence -> (v=0, yaw=0)
 - ALIGN: heading error too large to drive forward; pivot in place at a fixed
@@ -248,18 +253,33 @@ class WaypointNavController:
             if err_abs <= cfg.align_threshold_deg:
                 self._state = NavState.DRIVE
             else:
-                yaw = -cfg.pivot_yaw_cmd if err_signed > 0 else cfg.pivot_yaw_cmd
+                yaw = self._pivot_yaw_for_error(err_signed)
                 return self._emit(NavState.ALIGN, 0.0, yaw)
 
         # DRIVE state
         if err_abs > cfg.recovery_threshold_deg:
             self._state = NavState.ALIGN
-            yaw = -cfg.pivot_yaw_cmd if err_signed > 0 else cfg.pivot_yaw_cmd
+            yaw = self._pivot_yaw_for_error(err_signed)
             return self._emit(NavState.ALIGN, 0.0, yaw)
 
         v_cmd = self._forward_v_for_distance(dist)
         # yaw_cmd for DRIVE is left to the imu compensator (returned as 0 here).
         return self._emit(NavState.DRIVE, v_cmd, 0.0)
+
+    def _pivot_yaw_for_error(self, err_signed: float) -> float:
+        """Pivot yaw command for a signed heading error.
+
+        Both frames are clockwise-positive: ``bearing_deg`` is CW from north and
+        the IMU heading is CW-positive (see ``OakImuReader.read``). A positive
+        ``err_signed`` therefore means the bearing is clockwise of the current
+        heading, so the robot must turn RIGHT, and ``mix_to_bytes`` turns right
+        on a POSITIVE ``yaw_cmd``.
+
+        (Until 2026-09-19 this returned ``-pivot`` for a positive error. That
+        was a compensator for the reader's inverted heading, not a mixer fact.)
+        """
+        pivot = self._cfg.pivot_yaw_cmd
+        return pivot if err_signed > 0 else -pivot
 
     def _emit(self, state: NavState, v_cmd: float, yaw_cmd: float) -> tuple[float, float, NavState]:
         self._state = state

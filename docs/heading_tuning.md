@@ -5,6 +5,44 @@ chalk tests. Production defaults were **field-validated 2026-07-12**: pin
 `gyro_y` at scale `1.0`. **Never restore `auto` / `0.46`** — that pair hid
 host-side sample loss behind an empirical multiplier.
 
+## Sign convention (read this first)
+
+The canonical statement lives in the docstring of `OakImuReader.read`
+(`pi_app/hardware/oak_imu.py`). Everything else in the stack refers to it:
+
+- `heading_deg` is compass-style, **CLOCKWISE-POSITIVE** viewed from above,
+  relative to boot orientation, in `[0, 360)`.
+- `yaw_rate_world_dps` (published as `gz_dps` for `ImuReader` compatibility)
+  == `d(heading_deg)/dt`. **A right turn is a positive rate.**
+- Every yaw channel selectable in `OakImuReader` / `ImuYawProducer` is
+  "rotation about the body-**DOWN** axis, CW-positive":
+  - `gyro_y` **already is**. The BMI270 Y axis points down on this mounting
+    (the accelerometer reads about −1 g on Y at rest, which is why
+    `oak_imu.py` computes `roll_acc = atan2(ax, -ay)`), and a right-handed
+    frame with +Y down makes `+gy` a clockwise turn.
+  - `gravity_projected` projects onto the accelerometer **UP**-vector
+    (specific force), so it is **NEGATED** to land in this convention.
+  - `gyro_x` / `gyro_z` are diagnostics; their sign depends on mounting.
+
+WARNING: the 2026-07-12 chalk validation was **magnitude-only**, so the sign was
+never checked. It was wrong for two months. Field measurement 2026-09-19 (robot
+on `3923f23`): hand-turning the robot ~90° **RIGHT** moved the dashboard heading
+241.4 → 152.8 (−88.6°); turning back **LEFT** moved it 162.9 → 255.0 (+92°).
+Magnitude right, sign inverted. The inversion was `heading = -yaw` inside the
+reader; `ImuSteeringConfig.invert_output = True` and the negated waypoint ALIGN
+pivot were **compensators** for it, not independent facts. Under that double
+flip the steering D-term (`d_term = -kd * yaw_rate`) was **anti-damping**.
+
+Fixed 2026-09-19: the reader integrates `+gyro_y` into heading,
+`invert_output` defaults to `False`, ALIGN commands `+pivot_yaw_cmd` for a
+positive heading error, and the chalk harness prints a **SIGN** PASS/FAIL
+separate from the magnitude band. Guard tests:
+`pi_app/tests/test_heading_sign_closed_loop.py` (closed loop around a kinematic
+plant), plus sign cases in `test_oak_imu.py` and `test_waypoint_nav.py`.
+
+If steering or ALIGN turns the wrong way, **fix the sign at the reader and
+re-chalk**. Never add a second inversion downstream.
+
 ## Architecture (lossless producer yaw)
 
 ```
@@ -170,7 +208,7 @@ service) and prints producer + drain-batch metrics.
 7. Enter → **MARK END**.
 8. Read the report:
    - triad from **producer cum** at scale=1 (`gyro_x/y/z`)
-   - production path (`gyro_y` × 1.0); production free-yaw Δ should ≈ −producer gyro_y Δ
+   - production path (`gyro_y` × 1.0); production heading Δ should ≈ **+**producer gyro_y Δ
    - exact cumulative start/end, bias at 6 decimals, raw per-axis rate stats
    - bias-corrected gyro_y fraction below NMNI threshold
    - generation / restart / regression / gap / backlog metrics
@@ -210,7 +248,8 @@ For a single chalk turn after bias, with the **chosen pinned axis** at its fitte
 | --- | --- |
 | Magnitude | `||measured| − expected| ≤ max(8°, 10% of expected)` |
 | 90° and 180° | Both pass; 180° error should not be ~2× worse than 90° (rules out wrong axis) |
-| CW vs CCW | |Δ| within the same band; opposite free-yaw sign |
+| CW vs CCW | |Δ| within the same band; opposite signs from each other |
+| **SIGN** | **cw → production heading Δ > 0; ccw → < 0.** Own PASS/FAIL row; magnitude alone is not enough |
 | No packet loss | integrated tracks received; backlog_drop=0 |
 | No jumps | Heading freezes on stale/duplicate; counter-rewind freeze only on true replacement |
 | Integration | During the turn, `count_integrated` / `count_producer_packets` increase |
@@ -243,6 +282,11 @@ Chalk harness, full `OakDepthReader` path, production `gyro_y` × `1.0`, NMNI on
 (threshold 0.3 dps). Loss accounting was clean on every run below: zero
 duplicate/gap/backlog/queue loss, cadence ≈ 0.01007 s, no reconnect, producer
 `gyro_y` Δ exact opposite-sign match of production free-yaw Δ.
+
+CAUTION: the production Δ column below is in the **pre-2026-09-19** (negated)
+sign. Read it as magnitude evidence only: a 90° CW turn printed −89.73°, which
+is exactly the inverted sign this table failed to catch. Under the current
+convention the same turn prints **+89.73°**.
 
 | Run | Physical | Production free-yaw Δ | Result |
 | --- | --- | --- | --- |

@@ -114,7 +114,8 @@ def make_compensator(
         max_correction=max_correction,
         deadband_deg=deadband_deg,
         max_integral=max_integral,
-        invert_output=True,  # applied inside compensator
+        # invert_output intentionally NOT overridden: take the production default
+        # from ImuSteeringConfig so this harness exercises the shipped sign.
         log_steering_corrections=False,
         update_rate_hz=20.0,
         fallback_on_error=True,
@@ -150,8 +151,9 @@ def test_proportional_only() -> None:
     comp = make_compensator(imu, kp=1.0, ki=0.0, kd=0.0, deadband_deg=0.0)
     comp.set_target_heading(0.0)
     corr = tick(comp, imu, steering_input=0.0, dt=0.05)
-    # error = target - heading = -10 -> correction becomes +10 after inversion
-    assert_almost_equal("P-only correction", float(corr or 0.0), 10.0, tol=1e-6)
+    # error = target - heading = -10 -> correction -10 (no inversion; a
+    # negative correction steers left, which is what a heading of +10 needs).
+    assert_almost_equal("P-only correction", float(corr or 0.0), -10.0, tol=1e-6)
 
 
 def test_integral_clamp() -> None:
@@ -164,8 +166,8 @@ def test_integral_clamp() -> None:
         corr = tick(comp, imu, steering_input=0.0, dt=dt)
         # keep IMU heading constant to isolate integral
         imu.heading_deg = 0.0
-    # At clamp: integral_error = max_integral = 2.5; correction becomes -2.5 after inversion
-    assert_almost_equal("Integral clamp", float(corr or 0.0), -2.5, tol=1e-3)
+    # At clamp: integral_error = max_integral = 2.5 -> correction +2.5.
+    assert_almost_equal("Integral clamp", float(corr or 0.0), 2.5, tol=1e-3)
 
 
 def test_derivative_only() -> None:
@@ -173,8 +175,9 @@ def test_derivative_only() -> None:
     comp = make_compensator(imu, kp=0.0, ki=0.0, kd=0.8, deadband_deg=0.0)
     comp.set_target_heading(0.0)
     corr = tick(comp, imu, steering_input=0.0, dt=0.05)
-    # d term = -kd * yaw_rate = -16 -> +16 after inversion
-    assert_almost_equal("Derivative term", float(corr or 0.0), 16.0, tol=1e-6)
+    # d term = -kd * yaw_rate = -16; a CW-positive yaw rate is damped by a
+    # negative (left-turning) correction.
+    assert_almost_equal("Derivative term", float(corr or 0.0), -16.0, tol=1e-6)
 
 
 def test_output_clamp() -> None:
@@ -182,7 +185,7 @@ def test_output_clamp() -> None:
     comp = make_compensator(imu, kp=10.0, ki=0.0, kd=0.0, deadband_deg=0.0, max_correction=40)
     comp.set_target_heading(0.0)
     corr = tick(comp, imu, steering_input=0.0, dt=0.05)
-    assert_almost_equal("Output clamp (pos)", float(corr or 0.0), 40.0, tol=1e-6)
+    assert_almost_equal("Output clamp (neg)", float(corr or 0.0), -40.0, tol=1e-6)
 
 
 def test_wraparound_error() -> None:
@@ -191,8 +194,8 @@ def test_wraparound_error() -> None:
     comp = make_compensator(imu, kp=1.0, ki=0.0, kd=0.0, deadband_deg=0.0)
     comp.set_target_heading(359.0)
     corr = tick(comp, imu, steering_input=0.0, dt=0.05)
-    # error = 359 - 1 = 358 -> normalized to -2 -> +2 after inversion
-    assert_almost_equal("Wrap-around error", float(corr or 0.0), 2.0, tol=1e-6)
+    # error = 359 - 1 = 358 -> normalized to -2 -> correction -2
+    assert_almost_equal("Wrap-around error", float(corr or 0.0), -2.0, tol=1e-6)
 
 
 def test_neutral_transitions() -> None:
@@ -234,11 +237,11 @@ def test_integral_deadband_bias() -> None:
         corr = tick(comp, imu, steering_input=0.0, dt=dt)
         # keep heading error constant at 1 deg
         imu.heading_deg = 1.0
-    # Integral should clamp at -5 -> correction becomes +2.5 after inversion
+    # Integral should clamp at -5 -> i_term = 0.5 * -5 = -2.5 -> correction -2.5
     assert_almost_equal(
         "Integral bias correction",
         float(corr or 0.0),
-        2.5,
+        -2.5,
         tol=1e-3,
     )
 

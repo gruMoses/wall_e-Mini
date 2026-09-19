@@ -24,6 +24,15 @@ Procedure:
   5. Read the report: pick the axis with |delta| closest to expected and stable
      sign; compute scale = expected / measured (scale=1 integration).
 
+Sign
+----
+``heading_deg`` is compass-style, CLOCKWISE-POSITIVE viewed from above (canonical
+statement: ``OakImuReader.read``). The report prints a **SIGN** PASS/FAIL that is
+separate from the magnitude band: ``--direction cw`` requires a POSITIVE
+production heading delta, ``ccw`` a negative one. Magnitude alone is not enough —
+the 2026-07-12 validation was magnitude-only and an inverted heading slipped
+through it.
+
 CLI extras (no config write):
   --nmni / --no-nmni   force NMNI on/off for this run; report source; keep defaults
   --expected 0         stationary check; recommended scale is nan (no div-by-zero)
@@ -138,7 +147,8 @@ def parse_chalk_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace
     ap.add_argument("--expected", type=float, default=90.0,
                     help="Chalk turn magnitude in degrees (90 or 180 typical; 0 = stationary)")
     ap.add_argument("--direction", choices=("cw", "ccw"), default="cw",
-                    help="Physical turn direction looking down (for report only)")
+                    help="Physical turn direction looking down; drives the SIGN "
+                         "pass criterion (cw must give a positive heading delta)")
     ap.add_argument("--bias-s", type=float, default=2.0, help="Stationary gyro bias seconds")
     ap.add_argument("--rate-hz", type=float, default=50.0, help="Poll rate during test")
     ap.add_argument("--stream", action="store_true", help="Print live heading/triad while waiting")
@@ -435,7 +445,9 @@ def capture_mark_snapshot(
 
     return MarkSnapshot(
         prod_heading_deg=float(data["heading_deg"]),
-        prod_free_yaw_deg=-math.degrees(imu.yaw_rad),
+        # Unwrapped production heading accumulator: heading_deg == this mod 360.
+        # CW-positive (see OakImuReader.read); was negated before 2026-09-19.
+        prod_free_yaw_deg=math.degrees(imu.yaw_rad),
         triad_x_deg=float(triad.x_deg),
         triad_y_deg=float(triad.y_deg),
         triad_z_deg=float(triad.z_deg),
@@ -494,18 +506,38 @@ def wait_for_enter_with_poll(
             sleep_fn(period)
 
 
-def production_matches_neg_producer_y(
+def production_matches_producer_y(
     d_prod_free: float,
     d_producer_y: float,
     *,
     abs_tol_deg: float = 0.5,
     rel_tol: float = 0.02,
 ) -> bool:
-    """Production free-yaw delta should be ≈ −producer gyro_y delta (scale=1)."""
-    expected = -float(d_producer_y)
+    """Production heading delta should be ≈ +producer gyro_y delta (scale=1).
+
+    Both are clockwise-positive about the body-DOWN axis (canonical statement:
+    ``OakImuReader.read``). Renamed from ``production_matches_neg_producer_y``
+    on 2026-09-19, when the reader stopped negating gyro_y into heading.
+    """
+    expected = float(d_producer_y)
     err = abs(float(d_prod_free) - expected)
     band = max(abs_tol_deg, abs(expected) * rel_tol)
     return err <= band
+
+
+def heading_sign_matches_direction(d_prod_free: float, direction: str) -> bool:
+    """A CW chalk turn must give a POSITIVE heading delta; CCW a negative one.
+
+    Sign is a pass criterion in its own right, separate from the magnitude band:
+    the 2026-07-12 chalk validation was magnitude-only, which is exactly how an
+    inverted production heading survived unnoticed.
+    """
+    d = float(d_prod_free)
+    if abs(d) < 1e-9:
+        return False
+    if str(direction).lower() == "cw":
+        return d > 0.0
+    return d < 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -684,12 +716,21 @@ def print_results(
             best_name = name
 
     if d_producer_y is not None:
-        match = production_matches_neg_producer_y(d_prod_free, d_producer_y)
+        match = production_matches_producer_y(d_prod_free, d_producer_y)
         print_fn(
             f"  sync check: production Δ ({d_prod_free:+.4f}°) ≈ "
-            f"−producer gyro_y Δ ({-d_producer_y:+.4f}°)  "
+            f"+producer gyro_y Δ ({d_producer_y:+.4f}°)  "
             f"[{'PASS' if match else 'fail'}]"
         )
+
+    # SIGN is its own pass criterion, independent of the magnitude band above.
+    sign_ok = heading_sign_matches_direction(d_prod_free, direction)
+    want = "positive" if str(direction).lower() == "cw" else "negative"
+    print_fn(
+        f"  SIGN check: physical {direction} requires a {want} production "
+        f"heading Δ; measured {d_prod_free:+.2f}°  "
+        f"[{'PASS' if sign_ok else 'FAIL'}]"
+    )
 
     print_fn()
     print_fn("Interpretation:")
@@ -702,8 +743,16 @@ def print_results(
     print_fn("    cadence_avg≈0.01 s. Drain-batch high-water is messages drained per poll —")
     print_fn("    NOT host-queue occupancy. DepthAI nonblocking overwrite loss is not observable.")
     print_fn("    selection_coalesced=0 is structural only — not a manufactured loss proof.")
-    print_fn("  - Sign: heading uses -yaw integration; if Δ sign is opposite your chalk CW/CCW")
-    print_fn("    expectation, document it — do not flip sign in production without a full retest.")
+    print_fn("  - Sign convention (canonical: OakImuReader.read): heading_deg is")
+    print_fn("    compass-style, CLOCKWISE-POSITIVE viewed from above, relative to boot")
+    print_fn("    orientation, in [0, 360); yaw_rate_world_dps == d(heading_deg)/dt, so a")
+    print_fn("    right turn is a POSITIVE rate. Every selectable yaw channel is")
+    print_fn("    'rotation about the body-DOWN axis, CW-positive': gyro_y already is")
+    print_fn("    (BMI270 +Y points down); the gravity-projected channel projects onto the")
+    print_fn("    accelerometer UP-vector and is NEGATED to match; gyro_x / gyro_z are")
+    print_fn("    diagnostics whose sign depends on mounting. A failing SIGN check means")
+    print_fn("    the mounting or the channel changed — investigate it; never re-add an")
+    print_fn("    inverting compensator downstream.")
     print_fn()
     print_fn("Pass criteria (single axis, scale=1):")
     if abs(expected) < 1e-12:
@@ -713,6 +762,7 @@ def print_results(
             f"  | |measured| - {expected:.0f} | <= max({abs_tol_deg:.1f}°, "
             f"{rel_tol*100:.0f}% of expected)"
         )
+    print_fn("  SIGN: cw -> production heading Δ > 0; ccw -> < 0 (checked separately).")
     print_fn("  Loss proof = integrated/received + backlog/gap + drain-batch size, not coalesced.")
     print_fn("  Generation bumps preserve unread cum (incl. +turn/-turn back to ~0);")
     print_fn("  only integrated-counter rewind (true producer replacement) freezes heading.")

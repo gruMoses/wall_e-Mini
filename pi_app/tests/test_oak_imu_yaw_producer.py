@@ -351,9 +351,10 @@ class TestOakImuReaderProducerPath(unittest.TestCase):
             d = imu.read()  # one consumer read per batch
             self.assertEqual(d["integration_path"], "producer")
 
-        # heading_deg = (-yaw) mod 360; +gy free yaw → heading decreases.
+        # heading_deg = (+yaw) mod 360 since 2026-09-19: +gy is clockwise, so
+        # the compass heading INCREASES by the full 90°.
         final = imu.read()
-        self.assertAlmostEqual(final["heading_deg"], (h0 - 90.0) % 360.0, places=2)
+        self.assertAlmostEqual(final["heading_deg"], (h0 + 90.0) % 360.0, places=2)
         health = imu.get_health()
         self.assertEqual(health["integration_path"], "producer")
         self.assertGreaterEqual(health["count_producer_packets"], 99)
@@ -380,8 +381,8 @@ class TestOakImuReaderProducerPath(unittest.TestCase):
         batch = [_pkt(0.01 * i, gy_dps=90.0) for i in range(1, 11)]  # 0.1 s
         oak.push_batch(batch)
         d = imu.read()
-        # free yaw raw = 9°; scale 0.5 → 4.5° heading change
-        self.assertAlmostEqual(d["heading_deg"], (h0 - 4.5) % 360.0, places=3)
+        # free yaw raw = +9° clockwise; scale 0.5 → +4.5° heading change
+        self.assertAlmostEqual(d["heading_deg"], (h0 + 4.5) % 360.0, places=3)
 
     def test_reconnect_generation_no_jump(self):
         oak, imu = self._reader()
@@ -426,8 +427,8 @@ class TestOakImuReaderProducerPath(unittest.TestCase):
         self.assertAlmostEqual(math.degrees(oak.producer.cum_y_rad), y_before, places=6)
 
         d = imu.read()
-        # Must preserve the full 27° (heading decreases for +gy free yaw).
-        self.assertAlmostEqual(d["heading_deg"], (h0 - 27.0) % 360.0, places=2)
+        # Must preserve the full 27° (heading increases for +gy, i.e. clockwise).
+        self.assertAlmostEqual(d["heading_deg"], (h0 + 27.0) % 360.0, places=2)
         self.assertNotEqual(d["integrate_status"], "regressed")
         self.assertGreaterEqual(imu.get_health()["count_generation_change"], 1)
         self.assertEqual(imu.get_health()["count_cum_reset"], 0)
@@ -446,7 +447,7 @@ class TestOakImuReaderProducerPath(unittest.TestCase):
         plus = [_pkt(0.01 * i, gy_dps=100.0) for i in range(1, 11)]
         oak.push_batch(plus)
         d_plus = imu.read()
-        self.assertAlmostEqual(d_plus["heading_deg"], (h0 - 10.0) % 360.0, places=3)
+        self.assertAlmostEqual(d_plus["heading_deg"], (h0 + 10.0) % 360.0, places=3)
         y_plus = math.degrees(oak.producer.cum_y_rad)
         self.assertAlmostEqual(y_plus, 10.0, places=3)
 
@@ -508,7 +509,7 @@ class TestOakImuReaderProducerPath(unittest.TestCase):
         imu.read()  # seed clocks
         oak.push(device_ts=1.10, gy_dps=90.0)  # 0.1 s @ 90 → 9°
         d3 = imu.read()
-        self.assertAlmostEqual(d3["heading_deg"], (h1 - 9.0) % 360.0, places=2)
+        self.assertAlmostEqual(d3["heading_deg"], (h1 + 9.0) % 360.0, places=2)
 
     def test_near_zero_cum_without_counter_rewind_is_not_reset(self):
         """Cum channels at ~0 with continuous counter must never freeze heading."""
@@ -544,8 +545,8 @@ class TestOakImuReaderProducerPath(unittest.TestCase):
         batch = [_pkt(0.01 * i, gx_dps=90.0, gy_dps=90.0) for i in range(1, 11)]
         oak.push_batch(batch)
         d = imu.read()
-        # Only X contributes → 9° free, heading -9
-        self.assertAlmostEqual(d["heading_deg"], (h0 - 9.0) % 360.0, places=3)
+        # Only X contributes → +9° free yaw, heading +9
+        self.assertAlmostEqual(d["heading_deg"], (h0 + 9.0) % 360.0, places=3)
         self.assertEqual(d["yaw_rate_source_selected"], "gyro_x")
 
     def test_health_exposes_producer_counters(self):
@@ -682,7 +683,7 @@ class TestLegacySnapshotPathStillWorks(unittest.TestCase):
         d1 = imu.read()
         self.assertEqual(d1["integration_path"], "legacy_snapshot")
         self.assertEqual(d1["integrate_status"], "fresh")
-        self.assertAlmostEqual(d1["heading_deg"], (h0 - 4.5) % 360.0, places=4)
+        self.assertAlmostEqual(d1["heading_deg"], (h0 + 4.5) % 360.0, places=4)
 
 
 class CorrectedSnapshotFakeOak(ProducerBackedFakeOak):
@@ -861,7 +862,12 @@ class TestGyroCalibrateNmniNoCircular(unittest.TestCase):
         n_steps = int(duration_s / 0.01)
 
         def production_free_yaw_deg(apply_cal: bool, sign: float) -> float:
-            """Production free-yaw = -yaw_rad_deg (matches chalk report sign)."""
+            """Production heading accumulator = +yaw_rad_deg (chalk report sign).
+
+            Sign contract changed 2026-09-19: heading_deg == this value mod 360
+            and is clockwise-positive, so a positive body gy (a field CW turn)
+            now yields a POSITIVE accumulator. This helper used to negate it.
+            """
             oak = ProducerBackedFakeOak()
             imu = OakImuReader(
                 oak,
@@ -897,9 +903,9 @@ class TestGyroCalibrateNmniNoCircular(unittest.TestCase):
             ]
             oak.push_batch(batch)
             imu.read()
-            return -math.degrees(imu.yaw_rad)
+            return math.degrees(imu.yaw_rad)
 
-        # sign=+1 → positive body gy (field CW); production free-yaw negative.
+        # sign=+1 → positive body gy (field CW); production heading POSITIVE.
         cw_uncal = production_free_yaw_deg(False, +1.0)
         ccw_uncal = production_free_yaw_deg(False, -1.0)
         self.assertGreater(abs(abs(cw_uncal) - abs(ccw_uncal)), 0.3)
@@ -909,8 +915,9 @@ class TestGyroCalibrateNmniNoCircular(unittest.TestCase):
         self.assertAlmostEqual(abs(cw), 90.0, places=1)
         self.assertAlmostEqual(abs(ccw), 90.0, places=1)
         self.assertAlmostEqual(abs(cw), abs(ccw), places=2)
-        self.assertLess(cw, 0.0)
-        self.assertGreater(ccw, 0.0)
+        # A clockwise turn increases the compass heading; CCW decreases it.
+        self.assertGreater(cw, 0.0)
+        self.assertLess(ccw, 0.0)
 
 
 if __name__ == "__main__":

@@ -27,7 +27,8 @@ from pi_app.cli.oak_yaw_chalk_test import (
     format_bias_dps,
     parse_chalk_args,
     poll_imu_once,
-    production_matches_neg_producer_y,
+    heading_sign_matches_direction,
+    production_matches_producer_y,
     recommended_scale,
     resolve_nmni_enabled,
     wait_for_enter_with_poll,
@@ -153,10 +154,11 @@ class FakeImu:
         else:
             self.yaw_rad += (cum_y - self._last_cum_y) * self._scale
             self._last_cum_y = cum_y
-        heading = (-math.degrees(self.yaw_rad) + 360.0) % 360.0
+        # CW-positive compass heading (production contract since 2026-09-19).
+        heading = math.degrees(self.yaw_rad) % 360.0
         return {
             "heading_deg": heading,
-            "yaw_deg": -math.degrees(self.yaw_rad),
+            "yaw_deg": math.degrees(self.yaw_rad),
             "gx_dps": math.degrees(st.gx_rads),
             "gy_dps": math.degrees(st.gy_rads),
             "gz_dps": math.degrees(st.gz_rads),
@@ -217,6 +219,23 @@ class FakeImu:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _blank_mark() -> MarkSnapshot:
+    """Zeroed MarkSnapshot for report-formatting tests (no hardware)."""
+    return MarkSnapshot(
+        prod_heading_deg=0.0,
+        prod_free_yaw_deg=0.0,
+        triad_x_deg=0.0,
+        triad_y_deg=0.0,
+        triad_z_deg=0.0,
+        producer_cum_x_deg=0.0,
+        producer_cum_y_deg=0.0,
+        producer_cum_z_deg=0.0,
+        producer_packets_integrated=0,
+        yaw_generation=1,
+        health={},
+    )
 
 
 class TestPassBandAndScale(unittest.TestCase):
@@ -365,33 +384,32 @@ class TestBaselineDesyncRegression(unittest.TestCase):
         # Old start_prod path: refresh production only.
         data = imu.read()  # advances production from producer cum
         start_prod_heading = float(data["heading_deg"])
-        start_prod_yaw = -math.degrees(imu.yaw_rad)
+        start_prod_yaw = math.degrees(imu.yaw_rad)
         start_y_stale = triad.y_deg  # NEVER updated during wait
 
-        # Turn +7.55° on producer Y (production free-yaw sign is −Y).
+        # Turn +7.55° on producer Y (clockwise; production heading follows +Y).
         oak.advance_producer_y(7.55, packets=20)
         # End: poll would update triad; production needs read.
         poll()
-        end_prod_yaw = -math.degrees(imu.yaw_rad)
+        end_prod_yaw = math.degrees(imu.yaw_rad)
         end_y = triad.y_deg
 
         d_prod = end_prod_yaw - start_prod_yaw
         d_y = end_y - start_y_stale
 
-        # Bug signature: production start absorbed pre-mark motion (−17.94 →
-        # heading change), triad start stayed at ~0, so triad delta includes
-        # pre-mark −17.94 while production delta is only the turn (~ −7.55? wait
-        # production free = −cum_y at scale 1).
-        # imu.yaw_rad tracks +cum_y; prod_free = −degrees(yaw_rad).
-        # After first read after −17.94 advance: yaw_rad = −17.94°, free = +17.94
-        # Actually: yaw_rad += delta_cum_y; start free = -deg(yaw) = -(-17.94)=+17.94
-        # After +7.55: yaw = -17.94+7.55 = -10.39; free = +10.39; d_prod = -7.55
-        # triad start stale = 0; end after poll = -17.94+7.55 = -10.39; d_y = -10.39
-        self.assertAlmostEqual(d_prod, -7.55, places=2)
+        # Bug signature: the production start absorbed pre-mark motion (−17.94°),
+        # while the triad start stayed at ~0, so the triad delta still carries
+        # that pre-mark −17.94° and the production delta is only the +7.55° turn.
+        # Sign contract since 2026-09-19: imu.yaw_rad tracks +cum_y and the
+        # production heading accumulator is +degrees(yaw_rad) — no negation.
+        # After the −17.94 advance: yaw_rad = −17.94° → accumulator −17.94.
+        # After +7.55: yaw = −10.39 → accumulator −10.39 → d_prod = +7.55.
+        # triad start stale = 0; end after poll = −17.94+7.55 = −10.39 → d_y.
+        self.assertAlmostEqual(d_prod, 7.55, places=2)
         self.assertNotAlmostEqual(d_y, d_prod, places=1)
         # Exact mismatch: triad includes pre-mark producer motion.
         self.assertAlmostEqual(d_y, -17.94 + 7.55, places=2)
-        self.assertFalse(production_matches_neg_producer_y(d_prod, d_y))
+        self.assertFalse(production_matches_producer_y(d_prod, d_y))
 
     def test_fix_poll_while_waiting_keeps_baselines_synced(self):
         oak = FakeOak()
@@ -425,11 +443,15 @@ class TestBaselineDesyncRegression(unittest.TestCase):
 
         self.assertIsNotNone(d_producer_y)
         self.assertAlmostEqual(d_y, d_producer_y, places=5)
-        self.assertAlmostEqual(d_prod, -d_producer_y, places=5)
-        self.assertTrue(production_matches_neg_producer_y(d_prod, d_producer_y))
+        # Sign contract 2026-09-19: production heading tracks +producer gyro_y.
+        self.assertAlmostEqual(d_prod, d_producer_y, places=5)
+        self.assertTrue(production_matches_producer_y(d_prod, d_producer_y))
         # Turn-only: magnitude ~7.55, not contaminated by −17.94 pre-mark.
         self.assertAlmostEqual(d_y, 7.55, places=2)
-        self.assertAlmostEqual(d_prod, -7.55, places=2)
+        self.assertAlmostEqual(d_prod, 7.55, places=2)
+        # A clockwise producer turn must read as a positive heading delta.
+        self.assertTrue(heading_sign_matches_direction(d_prod, "cw"))
+        self.assertFalse(heading_sign_matches_direction(d_prod, "ccw"))
 
     def test_hardware_mismatch_numbers_pass_after_fix(self):
         """Full scripted scenario matching field numbers after fix."""
@@ -459,7 +481,8 @@ class TestBaselineDesyncRegression(unittest.TestCase):
 
         # Small residual turn after mark (field report production Δ +7.55 was
         # the *mismatched* symptom under the bug; under the fix a true +7.55°
-        # producer-Y motion yields production free Δ −7.55).
+        # producer-Y motion yields production heading Δ +7.55 — the negation was
+        # removed from the reader on 2026-09-19).
         oak.advance_producer_y(7.55, packets=30)
         for _ in range(2):
             poll()
@@ -470,8 +493,8 @@ class TestBaselineDesyncRegression(unittest.TestCase):
         d_py = end.producer_cum_y_deg - start.producer_cum_y_deg
 
         self.assertAlmostEqual(d_y, d_py, places=5)
-        self.assertAlmostEqual(d_prod, -d_py, places=5)
-        self.assertTrue(production_matches_neg_producer_y(d_prod, d_py))
+        self.assertAlmostEqual(d_prod, d_py, places=5)
+        self.assertTrue(production_matches_producer_y(d_prod, d_py))
 
 
 class TestSynchronizedBaselines(unittest.TestCase):
@@ -570,11 +593,56 @@ class TestNoMotorOrConfigWrites(unittest.TestCase):
         self.assertEqual(cfg_mod.config.imu_steering.oak_yaw_rate_scale, 1.0)
 
 
-class TestProductionNegProducerY(unittest.TestCase):
+class TestProductionProducerYMatch(unittest.TestCase):
+    """Sign contract 2026-09-19: production heading tracks +producer gyro_y.
+
+    The helper used to assert the opposite (it was
+    ``production_matches_neg_producer_y``), which encoded the reader's
+    heading = -yaw negation as if it were a hardware fact.
+    """
+
     def test_match_helper(self):
-        self.assertTrue(production_matches_neg_producer_y(-90.0, 90.0))
-        self.assertTrue(production_matches_neg_producer_y(90.0, -90.0))
-        self.assertFalse(production_matches_neg_producer_y(90.0, 90.0))
+        self.assertTrue(production_matches_producer_y(90.0, 90.0))
+        self.assertTrue(production_matches_producer_y(-90.0, -90.0))
+        self.assertFalse(production_matches_producer_y(90.0, -90.0))
+
+    def test_sign_criterion_is_direction_aware(self):
+        self.assertTrue(heading_sign_matches_direction(89.7, "cw"))
+        self.assertFalse(heading_sign_matches_direction(-89.7, "cw"))
+        self.assertTrue(heading_sign_matches_direction(-89.7, "ccw"))
+        self.assertFalse(heading_sign_matches_direction(89.7, "ccw"))
+        # A stationary run has no sign to check and must not silently pass.
+        self.assertFalse(heading_sign_matches_direction(0.0, "cw"))
+        self.assertFalse(heading_sign_matches_direction(0.0, "ccw"))
+
+    def test_report_prints_sign_pass_fail(self):
+        lines: List[str] = []
+        chalk.print_results(
+            expected=90.0,
+            direction="cw",
+            src="gyro_y",
+            scale=1.0,
+            triad=TriadIntegrator(),
+            start=_blank_mark(),
+            end=_blank_mark(),
+            d_prod_free=-89.7,   # inverted sign: right magnitude, wrong direction
+            d_x=0.0,
+            d_y=-89.7,
+            d_z=0.0,
+            d_producer_y=-89.7,
+            rate_window=RateWindow(),
+            nmni_enabled=True,
+            nmni_threshold_dps=0.3,
+            nmni_source="config",
+            abs_tol_deg=8.0,
+            rel_tol=0.10,
+            print_fn=lambda *a, **k: lines.append(" ".join(str(x) for x in a)),
+        )
+        text = "\n".join(lines)
+        self.assertIn("SIGN check", text)
+        # Magnitude is inside the band, so only the SIGN row may fail.
+        sign_line = [ln for ln in lines if "SIGN check" in ln][0]
+        self.assertIn("FAIL", sign_line)
 
 
 if __name__ == "__main__":

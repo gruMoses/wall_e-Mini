@@ -20,6 +20,23 @@ config.py              # Single Config dataclass (root of repo)
 VESC over CAN (`can0`) is the primary drive path; Arduino motor-driver fallback is wired in. All motor commands are "bytes" (0–255 centre-stop, range ~10–245). Left/right are issued separately via `VescCanDriver`. A command-space mixer converts `(v_cmd, yaw_cmd)` floats in `[-1, 1]` into left/right bytes.
 
 ### IMU
+- **Sign convention (canonical: `OakImuReader.read` docstring)**: `heading_deg`
+  is compass-style, **clockwise-positive** viewed from above, relative to boot
+  orientation, in `[0, 360)`. `yaw_rate_world_dps` (published as `gz_dps`) is
+  `d(heading_deg)/dt`, so a **right turn is a positive rate**. Every selectable
+  yaw channel is "rotation about the body-DOWN axis, CW-positive": `gyro_y`
+  already is (BMI270 +Y points down), the gravity-projected channel is negated
+  to match, and `gyro_x`/`gyro_z` are mounting-dependent diagnostics.
+  - Fixed 2026-09-19. Before that the reader integrated `-gyro_y`, so a right
+    turn read as a left turn (field: 90° right moved heading 241.4 → 152.8).
+    `ImuSteeringConfig.invert_output = True` and the negated waypoint ALIGN
+    pivot were **compensators** for that, and the pair made the steering D-term
+    anti-damping. Both are now corrected; `invert_output` defaults to `False`.
+  - The 2026-07-12 chalk validation was magnitude-only, which is why the sign
+    survived. The chalk harness now prints a separate **SIGN** PASS/FAIL, and
+    `pi_app/tests/test_heading_sign_closed_loop.py` closes the loop around a
+    kinematic plant. **If steering turns the wrong way, fix the sign at the
+    reader and re-chalk — never add a second inversion downstream.**
 - **Active hardware**: OAK-D Lite onboard **BMI270** (gyro + accelerometer; **no magnetometer**).
   - Heading is integrated from gyro and is **relative to startup orientation** — it is not referenced to magnetic north or GPS.
   - `imu_source = "auto"` (default): tries external I2C breakout first, falls back to OAK-D BMI270.
@@ -76,7 +93,7 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
 
 ### Waypoint Navigation
 State machine in `pi_app/control/waypoint_nav.py`:
-- **ALIGN**: pivot in place until heading error < `align_threshold_deg` (default 12°). Yaw sign: negative yaw_cmd for positive (right) heading error.
+- **ALIGN**: pivot in place until heading error < `align_threshold_deg` (default 12°). Yaw sign: **positive** yaw_cmd for a positive (bearing-is-clockwise-of-me) heading error — both frames are CW-positive and `mix_to_bytes` turns right on +yaw. (Was negative until 2026-09-19, compensating an inverted heading.)
 - **DRIVE**: forward at cruise speed with PID steering; falls back to ALIGN if error exceeds `recovery_threshold_deg`.
 - **ARRIVE**: within `arrival_radius_m` of target; zeroes commands and advances waypoint.
 - `compute()` returns `(v_cmd, yaw_cmd, state)` as floats; caller's mixer converts to motor bytes.

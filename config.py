@@ -42,7 +42,17 @@ class ImuSteeringConfig:
     max_correction: int = 35      # Maximum steering correction in byte units (0-255)
     deadband_deg: float = 0.9    # Minimum heading error to trigger correction (degrees)
     max_integral: float = 30.0   # Maximum integral term to prevent windup
-    invert_output: bool = True   # Invert sign so positive heading error drives corrective turn direction
+    # Steering-output inversion. Default flipped True -> False on 2026-09-19:
+    # it existed only to compensate an inverted heading. The OAK reader now
+    # publishes a clockwise-positive compass heading (see OakImuReader.read),
+    # and controller.py applies a positive correction as left+ / right- = turn
+    # right. With a CW-positive heading a rightward drift gives
+    # error = target - heading < 0 -> negative correction -> steer left. No
+    # inversion is needed. Note the D-term (imu_steering.py: d_term =
+    # -kd * yaw_rate) was ANTI-damping under the old double flip, because
+    # yaw_rate was CW-positive while heading was CCW-positive; it is true
+    # damping now. Knob kept for bench A/B on a re-mounted IMU.
+    invert_output: bool = False
     # Steering neutral detection (hysteresis) to lock heading until commanded turn
     steering_neutral_enter: float = 0.08  # |steering_input| below this enters neutral
     steering_neutral_exit: float = 0.15   # |steering_input| above this exits neutral

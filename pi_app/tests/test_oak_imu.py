@@ -71,6 +71,11 @@ class TestOakImuYawRateMode(unittest.TestCase):
         self.assertAlmostEqual(got, gz, places=8)
 
     def test_projected_mode_uses_projection_when_accel_valid(self):
+        """Projection is NEGATED (2026-09-19) to share gy's CW-positive frame.
+
+        The accelerometer vector is specific force — UP at rest — so projecting
+        onto it is counter-clockwise-positive before the sign flip.
+        """
         gx = math.radians(10.0)
         gy = math.radians(20.0)
         gz = math.radians(30.0)
@@ -79,7 +84,7 @@ class TestOakImuYawRateMode(unittest.TestCase):
             gx, gy, gz, sx, sy, sz,
             source="gravity_projected", auto_axis="gyro_y", use_gravity_projected=True,
         )
-        self.assertAlmostEqual(got, gz, places=8)
+        self.assertAlmostEqual(got, -gz, places=8)
 
     def test_projected_mode_falls_back_to_gy_when_accel_too_small(self):
         gx = math.radians(10.0)
@@ -106,9 +111,14 @@ class TestOakImuIntegrationHardening(unittest.TestCase):
         return oak, OakImuReader(oak, **defaults)
 
     def test_fresh_integration_advances_heading(self):
+        """+gy (a clockwise turn) must INCREASE the compass heading.
+
+        Sign contract changed 2026-09-19: heading_deg = (+yaw_deg) mod 360.
+        BMI270 +Y points down, so +gy is already clockwise-positive; the reader
+        used to negate it, which made a right turn read as a left turn.
+        """
         oak, imu = self._reader()
-        # Constant +90 dps about Y for 0.5 s total → ~45° free yaw before sign.
-        # heading_deg = (-yaw_deg) mod 360, so +gy yields negative heading change.
+        # Constant +90 dps about Y for 0.5 s total → ~45° of clockwise yaw.
         oak.push(device_ts=1.000, gy_dps=90.0)
         d0 = imu.read()
         self.assertEqual(d0["integrate_status"], "init")
@@ -118,13 +128,50 @@ class TestOakImuIntegrationHardening(unittest.TestCase):
         d1 = imu.read()
         self.assertEqual(d1["integrate_status"], "fresh")
         self.assertEqual(imu.get_health()["count_integrated"], 1)
-        # 90 dps * 0.05 s = 4.5° free yaw; heading moves opposite sign.
-        self.assertAlmostEqual(d1["heading_deg"], (h0 - 4.5) % 360.0, places=4)
+        # 90 dps * 0.05 s = 4.5° clockwise; heading increases by the same amount.
+        self.assertAlmostEqual(d1["heading_deg"], (h0 + 4.5) % 360.0, places=4)
+        # The published yaw rate is d(heading)/dt, so it is positive too.
+        self.assertGreater(d1["gz_dps"], 0.0)
+        self.assertAlmostEqual(d1["gz_dps"], 90.0, places=3)
 
         oak.push(device_ts=1.100, gy_dps=90.0)
         d2 = imu.read()
         self.assertEqual(d2["integrate_status"], "fresh")
-        self.assertAlmostEqual(d2["heading_deg"], (h0 - 9.0) % 360.0, places=4)
+        self.assertAlmostEqual(d2["heading_deg"], (h0 + 9.0) % 360.0, places=4)
+
+    def test_negative_gy_decreases_heading(self):
+        """−gy (a counter-clockwise turn) must DECREASE the compass heading."""
+        oak, imu = self._reader()
+        oak.push(device_ts=1.000, gy_dps=-60.0)
+        h0 = imu.read()["heading_deg"]
+        oak.push(device_ts=1.100, gy_dps=-60.0)
+        d1 = imu.read()
+        self.assertEqual(d1["integrate_status"], "fresh")
+        self.assertAlmostEqual(d1["heading_deg"], (h0 - 6.0) % 360.0, places=4)
+        self.assertLess(d1["gz_dps"], 0.0)
+
+    def test_health_reports_positive_yaw_rate_sign(self):
+        oak, imu = self._reader()
+        oak.push(device_ts=1.0, gy_dps=0.0)
+        imu.read()
+        self.assertEqual(imu.get_health()["yaw_rate_sign"], 1.0)
+
+    def test_gravity_projected_channel_is_cw_positive(self):
+        """Gravity projection must land in the same CW-positive frame as gy.
+
+        The accelerometer vector is specific force (UP at rest), so the raw
+        projection is CCW-positive and has to be negated.
+        """
+        gx = math.radians(0.0)
+        gy = math.radians(30.0)
+        gz = math.radians(0.0)
+        # Flat robot: gravity read as -1 g on Y (BMI270 +Y down).
+        sx, sy, sz = 0.0, -1.0, 0.0
+        got = OakImuReader._compute_yaw_rate_rads(
+            gx, gy, gz, sx, sy, sz,
+            source="gravity_projected", auto_axis="gyro_y", use_gravity_projected=True,
+        )
+        self.assertAlmostEqual(got, gy, places=8)
 
     def test_duplicate_device_timestamp_does_not_double_integrate(self):
         oak, imu = self._reader()
@@ -224,7 +271,8 @@ class TestOakImuIntegrationHardening(unittest.TestCase):
         # after init seeded host 100.0, first push at 100.0 may be duplicate of init seed.
         # At 100.050 we expect fresh.
         self.assertEqual(d1["integrate_status"], "fresh")
-        self.assertAlmostEqual(d1["heading_deg"], (h0 - 4.5) % 360.0, places=4)
+        # +gy is clockwise, so heading increases (sign contract 2026-09-19).
+        self.assertAlmostEqual(d1["heading_deg"], (h0 + 4.5) % 360.0, places=4)
 
     def test_telemetry_health_fields_present(self):
         oak, imu = self._reader(yaw_rate_source="gyro_x", yaw_rate_scale=0.46)

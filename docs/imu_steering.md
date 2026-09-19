@@ -15,13 +15,44 @@ The active IMU is the **OAK-D Lite onboard BMI270** (gyroscope + accelerometer o
 
 The system also supports external I2C breakout boards (ICM-20948, or ISM330DHCX + MMC5983MA combo). Source priority is controlled by `imu_source` in `config.py` (default `"auto"`: external first, OAK-D BMI270 fallback). The magnetometer is disabled by default (`imu_use_magnetometer = False`).
 
+## Sign convention
+
+The canonical statement is in the docstring of `OakImuReader.read`
+(`pi_app/hardware/oak_imu.py`). Repeated here because the whole PID sign
+depends on it:
+
+- `heading_deg` is compass-style, **clockwise-positive** viewed from above,
+  relative to boot orientation, in `[0, 360)`.
+- `yaw_rate_world_dps` (published as `gz_dps`) is `d(heading_deg)/dt`, so a
+  right turn gives a **positive** rate.
+- `controller.py` applies a positive correction as `left + corr` /
+  `right - corr`, which turns the robot **right**.
+
+Therefore a rightward drift gives `error = target - heading < 0`, a negative
+correction, and a left turn. No inversion is needed, and
+`ImuSteeringConfig.invert_output` is **`False`** (default flipped from `True` on
+2026-09-19). The knob is kept only for a bench A/B after a physical IMU
+re-mount.
+
+**Do not re-enable `invert_output` to fix a steering direction.** Before
+2026-09-19 the OAK reader published a counter-clockwise-positive heading and
+`invert_output = True` compensated for it. That pair also made the derivative
+term anti-damping, because the yaw rate was clockwise-positive while the heading
+was counter-clockwise-positive. If steering turns the wrong way, fix the reader
+sign and re-run the chalk harness (which now prints a SIGN PASS/FAIL), rather
+than adding a second inversion.
+
+`pi_app/tests/test_heading_sign_closed_loop.py` closes the loop around a
+kinematic plant so an inverted sign anywhere in the chain diverges.
+
 ## How It Works
 
 ### 1. PID Control Loop
 The system implements a PID controller:
 - **Proportional (P)**: Corrects based on current heading error
 - **Integral (I)**: Accumulates and corrects for systematic drift
-- **Derivative (D)**: Dampens oscillations using yaw rate
+- **Derivative (D)**: Dampens oscillations using yaw rate (true damping only
+  when the rate and the heading share the clockwise-positive convention above)
 
 ### 2. Steering Intent Detection
 - Compensation is strongest in straight-intent conditions and scales down as steering input grows.

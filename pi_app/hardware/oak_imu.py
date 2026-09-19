@@ -8,6 +8,12 @@ produce heading, roll, and pitch suitable for ImuSteeringCompensator.
 No magnetometer is available, so heading is relative to startup orientation
 (adequate for heading-hold steering over short/medium durations).
 
+Heading sign convention (see ``OakImuReader.read``)
+---------------------------------------------------
+``heading_deg`` is compass-style, **clockwise-positive** viewed from above,
+relative to boot orientation, in ``[0, 360)``. ``yaw_rate_world_dps`` is
+``d(heading_deg)/dt``, so a right turn reports a **positive** rate.
+
 Yaw integration (lossless producer path)
 ----------------------------------------
 OakDepthReader integrates **every** drained IMU packet on the producer side
@@ -171,16 +177,28 @@ class OakImuReader:
     ) -> float:
         """Compute world-yaw rate from gyro, optionally using gravity projection.
 
-        For OAK-D Lite camera frame (X=right, Y=down, Z=forward), robot yaw
-        (turning about vertical) maps best to the body-frame Y gyro component.
-        We also expose explicit axis selection for diagnostics.
+        Every channel returned here is "rotation about the body-DOWN axis,
+        clockwise-positive viewed from above" — the convention documented on
+        :meth:`read`.
+
+        For the OAK-D Lite camera frame (X=right, Y=down, Z=forward) robot yaw
+        maps to the body-frame Y gyro component, and BMI270 +Y points DOWN, so
+        ``gy`` is already clockwise-positive and needs no sign change.
+
+        The gravity-projected channel projects the rate onto the accelerometer
+        vector, which at rest is specific force pointing **UP** (about -Y in
+        this frame). That projection is therefore counter-clockwise-positive
+        and is **negated** to land in the same convention as ``gy``.
+
+        ``gyro_x`` / ``gyro_z`` are diagnostics: their sign depends on mounting.
         """
         if source == "auto":
             source = auto_axis
         if source == "gravity_projected" or use_gravity_projected:
             a_norm_sq = sx * sx + sy * sy + sz * sz
             if a_norm_sq > 0.25:
-                return (gx * sx + gy * sy + gz * sz) / a_norm_sq
+                # Negate: accel points UP at rest, gy's axis points DOWN.
+                return -(gx * sx + gy * sy + gz * sz) / a_norm_sq
             return gy
         if source == "gyro_x":
             return gx
@@ -459,7 +477,9 @@ class OakImuReader:
         return {
             "yaw_rate_source_cfg": self._yaw_rate_source,
             "yaw_rate_source_selected": selected,
-            "yaw_rate_sign": -1.0,  # heading_deg = (-yaw_rad_deg) mod 360
+            # heading_deg = (+yaw_rad_deg) mod 360: compass-style, CW-positive
+            # about the body-DOWN axis. See OakImuReader.read for the contract.
+            "yaw_rate_sign": +1.0,
             "yaw_rate_scale": self._yaw_rate_scale,
             "auto_axis": self._auto_axis,
             "use_gravity_projected": self._use_gravity_projected_yaw_rate,
@@ -476,7 +496,7 @@ class OakImuReader:
             "gy_body_dps": self._last_gy_body_dps,
             "gz_body_dps": self._last_gz_body_dps,
             "yaw_rate_world_dps": self._last_yaw_rate_world_dps,
-            "heading_deg": (-math.degrees(self.yaw_rad) + 360.0) % 360.0,
+            "heading_deg": math.degrees(self.yaw_rad) % 360.0,
             "count_read": self._count_read,
             "count_integrated": self._count_integrated,
             "count_duplicate": self._count_duplicate,
@@ -495,6 +515,31 @@ class OakImuReader:
 
     def read(self) -> Dict[str, float]:
         """Read latest IMU data from OAK-D and return in ImuReader format.
+
+        CANONICAL HEADING / YAW-RATE CONVENTION (referenced from everywhere else)
+        ------------------------------------------------------------------------
+        * ``heading_deg`` is compass-style, **CLOCKWISE-POSITIVE** viewed from
+          above, relative to boot orientation, in ``[0, 360)``.
+        * ``yaw_rate_world_dps`` (also published as ``gz_dps`` for ImuReader
+          compatibility) == ``d(heading_deg)/dt``, so a **right turn is a
+          positive rate**.
+        * Every yaw channel selectable in ``OakImuReader`` / ``ImuYawProducer``
+          is "rotation about the body-DOWN axis, CW-positive":
+            - ``gyro_y`` already is — the BMI270 Y axis points DOWN on this
+              mounting (accelerometer reads about -1 g on Y at rest), and a
+              right-handed frame with +Y down makes +gy a clockwise turn.
+            - ``gravity_projected`` projects onto the accelerometer UP-vector
+              (specific force), so it is **negated** to land in this convention.
+            - ``gyro_x`` / ``gyro_z`` are diagnostics; their sign depends on
+              mounting.
+
+        Field evidence (2026-09-19): hand-turning the robot ~90° RIGHT moved the
+        dashboard heading 241.4 → 152.8 (−88.6°) — magnitude right, sign
+        inverted. The inversion lived in this reader (``heading = -yaw``) while
+        ``gyro_y`` was already CW-positive; ``invert_output`` in
+        ``ImuSteeringConfig`` and the waypoint ALIGN yaw sign were compensators
+        for it. The 2026-07-12 chalk validation was magnitude-only, so the sign
+        was never checked.
 
         Heading advances from producer cumulative free-yaw deltas (scale applied
         once). Duplicate controller-loop polls of an unchanged cum freeze
@@ -655,13 +700,14 @@ class OakImuReader:
                     self.roll_rad = (1.0 - blend) * self.roll_rad + blend * roll_acc
                     self.pitch_rad = (1.0 - blend) * self.pitch_rad + blend * pitch_acc
 
-        heading_deg = (-math.degrees(self.yaw_rad) + 360.0) % 360.0
+        # CW-positive compass heading (see the convention block above).
+        heading_deg = math.degrees(self.yaw_rad) % 360.0
         selected = self._selected_source()
 
         return {
             "roll_deg": math.degrees(self.roll_rad),
             "pitch_deg": math.degrees(self.pitch_rad),
-            "yaw_deg": -math.degrees(self.yaw_rad),
+            "yaw_deg": math.degrees(self.yaw_rad),
             "heading_deg": heading_deg,
             "ax_g": ax_g,
             "ay_g": ay_g,
@@ -669,7 +715,8 @@ class OakImuReader:
             "gx_dps": gx_dps,
             "gy_dps": gy_dps,
             # ImuReader compatibility: gz_dps is the *selected* world yaw rate
-            # used by steering D-term (not necessarily body-frame Z).
+            # used by steering D-term (not necessarily body-frame Z). It is
+            # d(heading_deg)/dt — CW-positive, per the convention on read().
             "gz_dps": yaw_rate_world_dps,
             "mx_g": 0.0,
             "my_g": 0.0,
