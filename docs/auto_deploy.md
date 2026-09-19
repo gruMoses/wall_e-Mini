@@ -9,8 +9,9 @@
 3. If the local `HEAD` is not an ancestor of `origin/main`, it refuses. Fix the checkout by hand.
 4. If tracked files are modified on the Pi, it refuses.
 5. It reads `is_armed` from the first event of `http://127.0.0.1:8080/api/telemetry`. If the robot is armed, it holds. If the service is up but the telemetry cannot be read, it holds. After 3 consecutive unreadable checks (15 minutes) it treats the service as hung and continues.
-6. It runs `git pull --ff-only`, then byte-compiles `pi_app` and `config.py`, then imports `config`, `pi_app.control.controller` and `pi_app.control.follow_me`. If any step fails, it resets the checkout to the previous SHA and does not restart the service.
-7. It runs `sudo -n systemctl restart wall-e.service`.
+6. If the change touches only `docs/` or top-level `.md` files, it pulls and does not restart the service.
+7. It runs `git pull --ff-only`, then byte-compiles `pi_app` and `config.py`, then imports `config`, `pi_app.control.controller` and `pi_app.control.follow_me`. If any step fails, it resets the checkout to the previous SHA and does not restart the service.
+8. It runs `sudo -n systemctl restart wall-e.service`.
 
 Each decision is one line in `logs/deploy.log`.
 

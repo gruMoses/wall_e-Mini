@@ -81,15 +81,35 @@ if [ "$service_up" = true ] && [ "$armed" = unknown ]; then
 fi
 rm -f "$STATE"
 
+# Docs-only changes update the checkout without a service restart.
+code_changed=$(git diff --name-only "$LOCAL" "$REMOTE" | grep -vE '^(docs/|[^/]*\.md$)' | head -n 1)
+if [ -z "$code_changed" ]; then
+  if git pull -q --ff-only origin "$BRANCH"; then
+    log "DOCS-ONLY $LOCAL -> $REMOTE pulled; service not restarted"
+  else
+    log "FAIL pull --ff-only failed on docs-only change; nothing changed"
+  fi
+  exit 0
+fi
+
 # Deploy.
 if ! git pull -q --ff-only origin "$BRANCH"; then
   log "FAIL pull --ff-only failed; nothing changed"
   exit 0
 fi
-if ! python3 -m compileall -q pi_app config.py > /dev/null 2>&1 \
-   || ! python3 -c 'import config, pi_app.control.controller, pi_app.control.follow_me' > /dev/null 2>&1; then
+# Bytecode goes to a scratch prefix: a root-owned __pycache__ left in the
+# tree (2026-09-19: pi_app/io/__pycache__) made compileall fail with a
+# PermissionError and rolled back a good push. The error text is kept.
+export PYTHONPYCACHEPREFIX=/tmp/walle_auto_deploy_pycache
+SMOKE_OUT=$(
+  { python3 -m compileall -q pi_app config.py \
+    && python3 -c 'import config, pi_app.control.controller, pi_app.control.follow_me'; } 2>&1
+)
+SMOKE_RC=$?
+if [ "$SMOKE_RC" -ne 0 ]; then
   git reset -q --hard "$LOCAL"
-  log "FAIL smoke test at $REMOTE; rolled back to $LOCAL; service not restarted"
+  SMOKE_TAIL=$(printf '%s\n' "$SMOKE_OUT" | tail -n 3 | tr '\n' ' ')
+  log "FAIL smoke test (rc=$SMOKE_RC) at $REMOTE; rolled back to $LOCAL; service not restarted; error: $SMOKE_TAIL"
   exit 0
 fi
 if sudo -n systemctl restart "$SERVICE"; then
