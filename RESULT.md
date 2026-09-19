@@ -16,7 +16,7 @@ Before: gains were 0 since 2026-06-11 (dead RPM readback caused a lunge and stal
 
 After: one kinematic wheel-speed scale (0.009416 m/s per byte). Gains kp 0.6, ki 0.15, kd 0, integral limit 1.0, correction limit ±0.20 m/s. `RpmPlausibilityGate` trips when a motor is commanded 12 bytes or more from neutral and reports less than 150 eRPM for 0.5 s; the controller then uses open-loop control until real RPM returns (2 s minimum hold). The forward speed is the signed mean of the two wheels, so a turn does not read as overspeed. The PID integral resets on each open-loop tick and on the lost-target reset. Telemetry shows `vesc_rpm_plausible` and `vesc_rpm_gate_trips`.
 
-## B. Heading (on the branch, 7 commits 4ec534c..fde50e5)
+## B. Heading (on the branch, 8 commits 4ec534c..6978242)
 
 ### B.1 Field evidence
 
@@ -45,8 +45,11 @@ A 57-agent audit of the pipeline found the same two root causes plus three more 
 5. f9ff8c8 — Stationary tracking gated on a wheels-stopped witness (VESC eRPM or commanded bytes) in addition to sensor quiet; absolute max-rate bound (5 degrees per second); the reader uses the tracked bias for its rate output; the duplicate-read rate is bounded by sample age; calibration pauses the tracker.
 6. 53a925a — Yaw-axis sign derived from gravity at calibration, with WARNING logs for an inverted or non-vertical mount.
 7. fde50e5 — `imu_source` pinned to `oak_d`.
+8. 6978242 — Witness polarity: the robot counts as stopped only when the commanded bytes are at neutral and, when RPM is trusted, both wheels read under 30 eRPM (150 eRPM per wheel in opposite directions is a 1.7 degree-per-second pivot). Defaults aligned (5 degrees per second). Follow-me blind trail search steered toward the mirror of the trail under the new convention; fixed and pinned by a test.
 
-Tests: 703 at a0a2776 → 773 on the branch, all pass, 4 skipped. Changed tests and their reasons are in each commit message.
+Grok reviewed the full diff: the sign chain is consistent from packet to motor bytes; its one finding (the witness polarity) became commit 8.
+
+Tests: 703 at a0a2776 → 781 on the branch, all pass, 4 skipped. Changed tests and their reasons are in each commit message.
 
 ### B.4 Validation plan on the robot
 
@@ -61,7 +64,9 @@ Tests: 703 at a0a2776 → 773 on the branch, all pass, 4 skipped. Changed tests 
 - GPS course over ground and speed from the DFRobot receiver registers (needs a bench read first; a DFRobot audit is in progress).
 - RTK stays float: fix 4 has never appeared in any log on the Pi since 2026-07-30; investigation in progress.
 - The external 9DoF board is parked (`docs/external_imu_postmortem.md`).
-- Auto-deploy script and runbook are written but not committed (permission held by Kevin).
+- Auto-deploy: script and runbook are on `main` (5a3e41d). The install on the Pi (cron + one restart) is Kevin's step; the classifier blocks it from this session.
+- Logging changes (four commits: values already computed, speed-loop terms, slow 1 Hz diagnostics line + MCAP fill, RTK GPS driver with UTC/COG/SOG and fix-edge logging) are in progress.
+- RTK float: `docs/rtk_float_investigation.md`; next step is Kevin's short-baseline test.
 
 ## Technical Names
 
