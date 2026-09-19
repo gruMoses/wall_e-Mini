@@ -447,3 +447,37 @@ class TestCourseOverGroundLock(unittest.TestCase):
         aligner = GpsHeadingAligner(self._cfg(cog_lock_enabled=False))
         self._feed(aligner, [(30.0, 120.0)] * 8)
         self.assertFalse(aligner.locked)
+
+    def test_locked_offset_is_verified_and_relocks_on_disagreement(self):
+        aligner = GpsHeadingAligner(self._cfg(cog_verify_max_error_deg=15.0))
+        self._feed(aligner, [(30.0, 120.0)] * 6)
+        self.assertTrue(aligner.locked)
+        self.assertAlmostEqual(aligner.offset_deg, 90.0, places=3)
+        # Agreeing samples that agree with the lock: offset unchanged, small error reported.
+        self._feed(aligner, [(30.0, 122.0)] * 6, t0=2_000.0)
+        self.assertAlmostEqual(aligner.offset_deg, 90.0, places=3)
+        self.assertLess(aligner.status().cog_verify_error_deg, 15.0)
+        self.assertEqual(aligner.status().relock_count, 0)
+        # Agreeing samples that disagree with the lock by 40 deg: relock at the new value.
+        with self.assertLogs("pi_app.control.gps_heading_align", level="WARNING") as cm:
+            self._feed(aligner, [(30.0, 160.0)] * 6, t0=3_000.0)
+        self.assertTrue(aligner.locked)
+        self.assertAlmostEqual(aligner.offset_deg, 130.0, places=1)
+        self.assertEqual(aligner.lock_source, "cog-relock")
+        self.assertEqual(aligner.status().relock_count, 1)
+        self.assertTrue(any("DISAGREED" in m for m in cm.output))
+
+    def test_locked_offset_ignores_disagreeing_samples_that_do_not_agree_with_each_other(self):
+        aligner = GpsHeadingAligner(self._cfg())
+        self._feed(aligner, [(30.0, 120.0)] * 6)
+        self._feed(aligner, [(30.0, 160.0), (30.0, 200.0)] * 4, t0=2_000.0)  # spread > 8 deg
+        self.assertAlmostEqual(aligner.offset_deg, 90.0, places=3)
+        self.assertEqual(aligner.status().relock_count, 0)
+
+    def test_verification_needs_the_same_gates(self):
+        aligner = GpsHeadingAligner(self._cfg())
+        self._feed(aligner, [(30.0, 120.0)] * 6)
+        self._feed(aligner, [(30.0, 300.0)] * 8, fwd=False, t0=2_000.0)   # reverse: ignored
+        self._feed(aligner, [(30.0, 160.0)] * 8, fix=5, t0=3_000.0)      # float: clears candidates, lock stays
+        self.assertTrue(aligner.locked)
+        self.assertAlmostEqual(aligner.offset_deg, 90.0, places=3)

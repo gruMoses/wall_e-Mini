@@ -113,3 +113,12 @@ Gates (all fail-closed):
 Procedure: with the robot armed and the fix at 4, drive forward at walking pace for about 10 seconds. The path does not need to be straight. The nav page shows "GPS heading alignment locked" and the journal shows the lock line with the sample count and the spread.
 
 The displacement method stays in place; either method can lock first. The offset stays frozen until the armed session ends (`reset()`).
+
+### Lock persistence and verification (2026-09-19)
+
+The lock is kept across disarm, RC stale and e-stop within one service run (Kevin's decision). The IMU boot frame is continuous across those events: the gyro keeps integrating, ZUPT holds the heading while the robot is parked, and the tracked bias keeps it honest. Two guards replace the old reset:
+
+1. Verification. While locked, qualifying epochs keep feeding the course-over-ground window. When six epochs agree with each other (spread at most 8 degrees) but disagree with the frozen offset by more than `cog_verify_max_error_deg` (15 degrees), the offset moves to the new value, `lock_source` becomes `"cog-relock"`, `relock_count` increments, and the journal shows a WARNING. Verification happens only in MANUAL mode under the same gates as the lock, so a waypoint run never changes the offset.
+2. Frame discontinuity. Once per second the controller reads the OAK IMU health counters `oak_reconnect_count` and `count_cum_reset`. If either changes while locked, the lock is dropped with a WARNING, because rotation during an outage can be lost. Drive forward at RTK fixed to relock.
+
+A service restart still starts unlocked.

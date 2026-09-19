@@ -2,6 +2,7 @@
 
 import time
 import unittest
+import unittest.mock
 from dataclasses import replace
 from unittest.mock import MagicMock
 
@@ -98,9 +99,14 @@ def _gps(lat=40.0, lon=-74.0, fix_quality=4, ts=None) -> GpsReading:
     )
 
 
-class TestHeadingAlignDisarmReset(unittest.TestCase):
+class TestHeadingAlignLockPersistence(unittest.TestCase):
+    """2026-09-19 (Kevin's decision): the lock survives disarm / RC stale /
+    e-stop within a service run. The IMU boot frame is continuous across
+    those; the lock is re-verified from live course over ground when moving
+    and dropped on an IMU frame discontinuity. Before this change every
+    disarm forced another straight run."""
 
-    def test_manual_disarm_resets_aligner(self):
+    def test_manual_disarm_keeps_lock(self):
         cfg = GpsHeadingAlignConfig(enabled=True, min_distance_m=0.5, min_speed_mps=0.1)
         aligner = GpsHeadingAligner(cfg)
         aligner._locked = True
@@ -113,10 +119,10 @@ class TestHeadingAlignDisarmReset(unittest.TestCase):
         self.assertTrue(aligner.locked)
 
         ctrl.process(_fresh_disarm_rc())
-        self.assertFalse(aligner.locked)
-        self.assertEqual(aligner.offset_deg, 0.0)
+        self.assertTrue(aligner.locked)
+        self.assertEqual(aligner.offset_deg, 12.0)
 
-    def test_rc_stale_resets_aligner(self):
+    def test_rc_stale_keeps_lock(self):
         cfg = GpsHeadingAlignConfig(enabled=True)
         aligner = GpsHeadingAligner(cfg)
         aligner._locked = True
@@ -128,6 +134,25 @@ class TestHeadingAlignDisarmReset(unittest.TestCase):
 
         _, events, _ = ctrl.process(stale_rc)
         self.assertIn(SafetyEvent.RC_STALE, events)
+        self.assertTrue(aligner.locked)
+        self.assertEqual(aligner.offset_deg, 7.0)
+
+    def test_imu_frame_discontinuity_drops_lock(self):
+        aligner = GpsHeadingAligner(GpsHeadingAlignConfig(enabled=True))
+        aligner._locked = True
+        aligner._offset_deg = 33.0
+        imu = FakeImu()
+        health = {"oak_reconnect_count": 0, "count_cum_reset": 0}
+        imu.imu_reader = MagicMock(get_health=lambda: dict(health))
+        ctrl = _make_controller(aligner=aligner, imu=imu)
+        ctrl._gps_reading = _gps()
+        ctrl._safety_state.is_armed = True
+        with unittest.mock.patch("pi_app.control.controller.time.monotonic", side_effect=[100.0 + 0.1 * i for i in range(400)]):
+            ctrl.process(_fresh_armed_rc())          # baseline marker recorded
+            self.assertTrue(aligner.locked)
+            health["oak_reconnect_count"] = 1        # OAK USB reconnect: rotation may be lost
+            for _ in range(15):                      # > 1 s of ticks
+                ctrl.process(_fresh_armed_rc())
         self.assertFalse(aligner.locked)
         self.assertEqual(aligner.offset_deg, 0.0)
 
@@ -143,7 +168,7 @@ class TestHeadingAlignDisarmReset(unittest.TestCase):
         self.assertTrue(aligner.locked)
         self.assertEqual(aligner.offset_deg, 4.0)
 
-    def test_emergency_resets_aligner(self):
+    def test_emergency_keeps_lock(self):
         cfg = GpsHeadingAlignConfig(enabled=True)
         aligner = GpsHeadingAligner(cfg)
         aligner._locked = True
@@ -155,8 +180,8 @@ class TestHeadingAlignDisarmReset(unittest.TestCase):
 
         _, events, _ = ctrl.process(estop_rc)
         self.assertIn(SafetyEvent.EMERGENCY_TRIGGERED, events)
-        self.assertFalse(aligner.locked)
-        self.assertEqual(aligner.offset_deg, 0.0)
+        self.assertTrue(aligner.locked)
+        self.assertEqual(aligner.offset_deg, 9.0)
 
 
 class TestHeadingAlignManualForwardGate(unittest.TestCase):

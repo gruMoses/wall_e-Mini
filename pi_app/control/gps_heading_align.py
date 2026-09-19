@@ -44,7 +44,9 @@ class GpsHeadingAlignStatus:
     # Per-epoch course-over-ground path (2026-09-19).
     cog_samples: int = 0
     cog_spread_deg: Optional[float] = None
-    lock_source: Optional[str] = None   # "displacement" | "cog" | None
+    lock_source: Optional[str] = None   # "displacement" | "cog" | "cog-relock" | None
+    cog_verify_error_deg: Optional[float] = None  # |course-derived offset − frozen offset| while locked
+    relock_count: int = 0
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -111,6 +113,8 @@ class GpsHeadingAligner:
         self._last_cog_sample_ts: Optional[float] = None
         self._cog_spread_deg: Optional[float] = None
         self._lock_source: Optional[str] = None
+        self._cog_verify_error_deg: Optional[float] = None
+        self._relock_count: int = 0
 
     @property
     def lock_source(self) -> Optional[str]:
@@ -146,6 +150,8 @@ class GpsHeadingAligner:
             cog_samples=len(self._cog_samples),
             cog_spread_deg=self._cog_spread_deg,
             lock_source=self._lock_source,
+            cog_verify_error_deg=self._cog_verify_error_deg,
+            relock_count=self._relock_count,
         )
 
     def reset(self) -> None:
@@ -161,6 +167,8 @@ class GpsHeadingAligner:
         self._last_cog_sample_ts = None
         self._cog_spread_deg = None
         self._lock_source = None
+        self._cog_verify_error_deg = None
+        self._relock_count = 0
 
     def correct(self, raw_imu_heading_deg: float) -> float:
         """Return true-frame heading for a raw-IMU reading."""
@@ -297,7 +305,7 @@ class GpsHeadingAligner:
         within ``cog_max_spread_deg`` (circular standard deviation); their
         circular mean becomes the frozen offset.
 
-        Gates, all fail-closed: the offset is frozen once locked; RTK fixed
+        Gates, all fail-closed: RTK fixed
         only (a fix loss clears the candidate samples); ``forward_intent``
         (both tracks commanded forward — a reverse run would give a course
         180 deg from the heading); ``sog_mps >= cog_min_speed_mps`` (Doppler
@@ -309,8 +317,10 @@ class GpsHeadingAligner:
         cfg = self._cfg
         if not cfg.enabled or not bool(getattr(cfg, "cog_lock_enabled", True)):
             return
-        if self._locked:
-            return
+        # NOTE: no early return when locked. Once locked, qualifying epochs keep
+        # feeding the same window so the frozen offset is continuously verified
+        # (see the end of this method). Verification only happens under the
+        # same gates as the lock itself.
         if self._last_cog_sample_ts is not None:
             if sample_ts == self._last_cog_sample_ts:
                 return
@@ -359,7 +369,28 @@ class GpsHeadingAligner:
         if len(values) < min_samples or spread is None or spread > max_spread:
             return
 
-        self._offset_deg = _circular_mean_deg(values)
+        mean = _circular_mean_deg(values)
+        if self._locked:
+            # Verification (2026-09-19): the lock now survives disarm within a
+            # service run, so it must prove itself whenever the robot drives
+            # forward at RTK fixed. Agreeing samples that disagree with the
+            # frozen offset mean the frozen offset is the stale one.
+            err = abs(_signed_error_deg(mean, self._offset_deg))
+            self._cog_verify_error_deg = err
+            max_err = float(getattr(cfg, "cog_verify_max_error_deg", 15.0))
+            if err > max_err:
+                old = self._offset_deg
+                self._offset_deg = mean
+                self._lock_source = "cog-relock"
+                self._relock_count += 1
+                _logger.warning(
+                    "GPS heading lock DISAGREED with %d course-over-ground epochs "
+                    "by %.1f° (spread %.1f°): offset %+.1f° -> %+.1f° (relock #%d)",
+                    len(values), err, spread, old, self._offset_deg, self._relock_count,
+                )
+            return
+
+        self._offset_deg = mean
         self._locked = True
         self._lock_source = "cog"
         _logger.warning(

@@ -40,6 +40,13 @@ class GpsHeadingAlignConfig:
     cog_min_samples: int = 6              # epochs (1 Hz) that must agree
     cog_max_spread_deg: float = 8.0       # circular std of the samples
     cog_window_s: float = 20.0            # samples older than this expire
+    # Lock persistence (2026-09-19, Kevin's decision): the offset is kept
+    # across disarm / re-arm within one service run and re-verified against
+    # live course over ground whenever the robot drives forward at RTK fixed.
+    # If the samples agree with each other but disagree with the frozen offset
+    # by more than this, the lock moves to the new value with a WARNING. The
+    # lock is dropped on an IMU frame discontinuity (OAK reconnect / cum reset).
+    cog_verify_max_error_deg: float = 15.0
 
 
 @dataclass(frozen=True)

@@ -138,6 +138,8 @@ class Controller:
         # Track when we begin moving straight to (re)lock heading
         self._was_moving_straight = False
         self._straight_latched = False
+        self._imu_frame_check_ts: float = 0.0
+        self._imu_frame_marker: Optional[tuple[int, int]] = None
         self._straight_disengage_deadline = 0.0
         self._straight_target_true_heading: Optional[float] = None
 
@@ -377,10 +379,57 @@ class Controller:
         self._straight_target_true_heading = None
 
     def _on_armed_session_ended(self) -> None:
-        """Reset heading-align state when an armed session ends."""
-        if self._gps_heading_aligner is not None:
-            self._gps_heading_aligner.reset()
+        """An armed session ended (disarm, RC stale, e-stop).
+
+        The GPS heading lock is KEPT (2026-09-19, Kevin's decision): the
+        offset relates the IMU's boot frame to true north, and that frame is
+        continuous across a disarm — the gyro keeps integrating, ZUPT holds
+        the heading while parked, and the tracked bias keeps it honest. The
+        lock is verified against live course over ground whenever the robot
+        drives forward at RTK fixed (GpsHeadingAligner.update_cog) and is
+        dropped on an IMU frame discontinuity (see _check_imu_frame_continuity).
+        Before this change every disarm forced another straight run.
+        """
         self._straight_target_true_heading = None
+
+    def _check_imu_frame_continuity(self, mono_now: float) -> None:
+        """Drop the GPS heading lock if the IMU heading frame was reseeded.
+
+        An OAK USB reconnect or a producer cum reset can lose rotation that
+        happened during the outage, so a frozen offset may no longer relate
+        the heading to true north. Checked once per second from the reader's
+        health counters; fail-closed.
+        """
+        if self._gps_heading_aligner is None or self._imu_compensator is None:
+            return
+        if (mono_now - self._imu_frame_check_ts) < 1.0:
+            return
+        self._imu_frame_check_ts = mono_now
+        try:
+            reader = getattr(self._imu_compensator, "imu_reader", None)
+            health_fn = getattr(reader, "get_health", None)
+            if not callable(health_fn):
+                return
+            h = health_fn() or {}
+            marker = (
+                int(h.get("oak_reconnect_count") or 0),
+                int(h.get("count_cum_reset") or 0),
+            )
+            if (
+                self._imu_frame_marker is not None
+                and marker != self._imu_frame_marker
+                and self._gps_heading_aligner.locked
+            ):
+                self._gps_heading_aligner.reset()
+                _logger.warning(
+                    "GPS heading lock dropped: IMU frame discontinuity "
+                    "(oak_reconnect_count=%d, count_cum_reset=%d); drive forward "
+                    "at RTK fixed to relock",
+                    marker[0], marker[1],
+                )
+            self._imu_frame_marker = marker
+        except Exception:
+            pass
 
     def _heading_align_telemetry(self, raw_heading: Optional[float]) -> dict:
         """Nested heading-alignment observability for controller telemetry."""
@@ -415,6 +464,8 @@ class Controller:
             "cog_samples": st.cog_samples,
             "cog_spread_deg": st.cog_spread_deg,
             "lock_source": st.lock_source,
+            "cog_verify_error_deg": st.cog_verify_error_deg,
+            "relock_count": st.relock_count,
         }
 
     @staticmethod
@@ -1051,6 +1102,7 @@ class Controller:
             self._straight_target_true_heading = None
         self._was_moving_straight = is_moving_straight
 
+        self._check_imu_frame_continuity(mono_now)
         if (
             self._gps_heading_aligner is not None
             and self._gps_reading is not None
