@@ -43,6 +43,33 @@ plant), plus sign cases in `test_oak_imu.py` and `test_waypoint_nav.py`.
 If steering or ALIGN turns the wrong way, **fix the sign at the reader and
 re-chalk**. Never add a second inversion downstream.
 
+### Mount orientation: gravity, not an assumption (2026-09-19)
+
+`gyro_y` is CW-positive because BMI270 **+Y points DOWN** on the current,
+validated mount — true today (accelerometer reads about −1 g on Y at rest),
+but a MOUNTING fact, not a software constant. Re-mount the camera upside down
+and +Y points UP: `+gy` silently becomes counter-clockwise, and the heading
+inverts again exactly the way it did before 2026-09-19, just from a different
+cause. Gravity answers the question at boot instead of assuming it.
+
+`calibrate_gyro` now also averages the raw accelerometer over the same
+collection window and derives `OakImuReader.yaw_axis_sign` (default `+1`,
+applied only to the `gyro_y` channel — never to `gravity_projected`, which is
+mount-agnostic by construction, or to the `gyro_x`/`gyro_z` diagnostics):
+
+| Reading | Result | Log |
+| --- | --- | --- |
+| `\|ay\|/\|a\| ≥ 0.7`, `ay < 0` | `yaw_axis_sign = +1` (validated mount) | `+Y points DOWN (ay=... g): gyro_y is clockwise-positive, yaw_axis_sign=+1` |
+| `\|ay\|/\|a\| ≥ 0.7`, `ay ≥ 0` | `yaw_axis_sign = -1` (inverted mount) | `+Y points UP (ay=... g): camera appears mounted inverted; yaw_axis_sign=-1 so heading stays clockwise-positive` |
+| `\|ay\|/\|a\| < 0.7` (Y not vertical) | stays `+1` | Y axis is not vertical; `gyro_y` is not the yaw axis for this mount; select `gravity_projected` instead |
+| no accelerometer data | unchanged | `no accelerometer data during calibration; yaw axis sign unchanged` |
+
+`oak_yaw_axis_sign_auto` (default `True`) gates whether the check can change
+`yaw_axis_sign`; `False` keeps it pinned at `+1` and the check only logs
+(check-only). `get_health()` exposes `yaw_axis_sign` and `accel_mean_g`
+(the last calibration's averaged gravity vector, in g); `yaw_rate_sign` now
+reports the effective sign instead of an unconditional `+1`.
+
 ## Architecture (lossless producer yaw)
 
 ```

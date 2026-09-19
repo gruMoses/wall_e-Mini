@@ -299,6 +299,9 @@ def run() -> None:
                     stationary_bias_tau_s=float(
                         getattr(config.imu_steering, "oak_stationary_bias_tau_s", 15.0)
                     ),
+                    yaw_axis_sign_auto=bool(
+                        getattr(config.imu_steering, "oak_yaw_axis_sign_auto", True)
+                    ),
                 )
                 imu_source_used = "oak_d"
             except Exception as e:

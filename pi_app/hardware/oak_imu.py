@@ -80,6 +80,7 @@ class OakImuReader:
         stationary_accel_std_g: float = 0.03,
         stationary_max_rate_dps: float = 2.0,
         stationary_bias_tau_s: float = 15.0,
+        yaw_axis_sign_auto: bool = True,
     ) -> None:
         self._oak = oak_reader
         self.alpha_rp = complementary_alpha_rp
@@ -90,6 +91,13 @@ class OakImuReader:
         self.pitch_rad = 0.0
         self.yaw_rad = 0.0
         self.gyro_bias_dps = (0.0, 0.0, 0.0)
+        # Sign multiplier applied to the gyro_y channel only (see
+        # _resolve_yaw_axis_sign_from_gravity / docs/heading_tuning.md
+        # "Mount orientation"). +1 assumes the current, validated mount
+        # (BMI270 +Y points DOWN). calibrate_gyro derives it from gravity.
+        self.yaw_axis_sign: float = 1.0
+        self._yaw_axis_sign_auto = bool(yaw_axis_sign_auto)
+        self._last_accel_mean_g: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
         self._last_device_ts_s: Optional[float] = None
         self._last_host_sample_ts: Optional[float] = None
@@ -221,8 +229,18 @@ class OakImuReader:
         sy: float,
         sz: float,
         source: str,
+        yaw_axis_sign: float = 1.0,
     ) -> float:
         """Compute world-yaw rate from gyro, given an ALREADY-RESOLVED source.
+
+        ``yaw_axis_sign`` (default +1, applied ONLY to the "gyro_y" default
+        branch) corrects for camera mount orientation: the OAK pipeline
+        assumes BMI270 +Y points DOWN, which is a mounting fact derived from
+        gravity at calibration, not a software constant. It is never applied
+        to "gravity_projected" (mount-agnostic by construction — it projects
+        onto measured gravity directly) or to "gyro_x"/"gyro_z" (diagnostics
+        whose sign already depends on mounting). See
+        _resolve_yaw_axis_sign_from_gravity / docs/heading_tuning.md.
 
         ``source`` must be the final channel name ("gyro_x" / "gyro_y" /
         "gyro_z" / "gravity_projected") — never "auto". Resolving "auto" and
@@ -259,7 +277,7 @@ class OakImuReader:
         if source == "gyro_z":
             return gz
         # Default: gyro_y (OAK camera frame yaw axis)
-        return gy
+        return gy * yaw_axis_sign
 
     @staticmethod
     def _dominant_axis(gx_dps: float, gy_dps: float, gz_dps: float) -> str:
@@ -286,6 +304,9 @@ class OakImuReader:
         cum_z: float,
         cum_grav: float,
     ) -> float:
+        """Select the cum-delta channel. cum_y stays RAW on the producer;
+        yaw_axis_sign is applied here (mount correction), never to cum_grav
+        (mount-agnostic) or cum_x/cum_z (diagnostics)."""
         src = self._selected_source()
         if src == "gyro_x":
             return cum_x
@@ -293,7 +314,7 @@ class OakImuReader:
             return cum_z
         if src == "gravity_projected":
             return cum_grav
-        return cum_y
+        return cum_y * self.yaw_axis_sign
 
     def _seed_sample_clocks(self, dev_ts: float, host_ts: float) -> None:
         """Remember sample identity without integrating (no heading jump)."""
@@ -404,6 +425,90 @@ class OakImuReader:
             age_s,
         )
 
+    def _sample_raw_accel_g(self) -> tuple[Optional[tuple[float, float, float]], float]:
+        """Return ((ax, ay, az) g, age_s) or (None, age) — raw accelerometer.
+
+        Unlike gyro there is no bias/NMNI concept for accel, so the producer's
+        published ax/ay/az_mss (via ``get_imu_data``) is always raw; no
+        separate "raw accessor" contract is needed the way
+        ``get_imu_raw_gyro_dps`` exists for gyro.
+        """
+        try:
+            imu_state, age = self._oak.get_imu_data()
+        except Exception:
+            return None, float("inf")
+        age_s = float(age) if age is not None else float("inf")
+        try:
+            return (
+                (
+                    float(imu_state.ax_mss) / G_MSS,
+                    float(imu_state.ay_mss) / G_MSS,
+                    float(imu_state.az_mss) / G_MSS,
+                ),
+                age_s,
+            )
+        except Exception:
+            return None, age_s
+
+    def _resolve_yaw_axis_sign_from_gravity(
+        self, accel_mean_g: Optional[tuple[float, float, float]]
+    ) -> None:
+        """Derive ``yaw_axis_sign`` from gravity at calibration (2026-09-19).
+
+        The OAK pipeline pins the yaw-rate channel to gyro_y and assumes the
+        BMI270 +Y axis points DOWN — true for the current, validated mount
+        (accelerometer reads about -1 g on Y at rest), but that is a MOUNTING
+        fact, not a software constant. If the camera is ever re-mounted
+        upside down, +Y points UP and +gy silently becomes counter-clockwise
+        — exactly the inversion documented on :meth:`read`, just from a
+        different cause. Gravity answers the mounting question at boot
+        instead of assuming it.
+        """
+        if accel_mean_g is not None:
+            self._last_accel_mean_g = accel_mean_g
+        if accel_mean_g is None:
+            logger.warning(
+                "OAK IMU: no accelerometer data during calibration; yaw "
+                "axis sign unchanged (%+.0f)", self.yaw_axis_sign,
+            )
+            return
+        ax, ay, az = accel_mean_g
+        n = math.sqrt(ax * ax + ay * ay + az * az)
+        if n < 0.5:
+            logger.warning(
+                "OAK IMU: no accelerometer data during calibration; yaw "
+                "axis sign unchanged (%+.0f)", self.yaw_axis_sign,
+            )
+            return
+        if abs(ay) / n >= 0.7:
+            resolved = 1.0 if ay < 0.0 else -1.0
+            if ay < 0.0:
+                logger.warning(
+                    "OAK IMU: +Y points DOWN (ay=%+.2f g): gyro_y is "
+                    "clockwise-positive, yaw_axis_sign=%+.0f", ay, resolved,
+                )
+            else:
+                logger.warning(
+                    "OAK IMU: +Y points UP (ay=%+.2f g): camera appears "
+                    "mounted inverted; yaw_axis_sign=%+.0f so heading stays "
+                    "clockwise-positive", ay, resolved,
+                )
+        else:
+            resolved = 1.0
+            logger.warning(
+                "OAK IMU: Y axis is not vertical at calibration (ax=%+.2f "
+                "ay=%+.2f az=%+.2f g): gyro_y is not the yaw axis for this "
+                "mount, heading is unreliable — select gravity_projected "
+                "instead. yaw_axis_sign left at %+.0f", ax, ay, az, resolved,
+            )
+        if self._yaw_axis_sign_auto:
+            self.yaw_axis_sign = resolved
+        else:
+            logger.warning(
+                "OAK IMU: oak_yaw_axis_sign_auto is False (check-only); "
+                "yaw_axis_sign stays %+.0f", self.yaw_axis_sign,
+            )
+
     def calibrate_gyro(self, duration_s: float = 3.0) -> tuple:
         """Collect stationary RAW gyro samples to estimate bias.
 
@@ -426,14 +531,22 @@ class OakImuReader:
         mean while this method has just forced bias to 0, fighting the
         explicit collection with its own estimate. Restored in the same
         ``finally`` as everything else.
+
+        The same collection window also averages the raw accelerometer to
+        derive ``yaw_axis_sign`` from gravity — see
+        ``_resolve_yaw_axis_sign_from_gravity``.
         """
         prior_bias = self.gyro_bias_dps
         prior_stationary_tracking_enabled = self._stationary_bias_tracking_enabled
         prior_zupt_enabled = self._zupt_enabled
         measured: Optional[tuple] = None
+        accel_mean_g: Optional[tuple] = None
         xs: list[float] = []
         ys: list[float] = []
         zs: list[float] = []
+        axs: list[float] = []
+        ays: list[float] = []
+        azs: list[float] = []
         try:
             # Pause integrate-path transforms for the collection window.
             self.gyro_bias_dps = (0.0, 0.0, 0.0)
@@ -450,12 +563,23 @@ class OakImuReader:
                     xs.append(sample[0])
                     ys.append(sample[1])
                     zs.append(sample[2])
+                accel_sample, accel_age_s = self._sample_raw_accel_g()
+                if accel_sample is not None and accel_age_s < 0.5:
+                    axs.append(accel_sample[0])
+                    ays.append(accel_sample[1])
+                    azs.append(accel_sample[2])
                 time.sleep(0.01)
             if xs:
                 measured = (
                     sum(xs) / len(xs),
                     sum(ys) / len(ys),
                     sum(zs) / len(zs),
+                )
+            if axs:
+                accel_mean_g = (
+                    sum(axs) / len(axs),
+                    sum(ays) / len(ays),
+                    sum(azs) / len(azs),
                 )
         finally:
             # Always land on a real bias — the measured mean, or the prior
@@ -485,6 +609,7 @@ class OakImuReader:
                     "prior bias (x=%.4f y=%.4f z=%.4f dps)",
                     float(duration_s), prior_bias[0], prior_bias[1], prior_bias[2],
                 )
+            self._resolve_yaw_axis_sign_from_gravity(accel_mean_g)
         return self.gyro_bias_dps
 
     def calibrate_mag_hard_iron(self, duration_s: float = 5.0) -> tuple:
@@ -575,7 +700,10 @@ class OakImuReader:
             "yaw_rate_source_selected": selected,
             # heading_deg = (+yaw_rad_deg) mod 360: compass-style, CW-positive
             # about the body-DOWN axis. See OakImuReader.read for the contract.
-            "yaw_rate_sign": +1.0,
+            # The effective sign now reflects yaw_axis_sign (the gravity-
+            # derived mount correction applied to the gyro_y channel) rather
+            # than an unconditional +1.
+            "yaw_rate_sign": float(self.yaw_axis_sign),
             "yaw_rate_scale": self._yaw_rate_scale,
             "auto_axis": self._auto_axis,
             "use_gravity_projected": self._use_gravity_projected_yaw_rate,
@@ -587,6 +715,10 @@ class OakImuReader:
             "stationary": self._last_stationary,
             "gyro_bias_dps": tuple(self.gyro_bias_dps),
             "tracked_bias_dps": tuple(self._last_tracked_bias_dps),
+            # Mount orientation (2026-09-19): derived from gravity at
+            # calibration. See _resolve_yaw_axis_sign_from_gravity.
+            "yaw_axis_sign": float(self.yaw_axis_sign),
+            "accel_mean_g": tuple(self._last_accel_mean_g),
             "integrate_status": self._integrate_status,
             "integration_path": "producer" if self._has_producer_cum else "legacy_snapshot",
             "sample_age_s": self._last_sample_age_s,
@@ -758,6 +890,7 @@ class OakImuReader:
             sy if sy is not None else 0.0,
             sz if sz is not None else 0.0,
             resolved_source,
+            self.yaw_axis_sign,
         )
         yaw_rate_rads *= self._yaw_rate_scale
         yaw_rate_world_dps = math.degrees(yaw_rate_rads)

@@ -58,6 +58,7 @@ VESC over CAN (`can0`) is the primary drive path; Arduino motor-driver fallback 
 - IMU feeds `ImuSteeringCompensator` (PID heading-hold, differential byte correction).
 - GPS COG heading alignment is **implemented** (software) — one-shot locks IMU heading to true north during a forward, straight manual RTK-fixed run, then freezes the offset for the armed session; field validation pending (`docs/gps_heading_alignment.md`).
 - Stationary gyro-bias tracking / ZUPT (2026-09-19) requires a fresh wheels-stopped motion witness (`main.py` pushes `rpm_plausibility.wheels_stopped()` into `OakDepthReader.set_motion_witness`) in addition to a quiet gyro/accel window, because a genuine slow steady turn is indistinguishable from bias by gyro alone — see `docs/heading_tuning.md`.
+- `OakImuReader.calibrate_gyro` also derives `yaw_axis_sign` from the accelerometer at boot (BMI270 +Y should read about −1 g on the current mount), so a future upside-down re-mount flips the correction instead of silently inverting the heading — see `docs/heading_tuning.md` "Mount orientation".
 
 ### Camera calibration — READ THIS BEFORE TOUCHING ANY CAMERA GEOMETRY
 

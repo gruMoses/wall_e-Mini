@@ -124,6 +124,16 @@ class ImuSteeringConfig:
     oak_stationary_bias_tau_s: float = 15.0
     # Freeze yaw integration entirely while provably stationary.
     oak_zupt_enabled: bool = True
+    # Derive yaw_axis_sign from gravity at calibration (2026-09-19): the
+    # gyro_y channel is assumed CW-positive because BMI270 +Y points DOWN on
+    # the current, validated mount — a MOUNTING fact, not a software
+    # constant. If the camera is ever re-mounted upside down, +Y points UP
+    # and +gy silently becomes counter-clockwise. True: calibrate_gyro reads
+    # gravity and flips yaw_axis_sign if needed. False: yaw_axis_sign stays
+    # +1 and calibrate_gyro only logs what it would have done (check-only).
+    # See OakImuReader._resolve_yaw_axis_sign_from_gravity /
+    # docs/heading_tuning.md "Mount orientation".
+    oak_yaw_axis_sign_auto: bool = True
     # OAK IMU yaw-rate source:
     # - "auto": lock onto dominant gyro axis while turning (can pick the wrong axis
     #   under vibration — chalk 90/180 with pi_app.cli.oak_yaw_chalk_test before
