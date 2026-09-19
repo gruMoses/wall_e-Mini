@@ -482,6 +482,15 @@ class OakDepthReader:
         self._recording_queues: dict | None = None
         self._device_ready = threading.Event()
         self._depth_stats_decimation = 3
+        # OAK chip temperature (2026-09-19 logging audit), sampled once/sec
+        # from the pipeline loop via pipeline.getDefaultDevice().
+        # getChipTemperature() -- a live device call, so it must not run at
+        # tick rate. average/css/mss are dai.ChipTemperature's own fields;
+        # css/mss are best-effort (not on every depthai/device combination).
+        self._chip_temp_c: float | None = None
+        self._chip_temp_css_c: float | None = None
+        self._chip_temp_mss_c: float | None = None
+        self._last_chip_temp_poll_t: float = 0.0
         self._depth_stats_counter = 0
         self._rgb_poll_enabled = False
         self._rgb_always_poll = False  # set True for YOLO (passthrough monitoring)
@@ -838,6 +847,9 @@ class OakDepthReader:
             rgb_err = self._last_rgb_error_msg
             imu_err = self._last_imu_error_msg
             rgb_expected = bool(self._rgb_poll_enabled or self._rgb_always_poll)
+            chip_temp_c = self._chip_temp_c
+            chip_temp_css_c = self._chip_temp_css_c
+            chip_temp_mss_c = self._chip_temp_mss_c
 
         loop_age_s = (now - loop_ts) if loop_ts > 0.0 else float("inf")
         depth_age_s = (now - depth_ts) if depth_ts > 0.0 else float("inf")
@@ -884,6 +896,9 @@ class OakDepthReader:
             "last_detection_error": det_err or None,
             "last_rgb_error": rgb_err or None,
             "last_imu_error": imu_err or None,
+            "chip_temp_c": round(chip_temp_c, 1) if chip_temp_c is not None else None,
+            "chip_temp_css_c": round(chip_temp_css_c, 1) if chip_temp_css_c is not None else None,
+            "chip_temp_mss_c": round(chip_temp_mss_c, 1) if chip_temp_mss_c is not None else None,
         }
 
     @property
@@ -1382,6 +1397,23 @@ class OakDepthReader:
                     now = time.monotonic()
                 if now - next_imu_poll > (self._imu_poll_interval_s * max_catchup):
                     next_imu_poll = now
+                # Chip temperature: a live device call, so cap it at 1 Hz
+                # (matches the slow diagnostics line in pi_app.app.main).
+                if now - self._last_chip_temp_poll_t >= 1.0:
+                    self._last_chip_temp_poll_t = now
+                    try:
+                        device = pipeline.getDefaultDevice()
+                        chip_temp = device.getChipTemperature()
+                        with self._lock:
+                            self._chip_temp_c = float(chip_temp.average)
+                            self._chip_temp_css_c = float(getattr(chip_temp, "css", None)) \
+                                if getattr(chip_temp, "css", None) is not None else None
+                            self._chip_temp_mss_c = float(getattr(chip_temp, "mss", None)) \
+                                if getattr(chip_temp, "mss", None) is not None else None
+                    except Exception:
+                        # Non-fatal: temperature is a diagnostic, not required
+                        # for depth/detection/IMU. Leave the last-known value.
+                        pass
                 time.sleep(1.0 / self._obs_cfg.update_rate_hz)
         except Exception as e:
             # A fatal device/communication error (USB drop, XLink teardown) ends

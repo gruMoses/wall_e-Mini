@@ -114,6 +114,67 @@ def round_floats(val, ndigits: int):
 
 
 # ---------------------------------------------------------------------------
+# imu.oak_imu per-tick filter (2026-09-19 logging audit, Commit C)
+# ---------------------------------------------------------------------------
+#
+# OakImuReader.get_health() re-exports OakDepthReader.get_imu_metrics()
+# wholesale (the `imu_metrics` dict merged via **imu_metrics), so every key
+# below is an exact duplicate of a key already in the separate `imu_pipeline`
+# block -- confirmed key-for-key against pi_app/hardware/oak_depth.py's
+# get_imu_metrics(). Dropping them from the per-tick imu.oak_imu dict does
+# NOT touch get_health() itself (still full for live consumers: the field
+# chalk-test CLI, controller.get_imu_status()) -- only what main.py copies
+# into the per-tick log line.
+_OAK_IMU_DROP_PREFIXES = ("producer_", "queue_", "drain_batch_", "cadence_", "host_queue_")
+_OAK_IMU_DROP_KEYS = frozenset({
+    "max_packets_per_drain",
+    "last_batch_packets",
+    "zupt_engage_count",
+    "bias_updates",
+    "bias_gx_dps",
+    "bias_gy_dps",
+    "bias_gz_dps",
+    "window_gyro_std_dps",
+    "window_accel_std_g",
+    "last_bias_update_host_ts",
+    "stationary_tracking_enabled",
+    "zupt_enabled",
+})
+
+
+def _filter_oak_imu_for_log(oak_imu: dict) -> dict:
+    """Drop the imu.oak_imu keys that duplicate the `imu_pipeline`/slow-line
+    block. Keeps OakImuReader's own state: yaw_rate_source_*, yaw_axis_sign,
+    integrate_status, integration_path, sample_age_s, last_dt_s,
+    gx/gy/gz_body_dps, yaw_rate_world_dps, heading_deg, tracked_bias_dps,
+    gyro_bias_dps, stationary, zupt_active, count_*, and the oak_* health
+    flags -- none of which are re-exports of get_imu_metrics().
+    """
+    if not isinstance(oak_imu, dict):
+        return oak_imu
+    out = {}
+    for k, v in oak_imu.items():
+        if k in _OAK_IMU_DROP_KEYS:
+            continue
+        if any(k.startswith(p) for p in _OAK_IMU_DROP_PREFIXES):
+            continue
+        out[k] = v
+    return out
+
+
+def _filter_imu_status_for_log(imu_status):
+    """Apply ``_filter_oak_imu_for_log`` to imu_status["oak_imu"] (if
+    present) without mutating the caller's dict."""
+    if not isinstance(imu_status, dict):
+        return imu_status
+    if "oak_imu" not in imu_status:
+        return imu_status
+    filtered = dict(imu_status)
+    filtered["oak_imu"] = _filter_oak_imu_for_log(imu_status["oak_imu"])
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Console heartbeat gate
 # ---------------------------------------------------------------------------
 
@@ -270,9 +331,7 @@ def build_log_obj(
     cmd,
     loop_dt_ms,
     imu_dt_ms,
-    imu_pipeline,
     imu_motion_witness_still,
-    oak_camera_health,
     events,
 ) -> dict:
     """Build the per-tick structured JSON log object.
@@ -284,6 +343,14 @@ def build_log_obj(
     are already pulled from the live ``BmsService``, ``recording_state`` is
     ``oak_recorder.recording_state`` (a string or None), and ``events`` is
     the list of ``SafetyEvent`` members fired this tick.
+
+    ``imu_pipeline`` and ``oak_camera_health`` are NOT in this per-tick
+    object (2026-09-19 logging audit, Commit C): both are slowly-changing
+    diagnostics logged once/second in the separate "slow" line instead (see
+    ``build_slow_obj``). The ``imu`` block here is filtered
+    (``_filter_imu_status_for_log``, drops imu.oak_imu's re-exported
+    imu_pipeline duplicates) and rounded to 3 decimals -- the slow line
+    keeps full precision.
     """
     return {
         "ts": round(now_ts, 3),
@@ -294,7 +361,7 @@ def build_log_obj(
         "vesc_pack_low_latched": telem.get("vesc_pack_low_latched", False),
         "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
         "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
-        "imu": imu_status if imu_status else None,
+        "imu": round_floats(_filter_imu_status_for_log(imu_status), 3) if imu_status else None,
         "imu_steering": {
             "steering_input": telem.get("steering_input"),
             "correction_raw": telem.get("imu_correction_raw"),
@@ -390,10 +457,10 @@ def build_log_obj(
             "wp_in_align": telem.get("wp_in_align"),
         }),
         "straight_intent": telem.get("straight_intent"),
-        "heading_offset_deg": round1(telem.get("heading_offset_deg")),
-        "heading_offset_locked": telem.get("heading_offset_locked"),
-        "heading_offset_frozen": telem.get("heading_offset_frozen"),
-        "heading_offset_refining": telem.get("heading_offset_refining"),
+        # heading_offset_deg/locked/frozen/refining dropped as flat top-level
+        # keys (2026-09-19 logging audit): they duplicate heading_align's
+        # offset_deg/locked/frozen/refining below exactly (same telemetry
+        # values -- see controller.py's telemetry["heading_align"] block).
         "corrected_heading_deg": round1(telem.get("corrected_heading_deg")),
         "heading_align": round1(telem.get("heading_align") or {}),
         "recording_state": recording_state,
@@ -439,8 +506,37 @@ def build_log_obj(
         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},
         "loop_dt_ms": loop_dt_ms,
         "imu_dt_ms": imu_dt_ms,
-        "imu_pipeline": imu_pipeline,
         "imu_motion_witness_still": imu_motion_witness_still,
-        "oak_camera_health": oak_camera_health,
         "events": [e.name for e in events] if events else [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Slow line (1 Hz diagnostics, armed or not)
+# ---------------------------------------------------------------------------
+
+def should_write_slow_line(now: float, last_write_t: float, interval_s: float = 1.0) -> bool:
+    """Gate for the 1 Hz "slow" diagnostics line -- unconditional on arm
+    state (unlike should_log_tick), since imu_pipeline/oak_camera_health/
+    chip temperature are worth knowing about even while disarmed."""
+    return (now - last_write_t) >= interval_s
+
+
+def build_slow_obj(*, now_ts: float, imu_pipeline, oak_camera_health, chip_temp_c) -> dict:
+    """Build the 1 Hz "slow" diagnostics line.
+
+    imu_pipeline and oak_camera_health are slowly-changing (their counters
+    move over seconds, not ticks) and were previously logged at the full
+    armed 10 Hz tick rate for no benefit -- imu_pipeline alone was ~1.5 KB/
+    line. Both, plus the OAK chip temperature, now get one line per second
+    regardless of arm state, at full float precision (unlike the per-tick
+    "imu" block, which is rounded to 3 decimals).
+    """
+    return {
+        "type": "slow",
+        "ts": round(now_ts, 3),
+        "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        "imu_pipeline": imu_pipeline,
+        "oak_camera_health": oak_camera_health,
+        "oak": {"chip_temp_c": chip_temp_c},
     }

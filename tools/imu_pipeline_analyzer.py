@@ -51,6 +51,26 @@ def _latest_text(rows: list[dict], key: str) -> str | None:
     return None
 
 
+def _imu_pipeline_rows(rows: list[dict]) -> list[dict]:
+    """Return the imu_pipeline dicts from a log, in either format.
+
+    2026-09-19 logging audit: imu_pipeline moved off the per-tick line (it
+    changes over seconds, not ticks) into a once/second {"type": "slow", ...}
+    line. Prefer slow-line rows when present; fall back to the old per-tick
+    location so this tool still reads logs captured before the migration.
+    """
+    slow_rows = [
+        r.get("imu_pipeline") for r in rows
+        if r.get("type") == "slow" and isinstance(r.get("imu_pipeline"), dict)
+    ]
+    if slow_rows:
+        return slow_rows
+    return [
+        r.get("imu_pipeline") for r in rows
+        if r.get("type") != "slow" and isinstance(r.get("imu_pipeline"), dict)
+    ]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Analyze IMU pipeline metrics from structured run logs")
     ap.add_argument("--log", type=Path, required=True, help="Path to run_*.log")
@@ -102,8 +122,7 @@ def main() -> int:
         print("error: no loop_dt_ms samples found")
         return 2
 
-    imu_rows = [r.get("imu_pipeline") for r in rows if isinstance(r.get("imu_pipeline"), dict)]
-    imu_rows = [r for r in imu_rows if isinstance(r, dict)]
+    imu_rows = _imu_pipeline_rows(rows)
     imu_avail_rows = [r for r in imu_rows if bool(r.get("metrics_available"))]
 
     ge30_count = sum(v >= 30.0 for v in loop_vals)

@@ -1108,6 +1108,38 @@ class OakRecorder:
             obj["steer_offset"] = round(t.steer_offset, 1)
         if t.distance_error_m is not None:
             obj["distance_error_m"] = round(t.distance_error_m, 2)
+        # Fields already carried on RecordingTelemetry (main.py wires them
+        # from controller telemetry every tick) but previously dropped here
+        # before reaching the MCAP file (2026-09-19 logging audit).
+        if t.corrected_heading_deg is not None:
+            obj["corrected_heading_deg"] = round(t.corrected_heading_deg, 1)
+        if t.heading_offset_deg is not None:
+            obj["heading_offset_deg"] = round(t.heading_offset_deg, 1)
+        if t.heading_offset_locked is not None:
+            obj["heading_offset_locked"] = t.heading_offset_locked
+        if t.heading_offset_frozen is not None:
+            obj["heading_offset_frozen"] = t.heading_offset_frozen
+        if t.gps_lat is not None and t.gps_lon is not None:
+            obj["gps"] = {
+                "lat": round(t.gps_lat, 8),
+                "lon": round(t.gps_lon, 8),
+                "fix": t.gps_fix,
+                "sats": t.gps_sats,
+                "hdop": round(t.gps_hdop, 2) if t.gps_hdop is not None else None,
+                "diff_age_s": round(t.gps_diff_age_s, 1) if t.gps_diff_age_s is not None else None,
+            }
+        if t.vesc_left_rpm is not None:
+            obj["vesc_left_rpm"] = t.vesc_left_rpm
+        if t.vesc_right_rpm is not None:
+            obj["vesc_right_rpm"] = t.vesc_right_rpm
+        if t.vesc_actual_speed_mps is not None:
+            obj["vesc_actual_speed_mps"] = round(t.vesc_actual_speed_mps, 3)
+        if t.charger_inhibit is not None:
+            obj["charger_inhibit"] = t.charger_inhibit
+        if t.nav_state is not None:
+            obj["nav_state"] = t.nav_state
+        if t.wp_heading_error_deg is not None:
+            obj["wp_heading_error_deg"] = round(t.wp_heading_error_deg, 1)
         data = json.dumps(obj).encode("utf-8")
         log_ns = int(t.timestamp * 1e9)
         writer.add_message(

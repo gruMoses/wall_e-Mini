@@ -373,5 +373,36 @@ class TestStalenessHoldsDuringOutage(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Chip temperature (2026-09-19 logging audit): sampled at 1 Hz from
+# pipeline.getDefaultDevice().getChipTemperature() inside the real polling
+# loop (guarded by try/except -- a fake pipeline without getDefaultDevice()
+# must not break polling, confirmed by every other test in this file still
+# passing). These tests cover the storage/exposure contract directly rather
+# than re-simulating the full depthai pipeline just for a temperature read.
+# ---------------------------------------------------------------------------
+
+class TestChipTemperature(unittest.TestCase):
+
+    def test_get_health_defaults_to_none(self):
+        reader = _make_reader()
+        h = reader.get_health()
+        self.assertIn("chip_temp_c", h)
+        self.assertIsNone(h["chip_temp_c"])
+        self.assertIsNone(h["chip_temp_css_c"])
+        self.assertIsNone(h["chip_temp_mss_c"])
+
+    def test_get_health_reports_stored_value_rounded(self):
+        reader = _make_reader()
+        with reader._lock:
+            reader._chip_temp_c = 42.567
+            reader._chip_temp_css_c = 43.12
+            reader._chip_temp_mss_c = None  # not every device reports this
+        h = reader.get_health()
+        self.assertEqual(h["chip_temp_c"], 42.6)
+        self.assertEqual(h["chip_temp_css_c"], 43.1)
+        self.assertIsNone(h["chip_temp_mss_c"])
+
+
 if __name__ == "__main__":
     unittest.main()

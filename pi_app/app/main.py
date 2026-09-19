@@ -40,6 +40,7 @@ try:
     from pi_app.app.log_gating import (
         should_log_tick, cleanup_old_logs as _cleanup_old_logs,
         should_print_console_line, _session_header, build_log_obj,
+        build_slow_obj, should_write_slow_line,
     )
     from config import config
 except ModuleNotFoundError:
@@ -68,6 +69,7 @@ except ModuleNotFoundError:
     from pi_app.app.log_gating import (  # type: ignore
         should_log_tick, cleanup_old_logs as _cleanup_old_logs,
         should_print_console_line, _session_header, build_log_obj,
+        build_slow_obj, should_write_slow_line,
     )
     from config import config  # type: ignore
 
@@ -460,6 +462,7 @@ def run() -> None:
         prev_loop_ts = time.monotonic()
         _vesc_debug_last_t = 0.0
         _console_last_print_t = 0.0
+        _last_slow_write_t = 0.0
         prev_imu_ts = getattr(controller, "_last_imu_update", None)
         bt_shared_path = Path("/tmp/wall_e_bt_latest.json")
         bt_cached_data = None
@@ -954,22 +957,6 @@ def run() -> None:
                     mode_changed=_mode_changed,
                 ):
                     last_log_ts = now_ts
-                    imu_pipeline = None
-                    if oak_reader is not None:
-                        imu_pipeline = {"metrics_available": False}
-                        if oak_imu_metrics_getter is not None:
-                            try:
-                                imu_metrics = oak_imu_metrics_getter()
-                                if isinstance(imu_metrics, dict):
-                                    imu_pipeline["metrics_available"] = True
-                                    # Keep IMU pipeline timing metrics at full precision.
-                                    imu_pipeline.update(imu_metrics)
-                                elif hasattr(imu_metrics, "__dict__"):
-                                    imu_pipeline["metrics_available"] = True
-                                    # Keep IMU pipeline timing metrics at full precision.
-                                    imu_pipeline.update(vars(imu_metrics))
-                            except Exception:
-                                pass
                     _bms_state_for_log = bms_service.get_state() if bms_service is not None else None
                     _bms_charging_for_log = bms_service.is_charging() if bms_service is not None else None
                     log_obj = build_log_obj(
@@ -989,9 +976,7 @@ def run() -> None:
                         cmd=cmd,
                         loop_dt_ms=loop_dt_ms,
                         imu_dt_ms=imu_dt_ms,
-                        imu_pipeline=imu_pipeline,
                         imu_motion_witness_still=imu_motion_witness_still,
-                        oak_camera_health=oak_camera_health,
                         events=events,
                     )
                     line = json.dumps(log_obj)
@@ -1007,6 +992,46 @@ def run() -> None:
                                     _log_write_error_reported = True
                             except Exception:
                                 pass
+            except Exception:
+                pass
+
+            # Slow (1 Hz) diagnostics line: imu_pipeline / oak_camera_health /
+            # OAK chip temperature. These change over seconds, not ticks --
+            # imu_pipeline alone cost ~1.5 KB/line at the armed 10 Hz rate for
+            # no benefit -- so they get one line per second, armed or not,
+            # instead of riding the per-tick line above.
+            try:
+                if should_write_slow_line(loop_now, _last_slow_write_t):
+                    _last_slow_write_t = loop_now
+                    imu_pipeline = None
+                    if oak_reader is not None:
+                        imu_pipeline = {"metrics_available": False}
+                        if oak_imu_metrics_getter is not None:
+                            try:
+                                imu_metrics = oak_imu_metrics_getter()
+                                if isinstance(imu_metrics, dict):
+                                    imu_pipeline["metrics_available"] = True
+                                    imu_pipeline.update(imu_metrics)
+                                elif hasattr(imu_metrics, "__dict__"):
+                                    imu_pipeline["metrics_available"] = True
+                                    imu_pipeline.update(vars(imu_metrics))
+                            except Exception:
+                                pass
+                    _chip_temp_c = (
+                        oak_camera_health.get("chip_temp_c")
+                        if isinstance(oak_camera_health, dict) else None
+                    )
+                    slow_obj = build_slow_obj(
+                        now_ts=time.time(),
+                        imu_pipeline=imu_pipeline,
+                        oak_camera_health=oak_camera_health,
+                        chip_temp_c=_chip_temp_c,
+                    )
+                    if log_fh is not None:
+                        try:
+                            log_fh.write(json.dumps(slow_obj) + "\n")
+                        except Exception:
+                            pass
             except Exception:
                 pass
 

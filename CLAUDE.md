@@ -128,6 +128,10 @@ Daly SPIM08HP over BLE (`bleak`). Polls SOC / cell voltages / temp / MOSFET stat
 
 `config.py` (repo root) — one frozen `Config` dataclass with nested sub-configs. Edit this to change thresholds, enable/disable subsystems, set BMS MAC, VESC CAN IDs, etc.
 
+## Logging
+
+`logs/run_*.log` / `arm_*.log` mix four JSON line shapes (per-tick, 1 Hz "slow", session header, event) — see `docs/logging_troubleshooting.md` for the field-by-field format.
+
 ## Running Tests
 
 ```bash

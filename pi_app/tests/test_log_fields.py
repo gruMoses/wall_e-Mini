@@ -18,11 +18,15 @@ from unittest.mock import patch
 
 from pi_app.app.log_gating import (
     build_log_obj,
+    build_slow_obj,
     should_print_console_line,
+    should_write_slow_line,
     to_int,
     round1,
     round_floats,
     _session_header,
+    _filter_oak_imu_for_log,
+    _filter_imu_status_for_log,
 )
 from config import config as real_config
 
@@ -53,9 +57,7 @@ def _base_kwargs(**overrides):
         cmd=_cmd(),
         loop_dt_ms=33,
         imu_dt_ms=33,
-        imu_pipeline=None,
         imu_motion_witness_still=None,
-        oak_camera_health=None,
         events=[],
     )
     kwargs.update(overrides)
@@ -206,6 +208,182 @@ class ConsoleGateTests(unittest.TestCase):
     def test_non_tty_respects_custom_interval(self):
         self.assertFalse(should_print_console_line(False, now=10.0, last_print_t=9.0, min_interval_s=2.0))
         self.assertTrue(should_print_console_line(False, now=11.0, last_print_t=9.0, min_interval_s=2.0))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commit C: imu_pipeline/oak_camera_health demoted to the "slow" line,
+# imu.oak_imu duplicate-counter drop + per-tick rounding, flat
+# heading_offset_* removal.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SlowLineCadenceTests(unittest.TestCase):
+    def test_fires_at_or_after_one_second(self):
+        self.assertTrue(should_write_slow_line(now=101.0, last_write_t=100.0))
+        self.assertFalse(should_write_slow_line(now=100.9, last_write_t=100.0))
+
+    def test_unconditional_on_arm_state(self):
+        # No is_armed parameter at all -- unlike should_log_tick, this gate
+        # fires the same way whether the robot is armed or not.
+        self.assertTrue(should_write_slow_line(now=50.0, last_write_t=48.9))
+
+    def test_respects_custom_interval(self):
+        self.assertFalse(should_write_slow_line(now=10.0, last_write_t=9.0, interval_s=2.0))
+        self.assertTrue(should_write_slow_line(now=11.0, last_write_t=9.0, interval_s=2.0))
+
+
+class BuildSlowObjTests(unittest.TestCase):
+    def test_shape_and_content(self):
+        obj = build_slow_obj(
+            now_ts=1000.0,
+            imu_pipeline={"metrics_available": True, "queue_msgs_received": 42},
+            oak_camera_health={"is_stale": False},
+            chip_temp_c=41.2345,
+        )
+        self.assertEqual(obj["type"], "slow")
+        self.assertEqual(obj["ts"], 1000.0)
+        self.assertIn("ts_iso", obj)
+        self.assertEqual(obj["imu_pipeline"], {"metrics_available": True, "queue_msgs_received": 42})
+        self.assertEqual(obj["oak_camera_health"], {"is_stale": False})
+        # Full precision -- unlike the per-tick "imu" block, the slow line is
+        # never rounded by build_slow_obj itself (chip_temp_c comes in
+        # pre-rounded from oak_depth.get_health(), but build_slow_obj must
+        # not re-round or drop precision on its own).
+        self.assertEqual(obj["oak"]["chip_temp_c"], 41.2345)
+
+    def test_none_values_pass_through(self):
+        obj = build_slow_obj(now_ts=1.0, imu_pipeline=None, oak_camera_health=None, chip_temp_c=None)
+        self.assertIsNone(obj["imu_pipeline"])
+        self.assertIsNone(obj["oak_camera_health"])
+        self.assertIsNone(obj["oak"]["chip_temp_c"])
+
+
+class OakImuFilterTests(unittest.TestCase):
+    def test_drops_producer_queue_drain_cadence_host_queue_keys(self):
+        oak_imu = {
+            "yaw_rate_source_cfg": "gyro_y",
+            "heading_deg": 12.0,
+            "count_read": 100,
+            "producer_packets_received": 500,
+            "producer_cum_yaw_y_deg": 1.5,
+            "queue_msgs_received": 10,
+            "queue_drain_count": 3,
+            "drain_batch_high_water_msgs": 4,
+            "cadence_avg_s": 0.016,
+            "host_queue_max_size": 512,
+            "max_packets_per_drain": 512,
+            "last_batch_packets": 2,
+            "zupt_engage_count": 1,
+            "bias_updates": 5,
+            "bias_gx_dps": 0.01,
+            "window_gyro_std_dps": 0.02,
+            "last_bias_update_host_ts": 123.0,
+            "stationary_tracking_enabled": True,
+            "zupt_enabled": True,
+        }
+        filtered = _filter_oak_imu_for_log(oak_imu)
+        # Kept: OakImuReader's own state, not a re-export of get_imu_metrics().
+        self.assertEqual(filtered["yaw_rate_source_cfg"], "gyro_y")
+        self.assertEqual(filtered["heading_deg"], 12.0)
+        self.assertEqual(filtered["count_read"], 100)
+        # Dropped: everything that duplicates the imu_pipeline block.
+        for key in (
+            "producer_packets_received", "producer_cum_yaw_y_deg",
+            "queue_msgs_received", "queue_drain_count",
+            "drain_batch_high_water_msgs", "cadence_avg_s",
+            "host_queue_max_size", "max_packets_per_drain",
+            "last_batch_packets", "zupt_engage_count", "bias_updates",
+            "bias_gx_dps", "window_gyro_std_dps", "last_bias_update_host_ts",
+            "stationary_tracking_enabled", "zupt_enabled",
+        ):
+            self.assertNotIn(key, filtered, f"{key} should have been dropped")
+
+    def test_keeps_stationary_and_zupt_active_top_level(self):
+        # "stationary"/"zupt_active" (OakImuReader's own last-read snapshot)
+        # are explicitly kept even though the audit's rationale is dedup --
+        # they're cheap booleans, not counters, and useful inline.
+        oak_imu = {"stationary": True, "zupt_active": False}
+        filtered = _filter_oak_imu_for_log(oak_imu)
+        self.assertEqual(filtered, {"stationary": True, "zupt_active": False})
+
+    def test_non_dict_passes_through(self):
+        self.assertIsNone(_filter_oak_imu_for_log(None))
+
+
+class FilterImuStatusForLogTests(unittest.TestCase):
+    def test_filters_nested_oak_imu_without_mutating_input(self):
+        imu_status = {
+            "heading_deg": 5.0,
+            "oak_imu": {"heading_deg": 5.0, "producer_packets_received": 10},
+        }
+        original_oak_imu = imu_status["oak_imu"]
+        filtered = _filter_imu_status_for_log(imu_status)
+        self.assertNotIn("producer_packets_received", filtered["oak_imu"])
+        self.assertEqual(filtered["heading_deg"], 5.0)
+        # Original dict passed in must be untouched.
+        self.assertIn("producer_packets_received", original_oak_imu)
+        self.assertIn("producer_packets_received", imu_status["oak_imu"])
+
+    def test_no_oak_imu_key_passes_through_unchanged(self):
+        imu_status = {"heading_deg": 5.0}
+        self.assertEqual(_filter_imu_status_for_log(imu_status), imu_status)
+
+    def test_none_passes_through(self):
+        self.assertIsNone(_filter_imu_status_for_log(None))
+
+
+class BuildLogObjCommitCTests(unittest.TestCase):
+    def test_per_tick_has_no_imu_pipeline_or_oak_camera_health_keys(self):
+        obj = build_log_obj(**_base_kwargs())
+        self.assertNotIn("imu_pipeline", obj)
+        self.assertNotIn("oak_camera_health", obj)
+
+    def test_per_tick_has_no_flat_heading_offset_keys(self):
+        telem = {
+            "heading_offset_deg": 3.456, "heading_offset_locked": True,
+            "heading_offset_frozen": False, "heading_offset_refining": True,
+            "heading_align": {
+                "offset_deg": 3.456, "locked": True, "frozen": False, "refining": True,
+            },
+        }
+        obj = build_log_obj(**_base_kwargs(telem=telem))
+        for key in (
+            "heading_offset_deg", "heading_offset_locked",
+            "heading_offset_frozen", "heading_offset_refining",
+        ):
+            self.assertNotIn(key, obj)
+        # The same values remain available via heading_align.
+        self.assertEqual(obj["heading_align"]["offset_deg"], 3.5)  # round1
+        self.assertIs(obj["heading_align"]["locked"], True)
+        self.assertIs(obj["heading_align"]["frozen"], False)
+        self.assertIs(obj["heading_align"]["refining"], True)
+        # corrected_heading_deg is unaffected (not part of this drop).
+        self.assertIn("corrected_heading_deg", obj)
+
+    def test_imu_floats_rounded_to_3_decimals(self):
+        imu_status = {
+            "heading_deg": 12.345678,
+            "yaw_rate_dps": -1.23456789,
+            "oak_imu": {"gx_body_dps": 0.0123456, "heading_deg": 12.345678},
+        }
+        obj = build_log_obj(**_base_kwargs(imu_status=imu_status))
+        self.assertEqual(obj["imu"]["heading_deg"], 12.346)
+        self.assertEqual(obj["imu"]["yaw_rate_dps"], -1.235)
+        self.assertEqual(obj["imu"]["oak_imu"]["gx_body_dps"], 0.012)
+        self.assertEqual(obj["imu"]["oak_imu"]["heading_deg"], 12.346)
+
+    def test_imu_oak_imu_producer_keys_dropped_from_per_tick(self):
+        imu_status = {
+            "heading_deg": 1.0,
+            "oak_imu": {
+                "heading_deg": 1.0,
+                "producer_packets_received": 500,
+                "queue_msgs_received": 10,
+            },
+        }
+        obj = build_log_obj(**_base_kwargs(imu_status=imu_status))
+        self.assertNotIn("producer_packets_received", obj["imu"]["oak_imu"])
+        self.assertNotIn("queue_msgs_received", obj["imu"]["oak_imu"])
+        self.assertEqual(obj["imu"]["oak_imu"]["heading_deg"], 1.0)
 
 
 if __name__ == "__main__":
