@@ -269,6 +269,23 @@ class FollowMeConfig:
     # this many consecutive frames before it becomes the committed target. Filters
     # flickering high-conf blips.
     target_acquire_min_frames: int = 3
+    # SUSTAINED HAND-OFF (2026-09-19): when the committed target is absent and a
+    # DIFFERENT floor-clearing candidate is present, that challenger must stay the
+    # best qualifier for this long (and target_acquire_min_frames) before it takes
+    # the lock. Previously the hand-off was immediate, so a closer person stepping
+    # in front of the operator (occluding them for one frame) stole the lock on
+    # that frame. 0.0 restores the immediate hand-off. Must be < switch_grace_s
+    # to matter — after grace expires the ordinary lost → re-acquire path runs.
+    target_switch_min_s: float = 1.0
+    # DEPTH CONTINUITY: a candidate only counts as "my committed target" if its
+    # depth is within (continuity_m + rate_mps × seconds since last seen) of the
+    # held depth. This is what tells a closer person at the operator's x apart
+    # from the operator, and what rejects a tracklet id that got transferred onto
+    # an occluder. 0.6 m base: a person cannot close 0.6 m between two 30 Hz
+    # frames; a stereo-depth glitch that large costs one not-fresh tick, no more.
+    # 0.0 disables the gate (pure id / x continuity, the pre-2026-09-19 rule).
+    target_depth_continuity_m: float = 0.6
+    target_depth_continuity_rate_mps: float = 1.5
 
     # ── Host-side tracklet layer (IoU + constant-velocity Kalman) ─────────────
     # Assigns stable track_ids to person detections on parse paths that the OAK
@@ -278,6 +295,12 @@ class FollowMeConfig:
     tracklet_iou_threshold: float = 0.3  # min IoU (predicted bbox vs detection) to match a tracklet
     tracklet_min_hits: int = 3           # consecutive-ish hits before a tracklet is confirmed (reports its id)
     tracklet_max_age: int = 15           # frames a tracklet survives unmatched before deletion (~1 s @ 15 fps)
+    # DEPTH GATE on association (2026-09-19): a detection may only be matched to
+    # a tracklet if its depth is within (gate_m + growth × frames unmatched) of
+    # the tracklet's last depth. Stops an occluder's box (bigger, overlapping,
+    # closer) from inheriting the operator's id by IoU alone. 0.0 disables.
+    tracklet_depth_gate_m: float = 0.75
+    tracklet_depth_gate_growth_m_per_frame: float = 0.10  # ≈1.5 m/s of allowed closing at 15 fps
 
     # ── Layer 3: Lateral PID steering ────────────────────────────────────────
     # Error = normalized horizontal offset (-1.0 to +1.0); output scales to ±max_steer_offset_byte.

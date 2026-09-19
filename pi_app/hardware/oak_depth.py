@@ -248,6 +248,9 @@ class Tracklet:
         self.hits = 1
         self.age = 1
         self.time_since_update = 0
+        # Last measured depth (m) of the detection this tracklet matched; None
+        # until a caller supplies depths. Used by the association depth gate.
+        self.last_depth: float | None = None
 
     @staticmethod
     def _bbox_to_z(bbox):
@@ -289,24 +292,59 @@ class TrackletTracker:
     None path identical to today's untracked behaviour.
     """
 
-    def __init__(self, iou_threshold: float = 0.3, min_hits: int = 3, max_age: int = 15) -> None:
+    def __init__(
+        self,
+        iou_threshold: float = 0.3,
+        min_hits: int = 3,
+        max_age: int = 15,
+        depth_gate_m: float = 0.0,
+        depth_gate_growth_m_per_frame: float = 0.0,
+    ) -> None:
         self._iou_threshold = float(iou_threshold)
         self._min_hits = int(min_hits)
         self._max_age = int(max_age)
+        # Depth gate on association (2026-09-19). A detection may only match a
+        # tracklet when |depth − tracklet.last_depth| <= gate + growth × missed
+        # frames. Without it a closer occluder's bigger box can inherit the
+        # operator's id purely on IoU, and the id then LIES to follow_me.
+        # 0.0 (the constructor default) disables it: bbox-only behaviour, so
+        # callers that pass no depths are unchanged.
+        self._depth_gate_m = max(0.0, float(depth_gate_m))
+        self._depth_gate_growth = max(0.0, float(depth_gate_growth_m_per_frame))
         self._tracklets: list[Tracklet] = []
 
     @property
     def tracklets(self) -> list:
         return self._tracklets
 
-    def update(self, detections):
-        """Advance the tracker one frame; return parallel list of Optional[int]."""
+    def _depth_ok(self, t: "Tracklet", depth) -> bool:
+        if self._depth_gate_m <= 0.0 or depth is None or t.last_depth is None:
+            return True
+        d = float(depth)
+        if d <= 0.0:
+            return True  # no depth measurement → cannot gate
+        # time_since_update is already >= 1 here (predict() ran this frame);
+        # each ADDITIONAL missed frame widens the gate.
+        missed = max(0, int(t.time_since_update) - 1)
+        tol = self._depth_gate_m + self._depth_gate_growth * missed
+        return abs(d - t.last_depth) <= tol
+
+    def update(self, detections, depths=None):
+        """Advance the tracker one frame; return parallel list of Optional[int].
+
+        ``depths`` (optional) is a list parallel to ``detections`` of forward
+        distance in metres (``None`` / ``<= 0`` = unknown). When supplied and
+        the depth gate is enabled, association additionally requires depth
+        continuity (see ``_depth_ok``).
+        """
         # 1. Predict every existing tracklet forward one frame.
         for t in self._tracklets:
             t.predict()
 
         n_det = len(detections)
         assigned = [None] * n_det  # track_id (or None) per detection
+        if depths is None or len(depths) != n_det:
+            depths = [None] * n_det
 
         # 2. Greedy IoU matching: predicted tracklet bbox vs new detections.
         unmatched_tracklets = set(range(len(self._tracklets)))
@@ -317,7 +355,7 @@ class TrackletTracker:
                 pb = t.predicted_bbox()
                 for di in range(n_det):
                     iou = _iou(pb, detections[di])
-                    if iou >= self._iou_threshold:
+                    if iou >= self._iou_threshold and self._depth_ok(t, depths[di]):
                         pairs.append((iou, ti, di))
             pairs.sort(reverse=True)  # highest IoU first
             for iou, ti, di in pairs:
@@ -326,6 +364,8 @@ class TrackletTracker:
                     unmatched_tracklets.discard(ti)
                     unmatched_dets.discard(di)
                     t = self._tracklets[ti]
+                    if depths[di] is not None and float(depths[di]) > 0.0:
+                        t.last_depth = float(depths[di])
                     if t.hits >= self._min_hits:
                         assigned[di] = t.track_id
 
@@ -333,6 +373,8 @@ class TrackletTracker:
         #    until they reach min_hits).
         for di in unmatched_dets:
             t = Tracklet(_next_track_id(), detections[di])
+            if depths[di] is not None and float(depths[di]) > 0.0:
+                t.last_depth = float(depths[di])
             self._tracklets.append(t)
             if t.hits >= self._min_hits:  # only true if min_hits <= 1
                 assigned[di] = t.track_id
@@ -407,6 +449,10 @@ class OakDepthReader:
             iou_threshold=getattr(self._fm_cfg, "tracklet_iou_threshold", 0.3),
             min_hits=getattr(self._fm_cfg, "tracklet_min_hits", 3),
             max_age=getattr(self._fm_cfg, "tracklet_max_age", 15),
+            depth_gate_m=getattr(self._fm_cfg, "tracklet_depth_gate_m", 0.0),
+            depth_gate_growth_m_per_frame=getattr(
+                self._fm_cfg, "tracklet_depth_gate_growth_m_per_frame", 0.0
+            ),
         )
         self._imu_prev_consumed_ts = 0.0
         self._imu_last_warn_ts = 0.0
@@ -1886,7 +1932,11 @@ class OakDepthReader:
             # Still advance the tracker so unmatched tracklets age out correctly.
             self._tracklet_tracker.update([])
             return persons
-        track_ids = self._tracklet_tracker.update([p.bbox for p in persons])
+        # Depths ride along so association can reject an IoU match whose depth
+        # jumped (a closer occluder inheriting the operator's id).
+        track_ids = self._tracklet_tracker.update(
+            [p.bbox for p in persons], depths=[p.z_m for p in persons]
+        )
         return [replace(p, track_id=tid) for p, tid in zip(persons, track_ids)]
 
     def _poll_detections(self, det_q) -> None:

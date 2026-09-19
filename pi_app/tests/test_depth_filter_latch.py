@@ -71,16 +71,50 @@ class TestTargetSwitchReseed(unittest.TestCase):
     def test_track_id_change_reseeds_depth_filter_immediately(self):
         """Switching to a candidate with a new track_id reseeds the depth
         filter to that target's depth on the same frame, instead of riding the
-        rejection latch against the previous target's depth."""
-        fm = self._make()
-        # Lock onto track 1 at ~2.0m.
-        fm.compute([self._person(z_m=2.0, track_id=1)])
-        self.assertAlmostEqual(fm._depth_filter.value, 2.0, places=3)
+        rejection latch against the previous target's depth.
 
-        # Now only track 2 is visible, ~5.0m away. Without the reseed the 3m
-        # jump would be rejected and the filtered depth would stay near 2.0m.
-        fm.compute([self._person(z_m=5.0, track_id=2)])
-        self.assertAlmostEqual(fm._depth_filter.value, 5.0, places=3)
+        Since the sustained hand-off (2026-09-19) the switch itself is no longer
+        instantaneous: track 2 must stay the best qualifier for
+        target_switch_min_s (and target_acquire_min_frames) while track 1 is
+        absent. So this test drives frames at 10 Hz until the tracker hands
+        off, and asserts the reseed happens ON that frame. The pre-fix
+        single-frame switch is exactly the "closer person steals the lock"
+        defect, so the old two-call shape is no longer a valid scenario.
+        """
+        from unittest.mock import patch
+
+        fm = self._make()
+        t = 100.0
+        with patch("pi_app.control.follow_me.time") as mt:
+            mt.monotonic.return_value = t
+            # Lock onto track 1 at ~2.0m.
+            fm.compute([self._person(z_m=2.0, track_id=1)])
+            self.assertAlmostEqual(fm._depth_filter.value, 2.0, places=3)
+
+            # Now only track 2 is visible, ~5.0m away. It must NOT take the
+            # lock on its first frame any more.
+            t += 0.1
+            mt.monotonic.return_value = t
+            fm.compute([self._person(z_m=5.0, track_id=2)])
+            self.assertEqual(fm._tracker._state.track_id, 1,
+                             "a different person must not steal the lock on one frame")
+            self.assertAlmostEqual(fm._depth_filter.value, 2.0, places=3)
+
+            # Keep track 2 as the only candidate; it wins the lock once it has
+            # sustained for target_switch_min_s (< the 1.5 s grace window).
+            switched_at = None
+            for _ in range(14):
+                t += 0.1
+                mt.monotonic.return_value = t
+                fm.compute([self._person(z_m=5.0, track_id=2)])
+                if fm._tracker._state is not None and fm._tracker._state.track_id == 2:
+                    switched_at = t
+                    break
+            self.assertIsNotNone(switched_at, "sustained challenger must eventually win")
+            self.assertGreaterEqual(switched_at - 100.1, FollowMeConfig().target_switch_min_s)
+            # Without the reseed the 3m jump would be rejected and the filtered
+            # depth would stay near 2.0m.
+            self.assertAlmostEqual(fm._depth_filter.value, 5.0, places=3)
 
 
 if __name__ == "__main__":

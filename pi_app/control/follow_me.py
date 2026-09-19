@@ -287,6 +287,12 @@ class _TargetState:
     confidence: float
     track_id: int | None
     last_seen_time: float  # time.monotonic() of most recent fresh detection
+    # Raw (unfiltered) depth of the last fresh detection. FollowMeController
+    # overwrites ``depth_m`` in place with the EMA-filtered value each tick, so
+    # the tracker keeps its own copy for the depth-continuity gate — comparing
+    # a raw candidate against a lagging filtered depth would reject a target
+    # that is simply closing quickly.
+    raw_depth_m: float = 0.0
 
 
 class TargetTracker:
@@ -312,6 +318,15 @@ class TargetTracker:
         followed even if its confidence later drops below the floor.
       * SUSTAINED ACQUISITION — after a prior lock is lost, a challenger must
         qualify for ``acquire_min_frames`` consecutive frames before commit.
+      * SUSTAINED HAND-OFF — while the committed target is absent (within grace)
+        a floor-clearing challenger must stay the best qualifier for
+        ``switch_min_s`` AND ``acquire_min_frames`` before it takes the lock.
+        A closer person who occludes the operator for a frame or two does NOT
+        steal the lock; the operator reappearing clears the challenger.
+      * DEPTH CONTINUITY — a candidate is only "my target" if its depth is
+        within ``depth_continuity_m + depth_continuity_rate_mps × age`` of the
+        held depth. Applies to id matches too (a tracklet id transferred onto
+        a closer occluder is rejected) and to the positional fallback.
     """
 
     # Positional-continuity tolerance (normalized_x units, -1..+1) for matching a
@@ -326,6 +341,9 @@ class TargetTracker:
         switch_grace_s: float = 1.5,
         acquire_confidence: float = 0.65,
         acquire_min_frames: int = 3,
+        switch_min_s: float = 1.0,
+        depth_continuity_m: float = 0.6,
+        depth_continuity_rate_mps: float = 1.5,
     ) -> None:
         self._alpha = ema_alpha
         self._persistence_s = persistence_s
@@ -335,14 +353,20 @@ class TargetTracker:
         self._switch_grace_s = switch_grace_s
         self._acquire_confidence = acquire_confidence
         self._acquire_min_frames = max(1, int(acquire_min_frames))
+        self._switch_min_s = max(0.0, float(switch_min_s))
+        # Depth-continuity gate; <= 0 disables it (pure id / x continuity).
+        self._depth_tol_m = max(0.0, float(depth_continuity_m))
+        self._depth_tol_rate = max(0.0, float(depth_continuity_rate_mps))
         self._state: _TargetState | None = None
         self._fresh_raw_x_norm: float | None = None  # raw (pre-EMA) normalized_x of this tick's selected detection
-        # Pending-challenger state for SUSTAINED ACQUISITION. A new candidate must
-        # qualify for _acquire_min_frames consecutive frames before it is committed.
+        # Pending-challenger state for SUSTAINED ACQUISITION / HAND-OFF. A new
+        # candidate must qualify for _acquire_min_frames consecutive frames (and,
+        # for a hand-off, _switch_min_s) before it is committed.
         # Keyed by track_id when present; for id=None we track positional continuity.
         self._pending_id: int | None = None
-        self._pending_x: float | None = None       # last normalized_x of a None-id pending candidate
+        self._pending_x: float | None = None       # last normalized_x of the pending candidate
         self._pending_count: int = 0
+        self._pending_since: float | None = None   # time the current challenger streak began
         # Has the tracker ever committed a lock since the last reset()? The sustain
         # gate (and the grace hold, which presupposes a prior lock) only defend
         # AFTER an initial lock — i.e. on dropouts / re-acquisition / competing
@@ -391,33 +415,16 @@ class TargetTracker:
             return self._state
 
         # ── Is our committed target present in this frame? ───────────────────
-        # A target is "committed" once we hold any _state (id'd OR None-id). For
-        # an id'd target, presence = exact track_id match. For a None-id target
-        # (parse paths without tracklet ids) we use POSITIONAL continuity: the
-        # candidate nearest in normalized_x to the held position, within
-        # _NONE_ID_MATCH_NORM. This is what makes case (a) safe — a closer chicken
-        # at a different x does NOT count as "my target", so we grace-hold the
-        # person instead of switching. (Legacy None-id tracking just took the
-        # closest by depth, which is exactly the case-(a) failure.)
+        # A target is "committed" once we hold any _state (id'd OR None-id).
+        # _find_committed() applies id continuity, positional continuity and the
+        # depth-continuity gate; see its docstring. This is what makes case (a)
+        # safe — a closer chicken at a different x does NOT count as "my target",
+        # and (2026-09-19) neither does a closer PERSON at the SAME x: the depth
+        # gate rejects them, so we grace-hold the operator instead of switching.
         committed = self._state is not None
-        committed_present = False
-        committed_det: _FilteredDetection | None = None
-        if committed and self._state.track_id is not None:
-            for c in candidates:
-                if c.track_id == self._state.track_id:
-                    committed_present = True
-                    committed_det = c
-                    break
-        elif committed:  # None-id committed target → positional continuity
-            nearest = min(
-                candidates,
-                key=lambda d: abs(d.normalized_x - self._state.normalized_x),
-            )
-            if abs(nearest.normalized_x - self._state.normalized_x) <= self._NONE_ID_MATCH_NORM:
-                committed_present = True
-                committed_det = nearest
+        committed_det = self._find_committed(candidates, now) if committed else None
 
-        if committed_present:
+        if committed_det is not None:
             # COMMITTED → follow it. An already-committed target is trusted even
             # if its confidence dropped below the acquire floor (Layer-1's 0.45
             # base filter already gated it). This is the normal single-person path.
@@ -428,7 +435,7 @@ class TargetTracker:
 
         if committed:
             # Committed target is ABSENT from this frame's candidates. Decide
-            # between a GRACE-HOLD and a trusted hand-off.
+            # between a GRACE-HOLD and a SUSTAINED hand-off.
             #
             # GRACE-HOLD (the case-(a) fix): if no other candidate clears the
             # ACQUIRE FLOOR, every alternative is an untrusted impostor (the
@@ -437,30 +444,24 @@ class TargetTracker:
             # steer/speed. Do not refresh last_seen_time; let grace and the
             # persistence window age naturally.
             #
-            # TRUSTED HAND-OFF: if a *different* candidate DOES clear the acquire
-            # floor, it is a trustworthy target taking over (e.g. a distinct,
-            # high-confidence id'd person). The committed target has vanished and
-            # a trusted replacement is the only/closest qualifier, so we let the
-            # ACQUIRING path adopt it rather than coast blindly. (This is also the
-            # legitimate target-switch the depth-reseed path depends on — we never
-            # hold against a target we actually trust.)
+            # SUSTAINED HAND-OFF (2026-09-19; was immediate): a *different*
+            # floor-clearing candidate may take over only after it has stayed the
+            # best qualifier for _switch_min_s AND _acquire_min_frames while the
+            # committed target remained absent. A closer person who steps in
+            # front of the operator is present for a frame or two, then the
+            # operator reappears (id or x+depth match) and _reset_pending() wipes
+            # the challenger. Only a persistent occluder — or a genuinely new
+            # person after the operator vanished — ever wins the lock. Until then
+            # we grace-hold (coast, not fresh). If grace expires first, the
+            # ordinary lost → sustained re-acquire path below takes over.
             within_grace = (now - self._state.last_seen_time) <= self._switch_grace_s
-            qualifying = [
-                c for c in candidates if c.confidence >= self._acquire_confidence
-            ]
-            if within_grace and not qualifying:
-                self._fresh_raw_x_norm = None  # not fresh → caller decays steer/speed
-                self._reset_pending()
-                return self._state
-            if within_grace and qualifying:
-                # TRUSTED HAND-OFF within grace: the committed target vanished and
-                # a floor-clearing replacement is present. Adopt the closest such
-                # qualifier immediately (no sustain) — we only sustain-gate
-                # acquisitions from a fully-lost state, not a direct hand-off to a
-                # trusted target. Closest-by-depth among qualifiers, as elsewhere.
-                best = min(qualifying, key=lambda d: d.depth_m)
-                self._fresh_raw_x_norm = best.normalized_x
-                self._apply_ema(best, now)
+            if within_grace:
+                challenger = self._acquire(candidates, now, min_s=self._switch_min_s)
+                if challenger is None:
+                    self._fresh_raw_x_norm = None  # not fresh → caller decays steer/speed
+                    return self._state
+                self._fresh_raw_x_norm = challenger.normalized_x
+                self._apply_ema(challenger, now)
                 self._has_committed = True
                 self._reset_pending()
                 return self._state
@@ -483,8 +484,62 @@ class TargetTracker:
         self._reset_pending()
         return self._state
 
-    def _acquire(
+    def _depth_consistent(self, det: _FilteredDetection, now: float) -> bool:
+        """Is ``det`` at a depth the committed target could plausibly be at now?
+
+        Tolerance = depth_continuity_m + depth_continuity_rate_mps × seconds since
+        the target was last seen, so a freshly-seen target is held tightly (a
+        person cannot close 0.6 m between two frames) while a target coasting
+        through a grace window is allowed to have walked. Disabled when the
+        base tolerance is <= 0.
+        """
+        if self._depth_tol_m <= 0.0 or self._state is None:
+            return True
+        age = max(0.0, now - self._state.last_seen_time)
+        tol = self._depth_tol_m + self._depth_tol_rate * age
+        return abs(det.depth_m - self._state.raw_depth_m) <= tol
+
+    def _find_committed(
         self, candidates: list[_FilteredDetection], now: float
+    ) -> _FilteredDetection | None:
+        """Return the candidate that IS the committed target this frame, or None.
+
+        1. Id'd target: the candidate carrying the same track_id — but only if
+           it is depth-consistent. The tracklet layer can hand the operator's id
+           to a closer occluder whose box swallowed theirs (IoU match); a depth
+           jump on an id match is exactly that, so it is NOT our target.
+        2. Positional fallback: nearest candidate in normalized_x within
+           _NONE_ID_MATCH_NORM, depth-consistent. For a None-id target this is
+           the only rule (parse paths without ids). For an id'd target the
+           fallback only considers candidates WITHOUT a confirmed id: a new
+           tentative tracklet at our position is our target re-emerging after
+           an occlusion (ids churn: None for min_hits frames, then a new id),
+           whereas a different CONFIRMED id at our position is a different
+           person by the tracklet layer's judgement — that one must earn the
+           lock through the sustained hand-off.
+        """
+        st = self._state
+        if st is None:
+            return None
+        if st.track_id is not None:
+            for c in candidates:
+                if c.track_id == st.track_id and self._depth_consistent(c, now):
+                    return c
+            pool = [
+                c for c in candidates
+                if c.track_id is None and self._depth_consistent(c, now)
+            ]
+        else:
+            pool = [c for c in candidates if self._depth_consistent(c, now)]
+        if not pool:
+            return None
+        nearest = min(pool, key=lambda d: abs(d.normalized_x - st.normalized_x))
+        if abs(nearest.normalized_x - st.normalized_x) <= self._NONE_ID_MATCH_NORM:
+            return nearest
+        return None
+
+    def _acquire(
+        self, candidates: list[_FilteredDetection], now: float, min_s: float = 0.0
     ) -> _FilteredDetection | None:
         """ACQUISITION with a confidence floor + (post-loss) sustain.
 
@@ -497,8 +552,10 @@ class TargetTracker:
 
         Re-acquisition (we have committed before and lost the target): the chosen
         challenger must remain the closest qualifier for _acquire_min_frames
-        consecutive frames before it is returned (committed). This filters
-        flickering high-conf impostor blips (the chicken in case (b)).
+        consecutive frames — and for at least ``min_s`` seconds (the sustained
+        hand-off window while a committed target is grace-held) — before it is
+        returned (committed). This filters flickering high-conf impostor blips
+        (the chicken in case (b)) and one-frame occluders.
 
         Returns the winning detection on the commit frame, else None (coast/lost).
         """
@@ -515,26 +572,33 @@ class TargetTracker:
             return best
 
         # Continuity check: is `best` the same challenger we were counting?
-        # Track by track_id when present; for id=None track positional continuity
-        # (the closest qualifier must stay near where it was last frame).
-        if best.track_id is not None:
+        # Track by track_id when both sides have one; otherwise positional
+        # continuity (the closest qualifier must stay near where it was last
+        # frame). The positional rule also bridges a challenger whose tracklet
+        # confirms mid-streak (None → id) so the streak is not restarted.
+        if best.track_id is not None and self._pending_id is not None:
             same = (best.track_id == self._pending_id)
         else:
             same = (
-                self._pending_id is None
-                and self._pending_x is not None
+                self._pending_x is not None
                 and abs(best.normalized_x - self._pending_x) <= 0.25
             )
 
         if same:
             self._pending_count += 1
+            if best.track_id is not None:
+                self._pending_id = best.track_id
         else:
             # New challenger — start the sustain counter at 1.
             self._pending_id = best.track_id
             self._pending_count = 1
+            self._pending_since = now
         self._pending_x = best.normalized_x
 
-        if self._pending_count >= self._acquire_min_frames:
+        if self._pending_since is None:
+            self._pending_since = now
+        sustained_s = now - self._pending_since
+        if self._pending_count >= self._acquire_min_frames and sustained_s >= min_s:
             return best
         return None
 
@@ -542,6 +606,7 @@ class TargetTracker:
         self._pending_id = None
         self._pending_x = None
         self._pending_count = 0
+        self._pending_since = None
 
     def _apply_ema(self, det: _FilteredDetection, now: float) -> None:
         if self._state is None:
@@ -558,6 +623,7 @@ class TargetTracker:
             confidence=det.confidence,
             track_id=det.track_id,
             last_seen_time=now,
+            raw_depth_m=det.depth_m,
         )
 
     def reset(self) -> None:
@@ -836,6 +902,9 @@ class FollowMeController:
             switch_grace_s=config.target_switch_grace_s,
             acquire_confidence=config.target_acquire_confidence,
             acquire_min_frames=int(config.target_acquire_min_frames),
+            switch_min_s=float(config.target_switch_min_s),
+            depth_continuity_m=float(config.target_depth_continuity_m),
+            depth_continuity_rate_mps=float(config.target_depth_continuity_rate_mps),
         )
 
         # ── Layer 3: Steering (PID) ──────────────────────────────────────────
