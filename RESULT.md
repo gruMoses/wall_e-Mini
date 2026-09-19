@@ -1,6 +1,6 @@
 # RESULT — fable-follow-fixes (2026-09-19)
 
-This document gives the before and after state of the work on branch `fable-follow-fixes`. Section A (follow-me) is on `main` at a0a2776. Section B (heading) is on the branch and not deployed.
+This document gives the before and after state of the work on branch `fable-follow-fixes`. Section A (follow-me) is on `main` at a0a2776. Section B (heading) is on `main` and deployed. Section C (logging) is on `main` after this commit.
 
 ## A. Follow-me (pushed to main, a0a2776)
 
@@ -16,7 +16,7 @@ Before: gains were 0 since 2026-06-11 (dead RPM readback caused a lunge and stal
 
 After: one kinematic wheel-speed scale (0.009416 m/s per byte). Gains kp 0.6, ki 0.15, kd 0, integral limit 1.0, correction limit ±0.20 m/s. `RpmPlausibilityGate` trips when a motor is commanded 12 bytes or more from neutral and reports less than 150 eRPM for 0.5 s; the controller then uses open-loop control until real RPM returns (2 s minimum hold). The forward speed is the signed mean of the two wheels, so a turn does not read as overspeed. The PID integral resets on each open-loop tick and on the lost-target reset. Telemetry shows `vesc_rpm_plausible` and `vesc_rpm_gate_trips`.
 
-## B. Heading (on the branch, 8 commits 4ec534c..6978242)
+## B. Heading (on main since 507a0c3; deployed 2026-09-19 15:03 CDT)
 
 ### B.1 Field evidence
 
@@ -38,14 +38,14 @@ A 57-agent audit of the pipeline found the same two root causes plus three more 
 
 ### B.3 Fixes (commits, in order)
 
-1. 4ec534c — Compass-native heading, clockwise-positive end to end. `heading = +∫yaw`; the gravity-projected channel is negated to share the convention; `invert_output` default False; waypoint ALIGN pivots +yaw for a positive error; the chalk CLI gains a SIGN pass/fail; closed-loop plant tests prove heading hold and ALIGN converge with the real sign and diverge with the old flag.
-2. 0a7ae2f — Live yaw rate on duplicate IMU reads instead of zero; the stale path still reports 0 and logs once per episode.
-3. ae05bf5 — Stationary gyro-bias tracking and ZUPT in the producer; boot calibration logs its result; the reader-side bias adaptation is removed.
-4. 3cc6b4c — Honest UI: IMU recovery retry every 5 s; init failure logged with the exception; property map uses the corrected heading when locked; waypoint error and nav state reach the browser.
-5. f9ff8c8 — Stationary tracking gated on a wheels-stopped witness (VESC eRPM or commanded bytes) in addition to sensor quiet; absolute max-rate bound (5 degrees per second); the reader uses the tracked bias for its rate output; the duplicate-read rate is bounded by sample age; calibration pauses the tracker.
-6. 53a925a — Yaw-axis sign derived from gravity at calibration, with WARNING logs for an inverted or non-vertical mount.
-7. fde50e5 — `imu_source` pinned to `oak_d`.
-8. 6978242 — Witness polarity: the robot counts as stopped only when the commanded bytes are at neutral and, when RPM is trusted, both wheels read under 30 eRPM (150 eRPM per wheel in opposite directions is a 1.7 degree-per-second pivot). Defaults aligned (5 degrees per second). Follow-me blind trail search steered toward the mirror of the trail under the new convention; fixed and pinned by a test.
+1. c09c985 — Compass-native heading, clockwise-positive end to end. `heading = +∫yaw`; the gravity-projected channel is negated to share the convention; `invert_output` default False; waypoint ALIGN pivots +yaw for a positive error; the chalk CLI gains a SIGN pass/fail; closed-loop plant tests prove heading hold and ALIGN converge with the real sign and diverge with the old flag.
+2. 8d20063 — Live yaw rate on duplicate IMU reads instead of zero; the stale path still reports 0 and logs once per episode.
+3. 2db21ae — Stationary gyro-bias tracking and ZUPT in the producer; boot calibration logs its result; the reader-side bias adaptation is removed.
+4. 939eac3 — Honest UI: IMU recovery retry every 5 s; init failure logged with the exception; property map uses the corrected heading when locked; waypoint error and nav state reach the browser.
+5. 6c0c157 — Stationary tracking gated on a wheels-stopped witness (VESC eRPM or commanded bytes) in addition to sensor quiet; absolute max-rate bound (5 degrees per second); the reader uses the tracked bias for its rate output; the duplicate-read rate is bounded by sample age; calibration pauses the tracker.
+6. 96dd939 — Yaw-axis sign derived from gravity at calibration, with WARNING logs for an inverted or non-vertical mount.
+7. 0890138 — `imu_source` pinned to `oak_d`.
+8. e4f67e8 — Witness polarity: the robot counts as stopped only when the commanded bytes are at neutral and, when RPM is trusted, both wheels read under 30 eRPM (150 eRPM per wheel in opposite directions is a 1.7 degree-per-second pivot). Defaults aligned (5 degrees per second). Follow-me blind trail search steered toward the mirror of the trail under the new convention; fixed and pinned by a test.
 
 Grok reviewed the full diff: the sign chain is consistent from packet to motor bytes; its one finding (the witness polarity) became commit 8.
 
@@ -59,14 +59,27 @@ Tests: 703 at a0a2776 → 781 on the branch, all pass, 4 skipped. Changed tests 
 4. Manual drive with heading hold on a straight line: no oscillation; `pid.d` opposes the yaw rate.
 5. Waypoint ALIGN toward a bearing to the right: the robot pivots right.
 
+### B.4a Field validation (2026-09-19, after deploy)
+
+- Boot log: "OAK IMU gyro bias measured over 3.00s from 273 samples: x=0.22 y=-0.72 z=0.14 dps"; "+Y points DOWN (ay=-0.99 g): gyro_y is clockwise-positive, yaw_axis_sign=+1"; "IMU steering compensation enabled (source: oak_d)".
+- Parked and disarmed for 70 s: heading 0.0 throughout; `zupt_active` true, witness true, tracked bias −0.733 (boot −0.717). Before the fix the same 70 s drifted about 60 degrees.
+- Kevin then drove the robot to reposition it (no planned maneuver). In every segment the heading moved with the sign of the track differential: left track faster → heading increased; right track faster → heading decreased; straight → heading held. That is the sign validation from real driving.
+
 ### B.5 Not done
 
 - GPS course over ground and speed from the DFRobot receiver registers (needs a bench read first; a DFRobot audit is in progress).
-- RTK stays float: fix 4 has never appeared in any log on the Pi since 2026-07-30; investigation in progress.
+- RTK stays float: fix 4 has never appeared in any log on the Pi since 2026-07-30. Runbook: `docs/rtk_float_investigation.md`; next step is Kevin's short-baseline test.
 - The external 9DoF board is parked (`docs/external_imu_postmortem.md`).
 - Auto-deploy: script and runbook are on `main` (5a3e41d). The install on the Pi (cron + one restart) is Kevin's step; the classifier blocks it from this session.
-- Logging changes (four commits: values already computed, speed-loop terms, slow 1 Hz diagnostics line + MCAP fill, RTK GPS driver with UTC/COG/SOG and fix-edge logging) are in progress.
-- RTK float: `docs/rtk_float_investigation.md`; next step is Kevin's short-baseline test.
+
+## C. Logging (commits 61939ce, 547e2e2, a36be2b, d761ba9)
+
+1. Log the values already computed: VESC gate/temps/duty, heading-hold blend/gain-scale/saturation, GPS age, straight intent; a session header line (git SHA, gains, scales) at the top of each log file; the OAK health transition as an event line; the console line only at 1 per 5 s when not on a terminal (it wrote about 21 MB per hour into the journal).
+2. Speed loop: open-loop byte, target and actual m/s, error, P/I/D, correction, closed flag, logged as `follow_me.speed_loop`.
+3. Diagnostics demoted: `imu_pipeline` and `oak_camera_health` move to a 1 Hz "slow" line with the OAK chip temperature; duplicated `imu.oak_imu` counters and the flat `heading_offset_*` copies are dropped; the MCAP telemetry gains the corrected heading, GPS, VESC, charger inhibit and nav fields.
+4. RTK GPS driver: every fix-quality transition logged at WARNING; UTC and geoid separation parsed; course and speed over ground read from the receiver's RMC sentence (VTG fallback) and logged, not fed to control; low-quality epochs published; 5 Hz poll deduplicated on the UTC second; LoRa mode verified and logged; health counters and bus reopen. `docs/rtk_gps_module.md`.
+
+Tests: 781 → 867, all pass, 4 skipped. Note: `pi_app/tests/test_log_gating.py` uses bare pytest functions, which `unittest discover` does not collect; its tests have never run under the project test command.
 
 ## Technical Names
 
