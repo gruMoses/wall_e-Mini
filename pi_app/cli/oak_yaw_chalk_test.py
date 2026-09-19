@@ -813,7 +813,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         reader,
         nmni_enabled=nmni_enabled,
         nmni_threshold_dps=nmni_threshold,
-        bias_adapt_enabled=False,
         yaw_rate_source=src,
         yaw_rate_scale=scale,
         use_gravity_projected_yaw_rate=bool(

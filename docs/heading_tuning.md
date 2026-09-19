@@ -102,7 +102,13 @@ BMI270 @ 100 Hz ──► DepthAI host IMU queue (maxSize=512 msgs, nonblocking)
 | `oak_use_gravity_projected_yaw_rate` | `False` | |
 | `oak_nmni_enabled` | `True` | Applied per-packet on the producer |
 | `oak_nmni_threshold_dps` | `0.3` | |
-| `oak_bias_adapt_enabled` | `False` | |
+| `oak_stationary_bias_tracking_enabled` | `True` | Added 2026-09-19; replaced `oak_bias_adapt_*` |
+| `oak_zupt_enabled` | `True` | Freeze yaw integration while provably still |
+| `oak_stationary_window_s` | `1.0` | |
+| `oak_stationary_gyro_std_dps` | `0.3` | Per-axis raw-gyro std gate |
+| `oak_stationary_accel_std_g` | `0.03` | **Tune this one on the robot** |
+| `oak_stationary_max_rate_dps` | `2.0` | Must stay above the hot bias (~1.3 dps) |
+| `oak_stationary_bias_tau_s` | `15.0` | Bias relaxation time constant |
 | IMU host queue | `maxSize=512` msgs, `blocking=False` | message slots, not seconds |
 | Producer drain cap | `max_packets_per_drain=512` | aligned with host msg capacity @ ~1 pkt/msg |
 
@@ -110,12 +116,93 @@ Legacy `auto`+`0.46` is retired. If chalk later shows systematic magnitude error
 *after* lossless proof, fit a new scale for the **pinned** axis only — do not
 bring back auto axis switching without new field evidence.
 
+## Stationary bias tracking and ZUPT
+
+### The field measurement (2026-09-19)
+
+Parked, the heading wound **+0.9 deg/s**. The robot JSON log shows `gy_body_dps`
+(the bias-subtracted body rate about Y) after a **good** 3 s boot calibration:
+
+| Time | `gy_body_dps` |
+| --- | --- |
+| 11:12 (just after calibration) | −0.03 |
+| 11:16 | −0.46 |
+| 11:20 | −0.83 |
+| 11:36 | −1.07 |
+| 11:49 | −1.25 |
+| later | plateau ≈ −1.2 |
+
+That is **thermal gyro-bias drift**, and before 2026-09-19 nothing tracked it:
+
+- NMNI at 0.3 deg/s cannot gate a 1.2 deg/s rate.
+- The reader-side `bias_adapt` only ran when every axis was below the NMNI
+  threshold, so it could **never engage** once the drift exceeded 0.3 deg/s —
+  exactly when it was needed. It has been removed
+  (`oak_bias_adapt_enabled` / `oak_bias_adapt_alpha` are gone), because leaving
+  it would have meant two bias integrators fighting.
+
+### How it works now (producer side)
+
+`ImuYawProducer` keeps a rolling window of the last `oak_stationary_window_s`
+of **raw** samples, with running sums so mean/std are O(1) per packet (no numpy
+on the Pi). The robot counts as **stationary** only when **all** of these hold:
+
+1. the window is full (spans the configured length, ≥ 3 samples);
+2. every raw gyro axis has std < `oak_stationary_gyro_std_dps`;
+3. the accel norm has std < `oak_stationary_accel_std_g`;
+4. every axis mean is within `oak_stationary_max_rate_dps` of the current bias.
+
+The std gates do the real work. The max-rate bound exists only to reject a
+steady slow turn that would otherwise look quiet, and it must stay well above
+the measured hot bias (~1.3 deg/s) or it would veto exactly the drift it is
+supposed to let through — hence the 2.0 deg/s default.
+
+While stationary and tracking is enabled, each packet relaxes the bias toward
+the window mean: `bias += (dt / oak_stationary_bias_tau_s) * (mean - bias)`.
+With `oak_zupt_enabled` the packet is also **not** added to `cum_x/y/z/grav`
+(the heading is frozen), while the packet counters still advance so the
+consumer's producer-replacement detector keeps working.
+
+NOTE: a first-order tracker lags a ramp by `slope * tau`, so the heading error
+that leaks through a bias change is about `delta_bias * tau` — roughly 18° for
+the measured 1.2 deg/s change at `tau = 15 s`, independent of how long the drift
+takes. ZUPT is what removes it: while the robot is provably still, nothing
+integrates at all. If a future field run shows wind-up **while moving**, shorten
+`oak_stationary_bias_tau_s` rather than widening the std gates.
+
+`OakImuReader` reports `yaw_rate_world_dps = 0.0` and `integrate_status =
+"zupt"` whenever the snapshot says `zupt_active`, so the PID cannot damp a turn
+the frozen heading does not see.
+
+### Log lines to look for
+
+All at WARNING (the app installs no logging handler, so INFO is dropped):
+
+```
+OAK IMU gyro bias measured over 3.00s from N samples: x=... y=... z=... dps
+OAK IMU gyro bias: no fresh IMU samples in 3.00s: keeping prior bias (...)
+OAK IMU zupt_engage: bias=(...) dps delta_since_last_log=(...) dps bias_updates=N ...
+OAK IMU zupt_disengage: bias=(...) dps delta_since_last_log=(...) dps ...
+OAK IMU samples stale (age=...s > ...s): heading frozen, yaw rate reported as 0 ...
+```
+
+The ZUPT lines are rate-limited to at most one per 10 s per event type; the
+counters (`zupt_engage_count`, `bias_updates`) carry the full history.
+
+Healthy parked signature: `zupt_active=true`, `window_gyro_std_dps` ≈ 0.1,
+`window_accel_std_g` ≈ 0.01, `bias_gy_dps` drifting slowly toward −1.2, and
+`producer_cum_yaw_y_deg` **not moving**.
+
 ## Observability
 
 `OakImuReader.get_health()` and extra `read()` keys expose:
 
 - Body triad: `gx_body_dps`, `gy_body_dps`, `gz_body_dps`
 - Selected path: `yaw_rate_source_cfg`, `yaw_rate_source_selected`, `yaw_rate_scale`, `yaw_rate_sign`
+- Stationary / ZUPT: `stationary`, `zupt_active`, `zupt_engage_count`,
+  `bias_updates`, `bias_gx_dps` / `gy` / `gz`, `gyro_bias_dps`,
+  `window_gyro_std_dps`, `window_accel_std_g`, `last_bias_update_host_ts`,
+  `stationary_tracking_enabled`, `zupt_enabled`
 - Integration path: `integration_path` (`producer` vs `legacy_snapshot`)
 - Sample identity: `sample_age_s`, `device_timestamp_s`, `last_dt_s`
 - Consumer counters: `count_duplicate`, `count_stale`, `count_regressed`,

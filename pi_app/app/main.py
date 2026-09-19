@@ -267,12 +267,33 @@ def run() -> None:
                     oak_reader,
                     nmni_enabled=bool(getattr(config.imu_steering, "oak_nmni_enabled", False)),
                     nmni_threshold_dps=float(getattr(config.imu_steering, "oak_nmni_threshold_dps", 0.3)),
-                    bias_adapt_enabled=bool(getattr(config.imu_steering, "oak_bias_adapt_enabled", False)),
-                    bias_adapt_alpha=float(getattr(config.imu_steering, "oak_bias_adapt_alpha", 0.001)),
                     yaw_rate_source=str(getattr(config.imu_steering, "oak_yaw_rate_source", "gyro_y")),
                     yaw_rate_scale=float(getattr(config.imu_steering, "oak_yaw_rate_scale", 1.0)),
                     use_gravity_projected_yaw_rate=bool(
                         getattr(config.imu_steering, "oak_use_gravity_projected_yaw_rate", False)
+                    ),
+                    # Stationary gyro-bias tracking / ZUPT. OakImuReader is the
+                    # single owner: it pushes these into the producer through
+                    # OakDepthReader.configure_stationary_tracking, the same way
+                    # it pushes bias and NMNI.
+                    stationary_bias_tracking_enabled=bool(
+                        getattr(config.imu_steering, "oak_stationary_bias_tracking_enabled", True)
+                    ),
+                    zupt_enabled=bool(getattr(config.imu_steering, "oak_zupt_enabled", True)),
+                    stationary_window_s=float(
+                        getattr(config.imu_steering, "oak_stationary_window_s", 1.0)
+                    ),
+                    stationary_gyro_std_dps=float(
+                        getattr(config.imu_steering, "oak_stationary_gyro_std_dps", 0.3)
+                    ),
+                    stationary_accel_std_g=float(
+                        getattr(config.imu_steering, "oak_stationary_accel_std_g", 0.03)
+                    ),
+                    stationary_max_rate_dps=float(
+                        getattr(config.imu_steering, "oak_stationary_max_rate_dps", 2.0)
+                    ),
+                    stationary_bias_tau_s=float(
+                        getattr(config.imu_steering, "oak_stationary_bias_tau_s", 15.0)
                     ),
                 )
                 imu_source_used = "oak_d"

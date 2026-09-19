@@ -68,13 +68,18 @@ class OakImuReader:
         gyro_bias_samples: int = 200,
         nmni_enabled: bool = False,
         nmni_threshold_dps: float = 0.3,
-        bias_adapt_enabled: bool = False,
-        bias_adapt_alpha: float = 0.001,
         yaw_rate_source: str = "gyro_y",
         yaw_rate_scale: float = 1.0,
         use_gravity_projected_yaw_rate: bool = False,
         stale_age_s: float = _STALE_AGE_S,
         max_integrate_dt_s: float = _MAX_INTEGRATE_DT_S,
+        stationary_bias_tracking_enabled: bool = False,
+        zupt_enabled: bool = False,
+        stationary_window_s: float = 1.0,
+        stationary_gyro_std_dps: float = 0.3,
+        stationary_accel_std_g: float = 0.03,
+        stationary_max_rate_dps: float = 2.0,
+        stationary_bias_tau_s: float = 15.0,
     ) -> None:
         self._oak = oak_reader
         self.alpha_rp = complementary_alpha_rp
@@ -92,8 +97,16 @@ class OakImuReader:
         self._gyro_bias_samples = gyro_bias_samples
         self._nmni_enabled = bool(nmni_enabled)
         self._nmni_threshold_dps = float(nmni_threshold_dps)
-        self._bias_adapt_enabled = bool(bias_adapt_enabled)
-        self._bias_adapt_alpha = max(0.0, min(1.0, float(bias_adapt_alpha)))
+        # Stationary gyro-bias tracking / ZUPT live on the producer; this class
+        # is the single owner of that configuration, exactly as it is for bias
+        # and NMNI (see _sync_producer_config).
+        self._stationary_bias_tracking_enabled = bool(stationary_bias_tracking_enabled)
+        self._zupt_enabled = bool(zupt_enabled)
+        self._stationary_window_s = max(0.05, float(stationary_window_s))
+        self._stationary_gyro_std_dps = max(0.0, float(stationary_gyro_std_dps))
+        self._stationary_accel_std_g = max(0.0, float(stationary_accel_std_g))
+        self._stationary_max_rate_dps = max(0.0, float(stationary_max_rate_dps))
+        self._stationary_bias_tau_s = max(0.1, float(stationary_bias_tau_s))
         src = str(yaw_rate_source or "gyro_y").strip().lower()
         self._yaw_rate_source = (
             src if src in ("auto", "gyro_x", "gyro_y", "gyro_z", "gravity_projected") else "gyro_y"
@@ -142,6 +155,8 @@ class OakImuReader:
         self._count_cum_reset: int = 0
         # One WARNING per stale episode, not per read (30 Hz would flood).
         self._stale_episode_logged: bool = False
+        self._last_zupt_active: bool = False
+        self._last_stationary: bool = False
 
         # Push bias + NMNI into producer. NMNI may be on before the first
         # calibrate_gyro; calibrate temporarily clears it so bias estimation
@@ -164,11 +179,28 @@ class OakImuReader:
             except Exception:
                 pass
 
+    def _push_producer_stationary_config(self) -> None:
+        setter = getattr(self._oak, "configure_stationary_tracking", None)
+        if callable(setter):
+            try:
+                setter(
+                    enabled=self._stationary_bias_tracking_enabled,
+                    zupt_enabled=self._zupt_enabled,
+                    window_s=self._stationary_window_s,
+                    gyro_std_dps=self._stationary_gyro_std_dps,
+                    accel_std_g=self._stationary_accel_std_g,
+                    max_rate_dps=self._stationary_max_rate_dps,
+                    bias_tau_s=self._stationary_bias_tau_s,
+                )
+            except Exception:
+                pass
+
     def _sync_producer_config(self) -> None:
-        """Push current local bias + NMNI settings into the producer integrator."""
+        """Push local bias + NMNI + stationary settings into the producer."""
         bx, by, bz = self.gyro_bias_dps
         self._push_producer_bias_dps(bx, by, bz)
         self._push_producer_nmni(self._nmni_enabled, self._nmni_threshold_dps)
+        self._push_producer_stationary_config()
 
     @staticmethod
     def _compute_yaw_rate_rads(
@@ -407,8 +439,23 @@ class OakImuReader:
             # a zeroed bias would silently reintroduce the residual-integrate
             # skew this whole path exists to remove.
             self.gyro_bias_dps = measured if measured is not None else prior_bias
-            # Restore NMNI + measured/prior bias on the producer.
+            # Restore NMNI + measured/prior bias on the producer. The measured
+            # bias seeds the producer's stationary bias tracker from here.
             self._sync_producer_config()
+            # WARNING level on purpose: the app installs no logging handler, so
+            # INFO is dropped and a silent no-op calibration would be invisible.
+            if measured is not None:
+                logger.warning(
+                    "OAK IMU gyro bias measured over %.2fs from %d samples: "
+                    "x=%.4f y=%.4f z=%.4f dps",
+                    float(duration_s), len(xs), measured[0], measured[1], measured[2],
+                )
+            else:
+                logger.warning(
+                    "OAK IMU gyro bias: no fresh IMU samples in %.2fs: keeping "
+                    "prior bias (x=%.4f y=%.4f z=%.4f dps)",
+                    float(duration_s), prior_bias[0], prior_bias[1], prior_bias[2],
+                )
         return self.gyro_bias_dps
 
     def calibrate_mag_hard_iron(self, duration_s: float = 5.0) -> tuple:
@@ -476,6 +523,19 @@ class OakImuReader:
                         "drain_batch_high_water_msgs": raw_m.get("drain_batch_high_water_msgs"),
                         "drain_batch_large_events": raw_m.get("drain_batch_large_events"),
                         "drain_batch_full_size_events": raw_m.get("drain_batch_full_size_events"),
+                        # Stationary bias tracking / ZUPT (producer-side).
+                        "zupt_engage_count": raw_m.get("zupt_engage_count"),
+                        "bias_updates": raw_m.get("bias_updates"),
+                        "bias_gx_dps": raw_m.get("bias_gx_dps"),
+                        "bias_gy_dps": raw_m.get("bias_gy_dps"),
+                        "bias_gz_dps": raw_m.get("bias_gz_dps"),
+                        "window_gyro_std_dps": raw_m.get("window_gyro_std_dps"),
+                        "window_accel_std_g": raw_m.get("window_accel_std_g"),
+                        "last_bias_update_host_ts": raw_m.get("last_bias_update_host_ts"),
+                        "stationary_tracking_enabled": raw_m.get(
+                            "stationary_tracking_enabled"
+                        ),
+                        "zupt_enabled": raw_m.get("zupt_enabled"),
                     }
             except Exception:
                 imu_metrics = {}
@@ -492,6 +552,11 @@ class OakImuReader:
             "use_gravity_projected": self._use_gravity_projected_yaw_rate,
             "nmni_enabled": self._nmni_enabled,
             "nmni_threshold_dps": self._nmni_threshold_dps,
+            # Stationary detector / ZUPT as of the last read() (the producer
+            # counters above carry the running totals).
+            "zupt_active": self._last_zupt_active,
+            "stationary": self._last_stationary,
+            "gyro_bias_dps": tuple(self.gyro_bias_dps),
             "integrate_status": self._integrate_status,
             "integration_path": "producer" if self._has_producer_cum else "legacy_snapshot",
             "sample_age_s": self._last_sample_age_s,
@@ -569,6 +634,10 @@ class OakImuReader:
         producer_integrated = int(
             getattr(imu_state, "producer_packets_integrated", 0) or 0
         )
+        zupt_active = bool(getattr(imu_state, "zupt_active", False))
+        stationary = bool(getattr(imu_state, "stationary", False))
+        self._last_zupt_active = zupt_active
+        self._last_stationary = stationary
         # Producer path when oak state exposes cum channels (real OakDepthReader
         # and producer-backed fakes). Legacy stubs without these fields keep the
         # sparse-snapshot path for unit-test compatibility.
@@ -598,20 +667,12 @@ class OakImuReader:
                 self._auto_axis = self._dominant_axis(gx_dps, gy_dps, gz_dps)
                 self._auto_axis_lock_until_s = now + 0.8
 
-        if self._bias_adapt_enabled:
-            if (
-                abs(gx_dps) < self._nmni_threshold_dps
-                and abs(gy_dps) < self._nmni_threshold_dps
-                and abs(gz_dps) < self._nmni_threshold_dps
-            ):
-                a = self._bias_adapt_alpha
-                bx, by, bz = self.gyro_bias_dps
-                self.gyro_bias_dps = (
-                    (1.0 - a) * bx + a * gx_raw_dps,
-                    (1.0 - a) * by + a * gy_raw_dps,
-                    (1.0 - a) * bz + a * gz_raw_dps,
-                )
-                self._sync_producer_config()
+        # (The old reader-side bias_adapt EMA lived here. It was removed on
+        # 2026-09-19: it only ran when every axis was below the NMNI threshold
+        # (0.3 dps), so it could never engage once thermal drift exceeded that —
+        # measured on the robot at ~1.2 dps after 40 minutes — and two bias
+        # integrators would fight. Bias tracking now lives on the producer,
+        # gated by a real stationary detector. See ImuYawProducer.)
 
         # EMA-smooth the accelerometer for telemetry / gravity rate display.
         a = self._accel_ema_alpha
@@ -687,6 +748,19 @@ class OakImuReader:
                 gz=gz,
                 yaw_rate_world_dps=yaw_rate_world_dps,
             )
+            if zupt_active and self._integrate_status not in (
+                "stale",
+                "cum_reset",
+                "restart",
+            ):
+                # The producer proved the robot is stationary and deliberately
+                # froze cum, so the heading cannot move. Report a yaw rate of
+                # 0 to match: the PID must not damp a turn the heading does not
+                # see. (A stale sample is a different, stronger condition and
+                # keeps its own status.)
+                yaw_rate_world_dps = 0.0
+                self._last_yaw_rate_world_dps = 0.0
+                self._integrate_status = "zupt"
         else:
             # Legacy sparse-snapshot path (tests / stubs without cum fields).
             dt, status = self._resolve_integration_dt(dev_ts, host_ts, age_s)

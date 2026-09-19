@@ -326,7 +326,6 @@ class TestOakImuReaderProducerPath(unittest.TestCase):
             yaw_rate_source="gyro_y",
             yaw_rate_scale=1.0,
             nmni_enabled=False,
-            bias_adapt_enabled=False,
         )
         defaults.update(kwargs)
         return oak, OakImuReader(oak, **defaults)
@@ -819,7 +818,6 @@ class TestGyroCalibrateNmniNoCircular(unittest.TestCase):
             yaw_rate_scale=1.0,
             nmni_enabled=True,
             nmni_threshold_dps=0.3,
-            bias_adapt_enabled=False,
         )
         # __init__ already enabled producer NMNI with bias=0.
         self.assertTrue(oak.producer.nmni_enabled)
@@ -858,7 +856,6 @@ class TestGyroCalibrateNmniNoCircular(unittest.TestCase):
             yaw_rate_scale=1.0,
             nmni_enabled=True,
             nmni_threshold_dps=0.3,
-            bias_adapt_enabled=False,
         )
         self.assertTrue(oak.producer.nmni_enabled)
 
@@ -906,7 +903,6 @@ class TestGyroCalibrateNmniNoCircular(unittest.TestCase):
             yaw_rate_scale=1.0,
             nmni_enabled=True,
             nmni_threshold_dps=0.3,
-            bias_adapt_enabled=False,
         )
         prior = (0.11, 0.22, -0.07)
         imu.gyro_bias_dps = prior
@@ -949,7 +945,6 @@ class TestGyroCalibrateNmniNoCircular(unittest.TestCase):
                 yaw_rate_scale=1.0,
                 nmni_enabled=True,
                 nmni_threshold_dps=0.3,
-                bias_adapt_enabled=False,
             )
             if apply_cal:
                 n = [0]

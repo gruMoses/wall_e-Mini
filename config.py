@@ -93,8 +93,31 @@ class ImuSteeringConfig:
     # Optional OAK yaw drift mitigations (IMU-5). NMNI enabled by default after validation.
     oak_nmni_enabled: bool = True
     oak_nmni_threshold_dps: float = 0.3
-    oak_bias_adapt_enabled: bool = False
-    oak_bias_adapt_alpha: float = 0.001
+    # Stationary gyro-bias tracking + ZUPT (zero-velocity update), added
+    # 2026-09-19. Field evidence: parked, the heading wound +0.9 deg/s; the
+    # robot JSON log showed gy_body_dps (bias-subtracted body rate about Y) at
+    # -0.03 right after a GOOD 3 s boot calibration, then -0.46 / -0.83 /
+    # -1.07 / -1.25 over the next 37 min, plateauing near -1.2 deg/s. That is
+    # thermal gyro-bias drift with nothing tracking it. NMNI at 0.3 deg/s
+    # cannot gate it, and the old reader-side bias_adapt only ran when
+    # |rate| < 0.3 deg/s, so it could never engage once the drift passed that.
+    # (oak_bias_adapt_enabled / oak_bias_adapt_alpha were removed with it.)
+    oak_stationary_bias_tracking_enabled: bool = True
+    # Rolling window length for the stationary detector.
+    oak_stationary_window_s: float = 1.0
+    # Per-axis raw gyro std gate: below this the window looks like noise, not motion.
+    oak_stationary_gyro_std_dps: float = 0.3
+    # Accel-norm std gate: catches bumps/vibration that gyro std alone can miss.
+    # Tune this one on the robot — it is the most mounting-dependent threshold.
+    oak_stationary_accel_std_g: float = 0.03
+    # Bound on |window mean - current bias| per axis. The std gates do the real
+    # work; this only rejects a steady slow turn that would otherwise look
+    # quiet. It must stay well above the measured hot bias (~1.3 deg/s).
+    oak_stationary_max_rate_dps: float = 2.0
+    # Bias relaxation time constant toward the stationary window mean.
+    oak_stationary_bias_tau_s: float = 15.0
+    # Freeze yaw integration entirely while provably stationary.
+    oak_zupt_enabled: bool = True
     # OAK IMU yaw-rate source:
     # - "auto": lock onto dominant gyro axis while turning (can pick the wrong axis
     #   under vibration — chalk 90/180 with pi_app.cli.oak_yaw_chalk_test before

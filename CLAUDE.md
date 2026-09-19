@@ -42,6 +42,19 @@ VESC over CAN (`can0`) is the primary drive path; Arduino motor-driver fallback 
   - `imu_source = "auto"` (default): tries external I2C breakout first, falls back to OAK-D BMI270.
   - External I2C options: ICM-20948 or ISM330DHCX + MMC5983MA combo (if physically present).
   - `imu_use_magnetometer = False` is the current default — magnetometer fusion is disabled.
+- **Stationary bias tracking + ZUPT (2026-09-19)**: the gyro bias drifts
+  thermally after a good boot calibration — measured `gy_body_dps` went −0.03
+  (11:12) → −0.46 → −0.83 → −1.07 → −1.25 (11:49), plateauing near −1.2 deg/s,
+  winding the parked heading +0.9 deg/s. `ImuYawProducer` now runs a stationary
+  detector (rolling 1 s window; gyro-axis std, accel-norm std, and a per-axis
+  max-rate bound), relaxes the bias toward the stationary window mean, and with
+  `oak_zupt_enabled` freezes yaw integration outright while still.
+  `OakImuReader` then reports `yaw_rate_world_dps = 0` and
+  `integrate_status = "zupt"`. The old reader-side `bias_adapt` is **removed**:
+  it only ran when |rate| < the 0.3 deg/s NMNI threshold, so it could never
+  engage once the drift exceeded that. Thresholds and the log lines to look for
+  are in `docs/heading_tuning.md`; `oak_stationary_accel_std_g` still needs one
+  tuning pass on the robot.
 - IMU feeds `ImuSteeringCompensator` (PID heading-hold, differential byte correction).
 - GPS COG heading alignment is **implemented** (software) — one-shot locks IMU heading to true north during a forward, straight manual RTK-fixed run, then freezes the offset for the armed session; field validation pending (`docs/gps_heading_alignment.md`).
 

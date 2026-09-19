@@ -105,7 +105,6 @@ class TestOakImuIntegrationHardening(unittest.TestCase):
             yaw_rate_source="gyro_y",
             yaw_rate_scale=1.0,
             nmni_enabled=False,
-            bias_adapt_enabled=False,
         )
         defaults.update(kwargs)
         return oak, OakImuReader(oak, **defaults)

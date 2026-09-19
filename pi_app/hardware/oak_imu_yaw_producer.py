@@ -39,11 +39,22 @@ Safety
 
 from __future__ import annotations
 
+import logging
 import math
+import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Deque, Iterable, List, Optional, Sequence, Tuple
+
+# The app installs no logging handler, so INFO is dropped: anything that must be
+# visible in journalctl is logged at WARNING.
+logger = logging.getLogger(__name__)
 
 G_MSS = 9.80665
+
+# At most one WARNING per event type in this window (ZUPT can chatter at a
+# stop line; the counters carry the full history).
+_ZUPT_LOG_MIN_INTERVAL_S = 10.0
 
 # Default caps (match OakImuReader hardening).
 _MAX_INTEGRATE_DT_S = 0.15
@@ -122,6 +133,18 @@ class ImuYawProducerSnapshot:
     cadence_max_s: float = 0.0
     cadence_avg_s: float = 0.0
 
+    # Stationary detection / gyro-bias tracking / ZUPT
+    stationary: bool = False
+    zupt_active: bool = False
+    zupt_engage_count: int = 0
+    bias_updates: int = 0
+    bias_gx_dps: float = 0.0
+    bias_gy_dps: float = 0.0
+    bias_gz_dps: float = 0.0
+    window_gyro_std_dps: float = 0.0   # worst of the three axes
+    window_accel_std_g: float = 0.0
+    last_bias_update_host_ts: float = 0.0
+
 
 @dataclass
 class ImuYawProducer:
@@ -137,6 +160,17 @@ class ImuYawProducer:
     nmni_threshold_dps: float = 0.3
     # Accel EMA for gravity projection (same spirit as OakImuReader).
     accel_ema_alpha: float = 0.12
+
+    # ── Stationary bias tracking / ZUPT ──────────────────────────────────
+    # Both DEFAULT OFF so existing callers and unit tests keep the pure
+    # integrate-everything behaviour; production turns them on from config.
+    stationary_tracking_enabled: bool = False
+    zupt_enabled: bool = False
+    stationary_window_s: float = 1.0
+    stationary_gyro_std_dps: float = 0.3
+    stationary_accel_std_g: float = 0.03
+    stationary_max_rate_dps: float = 2.0
+    stationary_bias_tau_s: float = 15.0
 
     _ax_ema: Optional[float] = field(default=None, init=False, repr=False)
     _ay_ema: Optional[float] = field(default=None, init=False, repr=False)
@@ -180,6 +214,208 @@ class ImuYawProducer:
     cadence_min_s: float = field(default=0.0, init=False)
     cadence_max_s: float = field(default=0.0, init=False)
     cadence_avg_s: float = field(default=0.0, init=False)
+
+    # Stationary state / counters (see _update_stationary_window).
+    stationary: bool = field(default=False, init=False)
+    zupt_active: bool = field(default=False, init=False)
+    zupt_engage_count: int = field(default=0, init=False)
+    bias_updates: int = field(default=0, init=False)
+    window_gyro_std_dps: float = field(default=0.0, init=False)
+    window_accel_std_g: float = field(default=0.0, init=False)
+    last_bias_update_host_ts: float = field(default=0.0, init=False)
+
+    # Rolling window of RAW samples: (t_s, gx_dps, gy_dps, gz_dps, a_norm_g).
+    # Running sums keep mean/std O(1) per packet (no numpy on the Pi).
+    _win: Deque[Tuple[float, float, float, float, float]] = field(
+        default_factory=deque, init=False, repr=False
+    )
+    _win_clock_s: float = field(default=0.0, init=False, repr=False)
+    _win_sum: List[float] = field(
+        default_factory=lambda: [0.0, 0.0, 0.0, 0.0], init=False, repr=False
+    )
+    _win_sumsq: List[float] = field(
+        default_factory=lambda: [0.0, 0.0, 0.0, 0.0], init=False, repr=False
+    )
+    _bias_at_last_log_dps: Tuple[float, float, float] = field(
+        default=(0.0, 0.0, 0.0), init=False, repr=False
+    )
+    _last_zupt_log_mono: dict = field(default_factory=dict, init=False, repr=False)
+
+    # ── Stationary bias tracking / ZUPT ──────────────────────────────────
+
+    def configure_stationary_tracking(
+        self,
+        *,
+        enabled: Optional[bool] = None,
+        zupt_enabled: Optional[bool] = None,
+        window_s: Optional[float] = None,
+        gyro_std_dps: Optional[float] = None,
+        accel_std_g: Optional[float] = None,
+        max_rate_dps: Optional[float] = None,
+        bias_tau_s: Optional[float] = None,
+    ) -> None:
+        """Set the stationary detector knobs (None leaves a knob unchanged)."""
+        if enabled is not None:
+            self.stationary_tracking_enabled = bool(enabled)
+        if zupt_enabled is not None:
+            self.zupt_enabled = bool(zupt_enabled)
+        if window_s is not None:
+            self.stationary_window_s = max(0.05, float(window_s))
+        if gyro_std_dps is not None:
+            self.stationary_gyro_std_dps = max(0.0, float(gyro_std_dps))
+        if accel_std_g is not None:
+            self.stationary_accel_std_g = max(0.0, float(accel_std_g))
+        if max_rate_dps is not None:
+            self.stationary_max_rate_dps = max(0.0, float(max_rate_dps))
+        if bias_tau_s is not None:
+            self.stationary_bias_tau_s = max(0.1, float(bias_tau_s))
+
+    def _reset_stationary_window(self) -> None:
+        """Drop the window on any non-fresh packet (gap / reseed / regression).
+
+        The window clock is the integrated device time, so a gap would otherwise
+        leave two samples straddling it and report a bogus "full" window.
+        """
+        self._win.clear()
+        self._win_sum = [0.0, 0.0, 0.0, 0.0]
+        self._win_sumsq = [0.0, 0.0, 0.0, 0.0]
+        self.stationary = False
+        self._set_zupt_active(False)
+
+    @staticmethod
+    def _std(sum_v: float, sumsq_v: float, n: int) -> float:
+        if n <= 1:
+            return 0.0
+        mean = sum_v / n
+        var = (sumsq_v / n) - (mean * mean)
+        return math.sqrt(var) if var > 0.0 else 0.0
+
+    def _update_stationary_window(self, pkt: ImuPacket, dt: float) -> bool:
+        """Push one RAW sample and return whether the robot looks stationary.
+
+        Stationary iff the window is FULL **and** every raw gyro axis has a
+        standard deviation below ``stationary_gyro_std_dps``, **and** the accel
+        norm has a standard deviation below ``stationary_accel_std_g``, **and**
+        every axis mean sits within ``stationary_max_rate_dps`` of the current
+        bias estimate. The std gates do the real work; the max-rate bound only
+        rejects a steady slow turn that would otherwise look quiet.
+        """
+        self._win_clock_s += dt
+        t = self._win_clock_s
+
+        gx_dps = math.degrees(float(pkt.gx_rads))
+        gy_dps = math.degrees(float(pkt.gy_rads))
+        gz_dps = math.degrees(float(pkt.gz_rads))
+        a_norm_g = (
+            math.sqrt(
+                float(pkt.ax_mss) ** 2
+                + float(pkt.ay_mss) ** 2
+                + float(pkt.az_mss) ** 2
+            )
+            / G_MSS
+        )
+
+        sample = (t, gx_dps, gy_dps, gz_dps, a_norm_g)
+        self._win.append(sample)
+        for i, v in enumerate((gx_dps, gy_dps, gz_dps, a_norm_g)):
+            self._win_sum[i] += v
+            self._win_sumsq[i] += v * v
+
+        window_s = max(0.05, float(self.stationary_window_s))
+        # Keep the oldest sample that still spans the full window, so the span
+        # settles just above window_s instead of always just under it.
+        while len(self._win) > 2 and (t - self._win[1][0]) >= window_s:
+            old = self._win.popleft()
+            for i, v in enumerate(old[1:]):
+                self._win_sum[i] -= v
+                self._win_sumsq[i] -= v * v
+
+        n = len(self._win)
+        gyro_std = max(self._std(self._win_sum[i], self._win_sumsq[i], n) for i in range(3))
+        accel_std = self._std(self._win_sum[3], self._win_sumsq[3], n)
+        self.window_gyro_std_dps = gyro_std
+        self.window_accel_std_g = accel_std
+
+        span = t - self._win[0][0]
+        if n < 3 or span < window_s:
+            return False
+
+        if gyro_std >= self.stationary_gyro_std_dps:
+            return False
+        if accel_std >= self.stationary_accel_std_g:
+            return False
+
+        bias_dps = (self.bias_gx_dps, self.bias_gy_dps, self.bias_gz_dps)
+        for i in range(3):
+            mean_i = self._win_sum[i] / n
+            if abs(mean_i - bias_dps[i]) >= self.stationary_max_rate_dps:
+                return False
+        return True
+
+    def _update_bias_from_window(self, dt: float, host_ts: float) -> None:
+        """Relax the bias estimate toward the stationary window mean.
+
+        ``bias += (dt / tau) * (window_mean - bias)`` per packet, so the bias
+        follows thermal drift (measured on the robot: -0.03 dps right after a
+        good 3 s boot calibration, then -0.46 / -0.83 / -1.07 / -1.25 dps over
+        the next 37 minutes) without chasing noise.
+        """
+        n = len(self._win)
+        if n <= 0:
+            return
+        alpha = dt / max(0.1, float(self.stationary_bias_tau_s))
+        alpha = max(0.0, min(1.0, alpha))
+        if alpha <= 0.0:
+            return
+        bx = self.bias_gx_dps + alpha * ((self._win_sum[0] / n) - self.bias_gx_dps)
+        by = self.bias_gy_dps + alpha * ((self._win_sum[1] / n) - self.bias_gy_dps)
+        bz = self.bias_gz_dps + alpha * ((self._win_sum[2] / n) - self.bias_gz_dps)
+        self.set_gyro_bias_dps(bx, by, bz)
+        self.bias_updates += 1
+        if math.isfinite(host_ts):
+            self.last_bias_update_host_ts = float(host_ts)
+
+    def _set_zupt_active(self, active: bool) -> None:
+        if bool(active) == bool(self.zupt_active):
+            return
+        self.zupt_active = bool(active)
+        if self.zupt_active:
+            self.zupt_engage_count += 1
+        self._log_zupt_event("zupt_engage" if self.zupt_active else "zupt_disengage")
+
+    def _log_zupt_event(self, event: str) -> None:
+        now = time.monotonic()
+        last = self._last_zupt_log_mono.get(event)
+        if last is not None and (now - last) < _ZUPT_LOG_MIN_INTERVAL_S:
+            return
+        self._last_zupt_log_mono[event] = now
+        bx, by, bz = self.bias_gx_dps, self.bias_gy_dps, self.bias_gz_dps
+        pbx, pby, pbz = self._bias_at_last_log_dps
+        self._bias_at_last_log_dps = (bx, by, bz)
+        logger.warning(
+            "OAK IMU %s: bias=(%+.4f, %+.4f, %+.4f) dps "
+            "delta_since_last_log=(%+.4f, %+.4f, %+.4f) dps "
+            "bias_updates=%d zupt_engages=%d gyro_std=%.4f dps accel_std=%.4f g",
+            event,
+            bx, by, bz,
+            bx - pbx, by - pby, bz - pbz,
+            self.bias_updates,
+            self.zupt_engage_count,
+            self.window_gyro_std_dps,
+            self.window_accel_std_g,
+        )
+
+    @property
+    def bias_gx_dps(self) -> float:
+        return math.degrees(self.bias_gx_rads)
+
+    @property
+    def bias_gy_dps(self) -> float:
+        return math.degrees(self.bias_gy_rads)
+
+    @property
+    def bias_gz_dps(self) -> float:
+        return math.degrees(self.bias_gz_rads)
 
     def set_gyro_bias_rads(self, gx: float, gy: float, gz: float) -> None:
         self.bias_gx_rads = float(gx)
@@ -239,6 +475,16 @@ class ImuYawProducer:
             cadence_min_s=self.cadence_min_s,
             cadence_max_s=self.cadence_max_s,
             cadence_avg_s=self.cadence_avg_s,
+            stationary=self.stationary,
+            zupt_active=self.zupt_active,
+            zupt_engage_count=self.zupt_engage_count,
+            bias_updates=self.bias_updates,
+            bias_gx_dps=self.bias_gx_dps,
+            bias_gy_dps=self.bias_gy_dps,
+            bias_gz_dps=self.bias_gz_dps,
+            window_gyro_std_dps=self.window_gyro_std_dps,
+            window_accel_std_g=self.window_accel_std_g,
+            last_bias_update_host_ts=self.last_bias_update_host_ts,
         )
 
     @staticmethod
@@ -429,12 +675,23 @@ class ImuYawProducer:
         self.last_status = status
         if dt is None or status != "fresh":
             self.last_dt_s = 0.0
+            # A gap / reseed / regression breaks window continuity.
+            if status in ("restart", "regressed", "gap_freeze", "invalid_ts"):
+                self._reset_stationary_window()
             # Still update accel EMA so gravity projection recovers after gaps.
             self._update_accel_ema(self.ax_mss, self.ay_mss, self.az_mss)
             return
 
         self.last_dt_s = dt
         self._note_cadence(dt)
+
+        # Stationary detection runs on RAW rates (bias must stay measurable).
+        self.stationary = self._update_stationary_window(pkt, dt)
+        tracking = self.stationary and self.stationary_tracking_enabled
+        if tracking:
+            self._update_bias_from_window(dt, host_ts)
+        freeze = tracking and self.zupt_enabled
+        self._set_zupt_active(freeze)
 
         # Integrate-path only (locals): bias then NMNI. Never overwrite gx_rads.
         gx = float(pkt.gx_rads) - self.bias_gx_rads
@@ -447,10 +704,15 @@ class ImuYawProducer:
         sx, sy, sz = self._update_accel_ema(self.ax_mss, self.ay_mss, self.az_mss)
         g_rate = self._apply_nmni(self._gravity_rate(gx, gy, gz, sx, sy, sz))
 
-        self.cum_x_rad += gx * dt
-        self.cum_y_rad += gy * dt
-        self.cum_z_rad += gz * dt
-        self.cum_grav_rad += g_rate * dt
+        # ZUPT: the robot is provably still, so nothing is added to cum. The
+        # packet counters still advance — they mean "packets the integrator
+        # processed", and the consumer's producer-replacement detector relies on
+        # that counter being monotonic.
+        if not freeze:
+            self.cum_x_rad += gx * dt
+            self.cum_y_rad += gy * dt
+            self.cum_z_rad += gz * dt
+            self.cum_grav_rad += g_rate * dt
         self.integrated_time_s += dt
         self.packets_integrated += 1
 

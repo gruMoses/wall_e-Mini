@@ -23,6 +23,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Optional
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
@@ -114,6 +115,12 @@ class _ImuState:
     producer_packets_integrated: int = 0
     producer_integrated_time_s: float = 0.0
     last_integrated_device_ts_s: float = 0.0
+    # Stationary detector / zero-velocity update (see ImuYawProducer).
+    # zupt_active means the producer deliberately froze cum for this sample, so
+    # a consumer must report a yaw rate of 0 to stay consistent with the
+    # frozen heading.
+    stationary: bool = False
+    zupt_active: bool = False
 
 
 @dataclass
@@ -623,6 +630,8 @@ class OakDepthReader:
                 producer_packets_integrated=self._imu_state.producer_packets_integrated,
                 producer_integrated_time_s=self._imu_state.producer_integrated_time_s,
                 last_integrated_device_ts_s=self._imu_state.last_integrated_device_ts_s,
+                stationary=self._imu_state.stationary,
+                zupt_active=self._imu_state.zupt_active,
             ), age
 
     def get_imu_raw_gyro_dps(self) -> tuple[tuple[float, float, float], float]:
@@ -657,6 +666,34 @@ class OakDepthReader:
         """Configure per-packet NMNI on the producer integrator."""
         with self._lock:
             self._imu_yaw_producer.set_nmni(enabled, threshold_dps)
+
+    def configure_stationary_tracking(
+        self,
+        *,
+        enabled: Optional[bool] = None,
+        zupt_enabled: Optional[bool] = None,
+        window_s: Optional[float] = None,
+        gyro_std_dps: Optional[float] = None,
+        accel_std_g: Optional[float] = None,
+        max_rate_dps: Optional[float] = None,
+        bias_tau_s: Optional[float] = None,
+    ) -> None:
+        """Configure stationary gyro-bias tracking / ZUPT on the producer.
+
+        ``None`` leaves a knob unchanged. Both features default OFF on the
+        producer; ``OakImuReader`` pushes the production values from config the
+        same way it pushes bias and NMNI, so there is exactly one owner.
+        """
+        with self._lock:
+            self._imu_yaw_producer.configure_stationary_tracking(
+                enabled=enabled,
+                zupt_enabled=zupt_enabled,
+                window_s=window_s,
+                gyro_std_dps=gyro_std_dps,
+                accel_std_g=accel_std_g,
+                max_rate_dps=max_rate_dps,
+                bias_tau_s=bias_tau_s,
+            )
 
     def get_imu_metrics(self) -> dict:
         """Return a thread-safe snapshot of IMU observability counters."""
@@ -729,6 +766,21 @@ class OakDepthReader:
                 "producer_generation": snap.generation,
                 "producer_integrated_time_s": snap.integrated_time_s,
                 "producer_last_status": snap.last_status,
+                # Stationary detector / gyro-bias tracking / ZUPT.
+                "stationary": snap.stationary,
+                "zupt_active": snap.zupt_active,
+                "zupt_engage_count": snap.zupt_engage_count,
+                "bias_updates": snap.bias_updates,
+                "bias_gx_dps": snap.bias_gx_dps,
+                "bias_gy_dps": snap.bias_gy_dps,
+                "bias_gz_dps": snap.bias_gz_dps,
+                "window_gyro_std_dps": snap.window_gyro_std_dps,
+                "window_accel_std_g": snap.window_accel_std_g,
+                "last_bias_update_host_ts": snap.last_bias_update_host_ts,
+                "stationary_tracking_enabled": bool(
+                    self._imu_yaw_producer.stationary_tracking_enabled
+                ),
+                "zupt_enabled": bool(self._imu_yaw_producer.zupt_enabled),
             }
 
     def get_health(self) -> dict:
@@ -2306,6 +2358,8 @@ class OakDepthReader:
                 self._imu_state.producer_packets_integrated = snap.packets_integrated
                 self._imu_state.producer_integrated_time_s = snap.integrated_time_s
                 self._imu_state.last_integrated_device_ts_s = snap.last_integrated_device_ts_s
+                self._imu_state.stationary = snap.stationary
+                self._imu_state.zupt_active = snap.zupt_active
 
                 sample_ts = (
                     snap.device_timestamp_s
