@@ -697,7 +697,13 @@ class WaypointNavConfig:
     # State-machine thresholds (see WaypointNavController)
     align_threshold_deg: float = 12.0      # |heading_err| below this -> ALIGN->DRIVE
     recovery_threshold_deg: float = 25.0   # |heading_err| above this -> DRIVE->ALIGN
-    pivot_yaw_cmd: float = 0.5             # normalized yaw command during ALIGN pivot
+    # ALIGN pivot is proportional to the heading error (2026-09-19): full
+    # pivot_yaw_cmd at pivot_full_error_deg and above, floor pivot_yaw_min near
+    # the window. A fixed 0.5 pivot measured ~74 deg/s and overshot 25-30 deg,
+    # past recovery_threshold_deg, so ALIGN/DRIVE oscillated left-right.
+    pivot_yaw_cmd: float = 0.35            # max normalized yaw command during ALIGN pivot
+    pivot_yaw_min: float = 0.18            # floor so the tracks keep moving near the window
+    pivot_full_error_deg: float = 90.0     # error at which the pivot reaches pivot_yaw_cmd
     motor_deadband_byte: int = 12          # minimum byte offset to overcome motor deadband
 
 

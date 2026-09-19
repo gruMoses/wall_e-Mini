@@ -331,7 +331,9 @@ class TestPivotYawSign(unittest.TestCase):
         self.assertEqual(state, NavState.ALIGN)
         self.assertEqual(v_cmd, 0.0)
         self.assertGreater(yaw_cmd, 0.0)
-        self.assertAlmostEqual(yaw_cmd, self.PIVOT, places=6)
+        # Proportional pivot (2026-09-19): 60 deg of error at a 90 deg full-pivot
+        # range gives 2/3 of PIVOT (above the 0.18 floor).
+        self.assertAlmostEqual(yaw_cmd, max(0.18, self.PIVOT * 60.0 / 90.0), places=6)
         self.assertAlmostEqual(nav.get_status().heading_error_deg, 60.0, places=6)
 
     def test_align_negative_error_turns_left(self):
@@ -343,8 +345,23 @@ class TestPivotYawSign(unittest.TestCase):
         self.assertEqual(state, NavState.ALIGN)
         self.assertEqual(v_cmd, 0.0)
         self.assertLess(yaw_cmd, 0.0)
-        self.assertAlmostEqual(yaw_cmd, -self.PIVOT, places=6)
+        self.assertAlmostEqual(yaw_cmd, -max(0.18, self.PIVOT * 60.0 / 90.0), places=6)
         self.assertAlmostEqual(nav.get_status().heading_error_deg, -60.0, places=6)
+
+    def test_pivot_is_proportional_with_a_floor(self):
+        """2026-09-19 field run: a fixed full-speed pivot overshot 25-30 deg and
+        ALIGN/DRIVE oscillated left-right. The pivot must shrink as the error
+        closes, but never below the floor that keeps the tracks moving."""
+        nav = self._nav()
+        big = nav._pivot_yaw_for_error(120.0)
+        mid = nav._pivot_yaw_for_error(45.0)
+        small = nav._pivot_yaw_for_error(10.0)
+        self.assertAlmostEqual(big, self.PIVOT, places=6)          # saturates at the max
+        self.assertAlmostEqual(mid, self.PIVOT * 45.0 / 90.0, places=6)
+        self.assertGreater(big, mid)
+        self.assertGreater(mid, small)
+        self.assertAlmostEqual(small, 0.18, places=6)               # floor
+        self.assertAlmostEqual(nav._pivot_yaw_for_error(-10.0), -0.18, places=6)
 
     def _into_drive(self) -> WaypointNavController:
         nav = self._nav()

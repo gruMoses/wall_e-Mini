@@ -106,7 +106,14 @@ class WaypointNavConfig:
     stale_timeout_s: float = 3.0
     align_threshold_deg: float = 12.0
     recovery_threshold_deg: float = 25.0
-    pivot_yaw_cmd: float = 0.5
+    # ALIGN pivot (2026-09-19: proportional). A fixed 0.5 pivot measured about
+    # 74 deg/s in the field and carried 25-30 deg past the target, beyond
+    # recovery_threshold_deg, so ALIGN and DRIVE traded places left-right in a
+    # limit cycle. The pivot now scales with the error: full pivot_yaw_cmd at
+    # pivot_full_error_deg and above, down to pivot_yaw_min near the window.
+    pivot_yaw_cmd: float = 0.35
+    pivot_yaw_min: float = 0.18
+    pivot_full_error_deg: float = 90.0
     motor_deadband_byte: int = 12
 
 
@@ -278,8 +285,16 @@ class WaypointNavController:
         (Until 2026-09-19 this returned ``-pivot`` for a positive error. That
         was a compensator for the reader's inverted heading, not a mixer fact.)
         """
-        pivot = self._cfg.pivot_yaw_cmd
-        return pivot if err_signed > 0 else -pivot
+        cfg = self._cfg
+        pivot_max = float(cfg.pivot_yaw_cmd)
+        pivot_min = min(float(getattr(cfg, "pivot_yaw_min", pivot_max)), pivot_max)
+        full_err = max(1.0, float(getattr(cfg, "pivot_full_error_deg", 90.0)))
+        # Proportional pivot with a floor (2026-09-19): full speed only for a
+        # large error, slowing as the window approaches so the robot can stop
+        # inside align_threshold_deg instead of overshooting into a limit cycle.
+        magnitude = pivot_max * min(1.0, abs(err_signed) / full_err)
+        magnitude = max(pivot_min, min(pivot_max, magnitude))
+        return magnitude if err_signed > 0 else -magnitude
 
     def _emit(self, state: NavState, v_cmd: float, yaw_cmd: float) -> tuple[float, float, NavState]:
         self._state = state

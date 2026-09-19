@@ -108,7 +108,7 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
 
 ### Waypoint Navigation
 State machine in `pi_app/control/waypoint_nav.py`:
-- **ALIGN**: pivot in place until heading error < `align_threshold_deg` (default 12°). Yaw sign: **positive** yaw_cmd for a positive (bearing-is-clockwise-of-me) heading error — both frames are CW-positive and `mix_to_bytes` turns right on +yaw. (Was negative until 2026-09-19, compensating an inverted heading.)
+- **ALIGN**: pivot in place until heading error < `align_threshold_deg` (default 12°). Yaw sign: positive yaw_cmd for positive (right) heading error. The pivot is proportional to the error (max `pivot_yaw_cmd` 0.35 at ≥90°, floor `pivot_yaw_min` 0.18); a fixed 0.5 pivot overshot 25–30° and oscillated with DRIVE (2026-09-19).
 - **DRIVE**: forward at cruise speed with PID steering; falls back to ALIGN if error exceeds `recovery_threshold_deg`.
 - **ARRIVE**: within `arrival_radius_m` of target; zeroes commands and advances waypoint.
 - `compute()` returns `(v_cmd, yaw_cmd, state)` as floats; caller's mixer converts to motor bytes.
