@@ -11,7 +11,9 @@ from pi_app.control.follow_me import (
     DetectionFilter,
     FollowMeController,
     PersonDetection,
+    PIDController,
     NEUTRAL,
+    SpeedLayer,
     TargetTracker,
     _FilteredDetection,
 )
@@ -1783,6 +1785,196 @@ class TestDetectionFilterGeometric(unittest.TestCase):
         left, right = fm.compute([sliver])
         self.assertEqual(left, NEUTRAL)
         self.assertEqual(right, NEUTRAL, "Sliver must be rejected by controller with default config")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Speed-loop instrumentation (2026-09-19 logging audit): PIDController stores
+# its last p/i/d/output terms; SpeedLayer stores its own last speed-loop
+# fields on every compute() path; FollowMeController.get_status() exposes
+# both as a "speed_loop" dict.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FakeVelocityPID:
+    """A controllable stand-in for PIDController's compute()/reset(), so the
+    SpeedLayer tests below verify SpeedLayer's own bookkeeping in isolation
+    from PIDController's PID math (that math is covered separately below)."""
+
+    def __init__(self, output: float = 0.0):
+        self.output = output
+        self.calls: list[tuple[float, float]] = []
+        self.reset_calls = 0
+        self.last_p = 0.0
+        self.last_i = 0.0
+        self.last_d = 0.0
+        self.last_output = 0.0
+
+    def compute(self, error: float, dt: float) -> float:
+        self.calls.append((error, dt))
+        self.last_output = self.output
+        return self.output
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+
+class TestPIDControllerTelemetry(unittest.TestCase):
+
+    def test_compute_stores_last_p_i_d_and_output(self):
+        pid = PIDController(kp=2.0, ki=0.5, kd=1.0, integral_limit=10.0, output_limit=100.0)
+
+        out1 = pid.compute(error=1.0, dt=0.1)
+        # First tick: derivative term is suppressed (no previous error yet).
+        self.assertAlmostEqual(pid.last_p, 2.0)
+        self.assertAlmostEqual(pid.last_i, 0.5 * (1.0 * 0.1))
+        self.assertAlmostEqual(pid.last_d, 0.0)
+        self.assertAlmostEqual(pid.last_output, out1)
+
+        out2 = pid.compute(error=2.0, dt=0.1)
+        self.assertAlmostEqual(pid.last_p, 4.0)
+        self.assertAlmostEqual(pid.last_i, 0.5 * (1.0 * 0.1 + 2.0 * 0.1))
+        self.assertAlmostEqual(pid.last_d, 1.0 * (2.0 - 1.0) / 0.1)
+        self.assertAlmostEqual(pid.last_output, out2)
+
+    def test_last_output_reflects_output_limit_clamp(self):
+        pid = PIDController(kp=100.0, ki=0.0, kd=0.0, output_limit=5.0)
+        out = pid.compute(error=1.0, dt=0.1)
+        self.assertEqual(out, 5.0)
+        self.assertEqual(pid.last_output, 5.0)
+
+
+class TestSpeedLayerTelemetry(unittest.TestCase):
+
+    def _layer(self, fake_pid, speed_scale=0.01, dead_zone_m=0.1, min_dist_m=0.3):
+        return SpeedLayer(
+            target_dist_m=1.0,
+            dead_zone_m=dead_zone_m,
+            speed_gain=100.0,  # bytes per metre of distance error
+            min_dist_m=min_dist_m,
+            max_speed_byte=100.0,
+            velocity_pid=fake_pid,
+            speed_scale_mps_per_byte=speed_scale,
+        )
+
+    def test_closed_loop_stored_values_match_returned_byte(self):
+        fake_pid = _FakeVelocityPID(output=0.02)  # m/s correction
+        speed_scale = 0.01
+        layer = self._layer(fake_pid, speed_scale=speed_scale)
+
+        # depth=1.5 -> error=0.5 -> open_loop = min(100, 0.5*100) = 50.0
+        byte = layer.compute(depth_m=1.5, actual_speed_mps=0.3, dt=0.05)
+
+        expected_open_loop = 50.0
+        expected_target_mps = expected_open_loop * speed_scale  # 0.5
+        expected_err_mps = expected_target_mps - 0.3
+        expected_corr_byte = fake_pid.output / speed_scale  # 2.0
+        expected_byte = expected_open_loop + expected_corr_byte  # 52.0
+
+        self.assertAlmostEqual(byte, expected_byte)
+        self.assertAlmostEqual(layer.last_open_loop_byte, expected_open_loop)
+        self.assertAlmostEqual(layer.last_target_mps, expected_target_mps)
+        self.assertEqual(layer.last_actual_mps, 0.3)
+        self.assertAlmostEqual(layer.last_err_mps, expected_err_mps)
+        self.assertEqual(layer.last_corr_mps, fake_pid.output)
+        self.assertAlmostEqual(layer.last_corr_byte, expected_corr_byte)
+        self.assertTrue(layer.last_closed)
+
+    def test_open_loop_tick_sets_closed_false_and_resets_pid(self):
+        fake_pid = _FakeVelocityPID(output=0.02)
+        layer = self._layer(fake_pid)
+
+        byte = layer.compute(depth_m=1.5, actual_speed_mps=None, dt=0.05)
+
+        self.assertEqual(byte, 50.0)
+        self.assertEqual(layer.last_open_loop_byte, 50.0)
+        self.assertFalse(layer.last_closed)
+        self.assertIsNone(layer.last_target_mps)
+        self.assertIsNone(layer.last_actual_mps)
+        self.assertIsNone(layer.last_err_mps)
+        self.assertIsNone(layer.last_corr_mps)
+        self.assertIsNone(layer.last_corr_byte)
+        self.assertEqual(fake_pid.reset_calls, 1)
+
+    def test_dead_zone_resets_fields_to_zero_none(self):
+        fake_pid = _FakeVelocityPID(output=0.02)
+        layer = self._layer(fake_pid, dead_zone_m=0.2)
+
+        # Prime with a closed-loop tick so stale non-zero values exist.
+        layer.compute(depth_m=1.5, actual_speed_mps=0.3, dt=0.05)
+        self.assertTrue(layer.last_closed)
+
+        # depth=1.0 -> error=0.0, within the dead zone -> hold.
+        byte = layer.compute(depth_m=1.0, actual_speed_mps=0.3, dt=0.05)
+
+        self.assertEqual(byte, 0.0)
+        self.assertEqual(layer.last_open_loop_byte, 0.0)
+        self.assertIsNone(layer.last_target_mps)
+        self.assertIsNone(layer.last_actual_mps)
+        self.assertIsNone(layer.last_corr_mps)
+        self.assertFalse(layer.last_closed)
+
+    def test_too_close_resets_fields(self):
+        fake_pid = _FakeVelocityPID(output=0.02)
+        layer = self._layer(fake_pid, dead_zone_m=0.05, min_dist_m=0.3)
+
+        # target=1.0, depth=0.9 -> error=-0.1: negative and outside the dead
+        # zone (0.05), so this trips the "too close" branch, not dead-zone.
+        byte = layer.compute(depth_m=0.9, actual_speed_mps=0.3, dt=0.05)
+
+        self.assertEqual(byte, 0.0)
+        self.assertEqual(layer.last_open_loop_byte, 0.0)
+        self.assertIsNone(layer.last_target_mps)
+        self.assertFalse(layer.last_closed)
+
+    def test_min_dist_resets_fields(self):
+        fake_pid = _FakeVelocityPID(output=0.02)
+        layer = self._layer(fake_pid, min_dist_m=0.3)
+
+        byte = layer.compute(depth_m=0.2, actual_speed_mps=0.3, dt=0.05)  # depth <= min_dist
+
+        self.assertEqual(byte, 0.0)
+        self.assertEqual(layer.last_open_loop_byte, 0.0)
+        self.assertIsNone(layer.last_target_mps)
+        self.assertFalse(layer.last_closed)
+        self.assertEqual(fake_pid.reset_calls, 1)
+
+    def test_no_velocity_pid_configured_stays_open_loop(self):
+        # No velocity_pid at all: closed-loop branch is unreachable even with
+        # actual_speed_mps present.
+        layer = SpeedLayer(
+            target_dist_m=1.0, dead_zone_m=0.1, speed_gain=100.0,
+            min_dist_m=0.3, max_speed_byte=100.0, velocity_pid=None,
+        )
+        byte = layer.compute(depth_m=1.5, actual_speed_mps=0.3, dt=0.05)
+        self.assertEqual(byte, 50.0)
+        self.assertFalse(layer.last_closed)
+        self.assertEqual(layer.last_actual_mps, 0.3)
+        self.assertIsNone(layer.last_target_mps)
+        self.assertIsNone(layer.last_corr_mps)
+
+
+class TestFollowMeControllerSpeedLoopStatus(unittest.TestCase):
+
+    def test_status_carries_speed_loop_dict_with_expected_keys(self):
+        fm = FollowMeController(FollowMeConfig())
+        status = fm.get_status()
+        self.assertIn("speed_loop", status)
+        for key in (
+            "open_loop_byte", "target_mps", "actual_mps", "err_mps",
+            "p", "i", "d", "corr_mps", "corr_byte", "closed",
+        ):
+            self.assertIn(key, status["speed_loop"])
+        self.assertFalse(status["speed_loop"]["closed"])  # idle: never computed
+
+    def test_status_speed_loop_updates_after_a_closed_loop_tick(self):
+        cfg = FollowMeConfig()
+        fm = FollowMeController(cfg)
+        # Directly exercise the SpeedLayer used internally by this controller,
+        # mirroring what controller.py's _compute_follow_me_autonomy_command
+        # does via update_telemetry()/compute() on a real detection.
+        fm._speed.compute(depth_m=cfg.follow_distance_m + 0.5, actual_speed_mps=0.3, dt=0.05)
+        status = fm.get_status()
+        self.assertTrue(status["speed_loop"]["closed"])
+        self.assertIsNotNone(status["speed_loop"]["target_mps"])
 
 
 if __name__ == "__main__":

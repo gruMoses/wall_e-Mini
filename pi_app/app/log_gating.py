@@ -347,6 +347,10 @@ def build_log_obj(
             "steer_decay_factor": telem.get("follow_me_steer_decay_factor"),
             "fresh_detection": telem.get("follow_me_fresh_detection"),
             "steer_hold_active": telem.get("follow_me_steer_hold_active"),
+            # Speed-loop instrumentation (SpeedLayer + velocity PIDController):
+            # open_loop_byte, target_mps, actual_mps, err_mps, p, i, d,
+            # corr_mps, corr_byte, closed. See FollowMeController.get_status().
+            "speed_loop": telem.get("speed_loop"),
         }),
         "detections": [
             {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),

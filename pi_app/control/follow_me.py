@@ -669,6 +669,12 @@ class PIDController:
         self._integral: float = 0.0
         self._prev_error: float = 0.0
         self._first_tick: bool = True
+        # Last computed terms, for telemetry/troubleshooting (e.g. the
+        # follow-me speed loop's PID gains derived offline from the log).
+        self.last_p: float = 0.0
+        self.last_i: float = 0.0
+        self.last_d: float = 0.0
+        self.last_output: float = 0.0
 
     def compute(self, error: float, dt: float) -> float:
         """Return PID output for the given error and elapsed time."""
@@ -689,7 +695,12 @@ class PIDController:
         self._first_tick = False
 
         output = p + i + d
-        return max(-self._output_limit, min(self._output_limit, output))
+        output = max(-self._output_limit, min(self._output_limit, output))
+        self.last_p = p
+        self.last_i = i
+        self.last_d = d
+        self.last_output = output
+        return output
 
     def reset(self) -> None:
         self._integral = 0.0
@@ -767,6 +778,35 @@ class SpeedLayer:
         self._max_speed = max_speed_byte
         self._velocity_pid = velocity_pid
         self._speed_scale = max(speed_scale_mps_per_byte, 1e-9)
+        # Last-tick speed-loop telemetry, for troubleshooting and offline PID
+        # tuning. Set on every compute() path, including the early returns --
+        # a stale value from a prior closed-loop tick next to a `closed=False`
+        # flag would misrepresent this tick's (non-)control action.
+        self.last_open_loop_byte: float = 0.0
+        self.last_target_mps: float | None = None
+        self.last_actual_mps: float | None = None
+        self.last_err_mps: float | None = None
+        self.last_corr_mps: float | None = None
+        self.last_corr_byte: float | None = None
+        self.last_closed: bool = False
+
+    def _record(
+        self,
+        open_loop_byte: float,
+        target_mps: float | None,
+        actual_mps: float | None,
+        err_mps: float | None,
+        corr_mps: float | None,
+        corr_byte: float | None,
+        closed: bool,
+    ) -> None:
+        self.last_open_loop_byte = open_loop_byte
+        self.last_target_mps = target_mps
+        self.last_actual_mps = actual_mps
+        self.last_err_mps = err_mps
+        self.last_corr_mps = corr_mps
+        self.last_corr_byte = corr_byte
+        self.last_closed = closed
 
     def compute(
         self,
@@ -783,14 +823,17 @@ class SpeedLayer:
         if depth_m <= self._min_dist:
             if self._velocity_pid is not None:
                 self._velocity_pid.reset()
+            self._record(0.0, None, None, None, None, None, False)
             return 0.0
         error = depth_m - self._target
         if abs(error) <= self._dead_zone:
             if self._velocity_pid is not None:
                 self._velocity_pid.reset()
+            self._record(0.0, None, None, None, None, None, False)
             return 0.0
         if error <= 0.0:
             self.reset()
+            self._record(0.0, None, None, None, None, None, False)
             return 0.0  # too close — stop (backing up not implemented here)
         open_loop = min(self._max_speed, error * self._gain)
 
@@ -799,6 +842,7 @@ class SpeedLayer:
             # tripped): drop the integral so a stale I-term is not applied
             # when closed-loop resumes.
             self.reset()
+            self._record(open_loop, None, None, None, None, None, False)
             return open_loop
 
         # Closed-loop velocity correction when telemetry is available
@@ -807,7 +851,13 @@ class SpeedLayer:
             velocity_error = target_speed_mps - actual_speed_mps
             correction_mps = self._velocity_pid.compute(velocity_error, dt)
             correction_byte = correction_mps / self._speed_scale
-            return max(0.0, min(self._max_speed, open_loop + correction_byte))
+            out = max(0.0, min(self._max_speed, open_loop + correction_byte))
+            self._record(
+                open_loop, target_speed_mps, actual_speed_mps, velocity_error,
+                correction_mps, correction_byte, True,
+            )
+            return out
+        self._record(open_loop, None, actual_speed_mps, None, None, None, False)
         return open_loop
 
     def reset(self) -> None:
@@ -2142,6 +2192,25 @@ class FollowMeController:
             "extrapolation_active": self._trail_extrapolated,
             "extrapolation_count": self._trail_extrapolation_count,
             "consume_radius_m": float(self._cfg.trail_consume_radius_m),
+        }
+
+        # Speed-loop instrumentation (2026-09-19 logging audit): the values
+        # SpeedLayer/velocity PIDController compute every tick and, before
+        # this, discarded. p/i/d come from the velocity PIDController itself
+        # (self._speed._velocity_pid) -- they only advance on a closed-loop
+        # tick, so they're only meaningful when "closed" is True.
+        _vpid = self._speed._velocity_pid
+        status["speed_loop"] = {
+            "open_loop_byte": self._speed.last_open_loop_byte,
+            "target_mps": self._speed.last_target_mps,
+            "actual_mps": self._speed.last_actual_mps,
+            "err_mps": self._speed.last_err_mps,
+            "p": _vpid.last_p if _vpid is not None else None,
+            "i": _vpid.last_i if _vpid is not None else None,
+            "d": _vpid.last_d if _vpid is not None else None,
+            "corr_mps": self._speed.last_corr_mps,
+            "corr_byte": self._speed.last_corr_byte,
+            "closed": self._speed.last_closed,
         }
         if self._trail_enabled:
             status["trail_length"] = self._trail_length
