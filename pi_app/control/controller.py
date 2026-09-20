@@ -21,7 +21,10 @@ from pi_app.control.state import DriveCommand, AutonomyCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
 from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
 from pi_app.control.follow_me import FollowMeController, PersonDetection
-from pi_app.control.gesture_control import GestureStateMachine, GestureEvent, HandData
+from pi_app.control.gesture_control import (
+    GestureStateMachine, GestureEvent, HandData,
+    hand_poll_wanted as _hand_poll_wanted,
+)
 from pi_app.control.waypoint_nav import WaypointNavController, NavState, mix_to_bytes
 from pi_app.control.gps_heading_align import GpsHeadingAligner
 from pi_app.control.rpm_plausibility import (
@@ -303,6 +306,26 @@ class Controller:
     @property
     def motor_driver(self) -> MotorDriver:
         return self._motor
+
+    @property
+    def gesture_phase_active(self) -> bool:
+        """True when the gesture machine is in phase ACTIVE (FIVE is honoured)."""
+        return self._gesture is not None and self._gesture.is_active
+
+    def hand_poll_wanted(self, is_armed: bool) -> bool:
+        """Whether host-side MediaPipe Hands should run this tick.
+
+        Armed and (mode is not FOLLOW_ME, or the gesture machine is ACTIVE).
+        ``GestureConfig.hand_poll_in_follow_me=True`` restores the old
+        always-when-armed behaviour.
+        """
+        cfg = getattr(config, "gesture", None)
+        return _hand_poll_wanted(
+            is_armed=bool(is_armed),
+            mode=self._mode,
+            phase_active=self.gesture_phase_active,
+            hand_poll_in_follow_me=bool(getattr(cfg, "hand_poll_in_follow_me", False)),
+        )
 
     @property
     def is_armed(self) -> bool:
@@ -911,19 +934,26 @@ class Controller:
 
         # Hand-gesture Follow Me activation/deactivation
         gesture_event: GestureEvent | None = None
+        gesture_status: dict | None = None
         if self._gesture is not None:
             gesture_event = self._gesture.update(self._hand_data)
+            gesture_status = self._gesture.get_status()
             if gesture_event is GestureEvent.ACTIVATE:
-                if (
-                    self._follow_me is not None
-                    and self._safety_state.is_armed
-                    and self._follow_me_target_present()
+                if not self._safety_state.is_armed:
+                    gesture_event = None  # cannot activate
+                    gesture_status["event"] = None
+                    gesture_status["event_reason"] = "blocked_disarmed"
+                elif (
+                    self._follow_me is None
+                    or not self._follow_me_target_present()
                 ):
+                    gesture_event = None  # cannot activate
+                    gesture_status["event"] = None
+                    gesture_status["event_reason"] = "blocked_no_target"
+                else:
                     self._mode = "FOLLOW_ME"
                     self._safety_state.set_follow_me_active(True)
                     self._follow_me.start_recorder()
-                else:
-                    gesture_event = None  # cannot activate
             elif gesture_event is GestureEvent.DEACTIVATE:
                 if self._mode == "FOLLOW_ME":
                     self._mode = "MANUAL"
@@ -943,6 +973,12 @@ class Controller:
             telemetry["gesture_phase"] = self._gesture.phase_name
             if gesture_event is not None:
                 telemetry["gesture_event"] = gesture_event.name
+            if gesture_status is None:
+                gesture_status = self._gesture.get_status()
+            gesture_status["hand_poll_enabled"] = self.hand_poll_wanted(
+                self._safety_state.is_armed
+            )
+            telemetry["gesture"] = gesture_status
 
         wp_pivot_active = False
         wp_in_align = False

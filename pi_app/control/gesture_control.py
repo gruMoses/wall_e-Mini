@@ -55,6 +55,47 @@ _GESTURE_FINGER_COUNT = {
     "FIST": 0, "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
 }
 
+# Host-side MediaPipe Hands preview is requested at this size
+# (oak_depth._build_hand_tracking_nodes). Landmark x/y are 0..1 of that frame.
+_HAND_FRAME_W = 640.0
+_HAND_FRAME_H = 480.0
+
+
+def hand_span_px(hand: HandData | None) -> float:
+    """Max extent of the 21 landmarks in pixels of the 640x480 hand frame."""
+    if hand is None:
+        return 0.0
+    lm = hand.norm_landmarks
+    if lm is None or len(lm) < 21:
+        return 0.0
+    xs = [float(p[0]) * _HAND_FRAME_W for p in lm]
+    ys = [float(p[1]) * _HAND_FRAME_H for p in lm]
+    return max(max(xs) - min(xs), max(ys) - min(ys))
+
+
+def hand_poll_wanted(
+    is_armed: bool,
+    mode: str,
+    phase_active: bool,
+    hand_poll_in_follow_me: bool = False,
+) -> bool:
+    """Whether host-side MediaPipe Hands should run this tick.
+
+    FIVE is only honoured in GestureStateMachine phase ACTIVE, which only
+    the 3-4-3 start gesture enters. FOLLOW_ME from the RC switch leaves
+    the machine in IDLE, so Hands cannot act and should not run
+    (2026-09-20: 20-50 ms per loop on the shared vision thread).
+    ``hand_poll_in_follow_me=True`` restores the old always-when-armed
+    behaviour.
+    """
+    if not is_armed:
+        return False
+    if hand_poll_in_follow_me:
+        return True
+    if mode != "FOLLOW_ME":
+        return True
+    return bool(phase_active)
+
 
 # ---------------------------------------------------------------------------
 # Geometry helpers (pure-Python, no numpy dependency for Pi-side lightweight)
@@ -151,6 +192,29 @@ class _Phase(Enum):
     ACTIVE = auto()  # Follow Me activated via gesture
 
 
+# Steps of the activation sequence completed: IDLE=0 .. ACTIVE=3.
+_PHASE_SEQ_IDX = {
+    _Phase.IDLE: 0,
+    _Phase.SEQ_0: 1,
+    _Phase.SEQ_1: 2,
+    _Phase.ACTIVE: 3,
+}
+
+
+def _empty_gesture_status() -> dict:
+    return {
+        "hand_detected": False,
+        "hand_span_px": 0.0,
+        "finger_count": -1,
+        "label": None,
+        "streak": 0,
+        "phase": _Phase.IDLE.name,
+        "seq_idx": 0,
+        "event": None,
+        "event_reason": None,
+    }
+
+
 class GestureStateMachine:
     """Detects activation/deactivation gesture sequences.
 
@@ -179,6 +243,7 @@ class GestureStateMachine:
         self._last_step_time: float = 0.0
         self._cooldown_until: float = 0.0
         self._awaiting_change: str | None = None  # gesture to ignore until it changes
+        self._status: dict = _empty_gesture_status()
 
     # -- Public API --
 
@@ -190,107 +255,148 @@ class GestureStateMachine:
     def is_active(self) -> bool:
         return self._phase is _Phase.ACTIVE
 
+    def get_status(self) -> dict:
+        """Latest-frame gesture diagnostics. Does not change machine state."""
+        return dict(self._status)
+
     def notify_external_deactivation(self) -> None:
         """Called when Follow Me is stopped via RC or web UI."""
         if self._phase is _Phase.ACTIVE:
             self._phase = _Phase.IDLE
             self._reset_hold()
             self._cooldown_until = time.monotonic() + self._cooldown_s
+            st = dict(self._status)
+            st["phase"] = self._phase.name
+            st["seq_idx"] = _PHASE_SEQ_IDX.get(self._phase, 0)
+            st["streak"] = self._consecutive
+            st["event"] = None
+            st["event_reason"] = None
+            self._status = st
 
     def update(self, hand: HandData | None) -> GestureEvent | None:
         """Feed one frame of hand data; returns event or None."""
         now = time.monotonic()
-
-        if now < self._cooldown_until:
-            self._reset_hold()
-            return None
-
-        if hand is None:
-            self._reset_hold()
-            return None
-
-        gesture, finger_count = recognize_gesture(hand)
-
-        # Clear transition guard once the gesture changes
-        if self._awaiting_change is not None and gesture != self._awaiting_change:
-            self._awaiting_change = None
-
-        # Debounce: track consecutive frames with same gesture
-        if gesture == self._last_gesture:
-            self._consecutive += 1
-        else:
-            self._consecutive = 1
-            self._last_gesture = gesture
-            self._last_finger_count = finger_count
-
-        stable = self._consecutive >= self._hold_frames
-
-        # --- ACTIVE phase: look for stop gesture ---
-        if self._phase is _Phase.ACTIVE:
-            if stable and gesture == self._stop_gesture:
-                self._phase = _Phase.IDLE
+        event: GestureEvent | None = None
+        event_reason: str | None = None
+        gesture: str | None = None
+        finger_count: int = -1
+        try:
+            if now < self._cooldown_until:
                 self._reset_hold()
-                self._cooldown_until = now + self._cooldown_s
-                logger.warning("Gesture: DEACTIVATE (stop gesture %s)", gesture)
-                return GestureEvent.DEACTIVATE
-            return None
+                return None
 
-        # --- Sequence matching (IDLE → SEQ_0 → SEQ_1 → ACTIVE) ---
-        timed_out = (
-            self._phase is not _Phase.IDLE
-            and (now - self._last_step_time) > self._timeout_s
-        )
-        if timed_out:
-            if self._phase is not _Phase.IDLE:
-                logger.warning("SEQ: timed out in %s", self._phase.name)
-            self._phase = _Phase.IDLE
-            self._reset_hold()
+            if hand is None:
+                self._reset_hold()
+                return None
 
-        if not stable:
-            return None
+            gesture, finger_count = recognize_gesture(hand)
 
-        # Don't advance or break while still showing the gesture that
-        # triggered the previous step -- wait for the user to change.
-        if self._awaiting_change is not None:
-            return None
-
-        target_idx = {
-            _Phase.IDLE: 0,
-            _Phase.SEQ_0: 1,
-            _Phase.SEQ_1: 2,
-        }.get(self._phase)
-
-        if target_idx is None:
-            return None
-
-        if finger_count == self._seq[target_idx]:
-            next_phases = [_Phase.SEQ_0, _Phase.SEQ_1, _Phase.ACTIVE]
-            next_phase = next_phases[target_idx]
-            self._phase = next_phase
-            self._last_step_time = now
-            self._awaiting_change = gesture
-            self._reset_hold()
-            logger.warning(
-                "SEQ: step %d/%d matched (fingers=%d) -> %s",
-                target_idx + 1, len(self._seq), finger_count, next_phase.name,
-            )
-            if next_phase is _Phase.ACTIVE:
-                self._cooldown_until = now + self._cooldown_s
+            # Clear transition guard once the gesture changes
+            if self._awaiting_change is not None and gesture != self._awaiting_change:
                 self._awaiting_change = None
-                logger.warning("Gesture: ACTIVATE (sequence %s completed)", self._seq)
-                return GestureEvent.ACTIVATE
-        else:
-            if gesture is not None and self._phase is not _Phase.IDLE:
-                logger.warning(
-                    "SEQ: BROKEN by fingers=%d (expected %d) in %s",
-                    finger_count, self._seq[target_idx], self._phase.name,
-                )
+
+            # Debounce: track consecutive frames with same gesture
+            if gesture == self._last_gesture:
+                self._consecutive += 1
+            else:
+                self._consecutive = 1
+                self._last_gesture = gesture
+                self._last_finger_count = finger_count
+
+            stable = self._consecutive >= self._hold_frames
+
+            # --- ACTIVE phase: look for stop gesture ---
+            if self._phase is _Phase.ACTIVE:
+                if stable and gesture == self._stop_gesture:
+                    self._phase = _Phase.IDLE
+                    self._reset_hold()
+                    self._cooldown_until = now + self._cooldown_s
+                    logger.warning("Gesture: DEACTIVATE (stop gesture %s)", gesture)
+                    event = GestureEvent.DEACTIVATE
+                    event_reason = "deactivate"
+                    return event
+                return None
+
+            # Stable stop while not ACTIVE cannot fire DEACTIVATE (phase
+            # ACTIVE is entered only by the 3-4-3 start sequence). Record
+            # why so logs can tell a FIVE was seen and ignored.
+            if stable and gesture == self._stop_gesture:
+                event_reason = "ignored_not_active_phase"
+
+            # --- Sequence matching (IDLE → SEQ_0 → SEQ_1 → ACTIVE) ---
+            timed_out = (
+                self._phase is not _Phase.IDLE
+                and (now - self._last_step_time) > self._timeout_s
+            )
+            if timed_out:
+                if self._phase is not _Phase.IDLE:
+                    logger.warning("SEQ: timed out in %s", self._phase.name)
                 self._phase = _Phase.IDLE
                 self._reset_hold()
 
-        return None
+            if not stable:
+                return None
+
+            # Don't advance or break while still showing the gesture that
+            # triggered the previous step -- wait for the user to change.
+            if self._awaiting_change is not None:
+                return None
+
+            target_idx = {
+                _Phase.IDLE: 0,
+                _Phase.SEQ_0: 1,
+                _Phase.SEQ_1: 2,
+            }.get(self._phase)
+
+            if target_idx is None:
+                return None
+
+            if finger_count == self._seq[target_idx]:
+                next_phases = [_Phase.SEQ_0, _Phase.SEQ_1, _Phase.ACTIVE]
+                next_phase = next_phases[target_idx]
+                self._phase = next_phase
+                self._last_step_time = now
+                self._awaiting_change = gesture
+                self._reset_hold()
+                logger.warning(
+                    "SEQ: step %d/%d matched (fingers=%d) -> %s",
+                    target_idx + 1, len(self._seq), finger_count, next_phase.name,
+                )
+                if next_phase is _Phase.ACTIVE:
+                    self._cooldown_until = now + self._cooldown_s
+                    self._awaiting_change = None
+                    logger.warning("Gesture: ACTIVATE (sequence %s completed)", self._seq)
+                    event = GestureEvent.ACTIVATE
+                    event_reason = "activate"
+                    return event
+            else:
+                if gesture is not None and self._phase is not _Phase.IDLE:
+                    logger.warning(
+                        "SEQ: BROKEN by fingers=%d (expected %d) in %s",
+                        finger_count, self._seq[target_idx], self._phase.name,
+                    )
+                    self._phase = _Phase.IDLE
+                    self._reset_hold()
+
+            return None
+        finally:
+            self._status = {
+                "hand_detected": hand is not None,
+                "hand_span_px": hand_span_px(hand),
+                "finger_count": finger_count,
+                "label": gesture,
+                "streak": self._consecutive,
+                "phase": self._phase.name,
+                "seq_idx": _PHASE_SEQ_IDX.get(self._phase, 0),
+                "event": event.name if event is not None else None,
+                "event_reason": event_reason,
+            }
 
     def _reset_hold(self) -> None:
         self._consecutive = 0
         self._last_gesture = None
         self._last_finger_count = -1
+
+
+# Name used by Controller.__init__(gesture_controller=...) and diagnostics.
+GestureController = GestureStateMachine

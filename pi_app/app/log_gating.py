@@ -365,6 +365,7 @@ def build_log_obj(
     keeps full precision.
     """
     _oak = oak_camera_health if isinstance(oak_camera_health, dict) else {}
+    _g = telem.get("gesture") if isinstance(telem.get("gesture"), dict) else {}
     return {
         "ts": round(now_ts, 3),
         "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
@@ -558,6 +559,23 @@ def build_log_obj(
             "det_fps": _oak.get("det_fps") if _oak else None,
             "depth_fps": _oak.get("depth_fps") if _oak else None,
             "det_latency_s": _oak.get("det_latency_s") if _oak else None,
+            "vision_loop_hz": _oak.get("vision_loop_hz") if _oak else None,
+            "vision_work_ms": _oak.get("vision_work_ms") if _oak else None,
+            "hand_poll_ms": _oak.get("hand_poll_ms") if _oak else None,
+            "nn_input_queue_size": _oak.get("nn_input_queue_size") if _oak else None,
+            "hand_poll_enabled": _oak.get("hand_poll_enabled") if _oak else None,
+        },
+        "gesture": {
+            "hand_detected": _g.get("hand_detected"),
+            "hand_span_px": _g.get("hand_span_px"),
+            "finger_count": _g.get("finger_count"),
+            "label": _g.get("label"),
+            "streak": _g.get("streak"),
+            "phase": _g.get("phase"),
+            "seq_idx": _g.get("seq_idx"),
+            "event": _g.get("event"),
+            "event_reason": _g.get("event_reason"),
+            "hand_poll_enabled": _g.get("hand_poll_enabled"),
         },
     }
 
@@ -586,6 +604,7 @@ def build_slow_obj(
     arm state, at full float precision (unlike the per-tick "imu" block,
     which is rounded to 3 decimals).
     """
+    _oak = oak_camera_health if isinstance(oak_camera_health, dict) else {}
     return {
         "type": "slow",
         "ts": round(now_ts, 3),
@@ -594,9 +613,20 @@ def build_slow_obj(
         "oak_camera_health": oak_camera_health,
         "oak": {
             "chip_temp_c": chip_temp_c,
-            "det_fps": oak_camera_health.get("det_fps") if isinstance(oak_camera_health, dict) else None,
-            "depth_fps": oak_camera_health.get("depth_fps") if isinstance(oak_camera_health, dict) else None,
-            "det_latency_s": oak_camera_health.get("det_latency_s") if isinstance(oak_camera_health, dict) else None,
+            "det_fps": _oak.get("det_fps"),
+            "depth_fps": _oak.get("depth_fps"),
+            "det_latency_s": _oak.get("det_latency_s"),
+            "vision_loop_hz": _oak.get("vision_loop_hz"),
+            "vision_work_ms": _oak.get("vision_work_ms"),
+            "hand_poll_ms": _oak.get("hand_poll_ms"),
+            "nn_input_queue_size": _oak.get("nn_input_queue_size"),
+            "hand_poll_enabled": _oak.get("hand_poll_enabled"),
+        },
+        "gesture": {
+            "hand_poll_enabled": _oak.get("hand_poll_enabled"),
+            "hand_poll_ms": _oak.get("hand_poll_ms"),
+            "mp_loaded": _oak.get("mp_loaded"),
+            "hand_detect_rate": _oak.get("hand_detect_rate"),
         },
         "gps_health": gps_health,
     }

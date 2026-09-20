@@ -859,6 +859,12 @@ class GestureConfig:
     hold_frames: int = 12         # consecutive frames a gesture must be stable
     sequence_timeout_s: float = 3.0  # max seconds between sequence steps
     cooldown_s: float = 2.0       # ignore gestures briefly after activate/deactivate
+    # True restores the old always-when-armed MediaPipe Hands poll.
+    # False (default): skip Hands in FOLLOW_ME unless the gesture machine
+    # is in phase ACTIVE (the only phase that honours FIVE). FOLLOW_ME from
+    # the RC switch leaves the machine in IDLE, so Hands cannot act
+    # (2026-09-20: 20-50 ms per loop on the shared vision thread).
+    hand_poll_in_follow_me: bool = False
 
 
 @dataclass(frozen=True)
@@ -934,6 +940,31 @@ class OakDetectionConfig:
     stop_class_ids: tuple = (0, 15, 16, 17, 18, 19)   # person, cat, dog, horse, sheep, cow
     # SLOW: smaller moving objects — reduce speed
     slow_class_ids: tuple = (29, 32, 36, 37)           # frisbee, sports ball, skateboard, surfboard
+    # 2026-09-20 field runs: person dets reach steering ~0.6 s old
+    # (det_latency_s p50 0.80 s at det_fps 8 in follow-me, 0.61-0.66 s at
+    # det_fps 11 idle; IMU yaw vs bbox-centre cross-correlation 0.60-0.65 s
+    # on three runs). The YOLO NN input used depthai v3's default queue size
+    # 3 with setBlocking(False): camera ~30 fps, NN ~10, so the NN always
+    # worked a 3-deep FIFO (~300 ms) behind. 1 keeps only the newest frame.
+    # 0 = leave the library default.
+    nn_input_queue_size: int = 1
+    # The vision loop slept 1/update_rate_hz unconditionally (67 ms) after
+    # its work, so work 60 ms + sleep 67 ms = 8 Hz — the measured det_fps.
+    # True = sleep only the remainder of the period; False = old sleep.
+    vision_deadline_sleep: bool = True
+    # _poll_depth ran before _poll_detections, ageing each detection by the
+    # corridor computation. True = detections first. The corridor already
+    # masks with last-published boxes and the safety-tier override already
+    # reads last-published detections.
+    poll_detections_first: bool = True
+    # 0 = unspecified (today's requestOutput calls, no fps=). Reserved for
+    # the next A/B; when > 0 pass fps= to every Camera.requestOutput in the
+    # YOLO pipeline (colour NN, colour preview/hand, both mono outputs).
+    camera_fps: float = 0.0
+    # Today's NeuralNetwork.setNumInferenceThreads value. Reserved for the next A/B.
+    nn_inference_threads: int = 2
+    # Today's NeuralNetwork.setNumShavesPerInferenceThread value.
+    nn_shaves_per_thread: int = 4
 
 
 @dataclass(frozen=True)

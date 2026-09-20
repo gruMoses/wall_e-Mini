@@ -114,6 +114,8 @@ def _corridor_min_support_px(min_px: int, min_frac: float, corridor_pixel_count:
 # next to depth_ema_alpha for the three field failures this replaces.
 _PERSON_DEPTH_EDGE_EPS = 0.01
 _VISION_RATE_WINDOW_S = 2.0
+_HAND_DETECT_WINDOW_S = 1.0
+_VISION_YIELD_S = 0.001
 
 
 @dataclass(frozen=True)
@@ -148,9 +150,54 @@ def _window_rate(times, now: float, window_s: float = _VISION_RATE_WINDOW_S) -> 
     cutoff = now - window_s
     n = 0
     for t in times:
-        if t >= cutoff:
+        ts = t[0] if isinstance(t, tuple) else t
+        if ts >= cutoff:
             n += 1
     return n / window_s if window_s > 0.0 else 0.0
+
+
+def _window_mean(samples, index: int, now: float, window_s: float = _VISION_RATE_WINDOW_S) -> float:
+    """Mean of ``sample[index]`` over samples with ts in the last ``window_s``."""
+    cutoff = now - window_s
+    total = 0.0
+    n = 0
+    for sample in samples:
+        if sample[0] >= cutoff:
+            total += float(sample[index])
+            n += 1
+    return total / n if n else 0.0
+
+
+def _record_windowed(samples: list, item: tuple, window_s: float) -> None:
+    """Append a (ts, ...) sample and drop entries older than ``window_s``."""
+    samples.append(item)
+    cutoff = item[0] - window_s
+    n_drop = 0
+    for sample in samples:
+        if sample[0] < cutoff:
+            n_drop += 1
+        else:
+            break
+    if n_drop:
+        del samples[:n_drop]
+
+
+def vision_loop_sleep_s(period: float, elapsed: float, deadline_flag: bool) -> float:
+    """Seconds to sleep at the end of a vision-loop iteration.
+
+    When ``deadline_flag`` is True, sleep only the remainder of the period so
+    work + sleep ≈ period (2026-09-20 field runs: an unconditional 67 ms
+    sleep after ~60 ms of work collapsed det_fps to ~8 Hz). When elapsed
+    already meets or exceeds the period, yield ``_VISION_YIELD_S`` rather
+    than busy-spinning. When ``deadline_flag`` is False, keep the old
+    unconditional sleep of ``period``.
+    """
+    if not deadline_flag:
+        return float(period)
+    remaining = float(period) - float(elapsed)
+    if remaining <= 0.0:
+        return _VISION_YIELD_S
+    return remaining
 
 
 def _nn_msg_latency_s(msg) -> float | None:
@@ -946,6 +993,13 @@ class OakDepthReader:
         self._det_event_ts: list[float] = []
         self._depth_event_ts: list[float] = []
         self._det_latency_s: float | None = None
+        # Vision-loop diagnostics (2026-09-20 latency fix): 2 s window of
+        # (ts, work_s, hand_poll_s) and a 1 s window of (ts, found) for
+        # hand-detect rate. nn_input_queue_size is the value read back from
+        # the device after setMaxSize (None until the pipeline starts).
+        self._vision_iter_samples: list[tuple[float, float, float]] = []
+        self._hand_detect_samples: list[tuple[float, bool]] = []
+        self._nn_input_queue_size: int | None = None
         # H5: sampler exception log-once-per-episode (reset on the next success).
         self._person_sample_exc_logged = False
         self._last_detection_poll_ts = 0.0
@@ -1292,6 +1346,11 @@ class OakDepthReader:
             det_event_ts = list(self._det_event_ts)
             depth_event_ts = list(self._depth_event_ts)
             det_latency_s = self._det_latency_s
+            vision_iter_samples = list(self._vision_iter_samples)
+            hand_detect_samples = list(self._hand_detect_samples)
+            nn_input_queue_size = self._nn_input_queue_size
+            hand_poll_enabled = bool(self._hand_poll_enabled)
+            mp_loaded = self._lm_net is not None
 
         loop_age_s = (now - loop_ts) if loop_ts > 0.0 else float("inf")
         depth_age_s = (now - depth_ts) if depth_ts > 0.0 else float("inf")
@@ -1311,6 +1370,18 @@ class OakDepthReader:
         critical_stale = loop_stale or depth_stale
         det_fps = _window_rate(det_event_ts, now)
         depth_fps = _window_rate(depth_event_ts, now)
+        vision_loop_hz = _window_rate(vision_iter_samples, now)
+        vision_work_ms = _window_mean(vision_iter_samples, 1, now) * 1000.0
+        hand_poll_ms = _window_mean(vision_iter_samples, 2, now) * 1000.0
+        hand_cutoff = now - _HAND_DETECT_WINDOW_S
+        hand_n = 0
+        hand_found = 0
+        for ts, found in hand_detect_samples:
+            if ts >= hand_cutoff:
+                hand_n += 1
+                if found:
+                    hand_found += 1
+        hand_detect_rate = (hand_found / hand_n) if hand_n else 0.0
 
         return {
             "pipeline_running": running,
@@ -1346,6 +1417,13 @@ class OakDepthReader:
             "det_fps": round(det_fps, 2),
             "depth_fps": round(depth_fps, 2),
             "det_latency_s": round(det_latency_s, 3) if det_latency_s is not None else None,
+            "vision_loop_hz": round(vision_loop_hz, 2),
+            "vision_work_ms": round(vision_work_ms, 1),
+            "hand_poll_ms": round(hand_poll_ms, 1),
+            "nn_input_queue_size": nn_input_queue_size,
+            "hand_poll_enabled": hand_poll_enabled,
+            "mp_loaded": mp_loaded,
+            "hand_detect_rate": round(hand_detect_rate, 3),
         }
 
     @property
@@ -1514,6 +1592,64 @@ class OakDepthReader:
                 return False
         return False
 
+    def _camera_fps_kw(self) -> dict:
+        """kwargs for Camera.requestOutput: fps= only when camera_fps > 0."""
+        fps = float(getattr(self._det_cfg, "camera_fps", 0.0) or 0.0)
+        return {"fps": fps} if fps > 0.0 else {}
+
+    def _nn_thread_counts(self) -> tuple[int, int]:
+        threads = int(getattr(self._det_cfg, "nn_inference_threads", 2))
+        shaves = int(getattr(self._det_cfg, "nn_shaves_per_thread", 4))
+        return threads, shaves
+
+    def _configure_nn_input_queue(self, nn_input, label: str) -> None:
+        """Keep the NN input queue at nn_input_queue_size (newest-only when 1).
+
+        depthai 3.3.0 on the robot has Node.Input.setMaxSize / getMaxSize.
+        Older depthai raises AttributeError; we leave the library default.
+        0 = do not call setMaxSize. Log the read-back at WARNING because
+        this app installs no logging handler and INFO is dropped.
+        """
+        requested = int(getattr(self._det_cfg, "nn_input_queue_size", 1) or 0)
+        if requested > 0:
+            try:
+                nn_input.setMaxSize(requested)
+            except AttributeError:
+                logger.warning(
+                    "%s.input.setMaxSize not available on this depthai; "
+                    "leaving library default",
+                    label,
+                )
+        try:
+            read_back = int(nn_input.getMaxSize())
+            self._nn_input_queue_size = read_back
+            logger.warning(
+                "%s.input queue maxSize=%s (requested %s; 0 leaves library default)",
+                label, read_back, requested,
+            )
+        except AttributeError:
+            logger.warning(
+                "%s.input.getMaxSize not available on this depthai",
+                label,
+            )
+
+    def _poll_vision_queues(self, depth_q, spatial_depth_q, det_q, np) -> None:
+        """Poll detections and depth in the configured order.
+
+        The corridor already masks with the last published person boxes
+        (see _poll_depth) and the safety-tier override already reads the
+        last published detections (_all_dets_state), so detections-first
+        does not change those consumers — it only publishes person boxes
+        one corridor-computation earlier to the steering loop.
+        """
+        detections_first = bool(getattr(self._det_cfg, "poll_detections_first", True))
+        if detections_first:
+            self._poll_detections(det_q)
+            self._poll_depth(depth_q, spatial_depth_q, np)
+        else:
+            self._poll_depth(depth_q, spatial_depth_q, np)
+            self._poll_detections(det_q)
+
     def _run_pipeline_once(self, dai, np) -> bool:
         """Build + open one device session and run the poll loops.
 
@@ -1546,8 +1682,9 @@ class OakDepthReader:
                 stereo.setExtendedDisparity(True)
                 # Align depth map to RGB camera so bounding-box spatial positions are correct.
                 stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
-            mono_left.requestOutput((640, 400)).link(stereo.left)
-            mono_right.requestOutput((640, 400)).link(stereo.right)
+            _cam_fps_kw = self._camera_fps_kw()
+            mono_left.requestOutput((640, 400), **_cam_fps_kw).link(stereo.left)
+            mono_right.requestOutput((640, 400), **_cam_fps_kw).link(stereo.right)
 
             # Device-side ROI spatial depth for obstacle distance + median depth.
             spatial_calc = pipeline.create(dai.node.SpatialLocationCalculator)
@@ -1623,12 +1760,15 @@ class OakDepthReader:
                 # coordinates from the stereo depth frame instead.
                 yolo_nn = pipeline.create(dai.node.NeuralNetwork)
                 yolo_nn.setBlobPath(str(_blob_abs))
-                yolo_nn.setNumInferenceThreads(2)
-                yolo_nn.setNumShavesPerInferenceThread(4)
+                _nn_threads, _nn_shaves = self._nn_thread_counts()
+                yolo_nn.setNumInferenceThreads(_nn_threads)
+                yolo_nn.setNumShavesPerInferenceThread(_nn_shaves)
                 yolo_nn.input.setBlocking(False)
+                self._configure_nn_input_queue(yolo_nn.input, "yolo_nn")
                 _yolo_cam_out = cam_rgb.requestOutput(
                     (_det_cfg.input_width, _det_cfg.input_height),
                     dai.ImgFrame.Type.BGR888p,
+                    **self._camera_fps_kw(),
                 )
                 _yolo_cam_out.link(yolo_nn.input)
                 det_q = yolo_nn.out.createOutputQueue(maxSize=1, blocking=False)
@@ -1653,9 +1793,12 @@ class OakDepthReader:
                     cam_rgb, stereo, model_desc,
                 )
                 spatial_nn.setConfidenceThreshold(self._fm_cfg.detection_confidence)
+                # MobileNet fallback keeps its own, unchanged settings; the
+                # nn_inference_threads knob is for the YOLO path's A/B only.
                 spatial_nn.setNumInferenceThreads(1)
                 spatial_nn.setNumShavesPerInferenceThread(4)
                 spatial_nn.input.setBlocking(False)
+                self._configure_nn_input_queue(spatial_nn.input, "spatial_nn")
                 spatial_nn.setBoundingBoxScaleFactor(0.5)
                 spatial_nn.setDepthLowerThreshold(int(self._fm_cfg.min_distance_m * 1000))
                 spatial_nn.setDepthUpperThreshold(int(self._fm_cfg.max_distance_m * 1000))
@@ -1702,10 +1845,10 @@ class OakDepthReader:
                     # Use a different resolution than the NN input so depthai v3
                     # does not de-duplicate the requestOutput() call and hand us
                     # back the same on-device-only output that feeds the NN.
-                    _yolo_rgb_diag = cam_rgb.requestOutput((640, 480))
+                    _yolo_rgb_diag = cam_rgb.requestOutput((640, 480), **self._camera_fps_kw())
                     rgb_preview_q = _yolo_rgb_diag.createOutputQueue(maxSize=1, blocking=False)
                 else:
-                    rgb_preview_out = cam_rgb.requestOutput((640, 480))
+                    rgb_preview_out = cam_rgb.requestOutput((640, 480), **self._camera_fps_kw())
                     rgb_preview_q = rgb_preview_out.createOutputQueue(maxSize=1, blocking=False)
             else:
                 rgb_preview_q = None  # set below after hand pipeline build
@@ -1814,15 +1957,20 @@ class OakDepthReader:
 
         try:
             next_imu_poll = time.monotonic()
+            period = 1.0 / self._obs_cfg.update_rate_hz
+            deadline_sleep = bool(getattr(self._det_cfg, "vision_deadline_sleep", True))
             while not self._stop_event.is_set() and pipeline.isRunning():
+                loop_start = time.monotonic()
+                hand_s = 0.0
                 with self._lock:
-                    self._last_pipeline_loop_ts = time.monotonic()
-                self._poll_depth(depth_q, spatial_depth_q, np)
-                self._poll_detections(det_q)
+                    self._last_pipeline_loop_ts = loop_start
+                self._poll_vision_queues(depth_q, spatial_depth_q, det_q, np)
                 with self._lock:
                     hand_enabled = self._hand_poll_enabled
                 if hand_queues is not None and hand_enabled:
+                    t_hand = time.monotonic()
                     self._poll_hand(hand_queues)
+                    hand_s = time.monotonic() - t_hand
                 with self._lock:
                     rgb_enabled = self._rgb_poll_enabled or self._rgb_always_poll
                 if hand_queues is not None and not hand_enabled:
@@ -1862,7 +2010,14 @@ class OakDepthReader:
                         # Non-fatal: temperature is a diagnostic, not required
                         # for depth/detection/IMU. Leave the last-known value.
                         pass
-                time.sleep(1.0 / self._obs_cfg.update_rate_hz)
+                elapsed = time.monotonic() - loop_start
+                with self._lock:
+                    _record_windowed(
+                        self._vision_iter_samples,
+                        (loop_start, elapsed, hand_s),
+                        _VISION_RATE_WINDOW_S,
+                    )
+                time.sleep(vision_loop_sleep_s(period, elapsed, deadline_sleep))
         except Exception as e:
             # A fatal device/communication error (USB drop, XLink teardown) ends
             # the session; the supervisor will close, back off, and rebuild. Any
@@ -2024,7 +2179,7 @@ class OakDepthReader:
 
         Returns rgb_q (host output queue for camera frames).
         """
-        hand_cam_out = cam_rgb.requestOutput((640, 480))
+        hand_cam_out = cam_rgb.requestOutput((640, 480), **self._camera_fps_kw())
         rgb_q = hand_cam_out.createOutputQueue(maxSize=1, blocking=False)
         return rgb_q
 
@@ -2109,6 +2264,11 @@ class OakDepthReader:
                 with self._lock:
                     self._hand_state.hand_data = None
                     self._hand_state.timestamp = time.monotonic()
+                    _record_windowed(
+                        self._hand_detect_samples,
+                        (time.monotonic(), False),
+                        _HAND_DETECT_WINDOW_S,
+                    )
                 return
 
             hand_lm = results.multi_hand_landmarks[0]
@@ -2120,6 +2280,11 @@ class OakDepthReader:
             with self._lock:
                 self._hand_state.hand_data = hd
                 self._hand_state.timestamp = time.monotonic()
+                _record_windowed(
+                    self._hand_detect_samples,
+                    (time.monotonic(), True),
+                    _HAND_DETECT_WINDOW_S,
+                )
 
         except Exception as e:
             with self._lock:
@@ -2171,8 +2336,10 @@ class OakDepthReader:
 
             # Mask out detected person bounding boxes so the depth corridor
             # measures obstacles AROUND/BEHIND the followed person, not the
-            # person themselves.  Uses previous-frame detections (one-frame lag
-            # is acceptable — bbox won't have moved significantly).
+            # person themselves. Reads last-published detections (_det_state):
+            # previous-frame when depth is polled first, same-frame when
+            # poll_detections_first (strictly fresher; one-frame lag was
+            # always acceptable).
             with self._lock:
                 person_bboxes = [p.bbox for p in self._det_state.persons if p.bbox]
             if person_bboxes:

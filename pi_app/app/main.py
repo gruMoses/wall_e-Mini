@@ -590,12 +590,15 @@ def run() -> None:
                 if isinstance(yr, (int, float)):
                     last_imu_yaw_rate_dps = float(yr)
 
-            # Gate host-side MediaPipe Hands on arm state. No gesture can take
-            # effect while disarmed (ACTIVATE requires armed; DEACTIVATE only
-            # applies in FOLLOW_ME), and disarmed is most of the robot's uptime,
-            # so this frees Pi CPU for the control loop with no behavior change.
+            # Gate host-side MediaPipe Hands. FIVE is only honoured in
+            # gesture phase ACTIVE (the 3-4-3 start sequence); FOLLOW_ME
+            # from the RC switch leaves the machine in IDLE, so Hands
+            # cannot act and should not run (2026-09-20: 20-50 ms per
+            # loop on the shared vision thread).
             if oak_reader is not None and gesture_ctrl is not None:
-                oak_reader.set_hand_poll_enabled(cmd.is_armed)
+                oak_reader.set_hand_poll_enabled(
+                    controller.hand_poll_wanted(cmd.is_armed)
+                )
 
             # P3: BMS discharge FET safety — rate-limited warning + post-grace safety timeout.
             if bms_service is not None and cmd.is_armed:
