@@ -327,12 +327,29 @@ class TargetTracker:
         within ``depth_continuity_m + depth_continuity_rate_mps × age`` of the
         held depth. Applies to id matches too (a tracklet id transferred onto
         a closer occluder is rejected) and to the positional fallback.
+      * SINGLE-CANDIDATE REBIND — if the committed id is gone and this frame
+        has exactly one candidate, that candidate is accepted as the same
+        person when it is depth-consistent, clears the acquire floor, and
+        stays within a widening x-gate. Tracklet id churn on a lone operator
+        (2026-09-20 run) was minting a new confirmed id and the switch-grace
+        hold then decayed speed to 0. Uniqueness is the steal defence: a
+        thief needs a second body in frame, and then len(candidates) >= 2
+        restores the "different confirmed id is a different person" rule.
+        If the committed id is present but depth-inconsistent (transferred
+        onto an occluder), this exception does not fire.
     """
 
     # Positional-continuity tolerance (normalized_x units, -1..+1) for matching a
     # None-id committed target to a candidate. ~0.30 ≈ 15% of frame width each
     # side: tight enough that a chicken offset from the person does not match.
     _NONE_ID_MATCH_NORM: float = 0.30
+    # Extra x-gate growth (normalised units per second of absence) for the
+    # single-candidate rebind. 0.6 ≈ a person sweeping ~20% of the frame in
+    # 0.3 s of yaw; total tolerance is capped at 1.0.
+    _REBIND_X_RATE_PER_S: float = 0.6
+    # The rebind only bridges detection gaps (0.12-0.35 s on the 2026-09-20
+    # run). Past this age the ordinary grace-hold / sustained hand-off rules.
+    _REBIND_MAX_AGE_S: float = 0.5
 
     def __init__(
         self,
@@ -508,7 +525,20 @@ class TargetTracker:
            it is depth-consistent. The tracklet layer can hand the operator's id
            to a closer occluder whose box swallowed theirs (IoU match); a depth
            jump on an id match is exactly that, so it is NOT our target.
-        2. Positional fallback: nearest candidate in normalized_x within
+        2. Single-candidate rebind: if the committed target has a track_id, no
+           candidate in this frame carries that id, and len(candidates) == 1,
+           accept that candidate when the target was seen within
+           _REBIND_MAX_AGE_S, its depth is within the BASE depth tolerance
+           (no age growth), confidence >=
+           the acquire floor, and |Δx| <= _NONE_ID_MATCH_NORM +
+           _REBIND_X_RATE_PER_S × age (capped at 1.0). Tracklet id churn on a
+           lone operator (2026-09-20) otherwise treated them as a different
+           person and grace-held until speed decayed to 0. Uniqueness is the
+           steal defence: a thief needs a second body, then
+           len(candidates) >= 2 and this exception does not apply. If the
+           committed id IS present but depth-inconsistent (id transferred
+           onto an occluder), the exception does not fire.
+        3. Positional fallback: nearest candidate in normalized_x within
            _NONE_ID_MATCH_NORM, depth-consistent. For a None-id target this is
            the only rule (parse paths without ids). For an id'd target the
            fallback only considers candidates WITHOUT a confirmed id: a new
@@ -516,7 +546,8 @@ class TargetTracker:
            an occlusion (ids churn: None for min_hits frames, then a new id),
            whereas a different CONFIRMED id at our position is a different
            person by the tracklet layer's judgement — that one must earn the
-           lock through the sustained hand-off.
+           lock through the sustained hand-off. Multi-candidate frames are
+           byte-identical to the pre-rebind rule.
         """
         st = self._state
         if st is None:
@@ -524,6 +555,36 @@ class TargetTracker:
         if st.track_id is not None:
             for c in candidates:
                 if c.track_id == st.track_id and self._depth_consistent(c, now):
+                    return c
+            committed_id_present = any(
+                c.track_id == st.track_id for c in candidates
+            )
+            age = max(0.0, now - st.last_seen_time)
+            # Bounded to one or two detection gaps (_REBIND_MAX_AGE_S) and to
+            # the BASE depth tolerance with no age growth. Id churn rebinds on
+            # the very next detection, so a short window loses nothing; the
+            # age-grown gates would let a lone closer person take the lock
+            # sooner than the sustained hand-off (switch_min_s) allows, and
+            # after a long dropout they would admit anyone.
+            if (
+                not committed_id_present
+                and len(candidates) == 1
+                and age <= min(self._REBIND_MAX_AGE_S, self._switch_grace_s)
+            ):
+                c = candidates[0]
+                x_tol = min(
+                    1.0,
+                    self._NONE_ID_MATCH_NORM + self._REBIND_X_RATE_PER_S * age,
+                )
+                depth_ok = (
+                    self._depth_tol_m <= 0.0
+                    or abs(c.depth_m - st.raw_depth_m) <= self._depth_tol_m
+                )
+                if (
+                    depth_ok
+                    and c.confidence >= self._acquire_confidence
+                    and abs(c.normalized_x - st.normalized_x) <= x_tol
+                ):
                     return c
             pool = [
                 c for c in candidates

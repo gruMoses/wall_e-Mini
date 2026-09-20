@@ -254,5 +254,92 @@ class TestDetectionTrackIdSerialization(unittest.TestCase):
         self.assertEqual(det.track_id, 42)
 
 
+# 2026-09-20 field evidence: consecutive detections of the same person whose
+# IoU is 0 (or < 0.3) because the box is narrow at range and the robot yaws.
+_EVIDENCE_SEQS = (
+    (
+        ((0.62, 0.15, 0.71, 0.65), 4.3),
+        ((0.43, 0.15, 0.53, 0.64), 4.6),
+        ((0.36, 0.16, 0.46, 0.66), 4.6),
+    ),
+    (
+        ((0.41, 0.17, 0.52, 0.74), 3.9),
+        ((0.26, 0.13, 0.37, 0.71), 4.0),
+        ((0.21, 0.14, 0.34, 0.72), 4.0),
+    ),
+)
+
+
+class TestCentreDistanceFallback(unittest.TestCase):
+    """Host-side tracklet layer: centre-distance fallback after greedy IoU."""
+
+    def _fallback(self, **kw) -> TrackletTracker:
+        opts = dict(
+            iou_threshold=0.3, min_hits=3, max_age=15,
+            center_gate_min=0.20, center_gate_width_mult=1.5,
+        )
+        opts.update(kw)
+        return TrackletTracker(**opts)
+
+    def _confirm(self, tracker: TrackletTracker, box, depth=None) -> int:
+        ids = None
+        depths = None if depth is None else [depth]
+        for _ in range(4):
+            ids = tracker.update([box], depths=depths)
+        self.assertIsNotNone(ids[0], "tracklet must be confirmed")
+        return ids[0]
+
+    def test_evidence_sequences_keep_id_with_fallback(self):
+        for seq in _EVIDENCE_SEQS:
+            tracker = self._fallback()
+            op_id = self._confirm(tracker, seq[0][0], seq[0][1])
+            for box, depth in seq[1:]:
+                ids = tracker.update([box], depths=[depth])
+                self.assertEqual(
+                    ids[0], op_id,
+                    f"fallback must keep id across {seq[0][0]} -> {box}",
+                )
+
+    def test_evidence_sequences_mint_new_id_without_fallback(self):
+        """Documents the 2026-09-20 bug: defaults disable the fallback, so
+        IoU-0 jumps mint a new tentative tracklet (assigned None)."""
+        for seq in _EVIDENCE_SEQS:
+            tracker = TrackletTracker(iou_threshold=0.3, min_hits=3, max_age=15)
+            op_id = self._confirm(tracker, seq[0][0], seq[0][1])
+            ids = tracker.update([seq[1][0]], depths=[seq[1][1]])
+            self.assertNotEqual(ids[0], op_id)
+            self.assertIsNone(ids[0], "new tracklet is tentative until min_hits")
+
+    def test_depth_gate_still_wins_inside_centre_gate(self):
+        tracker = self._fallback(
+            depth_gate_m=0.75, depth_gate_growth_m_per_frame=0.10,
+        )
+        box_a, depth_a = _EVIDENCE_SEQS[0][0]
+        box_b, _ = _EVIDENCE_SEQS[0][1]
+        op_id = self._confirm(tracker, box_a, depth_a)
+        ids = tracker.update([box_b], depths=[depth_a - 1.5])
+        self.assertNotEqual(ids[0], op_id)
+        self.assertIsNone(ids[0], "1.5 m closer must not inherit the id")
+
+    def test_ambiguity_guard_two_dets_in_one_gate(self):
+        tracker = self._fallback()
+        op_id = self._confirm(tracker, _box(0.50, 0.50, w=0.10, h=0.30))
+        left = _box(0.35, 0.50, w=0.10, h=0.30)
+        right = _box(0.65, 0.50, w=0.10, h=0.30)
+        ids = tracker.update([left, right])
+        self.assertIsNone(ids[0])
+        self.assertIsNone(ids[1])
+        self.assertNotIn(op_id, ids)
+
+    def test_tentative_tracklet_does_not_use_fallback(self):
+        tracker = self._fallback(min_hits=3)
+        first = tracker.update([_EVIDENCE_SEQS[0][0][0]], depths=[4.3])
+        self.assertIsNone(first[0], "unconfirmed after one hit")
+        second = tracker.update([_EVIDENCE_SEQS[0][1][0]], depths=[4.6])
+        self.assertIsNone(second[0], "tentative must not inherit via fallback")
+        self.assertEqual(len(tracker.tracklets), 2,
+                         "unmatched det must mint a new tracklet")
+
+
 if __name__ == "__main__":
     unittest.main()

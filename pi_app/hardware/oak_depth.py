@@ -374,6 +374,16 @@ class TrackletTracker:
     tracklet, else ``None``. A tracklet is confirmed only after ``min_hits``
     hits, so transient / first-seen detections report ``None`` — keeping the
     None path identical to today's untracked behaviour.
+
+    After the greedy IoU pass, unmatched CONFIRMED tracklets may still match
+    unmatched detections by centre-distance. Narrow boxes at range plus
+    detection gaps plus ego yaw drop IoU to 0 between consecutive boxes of
+    the same person (2026-09-20 run). Disabled when ``center_gate_min`` and
+    ``center_gate_width_mult`` are both 0 (the constructor default, so
+    existing callers are unchanged). Ambiguous gates — two detections in one
+    tracklet's gate, or one detection in two tracklets' gates — are not
+    matched, so two people side by side cannot swap ids. Tentative
+    tracklets never use the fallback.
     """
 
     def __init__(
@@ -383,6 +393,8 @@ class TrackletTracker:
         max_age: int = 15,
         depth_gate_m: float = 0.0,
         depth_gate_growth_m_per_frame: float = 0.0,
+        center_gate_min: float = 0.0,
+        center_gate_width_mult: float = 0.0,
     ) -> None:
         self._iou_threshold = float(iou_threshold)
         self._min_hits = int(min_hits)
@@ -395,6 +407,10 @@ class TrackletTracker:
         # callers that pass no depths are unchanged.
         self._depth_gate_m = max(0.0, float(depth_gate_m))
         self._depth_gate_growth = max(0.0, float(depth_gate_growth_m_per_frame))
+        # Centre-distance fallback (2026-09-20). 0.0 on both knobs disables
+        # it, so existing callers and tests keep bbox-IoU-only association.
+        self._center_gate_min = max(0.0, float(center_gate_min))
+        self._center_gate_width_mult = max(0.0, float(center_gate_width_mult))
         self._tracklets: list[Tracklet] = []
 
     @property
@@ -412,6 +428,30 @@ class TrackletTracker:
         missed = max(0, int(t.time_since_update) - 1)
         tol = self._depth_gate_m + self._depth_gate_growth * missed
         return abs(d - t.last_depth) <= tol
+
+    def _fallback_enabled(self) -> bool:
+        return self._center_gate_min > 0.0 or self._center_gate_width_mult > 0.0
+
+    def _centre_ok(self, t: "Tracklet", det_bbox, depth) -> bool:
+        """Centre-distance fallback gate. Tentative tracklets never match here."""
+        if t.hits < self._min_hits:
+            return False
+        pb = t.predicted_bbox()
+        cx_p, cy_p, w_p, h_p = Tracklet._bbox_to_z(pb)
+        cx_d, cy_d, w_d, h_d = Tracklet._bbox_to_z(det_bbox)
+        center_gate = max(
+            self._center_gate_min,
+            self._center_gate_width_mult * max(w_p, w_d),
+        )
+        if abs(cx_d - cx_p) > center_gate:
+            return False
+        if abs(cy_d - cy_p) > 0.5 * max(h_p, h_d):
+            return False
+        if h_p > 0.0:
+            ratio = h_d / h_p
+            if ratio < 0.6 or ratio > 1.67:
+                return False
+        return self._depth_ok(t, depth)
 
     def update(self, detections, depths=None):
         """Advance the tracker one frame; return parallel list of Optional[int].
@@ -452,6 +492,43 @@ class TrackletTracker:
                         t.last_depth = float(depths[di])
                     if t.hits >= self._min_hits:
                         assigned[di] = t.track_id
+
+        # 2b. Centre-distance fallback for still-unmatched CONFIRMED tracklets
+        #     (2026-09-20). IoU is 0 when a narrow box jumps across the frame
+        #     during a detection gap + ego yaw; without this pass a new id is
+        #     minted and follow_me treats the operator as a different person.
+        #     Ambiguous gates (one tracklet ↔ many dets, or one det ↔ many
+        #     tracklets) are not matched — two people side by side must not
+        #     swap ids.
+        if (
+            self._fallback_enabled()
+            and unmatched_tracklets
+            and unmatched_dets
+        ):
+            cand_pairs = []
+            for ti in unmatched_tracklets:
+                t = self._tracklets[ti]
+                for di in unmatched_dets:
+                    if self._centre_ok(t, detections[di], depths[di]):
+                        cand_pairs.append((ti, di))
+            t_count: dict = {}
+            d_count: dict = {}
+            for ti, di in cand_pairs:
+                t_count[ti] = t_count.get(ti, 0) + 1
+                d_count[di] = d_count.get(di, 0) + 1
+            for ti, di in cand_pairs:
+                if t_count[ti] != 1 or d_count[di] != 1:
+                    continue
+                if ti not in unmatched_tracklets or di not in unmatched_dets:
+                    continue
+                self._tracklets[ti].update(detections[di])
+                unmatched_tracklets.discard(ti)
+                unmatched_dets.discard(di)
+                t = self._tracklets[ti]
+                if depths[di] is not None and float(depths[di]) > 0.0:
+                    t.last_depth = float(depths[di])
+                if t.hits >= self._min_hits:
+                    assigned[di] = t.track_id
 
         # 3. Unmatched detections become new tentative tracklets (report None
         #    until they reach min_hits).
@@ -539,6 +616,10 @@ class OakDepthReader:
             depth_gate_m=getattr(self._fm_cfg, "tracklet_depth_gate_m", 0.0),
             depth_gate_growth_m_per_frame=getattr(
                 self._fm_cfg, "tracklet_depth_gate_growth_m_per_frame", 0.0
+            ),
+            center_gate_min=getattr(self._fm_cfg, "tracklet_center_gate_min", 0.0),
+            center_gate_width_mult=getattr(
+                self._fm_cfg, "tracklet_center_gate_width_mult", 0.0
             ),
         )
         self._imu_prev_consumed_ts = 0.0

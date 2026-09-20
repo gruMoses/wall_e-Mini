@@ -12,7 +12,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from tools.analyze_follow_me_log import analyze, main  # noqa: E402
+from tools.analyze_follow_me_log import analyze, main, render_report  # noqa: E402
 
 
 T0 = 1789861810.0
@@ -157,6 +157,38 @@ class TestAnalyzeFollowMeLog(unittest.TestCase):
         data = json.loads(out.read_text(encoding="utf-8"))
         self.assertIn("jumpiness", data)
         self.assertIn("cuts", data["jumpiness"])
+
+    def test_track_id_changes_on_followed_target(self) -> None:
+        path = Path(self._tmp.name) / "churn.jsonl"
+        # 266 -> None -> 272 -> 271: two changes from the previous non-null id.
+        ids = [266.0, None, 272.0, 271.0]
+        lines: list[dict] = [_header(), _slow()]
+        for i, tid in enumerate(ids):
+            obj = _tick(i)
+            obj["follow_me"]["target_track_id"] = tid
+            obj["detections"][0]["track_id"] = None if tid is None else int(tid)
+            lines.append(obj)
+        path.write_text(
+            "".join(json.dumps(obj) + "\n" for obj in lines), encoding="utf-8"
+        )
+        result = analyze([path])
+        self.assertEqual(result["detection_filter"]["n_target_track_id_changes"], 2)
+        report = render_report(result)
+        self.assertIn("track id changes on the followed target: 2", report)
+
+    def test_log_without_track_id_still_renders(self) -> None:
+        path = Path(self._tmp.name) / "no_tid.jsonl"
+        obj = _tick(0)
+        obj["follow_me"].pop("target_track_id", None)
+        # detections in _tick have no track_id key
+        path.write_text(
+            "".join(json.dumps(o) + "\n" for o in [_header(), _slow(), obj]),
+            encoding="utf-8",
+        )
+        result = analyze([path])
+        report = render_report(result)
+        self.assertIn("track id changes on the followed target: 0", report)
+        self.assertEqual(result["detection_filter"]["n_target_track_id_changes"], 0)
 
 
 if __name__ == "__main__":

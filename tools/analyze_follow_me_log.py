@@ -127,6 +127,7 @@ def _bbox_info(det: dict) -> dict | None:
         "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax,
         "width": xmax - xmin, "conf": _num(det.get("conf")),
         "z_m": _num(det.get("z_m")), "x_m": _num(det.get("x_m")),
+        "track_id": det.get("track_id"),
     }
 
 
@@ -426,7 +427,24 @@ def _section_timeline(fm_ticks: list[dict], t0: float, bin_s: float) -> list[dic
     return rows
 
 
-def _section_detection_filter(fm_ticks: list[dict]) -> dict:
+def _count_target_track_id_changes(segs: list[list[dict]]) -> int:
+    """Ticks where follow_me.target_track_id differs from the previous non-null
+    value within a FOLLOW_ME segment. Logs that lack the field contribute 0.
+    """
+    n = 0
+    for seg in segs:
+        prev = None
+        for tk in seg:
+            tid = _num(_get(tk, "follow_me", "target_track_id"))
+            if tid is None:
+                continue
+            if prev is not None and tid != prev:
+                n += 1
+            prev = tid
+    return n
+
+
+def _section_detection_filter(fm_ticks: list[dict], segs: list[list[dict]] | None = None) -> dict:
     infos: list[dict] = []
     n_ticks = 0
     for tk in fm_ticks:
@@ -456,6 +474,9 @@ def _section_detection_filter(fm_ticks: list[dict]) -> dict:
             or (i.get("xmax") is not None and i["xmax"] < 0.15)
         ),
         "n_top_clipped": sum(1 for i in infos if i.get("ymin") is not None and i["ymin"] <= 0.01),
+        "n_target_track_id_changes": _count_target_track_id_changes(
+            segs if segs is not None else ([fm_ticks] if fm_ticks else [])
+        ),
     }
 
 
@@ -655,7 +676,7 @@ def analyze(paths, bin_s: float = DEFAULT_BIN_S, start_s: float | None = None,
         },
         "timeline": _section_timeline(fm_ticks, t0, bin_s) if t0 is not None else [],
         "jumpiness": jump_overall,
-        "detection_filter": _section_detection_filter(fm_ticks),
+        "detection_filter": _section_detection_filter(fm_ticks, segs),
         "steering": _section_steering(fm_ticks, t0, direct_cap),
         "speed_cap": _section_speed_cap(fm_ticks, max_spd),
         "obstacle": _section_obstacle(fm_ticks, t0),
@@ -763,6 +784,9 @@ def render_report(m: dict) -> str:
     lines.append(
         f"  edge (xmin>0.85 or xmax<0.15)={d.get('n_edge', 0)}  "
         f"top-clipped ymin<=0.01={d.get('n_top_clipped', 0)}"
+    )
+    lines.append(
+        f"track id changes on the followed target: {d.get('n_target_track_id_changes', 0)}"
     )
 
     s = m.get("steering") or {}

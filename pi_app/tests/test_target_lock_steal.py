@@ -174,11 +174,18 @@ class TestCloserPersonCannotStealLock(unittest.TestCase):
             self.assertIsNotNone(trk.fresh_raw_x_norm)
 
     def test_different_confirmed_id_at_operator_position_is_not_the_operator(self):
+        # Contract change 2026-09-20: a LONE candidate with a new confirmed id
+        # rebinds (tracklet churn on a single operator). The original rule
+        # still holds for multi-candidate frames — uniqueness is the steal
+        # defence — so this test now includes a second body.
         trk = _tracker()
         t = 100.0
         trk.update([_det(normalized_x=0.0, depth_m=3.0, track_id=1)], now=t)
         t += 0.05
-        st = trk.update([_det(normalized_x=0.05, depth_m=3.0, confidence=0.95, track_id=2)], now=t)
+        st = trk.update([
+            _det(normalized_x=0.05, depth_m=3.0, confidence=0.95, track_id=2),
+            _det(normalized_x=0.40, depth_m=2.0, confidence=0.90, track_id=3),
+        ], now=t)
         self.assertEqual(st.track_id, 1, "a different confirmed id must earn the lock")
         self.assertIsNone(trk.fresh_raw_x_norm)
 
@@ -326,6 +333,84 @@ class TestTrackletDepthGate(unittest.TestCase):
             depth_gate_growth_m_per_frame=cfg.tracklet_depth_gate_growth_m_per_frame,
         )
         self.assertGreater(tracker._depth_gate_m, 0.0)
+
+
+class TestSingleCandidateRebind(unittest.TestCase):
+    """2026-09-20: lone operator whose tracklet id churns stays the target."""
+
+    def test_lone_operator_id_flip_stays_fresh(self):
+        trk = _tracker()
+        t = 100.0
+        trk.update([_det(normalized_x=0.0, depth_m=3.0, track_id=272)], now=t)
+        t += 0.05
+        st = trk.update(
+            [_det(normalized_x=0.0, depth_m=3.0, confidence=0.9, track_id=271)],
+            now=t,
+        )
+        self.assertIsNotNone(trk.fresh_raw_x_norm)
+        self.assertEqual(st.track_id, 271)
+
+    def test_id_flip_with_second_candidate_is_not_fresh(self):
+        trk = _tracker()
+        t = 100.0
+        trk.update([_det(normalized_x=0.0, depth_m=3.0, track_id=272)], now=t)
+        t += 0.05
+        st = trk.update([
+            _det(normalized_x=0.0, depth_m=3.0, confidence=0.9, track_id=271),
+            _det(normalized_x=0.4, depth_m=2.5, confidence=0.9, track_id=99),
+        ], now=t)
+        self.assertEqual(st.track_id, 272)
+        self.assertIsNone(trk.fresh_raw_x_norm)
+
+    def test_lone_new_id_1_5m_closer_is_not_fresh(self):
+        trk = _tracker()
+        t = 100.0
+        trk.update([_det(normalized_x=0.0, depth_m=3.0, track_id=272)], now=t)
+        t += 0.05
+        st = trk.update(
+            [_det(normalized_x=0.0, depth_m=1.5, confidence=0.9, track_id=271)],
+            now=t,
+        )
+        self.assertEqual(st.track_id, 272)
+        self.assertIsNone(trk.fresh_raw_x_norm)
+
+    def test_lone_new_id_below_acquire_floor_is_not_fresh(self):
+        trk = _tracker()
+        t = 100.0
+        trk.update([_det(normalized_x=0.0, depth_m=3.0, track_id=272)], now=t)
+        t += 0.05
+        st = trk.update(
+            [_det(normalized_x=0.0, depth_m=3.0, confidence=0.5, track_id=271)],
+            now=t,
+        )
+        self.assertEqual(st.track_id, 272)
+        self.assertIsNone(trk.fresh_raw_x_norm)
+
+    def test_lone_new_id_after_grace_must_earn_the_lock(self):
+        # Both rebind gates widen with age; past switch_grace_s they would
+        # admit anyone, so the exception is bounded by the grace window.
+        trk = _tracker()
+        t = 100.0
+        trk.update([_det(normalized_x=0.0, depth_m=3.0, track_id=272)], now=t)
+        t += 5.0
+        trk.update(
+            [_det(normalized_x=0.0, depth_m=3.0, confidence=0.9, track_id=271)],
+            now=t,
+        )
+        self.assertIsNone(trk.fresh_raw_x_norm)
+
+    def test_committed_id_depth_inconsistent_alone_is_not_fresh(self):
+        trk = _tracker()
+        t = 100.0
+        trk.update([_det(normalized_x=0.0, depth_m=3.0, track_id=272)], now=t)
+        t += 0.05
+        st = trk.update(
+            [_det(normalized_x=0.0, depth_m=1.5, confidence=0.9, track_id=272)],
+            now=t,
+        )
+        self.assertEqual(st.track_id, 272)
+        self.assertEqual(st.depth_m, 3.0)
+        self.assertIsNone(trk.fresh_raw_x_norm)
 
 
 if __name__ == "__main__":

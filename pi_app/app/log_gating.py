@@ -443,7 +443,8 @@ def build_log_obj(
         "detections": [
             {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
              "conf": round(d.confidence, 2),
-             "bbox": [round(b, 3) for b in d.bbox]}
+             "bbox": [round(b, 3) for b in d.bbox],
+             "track_id": getattr(d, "track_id", None)}
             for d in oak_persons
         ] if oak_persons else None,
         "gps": {

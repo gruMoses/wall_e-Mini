@@ -428,6 +428,15 @@ class FollowMeConfig:
     # closer) from inheriting the operator's id by IoU alone. 0.0 disables.
     tracklet_depth_gate_m: float = 0.75
     tracklet_depth_gate_growth_m_per_frame: float = 0.10  # ≈1.5 m/s of allowed closing at 15 fps
+    # CENTRE-DISTANCE FALLBACK (2026-09-20 run, arm_20260920_145718.log): the
+    # box is narrow at range (width 0.10 of the frame at 4 m), detections
+    # arrive with 0.12-0.35 s gaps, and the robot yaws at 20-35 deg/s, so
+    # predicted vs new detection IoU is 0 and TrackletTracker mints a new
+    # id for the same person. 35 deg/s × 0.35 s = 12 deg = 0.175 of the
+    # 70 deg frame. A second association pass matches unmatched CONFIRMED
+    # tracklets by centre distance. 0.0 on both knobs disables the fallback.
+    tracklet_center_gate_min: float = 0.20
+    tracklet_center_gate_width_mult: float = 1.5
 
     # ── Layer 3: Lateral PID steering ────────────────────────────────────────
     # Error = normalized horizontal offset (-1.0 to +1.0); output scales to ±max_steer_offset_byte.
