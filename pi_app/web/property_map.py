@@ -233,7 +233,7 @@ _MAP_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
 <title>WALL-E Mini — Property Map</title>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -246,9 +246,11 @@ body {
 /* ── Top bar ── */
 #topbar {
     position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-    height: 44px; background: rgba(26,27,38,0.92); backdrop-filter: blur(8px);
+    height: calc(44px + env(safe-area-inset-top, 0px));
+    background: rgba(26,27,38,0.92); backdrop-filter: blur(8px);
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0 16px; border-bottom: 1px solid #292e42;
+    padding: max(0px, env(safe-area-inset-top, 0px)) 16px 0;
+    border-bottom: 1px solid #292e42;
 }
 #topbar h1 { font-size: 15px; font-weight: 600; color: #c0caf5; white-space: nowrap; }
 #topbar a { color: #7aa2f7; text-decoration: none; font-size: 13px; margin-right: 12px; }
@@ -274,7 +276,10 @@ body {
 
 /* ── Canvas ── */
 #mapCanvas {
-    position: fixed; top: 44px; left: 0; right: 0; bottom: 0;
+    position: fixed;
+    top: calc(44px + max(0px, env(safe-area-inset-top, 0px)));
+    left: 0; right: 0;
+    bottom: max(0px, env(safe-area-inset-bottom, 0px));
     display: block; cursor: grab;
 }
 #mapCanvas.crosshair { cursor: crosshair; }
@@ -282,11 +287,14 @@ body {
 
 /* ── Calibration panel ── */
 #calPanel {
-    position: fixed; top: 44px; right: -340px; bottom: 0; width: 330px;
+    position: fixed;
+    top: calc(44px + max(0px, env(safe-area-inset-top, 0px)));
+    right: -340px; bottom: 0; width: 330px;
     background: rgba(26,27,38,0.96); backdrop-filter: blur(10px);
     border-left: 1px solid #292e42; z-index: 90;
     transition: right .25s ease; overflow-y: auto;
     padding: 16px; font-size: 13px;
+    padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
 }
 #calPanel.open { right: 0; }
 #calPanel h3 { font-size: 14px; color: #7aa2f7; margin-bottom: 10px; }

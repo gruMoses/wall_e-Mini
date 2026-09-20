@@ -1426,7 +1426,13 @@ button{cursor:pointer;font-family:inherit;}
 }
 .seg.on{background:var(--blue);color:#fff;box-shadow:0 2px 12px var(--blue-md);}
 /* ---- arm row ---- */
-.arm-row{display:flex;align-items:center;gap:11px;padding:9px 12px 0;flex-shrink:0;}
+.arm-row{display:flex;align-items:center;gap:11px;padding:9px 12px 0;flex-shrink:0;flex-wrap:wrap;}
+#dm-banner{
+  flex:1 1 100%;
+  font-size:12px;font-weight:700;color:var(--red);
+  line-height:1.45;letter-spacing:.02em;
+}
+#dm-banner.hidden{display:none;}
 .arm-outer{flex:1;position:relative;}
 .arm-btn{
   width:100%;height:48px;border-radius:var(--r-arm);
@@ -1587,6 +1593,7 @@ button{cursor:pointer;font-family:inherit;}
 
 <!-- ARM row -->
 <div class="arm-row">
+  <div class="dm-banner hidden" id="dm-banner">Deadman tripped: the page was hidden or the connection paused. Press and hold ARM to resume.</div>
   <div class="arm-outer">
     <button class="arm-btn" id="arm-btn">HOLD TO ARM</button>
     <svg class="arm-ring" viewBox="0 0 32 32" aria-hidden="true">
@@ -1691,7 +1698,7 @@ function connect() {
     lastSt = m;
     if (!m.armed) armPending = false;
     if (m.echo_ts != null) rtt = Math.max(0, Math.round(performance.now() - m.echo_ts));
-    if (wasArmed && !m.armed && m.tripped_reason === 'deadman') showOverlay('deadman');
+    if (!wasArmed && m.armed) startDriveLoop();
     renderAll();
     updateCamFromStatus(m);
   };
@@ -1700,32 +1707,60 @@ function send(o) {
   if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify(o)); } catch(_) {} }
 }
 
+/* Neutral / no-input drive intent (same payload as a released stick). */
+function sendNeutral() {
+  stickX = stickY = 0; leftV = rightV = 0;
+  send({type:'drive', seq: seq++, t: performance.now(), left: 0, right: 0});
+  var knob = document.getElementById('knobS');
+  var pad  = document.getElementById('padS');
+  if (knob) { knob.classList.remove('drag'); knob.style.left = '50%'; knob.style.top = '50%'; }
+  if (pad) pad.classList.remove('fwd', 'rev');
+  paintGauges();
+}
+
 /* ---- drive loops — identical timing to tranche-1 minimal UI ---- */
 /* heartbeat 10 Hz */
 setInterval(function() { send({type:'hb', t: performance.now()}); }, 100);
 /* drive 15 Hz, only when session is armed */
-setInterval(function() {
+function driveTick() {
   if (lastSt.armed) send({type:'drive', seq: seq++, t: performance.now(), left: leftV, right: rightV});
-}, 66);
+}
+var driveTimer = setInterval(driveTick, 66);
+function stopDriveLoop() {
+  if (driveTimer != null) { clearInterval(driveTimer); driveTimer = null; }
+}
+function startDriveLoop() {
+  if (driveTimer == null) driveTimer = setInterval(driveTick, 66);
+}
 
-/* ---- client-side safety belt: zero sticks immediately on page hide ---- */
+/* ---- client-side safety belt: zero sticks immediately on page hide ----
+   Stop the drive loop so a later visible tab does not auto-resume driving.
+   Re-arm (armed false→true) is what starts the loop again. The server
+   cannot tell "tab hidden" from "connection paused"; both look like a
+   stale heartbeat, so the UI uses one deadman message for both. */
 document.addEventListener('visibilitychange', function() {
   if (document.hidden) {
-    stickX = stickY = 0; leftV = rightV = 0;
-    send({type:'drive', seq: seq++, t: performance.now(), left: 0, right: 0});
+    sendNeutral();
+    stopDriveLoop();
+  } else if (lastSt.armed) {
+    /* Back before the 250 ms deadman tripped (rare): the session is still
+       armed, so a stopped loop would leave the stick dead with the chip
+       saying ARMED. Sticks were zeroed on hide, so nothing moves until the
+       operator touches the stick again. */
+    startDriveLoop();
   }
 });
 window.addEventListener('pagehide', function() {
-  stickX = stickY = 0; leftV = rightV = 0;
-  send({type:'drive', seq: seq++, t: performance.now(), left: 0, right: 0});
+  sendNeutral();
+  stopDriveLoop();
 });
 
 /* ---- overlay ---- */
 function showOverlay(reason) {
-  var titles = {disconnected:'DISCONNECTED', deadman:'LINK LOST', unauthorized:'UNAUTHORIZED'};
+  var titles = {disconnected:'DISCONNECTED', deadman:'DEADMAN', unauthorized:'UNAUTHORIZED'};
   var subs   = {
     disconnected: 'Robot stopped · reconnecting…',
-    deadman:      'Deadman tripped — robot stopped · re-arm to resume',
+    deadman:      'Deadman tripped: the page was hidden or the connection paused. Press and hold ARM to resume.',
     unauthorized: 'Bad or missing token — clear it and reload to re-enter',
   };
   document.getElementById('ov-title').textContent = titles[reason] || 'STOPPED';
@@ -1983,6 +2018,12 @@ function renderAll() {
     ac.className = 'chip bad';
   } else {
     ac.textContent = 'DISARMED'; ac.className = 'chip';
+  }
+
+  /* deadman copy next to the press-and-hold ARM control (not a full-screen lock) */
+  var dmBanner = document.getElementById('dm-banner');
+  if (dmBanner) {
+    dmBanner.classList.toggle('hidden', !(!s.armed && s.tripped_reason === 'deadman'));
   }
 
   /* battery */

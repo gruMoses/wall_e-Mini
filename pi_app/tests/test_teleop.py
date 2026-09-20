@@ -1033,3 +1033,27 @@ def test_drive_session_still_arms_and_drives_with_estop_gate_wired(tmp_path):
     ok, _ = s.clear_estop()
     assert ok is True
     assert s.estop_latched is False
+
+
+# ==========================================================================
+# Phone-page deadman UX (issue #50) — served HTML, not the watchdog.
+# ==========================================================================
+
+def test_drive_page_html_has_visibilitychange_handler(tmp_path):
+    app, _ = _make_flask_app("T0K", tmp_path)
+    html = app.test_client().get("/drive?token=T0K").get_data(as_text=True)
+    assert "visibilitychange" in html
+    assert "sendNeutral" in html
+    assert "stopDriveLoop" in html
+    assert "document.hidden" in html
+
+
+def test_drive_page_html_has_deadman_trip_message(tmp_path):
+    app, _ = _make_flask_app("T0K", tmp_path)
+    html = app.test_client().get("/drive?token=T0K").get_data(as_text=True)
+    assert (
+        "Deadman tripped: the page was hidden or the connection paused. "
+        "Press and hold ARM to resume."
+    ) in html
+    assert 'id="dm-banner"' in html
+    assert 'id="arm-btn"' in html

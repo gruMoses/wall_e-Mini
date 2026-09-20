@@ -793,17 +793,42 @@ function keepAlive(imgId, statusId, url) {
   const status = document.getElementById(statusId);
   let cooldown = false;
   img.onerror = function() {
-    if (cooldown) return;
+    if (cooldown || document.hidden) return;
     cooldown = true;
     setTimeout(function() {
+      cooldown = false;
+      if (document.hidden) return;
       img.src = url + '?t=' + Date.now();
       if (status) status.textContent = 'reconnected ' + new Date().toLocaleTimeString();
-      cooldown = false;
     }, 3000);
   };
 }
 keepAlive('rgb-stream', 'rgb-status', '/stream/rgb');
 keepAlive('depth-stream', 'depth-status', '/stream/depth');
+
+/* Pause MJPEG streams while the tab is hidden; restore when visible. */
+(function() {
+  var BLANK = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+  var streams = [
+    {id: 'rgb-stream', url: '/stream/rgb'},
+    {id: 'depth-stream', url: '/stream/depth'}
+  ];
+  var saved = {};
+  document.addEventListener('visibilitychange', function() {
+    streams.forEach(function(s) {
+      var img = document.getElementById(s.id);
+      if (!img) return;
+      if (document.hidden) {
+        saved[s.id] = img.getAttribute('src') || s.url;
+        if (saved[s.id].indexOf('data:') === 0) saved[s.id] = s.url;
+        img.src = BLANK;
+      } else {
+        img.src = saved[s.id] || s.url;
+        saved[s.id] = null;
+      }
+    });
+  });
+})();
 
 /* ── Follow-Me Status Panel + Trail Canvas ───────────────────────── */
 var trailCanvas = document.getElementById('trail-canvas');
