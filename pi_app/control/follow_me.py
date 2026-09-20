@@ -759,6 +759,20 @@ class SpeedLayer:
     actual_speed_mps is None (no VESC telemetry, stale frames, or the RPM
     plausibility gate tripped) — the open-loop path is byte-identical to the
     gains-zeroed behaviour that shipped from 2026-06-11 to 2026-09-19.
+
+    When ``emitted_forward_byte`` is also provided, the PID target is the
+    forward speed the rest of the pipeline actually let through last tick
+    rather than the open-loop request. Persistence decay, the SafetyLayer
+    accel ramp, obstacle throttle scaling, and the controller slew limiter
+    all cut the command AFTER this layer; without that feedback the
+    integrator winds against the limit and dumps a surge when the limit
+    lifts. If nothing limited the command, emitted = open_loop + corr so
+    the target stays open_loop (unchanged behaviour). If an external stage
+    scaled or cut it, the target follows what was actually commanded.
+    ``min(open_loop, ...)`` keeps the target from ever exceeding the
+    open-loop request. A fully-cut target (0) resets the PID instead of
+    integrating a negative error. ``emitted_forward_byte=None`` keeps the
+    previous target = open_loop behaviour.
     """
 
     def __init__(
@@ -789,6 +803,7 @@ class SpeedLayer:
         self.last_corr_mps: float | None = None
         self.last_corr_byte: float | None = None
         self.last_closed: bool = False
+        self.last_target_byte: float | None = None
 
     def _record(
         self,
@@ -799,6 +814,7 @@ class SpeedLayer:
         corr_mps: float | None,
         corr_byte: float | None,
         closed: bool,
+        target_byte: float | None = None,
     ) -> None:
         self.last_open_loop_byte = open_loop_byte
         self.last_target_mps = target_mps
@@ -807,18 +823,22 @@ class SpeedLayer:
         self.last_corr_mps = corr_mps
         self.last_corr_byte = corr_byte
         self.last_closed = closed
+        self.last_target_byte = target_byte
 
     def compute(
         self,
         depth_m: float,
         actual_speed_mps: float | None = None,
         dt: float = 0.05,
+        emitted_forward_byte: float | None = None,
     ) -> float:
         """Return forward speed offset in motor bytes (0 = hold/stop).
 
         When actual_speed_mps is provided and a velocity_pid is configured,
         a closed-loop correction is applied on top of the open-loop output.
         Otherwise (or when actual speed is None) behaves as pure open-loop.
+        ``emitted_forward_byte`` is the previous tick's post-limit common-mode
+        forward byte; None leaves the target at open_loop (byte-identical).
         """
         if depth_m <= self._min_dist:
             if self._velocity_pid is not None:
@@ -847,14 +867,37 @@ class SpeedLayer:
 
         # Closed-loop velocity correction when telemetry is available
         if self._velocity_pid is not None:
-            target_speed_mps = open_loop * self._speed_scale
+            last_corr_byte = (
+                self.last_corr_byte if self.last_corr_byte is not None else 0.0
+            )
+            if emitted_forward_byte is not None:
+                # If nothing limited the command, emitted = open_loop + corr
+                # so target = open_loop. If an external stage scaled or cut
+                # it, the target follows what was actually commanded so the
+                # integrator cannot wind up against a limit.
+                target_byte = max(
+                    0.0,
+                    min(open_loop, emitted_forward_byte - last_corr_byte),
+                )
+                if target_byte <= 0.0:
+                    # Fully cut: reset rather than integrating a negative error.
+                    self.reset()
+                    self._record(
+                        open_loop, 0.0, actual_speed_mps, None,
+                        0.0, 0.0, True, target_byte=0.0,
+                    )
+                    return open_loop
+                target_speed_mps = target_byte * self._speed_scale
+            else:
+                target_byte = open_loop
+                target_speed_mps = open_loop * self._speed_scale
             velocity_error = target_speed_mps - actual_speed_mps
             correction_mps = self._velocity_pid.compute(velocity_error, dt)
             correction_byte = correction_mps / self._speed_scale
             out = max(0.0, min(self._max_speed, open_loop + correction_byte))
             self._record(
                 open_loop, target_speed_mps, actual_speed_mps, velocity_error,
-                correction_mps, correction_byte, True,
+                correction_mps, correction_byte, True, target_byte=target_byte,
             )
             return out
         self._record(open_loop, None, actual_speed_mps, None, None, None, False)
@@ -1074,6 +1117,7 @@ class FollowMeController:
         self._steer_decay_factor: float = 1.0     # 1.0=fresh, 0.0=fully decayed
         self._steer_hold_active: bool = False     # True while coasting on held steer
         self._last_fresh_detection: bool = False  # whether current frame had a fresh detection
+        self._turn_speed_scale: float = 1.0       # direct-pursuit off-centre throttle scale
 
         # ── Telemetry state ──────────────────────────────────────────────────
         self._tracking: bool = False
@@ -1112,6 +1156,10 @@ class FollowMeController:
         # motor-cutout bug — surfaced here so the FM trial JSONL can show whether
         # a stop mid-chase was the charger inhibit, not a follow-me control bug.
         self._charger_inhibit: bool = False
+        # Previous tick's post-limit common-mode forward byte, fed by
+        # controller.py so the velocity PID cannot wind up against an
+        # external cut (decay / accel ramp / obstacle / slew).
+        self._emitted_forward_byte: float | None = None
         self._last_slip_active: bool = False
         # Consecutive-tick counter for the slip "going straight" guard. Evaluated
         # on the EMITTED/commanded steer; slip may only act once it persists.
@@ -1231,6 +1279,7 @@ class FollowMeController:
         left_temp_c: float | None = None,
         right_temp_c: float | None = None,
         charger_inhibit: bool = False,
+        emitted_forward_byte: float | None = None,
     ) -> None:
         """Feed VESC telemetry for closed-loop speed control and slip detection.
 
@@ -1242,6 +1291,10 @@ class FollowMeController:
         ``charger_inhibit`` mirrors controller._charger_inhibit so the per-tick
         FM trial recorder can show it (2026-06-13 motor-cutout bug: a stop
         mid-chase looked like a follow-me bug until charger_inhibit was found).
+
+        ``emitted_forward_byte`` is the previous tick's post-limit common-mode
+        forward byte ((L+R)/2 − CENTER). None when that tick was not FOLLOW_ME
+        (or on the first FOLLOW_ME tick) so the speed loop keeps its old target.
         """
         self._actual_left_rpm = left_rpm
         self._actual_right_rpm = right_rpm
@@ -1251,6 +1304,7 @@ class FollowMeController:
         self._actual_left_temp_c = left_temp_c
         self._actual_right_temp_c = right_temp_c
         self._charger_inhibit = bool(charger_inhibit)
+        self._emitted_forward_byte = emitted_forward_byte
 
     # ── Public API: main compute ─────────────────────────────────────────────
 
@@ -1346,6 +1400,7 @@ class FollowMeController:
         # was bool(filtered), which the new sticky logic would mis-mark fresh when
         # candidates (e.g. a chicken) exist but the tracker did not select one.
         fresh_detection = self._tracker.fresh_raw_x_norm is not None
+        self._turn_speed_scale = 1.0
 
         if not target_present:
             self._prev_fresh_detection = False
@@ -1372,6 +1427,7 @@ class FollowMeController:
                 target.depth_m,
                 actual_speed_mps=self._actual_speed_mps,
                 dt=dt,
+                emitted_forward_byte=self._emitted_forward_byte,
             )
             self._last_distance_error = target.depth_m - self._cfg.follow_distance_m
 
@@ -1382,12 +1438,24 @@ class FollowMeController:
             if not fresh_detection:
                 elapsed_since_fresh = now - self._last_fresh_steer_time
                 hold_decay_s = float(self._cfg.steer_hold_decay_s)
+                grace_s = float(self._cfg.steer_hold_grace_s)
                 # Speed-aware: at higher commanded speed decay faster (more dangerous to drive blind fast).
-                # effective_decay = decay_s * max(0.3, 1.0 - speed_factor) where speed_factor ∈ [0, 1].
+                # effective_decay = decay_s * max(floor, 1.0 - speed_factor) where speed_factor ∈ [0, 1].
+                # A dropped 15 fps frame is ~66 ms; without a grace hold the old
+                # 0.3 s floor already scaled speed by 0.78 on one miss.
                 max_speed = float(self._cfg.max_follow_speed_byte)
                 speed_factor = speed / max_speed if max_speed > 0.0 else 0.0
-                effective_decay_s = hold_decay_s * max(0.3, 1.0 - speed_factor)
-                decay = max(0.0, 1.0 - elapsed_since_fresh / effective_decay_s) if effective_decay_s > 0.0 else 0.0
+                floor = float(self._cfg.steer_hold_decay_speed_floor)
+                effective_decay_s = hold_decay_s * max(floor, 1.0 - speed_factor)
+                if elapsed_since_fresh <= grace_s:
+                    decay = 1.0
+                elif effective_decay_s > 0.0:
+                    decay = max(
+                        0.0,
+                        1.0 - (elapsed_since_fresh - grace_s) / effective_decay_s,
+                    )
+                else:
+                    decay = 0.0
                 # Clamp held steer to 70% of max during decay — prevents full-lock blind turns.
                 max_s = float(self._cfg.max_steer_offset_byte)
                 clamped_last_steer = max(-0.7 * max_s, min(0.7 * max_s, self._last_fresh_steer))
@@ -1414,6 +1482,24 @@ class FollowMeController:
                 if not self._prev_fresh_detection:
                     self._reacq_time = now  # mark reacquisition start
                 steer = self._compute_steering(target, speed, dt, now)
+                # Skid-steer cannot turn at full forward speed (mixer clips at
+                # 245; measured ~0.22 deg/s of yaw per L-R byte). Scale speed
+                # in direct pursuit from the fresh bbox x so the accel ramp
+                # sees the reduced request; the speed loop follows via
+                # emitted_forward_byte on the next tick.
+                if self._pursuit_mode == "direct":
+                    x_norm = self._tracker.fresh_raw_x_norm
+                    if x_norm is not None:
+                        knee = float(self._cfg.direct_turn_speed_knee_norm)
+                        min_scale = float(self._cfg.direct_turn_speed_min_scale)
+                        span = 1.0 - knee
+                        if span > 0.0:
+                            t = max(0.0, min(1.0, (abs(x_norm) - knee) / span))
+                            turn_scale = 1.0 - (1.0 - min_scale) * t
+                        else:
+                            turn_scale = 1.0
+                        speed = speed * turn_scale
+                        self._turn_speed_scale = turn_scale
                 # Recorder: fresh tick — record the branch's raw steer BEFORE the
                 # reacq ramp, slip-comp, and slew cap, and which path produced it.
                 # _compute_steering sets _pursuit_mode to "trail" or "direct".
@@ -2013,6 +2099,7 @@ class FollowMeController:
         self._steer_decay_factor = 1.0
         self._steer_hold_active = False
         self._last_fresh_detection = False
+        self._turn_speed_scale = 1.0
         self._pursuit_mode = "direct"
         self._last_pursuit_mode = "direct"
         self._depth_filter.reset()
@@ -2178,6 +2265,7 @@ class FollowMeController:
             "follow_me_steer_decay_factor": round(self._steer_decay_factor, 3),
             "follow_me_fresh_detection": self._last_fresh_detection,
             "follow_me_steer_hold_active": self._steer_hold_active,
+            "turn_speed_scale": round(self._turn_speed_scale, 3),
             "follow_me_depth_filtered_m": self._depth_filter.value,
             # ── Visualization / troubleshooting (Items 2 + 4) ────────────
             "follow_mode": follow_mode,
@@ -2211,6 +2299,7 @@ class FollowMeController:
             "corr_mps": self._speed.last_corr_mps,
             "corr_byte": self._speed.last_corr_byte,
             "closed": self._speed.last_closed,
+            "target_byte": self._speed.last_target_byte,
         }
         if self._trail_enabled:
             status["trail_length"] = self._trail_length

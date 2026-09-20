@@ -168,6 +168,10 @@ class Controller:
         # Final-stage slew limiter state.
         self._slew_last_left = CENTER_OUTPUT_VALUE
         self._slew_last_right = CENTER_OUTPUT_VALUE
+        # Previous FOLLOW_ME tick's post-slew common-mode forward byte, so the
+        # velocity PID can target what actually reached the motors. None when
+        # the previous process() tick was not FOLLOW_ME.
+        self._last_follow_me_emitted_forward_byte: Optional[float] = None
         self._slew_last_update = time.monotonic()
         self._slew_initialized = False
         self._slew_seen_non_neutral = False
@@ -605,6 +609,7 @@ class Controller:
                 left_temp_c=self._actual_left_temp_c,
                 right_temp_c=self._actual_right_temp_c,
                 charger_inhibit=self._charger_inhibit,
+                emitted_forward_byte=self._last_follow_me_emitted_forward_byte,
             )
             detections = self._person_detections or []
             left, right = self._follow_me.compute(detections)
@@ -831,6 +836,7 @@ class Controller:
                 is_armed=False,
                 emergency_active=self._safety_state.emergency_active,
             )
+            self._last_follow_me_emitted_forward_byte = None
             return cmd, [SafetyEvent.RC_STALE], {"mode": "MANUAL", "rc_stale": True, "rc_age_s": rc_age}
 
         # Update safety. This now runs on EVERY tick before the calibration
@@ -872,6 +878,7 @@ class Controller:
                 is_armed=self._safety_state.is_armed,
                 emergency_active=self._safety_state.emergency_active,
             )
+            self._last_follow_me_emitted_forward_byte = None
             return cmd, events, {
                 "mode": "CALIBRATING",
                 "calibration": True,
@@ -1373,6 +1380,15 @@ class Controller:
         )
         telemetry["motor_left_byte"] = left
         telemetry["motor_right_byte"] = right
+        # Common-mode byte that actually reached the motors this tick (after
+        # obstacle scaling and the slew limiter). Next FOLLOW_ME tick's
+        # velocity PID targets this so it cannot wind up against a limit.
+        if self._mode == "FOLLOW_ME":
+            self._last_follow_me_emitted_forward_byte = (
+                (left + right) / 2.0 - CENTER_OUTPUT_VALUE
+            )
+        else:
+            self._last_follow_me_emitted_forward_byte = None
         telemetry["straight_intent"] = is_moving_straight
         telemetry["rc_equal_tol_us"] = tol
         telemetry["rc_equal_rel_pct"] = rel_pct
