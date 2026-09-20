@@ -344,6 +344,7 @@ def build_log_obj(
     imu_dt_ms,
     imu_motion_witness_still,
     events,
+    oak_camera_health=None,
 ) -> dict:
     """Build the per-tick structured JSON log object.
 
@@ -363,6 +364,7 @@ def build_log_obj(
     imu_pipeline duplicates) and rounded to 3 decimals -- the slow line
     keeps full precision.
     """
+    _oak = oak_camera_health if isinstance(oak_camera_health, dict) else {}
     return {
         "ts": round(now_ts, 3),
         "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
@@ -450,7 +452,13 @@ def build_log_obj(
             {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),
              "conf": round(d.confidence, 2),
              "bbox": [round(b, 3) for b in d.bbox],
-             "track_id": getattr(d, "track_id", None)}
+             "track_id": getattr(d, "track_id", None),
+             "depth_status": getattr(d, "depth_status", "ok"),
+             "depth_valid_px": getattr(d, "depth_valid_px", -1),
+             "depth_roi_px": getattr(d, "depth_roi_px", -1),
+             "z_stereo_m": round(getattr(d, "z_stereo_m", 0.0), 2),
+             "z_height_m": round(getattr(d, "z_height_m", 0.0), 2),
+             "z_spread_m": round(getattr(d, "z_spread_m", 0.0), 2)}
             for d in oak_persons
         ] if oak_persons else None,
         "gps": {
@@ -545,6 +553,11 @@ def build_log_obj(
         "imu_dt_ms": imu_dt_ms,
         "imu_motion_witness_still": imu_motion_witness_still,
         "events": [e.name for e in events] if events else [],
+        "oak": {
+            "det_fps": _oak.get("det_fps") if _oak else None,
+            "depth_fps": _oak.get("depth_fps") if _oak else None,
+            "det_latency_s": _oak.get("det_latency_s") if _oak else None,
+        },
     }
 
 
@@ -578,6 +591,11 @@ def build_slow_obj(
         "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
         "imu_pipeline": imu_pipeline,
         "oak_camera_health": oak_camera_health,
-        "oak": {"chip_temp_c": chip_temp_c},
+        "oak": {
+            "chip_temp_c": chip_temp_c,
+            "det_fps": oak_camera_health.get("det_fps") if isinstance(oak_camera_health, dict) else None,
+            "depth_fps": oak_camera_health.get("depth_fps") if isinstance(oak_camera_health, dict) else None,
+            "det_latency_s": oak_camera_health.get("det_latency_s") if isinstance(oak_camera_health, dict) else None,
+        },
         "gps_health": gps_health,
     }

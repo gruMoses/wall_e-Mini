@@ -324,6 +324,12 @@ class ObstacleAvoidanceConfig:
     stale_policy: str = "stop"   # fail-safe: stop when depth data is stale
     manual_stale_throttle_scale: float = 0.10  # MANUAL mode: slow (not stop) when depth is stale
     safety_stop_radius_m: float = 0.8  # YOLO "stop" tier detections within this radius force min_distance->0 (applied in oak_depth depth poll)
+    # Size backstop (2026-09-20, arm_20260920_154844.log): a genuinely close
+    # person with no usable stereo still stops the robot. Shoulders 0.5 m at
+    # 0.8 m subtend 0.45 of the 70 deg frame. A "stop"-tier detection whose
+    # depth_status is not "ok" and whose bbox width >= this forces the hard
+    # stop exactly like z < safety_stop_radius_m. 0.0 disables.
+    safety_stop_bbox_width: float = 0.40
 
 
 @dataclass(frozen=True)
@@ -476,6 +482,36 @@ class FollowMeConfig:
     # ── Depth EMA filter (stabilises stereo depth at long range) ────────────────
     depth_ema_alpha: float = 0.35          # EMA smoothing on raw depth (0=heavy, 1=none)
     depth_max_velocity_mps: float = 5.0    # reject readings implying > this speed (m/s)
+
+    # ── Person stereo sampler (2026-09-20, arm_20260920_154844.log, git 41f4fdf)
+    # OAK-D Lite is PASSIVE stereo: outdoors only 5-10 percent of depth pixels
+    # are valid. The old inner-50% median with a 6.0 m clip and no support
+    # floor produced three stop-the-robot failures:
+    #   (1) operator at 5.8-5.9 m, bbox 0.05-0.07 of the frame wide, SAME
+    #       track id: z_m jumped 5.8, 3.7, 3.1, 5.8, 4.1, 2.6, 5.8 because
+    #       the person's own pixels exceeded the 6000 mm clip and the median
+    #       landed on a few stray pixels;
+    #   (2) bbox at the right frame edge (x=[0.82, 1.00], often full-frame
+    #       height ymin=0.00 ymax=1.00) read 1.2, 1.0, 0.8 m. The operator
+    #       confirmed he really WAS about 1 m away (2026-09-20 15:49): those
+    #       stereo values were true, not a border artifact. 1.2 m is outside
+    #       safety_stop_radius_m 0.8, so the robot kept driving.
+    #   (3) bbox near the left edge (x=[0.08, 0.27]) read 1.5-1.7 m then
+    #       2.8 m one frame later.
+    # DetectionFilter still applies max_distance_m later; the sampler must
+    # not discard the person's own pixels at 6.0-6.5 m.
+    person_depth_sample_max_m: float = 9.0
+    person_depth_min_valid_px: int = 12          # absolute support floor
+    person_depth_min_valid_frac: float = 0.02    # fraction of torso-ROI pixels
+    person_assumed_height_m: float = 1.75        # standing adult; z_height_m diagnostic only, never a source of z
+    # Height-consistency veto is OFF (0.0 disables). z_height_m is still
+    # computed and logged as a diagnostic. Do not enable this without field
+    # evidence of a real too-close stereo artifact on a box that is NOT
+    # clipped top/bottom. The 2026-09-20 15:49 incident (true ~1.2 m
+    # readings at the frame edge, robot kept driving) showed that a veto
+    # which discards a true close range is a safety hazard; its only
+    # supporting evidence is gone.
+    person_depth_height_veto_ratio: float = 0.0
 
     # ── Layer 4: Speed (depth-based, closed-loop when VESC telemetry available) ─
     speed_dead_zone_m: float = 0.2       # ±dead_zone around follow_distance_m → speed = 0 (no oscillation)

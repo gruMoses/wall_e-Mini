@@ -729,6 +729,63 @@ def _clamp_stats(fm_ticks: list[dict], clamp_byte: float) -> dict:
     }
 
 
+def _section_person_depth(fm_ticks: list[dict]) -> dict:
+    """Person-stereo diagnostics over FOLLOW_ME ticks (first detection per tick)."""
+    status_counts: dict[str, int] = {}
+    saw_status = False
+    n_z_jumps = 0
+    valid_pxs: list[float] = []
+    det_fps: list[float] = []
+    depth_fps: list[float] = []
+    saw_fps = False
+    prev_z_stereo: float | None = None
+    prev_tid = None
+    for tk in fm_ticks:
+        dets = _detections(tk)
+        if dets:
+            first = dets[0]
+            if "depth_status" in first:
+                saw_status = True
+                st = first.get("depth_status")
+                key = str(st) if st is not None else "n/a"
+                status_counts[key] = status_counts.get(key, 0) + 1
+            vp = _num(first.get("depth_valid_px"))
+            if vp is not None and vp >= 0.0:
+                valid_pxs.append(vp)
+            z_st = _num(first.get("z_stereo_m"))
+            tid = first.get("track_id")
+            if (
+                prev_z_stereo is not None
+                and z_st is not None
+                and tid is not None
+                and prev_tid is not None
+                and tid == prev_tid
+                and abs(z_st - prev_z_stereo) > 1.0
+            ):
+                n_z_jumps += 1
+            if z_st is not None:
+                prev_z_stereo = z_st
+            if tid is not None:
+                prev_tid = tid
+        oak = tk.get("oak") if isinstance(tk.get("oak"), dict) else None
+        if oak is not None and ("det_fps" in oak or "depth_fps" in oak):
+            saw_fps = True
+        if oak is not None:
+            df = _num(oak.get("det_fps"))
+            dpf = _num(oak.get("depth_fps"))
+            if df is not None:
+                det_fps.append(df)
+            if dpf is not None:
+                depth_fps.append(dpf)
+    return {
+        "status_counts": status_counts if saw_status else None,
+        "n_z_stereo_jumps_same_track": n_z_jumps if saw_status else None,
+        "median_depth_valid_px": _median(valid_pxs),
+        "median_det_fps": _median(det_fps) if saw_fps else None,
+        "median_depth_fps": _median(depth_fps) if saw_fps else None,
+    }
+
+
 def analyze(paths, bin_s: float = DEFAULT_BIN_S, start_s: float | None = None,
             end_s: float | None = None, direct_cap: float | None = None) -> dict:
     """Compute every report metric from one or more JSON run logs."""
@@ -804,6 +861,7 @@ def analyze(paths, bin_s: float = DEFAULT_BIN_S, start_s: float | None = None,
         "steering": _section_steering(fm_ticks, t0, used_direct_cap),
         "speed_cap": _section_speed_cap(fm_ticks, max_spd),
         "obstacle": _section_obstacle(fm_ticks, t0),
+        "person_depth": _section_person_depth(fm_ticks),
     }
 
 
@@ -1003,6 +1061,25 @@ def render_report(m: dict) -> str:
     lines.append(
         f"depth_valid_pct<8.0: {o.get('n_depth_valid_pct_lt_8', 0)}  "
         f"runs={o.get('n_runs', 0)}  longest={o.get('longest_run', 0)}"
+    )
+
+    pd = m.get("person_depth") or {}
+    lines += ["", "=== PERSON DEPTH ==="]
+    counts = pd.get("status_counts")
+    if not counts:
+        lines.append("depth_status: n/a")
+    else:
+        parts = [f"{k}={v}" for k, v in sorted(counts.items())]
+        lines.append("depth_status: " + " ".join(parts))
+    jumps = pd.get("n_z_stereo_jumps_same_track")
+    lines.append(
+        f"z_stereo_m jumps >1.0 m (same track_id): "
+        f"{jumps if jumps is not None else 'n/a'}"
+    )
+    lines.append(f"median depth_valid_px: {_f(pd.get('median_depth_valid_px'), '.0f')}")
+    lines.append(
+        f"median det_fps: {_f(pd.get('median_det_fps'))}  "
+        f"median depth_fps: {_f(pd.get('median_depth_fps'))}"
     )
     return "\n".join(lines) + "\n"
 
