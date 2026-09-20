@@ -64,10 +64,68 @@ IMU_DRAIN_BATCH_LARGE_FRAC = 0.75
 class DepthStats:
     """Rich depth ROI statistics exposed for telemetry and recorder."""
     min_distance_m: float = float("inf")
-    p5_mm: float = 0.0
+    p5_mm: float = 0.0  # support-backed near estimate (see _corridor_near_distance_mm)
     p50_mm: float = 0.0
     valid_pixel_pct: float = 0.0
+    corridor_valid_pct: float = 0.0
+    corridor_support_px: int = 0
     timestamp: float = 0.0
+
+
+def _corridor_near_distance_mm(valid_depths, min_support_px: int) -> float | None:
+    """Return the support-backed near depth (mm), or None if the corridor is rejected.
+
+    Reported as ``p5_mm``, but this is not a plain 5th percentile: k =
+    max(min_support_px, int(0.05 * n_valid)), clamped to n_valid, and the
+    k-th smallest valid depth is taken with ``np.partition`` (no full sort).
+
+    Why: on the 2026-09-19 18:50 follow-me run the corridor p5 flickered
+    2.3 → 0.4 m while the followed person was 2.8–3.8 m ahead. Full-frame
+    valid_pixel_pct was 2–7%; 5% of that handful was a few noisy near
+    pixels. A real obstacle at 1 m and 0.3 m wide covers tens of thousands
+    of corridor pixels; min_support_px=400 ≈ a 20x20 blob — anything
+    smaller is noise.
+    """
+    import numpy as np
+    n_valid = int(getattr(valid_depths, "size", 0) or 0)
+    min_support_px = int(min_support_px)
+    if n_valid <= 0 or n_valid < min_support_px:
+        return None
+    k = max(min_support_px, int(0.05 * n_valid))
+    if k > n_valid:
+        k = n_valid
+    kth = k - 1
+    partitioned = np.partition(valid_depths, kth)
+    return float(partitioned[kth])
+
+
+class _CorridorPersistence:
+    """Report max(current, last persistence_polls-1 corridor estimates).
+
+    A single-poll phantom cannot lower the distance. A genuine approaching
+    obstacle is delayed by at most (persistence_polls - 1) polls (~66 ms at
+    15 Hz). Applied ONLY to the corridor estimate, before the YOLO
+    safety-tier override — a stop-tier detection must stay immediate.
+    """
+
+    def __init__(self, persistence_polls: int = 2) -> None:
+        self._persistence_polls = max(1, int(persistence_polls))
+        self._prev: list[float] = []
+
+    def reset(self) -> None:
+        self._prev.clear()
+
+    def update(self, current_mm: float) -> float:
+        reported = float(current_mm) if not self._prev else max(float(current_mm), *self._prev)
+        keep = self._persistence_polls - 1
+        if keep <= 0:
+            self._prev = []
+        else:
+            self._prev.append(float(current_mm))
+            extra = len(self._prev) - keep
+            if extra > 0:
+                del self._prev[:extra]
+        return reported
 
 
 @dataclass
@@ -424,6 +482,9 @@ class OakDepthReader:
         self._det_cfg = detection_config
 
         self._depth_state = _DepthState()
+        self._corridor_persistence = _CorridorPersistence(
+            int(getattr(obstacle_config, "corridor_persistence_polls", 2))
+        )
         self._det_state = _DetectionState(persons=[])
         self._all_dets_state = _AllDetsState(detections=[])
         self._rgb_state = _RgbState()
@@ -1353,6 +1414,7 @@ class OakDepthReader:
                 # without jumping cumulative free-yaw.
                 self._imu_yaw_producer.note_pipeline_restart()
                 self._imu_prev_consumed_ts = 0.0
+                self._corridor_persistence.reset()
 
         except Exception:
             logger.exception("Failed to build/start OAK-D pipeline")
@@ -1781,20 +1843,37 @@ class OakDepthReader:
                     pass
 
             # Corridor distance — may be inf when person bbox fills the ROI.
+            # p5_mm keeps its field name but is now the support-backed near
+            # estimate (k-th smallest with a min pixel floor), not a raw 5th
+            # percentile. See _corridor_near_distance_mm.
             corridor_p5_mm = float("inf")
             corridor_rejected = False
-            if valid_depths.size == 0:
+            n_valid = int(valid_depths.size)
+            corridor_support_px = n_valid
+            corridor_valid_pct = 0.0
+            min_support_px = int(getattr(self._obs_cfg, "corridor_min_support_px", 400))
+            if n_valid == 0:
                 corridor_rejected = True
             else:
-                corridor_pixel_count = int(in_corridor.sum())
-                if corridor_pixel_count > 0:
-                    corridor_valid_pct = (valid_depths.size / corridor_pixel_count) * 100.0
+                if robot_half_mm > 0:
+                    corridor_pixel_count = int(in_corridor.sum())
                 else:
-                    corridor_valid_pct = 0.0
-                if corridor_valid_pct < min_valid_pct:
+                    corridor_pixel_count = int(roi.size)
+                if corridor_pixel_count > 0:
+                    corridor_valid_pct = (n_valid / corridor_pixel_count) * 100.0
+                if corridor_valid_pct < min_valid_pct or n_valid < min_support_px:
                     corridor_rejected = True
                 else:
-                    corridor_p5_mm = float(np.percentile(valid_depths, 5))
+                    near_mm = _corridor_near_distance_mm(valid_depths, min_support_px)
+                    if near_mm is None:
+                        corridor_rejected = True
+                    else:
+                        # Persistence BEFORE the YOLO safety-tier override so a
+                        # stop-tier detection stays immediate.
+                        corridor_p5_mm = self._corridor_persistence.update(near_mm)
+
+            if corridor_rejected:
+                self._corridor_persistence.reset()
 
             # Canonical YOLO person/animal stop tier — see
             # _apply_safety_tier_override. A "stop"-tier detection within
@@ -1861,6 +1940,8 @@ class OakDepthReader:
                 p5_mm=p5,
                 p50_mm=p50,
                 valid_pixel_pct=round(valid_pct, 1),
+                corridor_valid_pct=round(corridor_valid_pct, 1),
+                corridor_support_px=int(corridor_support_px),
                 timestamp=now,
             )
             with self._lock:
