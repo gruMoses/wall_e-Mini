@@ -25,7 +25,7 @@ GAP_S = 5.0
 SURGE_BYTES = 30.0
 JUMP_WINDOW_S = 1.0
 DEFAULT_BIN_S = 2.0
-DEFAULT_DIRECT_CAP = 18.0
+DEFAULT_DIRECT_CAP = 32.0
 DEFAULT_CLAMP_BYTE = 21.2
 DEFAULT_MAX_SPEED_BYTE = 110.0
 DEFAULT_DEAD_ZONE_M = 0.2
@@ -365,29 +365,146 @@ def _tick_dt(ticks: list[dict], i: int) -> float | None:
     return None if dt_ms is None else dt_ms / 1000.0
 
 
+def _heading_deg(tick) -> float | None:
+    h = _num(_get(tick, "imu", "heading_deg"))
+    if h is not None:
+        return h
+    return _num(_get(tick, "imu", "oak_imu", "heading_deg"))
+
+
+def _logged_yaw_rate_dps(tick) -> float | None:
+    y = _num(_get(tick, "imu", "yaw_rate_dps"))
+    if y is not None:
+        return y
+    return _num(_get(tick, "imu", "oak_imu", "yaw_rate_world_dps"))
+
+
+def _unwrap_heading_deg(headings: list[float]) -> list[float]:
+    if not headings:
+        return []
+    out = [float(headings[0])]
+    prev = float(headings[0])
+    acc = prev
+    for raw in headings[1:]:
+        v = float(raw)
+        d = (v - prev + 180.0) % 360.0 - 180.0
+        acc += d
+        out.append(acc)
+        prev = v
+    return out
+
+
+def _lr_yaw_bins(xs: list[float], ys: list[float]) -> list[dict]:
+    bins: dict[float, list[float]] = defaultdict(list)
+    for x, y in zip(xs, ys):
+        bins[math.floor(x / 5.0) * 5.0].append(y)
+    return [
+        {"lr_lo": k, "lr_hi": k + 5.0, "mean_yaw_dps": _mean(bins[k]), "n": len(bins[k])}
+        for k in sorted(bins)
+    ]
+
+
 def _yaw_fit(fm_ticks: list[dict], pred) -> dict:
-    xs: list[float] = []
-    ys: list[float] = []
+    """Yaw vs L-R: heading derivative (primary) plus the logged-rate fit.
+
+    Logged ``yaw_rate_dps`` is often zero-filled under follow-me load (the
+    duplicate-branch freshness bound used to be tighter than the vision
+    thread's IMU drain). Derive rate from unwrapped ``imu.heading_deg``
+    with a +/-2-tick central difference, then fit against L-R delayed by
+    a lag searched over 0..6 ticks.
+    """
+    rows: list[tuple[float, float, float]] = []
+    logged_xs: list[float] = []
+    logged_ys: list[float] = []
+    n_zero = 0
+    n_logged = 0
     for tk in fm_ticks:
         actual = _num(_get(tk, "follow_me", "speed_loop", "actual_mps"))
         if actual is None or not pred(actual):
             continue
         lft = _num(_get(tk, "motor", "L"))
         rgt = _num(_get(tk, "motor", "R"))
-        yaw = _num(_get(tk, "imu", "oak_imu", "yaw_rate_world_dps"))
+        ts = _ts(tk)
+        heading = _heading_deg(tk)
+        if None not in (lft, rgt, ts, heading):
+            rows.append((float(ts), float(heading), float(lft) - float(rgt)))
+        yaw = _logged_yaw_rate_dps(tk)
         if None in (lft, rgt, yaw):
             continue
-        xs.append(lft - rgt)
-        ys.append(yaw)
-    fit = _linreg(xs, ys)
-    bins: dict[float, list[float]] = defaultdict(list)
-    for x, y in zip(xs, ys):
-        bins[math.floor(x / 5.0) * 5.0].append(y)
-    fit["bins"] = [
-        {"lr_lo": k, "lr_hi": k + 5.0, "mean_yaw_dps": _mean(bins[k]), "n": len(bins[k])}
-        for k in sorted(bins)
-    ]
-    return fit
+        n_logged += 1
+        if yaw == 0.0:
+            n_zero += 1
+        logged_xs.append(float(lft) - float(rgt))
+        logged_ys.append(float(yaw))
+    logged = _linreg(logged_xs, logged_ys)
+    logged["bins"] = _lr_yaw_bins(logged_xs, logged_ys)
+    logged["n_zero"] = n_zero
+    logged["n_samples"] = n_logged
+
+    empty = {
+        "slope": None, "intercept": None, "r": None, "n": 0,
+        "lag_ticks": None, "lag_s": None, "bins": [],
+        "logged": logged,
+    }
+    n = len(rows)
+    if n < 5:
+        return empty
+
+    ts_a = [r[0] for r in rows]
+    unw = _unwrap_heading_deg([r[1] for r in rows])
+    lr_a = [r[2] for r in rows]
+    samples: list[tuple[int, float]] = []
+    for i in range(2, n - 2):
+        dt = ts_a[i + 2] - ts_a[i - 2]
+        if dt <= 0.0 or dt > 1.0:
+            continue
+        samples.append((i, (unw[i + 2] - unw[i - 2]) / dt))
+    if not samples:
+        return empty
+
+    best: dict | None = None
+    best_abs_r = -1.0
+    best_lag = 0
+    best_xs: list[float] = []
+    best_ys: list[float] = []
+    for lag in range(0, 7):
+        xs: list[float] = []
+        ys: list[float] = []
+        for i, rate in samples:
+            j = i - lag
+            if j < 0:
+                continue
+            xs.append(lr_a[j])
+            ys.append(rate)
+        fit = _linreg(xs, ys)
+        r = fit.get("r")
+        if r is None or fit.get("n", 0) < 2:
+            continue
+        if abs(r) > best_abs_r:
+            best_abs_r = abs(r)
+            best = fit
+            best_lag = lag
+            best_xs = xs
+            best_ys = ys
+    if best is None:
+        return empty
+
+    lag_dts: list[float] = []
+    for i, _rate in samples:
+        j = i - best_lag
+        if j < 0:
+            continue
+        if best_lag == 0:
+            lag_dts.append(0.0)
+        else:
+            dtl = ts_a[i] - ts_a[j]
+            if dtl > 0.0:
+                lag_dts.append(dtl)
+    best["lag_ticks"] = best_lag
+    best["lag_s"] = _median(lag_dts) if lag_dts else None
+    best["bins"] = _lr_yaw_bins(best_xs, best_ys)
+    best["logged"] = logged
+    return best
 
 
 def _section_timeline(fm_ticks: list[dict], t0: float, bin_s: float) -> list[dict]:
@@ -613,7 +730,7 @@ def _clamp_stats(fm_ticks: list[dict], clamp_byte: float) -> dict:
 
 
 def analyze(paths, bin_s: float = DEFAULT_BIN_S, start_s: float | None = None,
-            end_s: float | None = None, direct_cap: float = DEFAULT_DIRECT_CAP) -> dict:
+            end_s: float | None = None, direct_cap: float | None = None) -> dict:
     """Compute every report metric from one or more JSON run logs."""
     header, ticks = _load_records([str(p) for p in paths])
     fm_all = [tk for tk in ticks if tk.get("mode") == "FOLLOW_ME"]
@@ -637,6 +754,13 @@ def analyze(paths, bin_s: float = DEFAULT_BIN_S, start_s: float | None = None,
     cfg_fm = _get(header, "config", "follow_me") if header else None
     cfg_vesc = _get(header, "config", "vesc") if header else None
     cfg_imu = _get(header, "config", "imu_steering") if header else None
+    header_cap = _num(_get(cfg_fm, "direct_mode_max_steer_byte"))
+    if direct_cap is not None:
+        used_direct_cap = direct_cap
+    elif header_cap is not None:
+        used_direct_cap = header_cap
+    else:
+        used_direct_cap = DEFAULT_DIRECT_CAP
     max_corr = _num(_get(cfg_fm, "speed_pid_max_correction_mps"))
     mps_per = _num(_get(cfg_fm, "speed_loop_mps_per_byte"))
     clamp_byte = (max_corr / mps_per) if (max_corr is not None and mps_per not in (None, 0.0)) else DEFAULT_CLAMP_BYTE
@@ -677,7 +801,7 @@ def analyze(paths, bin_s: float = DEFAULT_BIN_S, start_s: float | None = None,
         "timeline": _section_timeline(fm_ticks, t0, bin_s) if t0 is not None else [],
         "jumpiness": jump_overall,
         "detection_filter": _section_detection_filter(fm_ticks, segs),
-        "steering": _section_steering(fm_ticks, t0, direct_cap),
+        "steering": _section_steering(fm_ticks, t0, used_direct_cap),
         "speed_cap": _section_speed_cap(fm_ticks, max_spd),
         "obstacle": _section_obstacle(fm_ticks, t0),
     }
@@ -816,20 +940,34 @@ def render_report(m: dict) -> str:
             )
 
     def _yaw_line(label: str, fit: dict) -> None:
+        lag_ticks = fit.get("lag_ticks")
         lines.append(
-            f"yaw vs (L-R) {label}: slope={_f(fit.get('slope'), '.4f')} deg/s/byte  "
-            f"int={_f(fit.get('intercept'), '.3f')}  r={_f(fit.get('r'), '.3f')}  n={fit.get('n', 0)}"
+            f"yaw vs (L-R) {label} from heading_deg: "
+            f"slope={_f(fit.get('slope'), '.4f')} deg/s/byte  "
+            f"lag={lag_ticks if lag_ticks is not None else 'n/a'} ticks "
+            f"({_f(fit.get('lag_s'), '.2f')} s)  "
+            f"int={_f(fit.get('intercept'), '.3f')}  r={_f(fit.get('r'), '.3f')}  "
+            f"n={fit.get('n', 0)}"
         )
         bins = fit.get("bins") or []
         if not bins:
             lines.append("  bins: n/a")
-            return
-        parts = [
-            f"[{_f(b['lr_lo'], '.0f')},{_f(b['lr_hi'], '.0f')})="
-            f"{_f(b.get('mean_yaw_dps'), '.2f')}n={b.get('n', 0)}"
-            for b in bins
-        ]
-        lines.append("  bins: " + " ".join(parts))
+        else:
+            parts = [
+                f"[{_f(b['lr_lo'], '.0f')},{_f(b['lr_hi'], '.0f')})="
+                f"{_f(b.get('mean_yaw_dps'), '.2f')}n={b.get('n', 0)}"
+                for b in bins
+            ]
+            lines.append("  bins: " + " ".join(parts))
+        logged = fit.get("logged") or {}
+        n_zero = logged.get("n_zero", 0)
+        n_samp = logged.get("n_samples", logged.get("n", 0))
+        lines.append(
+            f"  logged yaw_rate_dps (unreliable: {n_zero} of {n_samp} samples "
+            f"are 0.0): slope={_f(logged.get('slope'), '.4f')} deg/s/byte  "
+            f"int={_f(logged.get('intercept'), '.3f')}  "
+            f"r={_f(logged.get('r'), '.3f')}  n={logged.get('n', 0)}"
+        )
 
     _yaw_line("moving (actual_mps>=0.3)", s.get("yaw_moving") or {})
     _yaw_line("pivot (actual_mps<0.15)", s.get("yaw_pivot") or {})
@@ -880,9 +1018,10 @@ def main(argv: list[str] | None = None) -> int:
                     metavar="S", help="Seconds from first FOLLOW_ME tick")
     ap.add_argument("--json", type=Path, default=None, dest="json_path",
                     metavar="PATH", help="Write every computed metric as one JSON object")
-    ap.add_argument("--direct-cap", type=float, default=DEFAULT_DIRECT_CAP,
+    ap.add_argument("--direct-cap", type=float, default=None,
                     dest="direct_cap", metavar="BYTES",
-                    help="Direct-mode steer cap in bytes (default 18)")
+                    help="Direct-mode steer cap in bytes (default: session "
+                         "header follow_me.direct_mode_max_steer_byte, else 32)")
     args = ap.parse_args(argv)
     for p in args.logs:
         if not Path(p).is_file():

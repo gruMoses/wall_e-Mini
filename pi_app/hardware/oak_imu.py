@@ -52,6 +52,9 @@ G_MSS = 9.80665
 
 # Reject samples older than this (host receive age from OakDepthReader).
 _STALE_AGE_S = 0.50
+# Duplicate-branch live-rate freshness. Must cover the vision thread's IMU
+# drain period under follow-me load, and stay below _STALE_AGE_S.
+_DUPLICATE_RATE_FRESHNESS_S = 0.20
 # Cap sample-to-sample dt used for roll/pitch and legacy fallback only.
 _MAX_INTEGRATE_DT_S = 0.15
 # Treat device timestamps within this epsilon as identical.
@@ -1206,15 +1209,17 @@ class OakImuReader:
             # GPS heading-aligner's "am I turning?" gate saw a rate that
             # flickered between the real value and 0 on alternate reads.
             #
-            # Freshness bound: without one, a wedged camera thread that stops
-            # producing new packets can hold this branch (delta stays ~0
-            # forever) and report a stale non-zero rate for up to
-            # stale_age_s (0.5 s) before the stale path above takes over. Bound
-            # it much tighter — a few packet periods — since this branch's
-            # whole justification is "two reads of the same fresh sample in
-            # one control tick", not "the producer stopped talking to us".
+            # Freshness bound: this branch also holds while the vision thread
+            # drains the IMU under follow-me load without a new producer
+            # packet. Measured snapshot ages on duplicate reads: p50 0.090 s,
+            # p90 0.182 s, max 0.286 s (vision drain about 6-10 Hz). The bound
+            # must cover that drain period, and it must stay below the 0.5 s
+            # stale threshold. A wedged camera thread that stops producing
+            # still cannot hold a stale non-zero rate for more than
+            # _DUPLICATE_RATE_FRESHNESS_S (0.2 s) before this branch reports
+            # 0.0; the stale path above takes over at stale_age_s (0.5 s).
             cadence = cadence_avg_s if cadence_avg_s and cadence_avg_s > 0.0 else 0.01
-            freshness_bound_s = max(0.05, 3.0 * cadence)
+            freshness_bound_s = max(_DUPLICATE_RATE_FRESHNESS_S, 3.0 * cadence)
             if age_s <= freshness_bound_s:
                 self._last_yaw_rate_world_dps = yaw_rate_world_dps
                 return yaw_rate_world_dps

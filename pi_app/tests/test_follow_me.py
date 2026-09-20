@@ -390,6 +390,7 @@ class TestTrackingModeByteIdentical(unittest.TestCase):
             pid_lateral_kp=0.4,
             max_steer_offset_byte=25.0,
             direct_mode_max_steer_byte=18.0,
+            steer_slew_per_tick=0.1,
             detect_min_bbox_width=0.09,
             direct_turn_speed_min_scale=1.0,  # no turn slowdown (added 2026-09-19)
         )

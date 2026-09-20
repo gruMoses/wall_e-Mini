@@ -440,13 +440,18 @@ class FollowMeConfig:
 
     # ── Layer 3: Lateral PID steering ────────────────────────────────────────
     # Error = normalized horizontal offset (-1.0 to +1.0); output scales to ±max_steer_offset_byte.
-    # 0.4 -> 0.8 on 2026-09-19 with max_steer_offset_byte 25 -> 40 and
-    # direct_mode_max_steer_byte 18 -> 40: the 18:50 run measured only
-    # 0.22 deg/s of yaw per byte of L-R differential at speed, so the old
-    # cap allowed ~8 deg/s while a person crossing at 3 m sweeps ~25 deg/s
-    # and walked out of the right edge of the frame. Close-range behaviour is
-    # still tame: steer_deadband_norm and steer_edge_knee are unchanged.
-    pid_lateral_kp: float = 0.8
+    # Plant from the heading derivative vs L-R (2026-09-19 and 2026-09-20):
+    # 0.65-0.71 deg/s per L-R byte, ~0.45 s lag, r = 0.89-0.93. The 0.22
+    # deg/s figure used on 2026-09-19 was an artifact of zero-filled
+    # yaw-rate samples (64% of imu.yaw_rate_dps reads were 0.0 while
+    # gy_body_dps was 18-20 deg/s; the producer still integrated heading).
+    # That retune raised kp 0.4 -> 0.8, max_steer_offset_byte 25 -> 40,
+    # direct_mode_max_steer_byte 18 -> 40 and the robot wove with growing
+    # amplitude. 2026-09-20: kp 0.5, max 32, slew 0.25 (offline sim on a
+    # 0.70 deg/s/byte plant with 0.15-0.30 s dead time). Close-range
+    # behaviour is still tame: steer_deadband_norm and steer_edge_knee
+    # are unchanged.
+    pid_lateral_kp: float = 0.5
     pid_lateral_ki: float = 0.0
     pid_lateral_kd: float = 0.2
     pid_lateral_integral_limit: float = 0.5  # anti-windup clamp (normalised units)
@@ -546,7 +551,7 @@ class FollowMeConfig:
     # Allow continued blind trail pursuit longer than short target-drop timeout.
     # This is the key behavior needed to keep moving around corners after LOS loss.
     lost_target_trail_pursuit_max_s: float = 3.0
-    max_steer_offset_byte: float = 40.0          # 25 -> 40 on 2026-09-19, see pid_lateral_kp (was 15 before that)
+    max_steer_offset_byte: float = 32.0          # 25 -> 40 on 2026-09-19 (bad 0.22 plant); 40 -> 32 on 2026-09-20, see pid_lateral_kp (was 15 before that)
     # Search-rotation steer magnitude (bytes) while pivoting in place to reacquire
     # a lost target. Was previously read via a phantom getattr fallback (30.0)
     # that had no backing field and EXCEEDED both max_steer_offset_byte (25) and
@@ -606,16 +611,17 @@ class FollowMeConfig:
     max_speed_accel_byte_per_s: float = 150.0  # max speed ramp-up rate (bytes/s) inside Follow Me SafetyLayer
 
     # ── Direct pursuit steering cap ──────────────────────────────────────────
-    direct_mode_max_steer_byte: float = 40.0   # 18 -> 40 on 2026-09-19, see pid_lateral_kp; the mixer clips at 254 anyway
+    direct_mode_max_steer_byte: float = 32.0   # 18 -> 40 on 2026-09-19 (bad 0.22 plant); 40 -> 32 on 2026-09-20, see pid_lateral_kp; the mixer clips at 254 anyway
     # Direct-pursuit forward-speed reduction while the person is off-centre.
-    # The mixer clips at 245 and skid-steer scrub at speed is high (~0.22 deg/s
-    # of yaw per L-R byte); below the knee, scale is 1.0 (byte-identical).
+    # The mixer clips at 245. True yaw authority is 0.65-0.71 deg/s per L-R
+    # byte (~0.45 s lag) from the heading derivative; the 0.22 figure was
+    # zero-filled yaw-rate samples. Below the knee, scale is 1.0 (byte-identical).
     direct_turn_speed_knee_norm: float = 0.30
     direct_turn_speed_min_scale: float = 0.35
 
     # ── Steer deadband and slew limiter ──────────────────────────────────────
     steer_deadband_norm: float = 0.04   # |x_err| below this → treat error as 0 (suppresses gait-wobble chasing; ~2-3% frame width)
-    steer_slew_per_tick: float = 0.1    # max steer change per 15 Hz output tick, as fraction of max_steer_offset_byte
+    steer_slew_per_tick: float = 0.25   # 0.1 -> 0.25 on 2026-09-20: 8 bytes per 15 Hz tick at max 32; less actuator lag was the cheapest stability win in the sim
 
     # ── Edge-boost steering gain (direct PID path only) ───────────────────────
     # Amplifies the PID input proportionally as the person drifts toward the

@@ -1,6 +1,21 @@
 # Follow-me run analysis (2026-09-19 18:50)
 
-Log: `/home/pi/wall_e-Mini/logs/arm_20260919_184719.log` on the Pi (a copy
+## Correction (2026-09-20)
+
+The 0.22 deg/s per L-R byte figure in section 1 finding 2 is wrong.
+That regression uses `imu.yaw_rate_dps`. 64 percent of those samples
+are exactly 0.0. The heading itself is correct. The derivative of
+`imu.heading_deg` against L-R gives 0.65-0.71 deg/s per byte. The best
+correlation is r = 0.89-0.93 at a lag of about 0.45 s, on both
+2026-09-19 and 2026-09-20.
+
+The 2026-09-19 retune raises the loop gain by 3.2x on the wrong plant.
+The robot weaves with growing amplitude.
+
+See `docs/follow_me_run_2026-09-20.md` for the correction, the retune,
+and the field-test procedure.
+
+Log: `/home/pi/wall_e-Mini/logs/arm_20260919_184719.log` on the Pi (a copy)
 was analyzed on the Mac). FOLLOW_ME ran from 18:50:10 to 18:53:45 (215 s,
 1,833 ticks, direct pursuit for more than 99 percent of the time). Kevin's
 report: good but not great; jumpy toward the end; did not turn fast enough;
