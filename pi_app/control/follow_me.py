@@ -110,6 +110,9 @@ class _FilteredDetection:
     confidence: float
     bbox: tuple[float, float, float, float]
     track_id: int | None = None
+    # False when the stereo sampler reported depth_status != "ok" (z_m is 0.0).
+    # The tracker may coast on the last known range; it must not acquire on this.
+    depth_known: bool = True
 
 
 class DetectionFilter:
@@ -118,7 +121,12 @@ class DetectionFilter:
     Rejects detections that are:
     * below the confidence threshold
     * outside the valid depth range [min_depth_m, max_depth_m]
+      (skipped when depth_status is not "ok" — those pass every other rule
+      and are emitted with depth_known=False, depth_m=0.0)
     * too small (bounding-box area below min_bbox_area as a frame fraction)
+
+    ``last_reject_counts`` is a per-call dict of how many detections were
+    dropped for each reason (reset at the start of every ``process()``).
     """
 
     def __init__(
@@ -146,29 +154,44 @@ class DetectionFilter:
         self._min_bbox_width = min_bbox_width
         self._min_person_height_m = min_person_height_m
         self._camera_vfov_deg = camera_vfov_deg
+        self.last_reject_counts: dict[str, int] = {
+            "conf": 0, "depth_range": 0, "area": 0,
+            "edge": 0, "width": 0, "height": 0,
+        }
 
     def process(self, raw: list[PersonDetection]) -> list[_FilteredDetection]:
         """Return validated and normalised detections."""
+        self.last_reject_counts = {
+            "conf": 0, "depth_range": 0, "area": 0,
+            "edge": 0, "width": 0, "height": 0,
+        }
         out: list[_FilteredDetection] = []
         for det in raw:
+            depth_known = getattr(det, "depth_status", "ok") == "ok"
             if det.confidence < self._conf:
+                self.last_reject_counts["conf"] += 1
                 continue
-            if not (self._min_depth <= det.z_m <= self._max_depth):
+            if depth_known and not (self._min_depth <= det.z_m <= self._max_depth):
+                self.last_reject_counts["depth_range"] += 1
                 continue
             area = (det.bbox[2] - det.bbox[0]) * (det.bbox[3] - det.bbox[1])
             if area < self._min_area:
+                self.last_reject_counts["area"] += 1
                 continue
             # ── Geometric rejection rules (each disabled when its threshold is ≤ 0) ──
             # Rule 1: Edge exclusion — reject sliver detections jammed against the frame edge.
             if self._edge_margin > 0:
                 if det.bbox[0] > (1.0 - self._edge_margin) or det.bbox[2] < self._edge_margin:
+                    self.last_reject_counts["edge"] += 1
                     continue
             # Rule 2: Minimum width — reject too-narrow boxes regardless of edge position.
             if self._min_bbox_width > 0:
                 width = det.bbox[2] - det.bbox[0]
                 if width < self._min_bbox_width:
+                    self.last_reject_counts["width"] += 1
                     continue
             # Rule 3: Minimum implied physical height — reject short ground blobs (animals).
+            # Needs a range; skipped when the sampler said it does not know.
             #
             # Only valid when the box FULLY CONTAINS the subject's height. A box
             # truncated by the TOP of frame measures the visible slice, not the
@@ -183,7 +206,7 @@ class DetectionFilter:
             # inflated every implied height by 1.66x and masked the clipping. Both
             # bugs were fixed together on 2026-07-26; fixing only the FOV would
             # have broken close-range Follow Me. See pi_app/cli/oak_intrinsics.py.
-            if self._min_person_height_m > 0:
+            if depth_known and self._min_person_height_m > 0:
                 # TOP edge only. The two edges are not symmetric on a ground
                 # robot whose camera sits at 0.497 m and looks forward:
                 #   - Too close => the head leaves the TOP of frame while the
@@ -199,16 +222,18 @@ class DetectionFilter:
                         math.radians(self._camera_vfov_deg) / 2.0
                     )
                     if implied_h_m < self._min_person_height_m:
+                        self.last_reject_counts["height"] += 1
                         continue
             cx = (det.bbox[0] + det.bbox[2]) * 0.5
             normalized_x = (cx - 0.5) * 2.0  # map [0, 1] → [-1, +1]
             out.append(_FilteredDetection(
                 normalized_x=normalized_x,
                 x_m=det.x_m,
-                depth_m=det.z_m,
+                depth_m=det.z_m if depth_known else 0.0,
                 confidence=det.confidence,
                 bbox=det.bbox,
                 track_id=det.track_id,
+                depth_known=depth_known,
             ))
         return out
 
@@ -306,6 +331,13 @@ class _TargetState:
     # a raw candidate against a lagging filtered depth would reject a target
     # that is simply closing quickly.
     raw_depth_m: float = 0.0
+    # False while coasting on a depth-unknown detection; depth_m/raw_depth_m
+    # then hold the last known range.
+    depth_known: bool = True
+    # time.monotonic() of the last depth-known match. Depth-continuity age is
+    # measured from this, not last_seen_time (which a depth-unknown coast
+    # keeps refreshing).
+    last_depth_time: float = 0.0
 
 
 class TargetTracker:
@@ -350,6 +382,12 @@ class TargetTracker:
         restores the "different confirmed id is a different person" rule.
         If the committed id is present but depth-inconsistent (transferred
         onto an occluder), this exception does not fire.
+      * DEPTH-UNKNOWN COAST — a candidate with depth_known False may only
+        CONTINUE an existing lock (same id, None-id x-match, or single-
+        candidate rebind with the depth test skipped). It cannot be
+        acquired and cannot hand off. The last known range is held; after
+        depth_coast_max_s the frame is treated as not-fresh so persistence
+        decay stops the robot. Depth-continuity age uses last_depth_time.
     """
 
     # Positional-continuity tolerance (normalized_x units, -1..+1) for matching a
@@ -374,6 +412,7 @@ class TargetTracker:
         switch_min_s: float = 1.0,
         depth_continuity_m: float = 0.6,
         depth_continuity_rate_mps: float = 1.5,
+        depth_coast_max_s: float = 1.0,
     ) -> None:
         self._alpha = ema_alpha
         self._persistence_s = persistence_s
@@ -387,7 +426,12 @@ class TargetTracker:
         # Depth-continuity gate; <= 0 disables it (pure id / x continuity).
         self._depth_tol_m = max(0.0, float(depth_continuity_m))
         self._depth_tol_rate = max(0.0, float(depth_continuity_rate_mps))
+        self._depth_coast_max_s = max(0.0, float(depth_coast_max_s))
         self._state: _TargetState | None = None
+        # First depth-unknown frame of the current coast; None when not coasting.
+        self._depth_coast_since: float | None = None
+        # Why this tick was not fresh; None when a fresh target was selected.
+        self.last_reject_reason: str | None = None
         self._fresh_raw_x_norm: float | None = None  # raw (pre-EMA) normalized_x of this tick's selected detection
         # Pending-challenger state for SUSTAINED ACQUISITION / HAND-OFF. A new
         # candidate must qualify for _acquire_min_frames consecutive frames (and,
@@ -437,6 +481,7 @@ class TargetTracker:
             # window. Grace is specifically the "candidates exist but not mine" case.
             self._fresh_raw_x_norm = None
             self._reset_pending()
+            self.last_reject_reason = "no_candidates"
             if self._state is None:
                 return None
             if (now - self._state.last_seen_time) > self._persistence_s:
@@ -459,8 +504,19 @@ class TargetTracker:
             # if its confidence dropped below the acquire floor (Layer-1's 0.45
             # base filter already gated it). This is the normal single-person path.
             self._reset_pending()
+            if (
+                not self._depth_known(committed_det)
+                and self._depth_coast_since is not None
+                and (now - self._depth_coast_since) > self._depth_coast_max_s
+            ):
+                # Steering blind on range for too long: not fresh, do not
+                # refresh last_seen_time, let persistence decay stop the robot.
+                self._fresh_raw_x_norm = None
+                self.last_reject_reason = "depth_coast_expired"
+                return self._state
             self._fresh_raw_x_norm = committed_det.normalized_x
             self._apply_ema(committed_det, now)
+            self.last_reject_reason = None
             return self._state
 
         if committed:
@@ -489,15 +545,20 @@ class TargetTracker:
                 challenger = self._acquire(candidates, now, min_s=self._switch_min_s)
                 if challenger is None:
                     self._fresh_raw_x_norm = None  # not fresh → caller decays steer/speed
+                    self.last_reject_reason = self._reason_not_fresh(
+                        candidates, now, handoff=True,
+                    )
                     return self._state
                 self._fresh_raw_x_norm = challenger.normalized_x
                 self._apply_ema(challenger, now)
                 self._has_committed = True
                 self._reset_pending()
+                self.last_reject_reason = None
                 return self._state
             # Grace expired → the committed target is truly lost. Drop the lock and
             # fall through to sustain-gated ACQUIRING (re-acquisition after loss).
             self._state = None
+            self._depth_coast_since = None
 
         # ── ACQUIRING ─────────────────────────────────────────────────────────
         # No committed target. Require a NEW target to clear the higher acquire
@@ -507,27 +568,87 @@ class TargetTracker:
         if acquired is None:
             # Nothing qualifies (or still sustaining) → stay lost, coast.
             self._fresh_raw_x_norm = None
+            self.last_reject_reason = self._reason_not_fresh(
+                candidates, now, acquiring=True,
+            )
             return self._state  # None here (committed cleared above / never set)
         self._fresh_raw_x_norm = acquired.normalized_x
         self._apply_ema(acquired, now)
         self._has_committed = True
         self._reset_pending()
+        self.last_reject_reason = None
         return self._state
 
     def _depth_consistent(self, det: _FilteredDetection, now: float) -> bool:
         """Is ``det`` at a depth the committed target could plausibly be at now?
 
         Tolerance = depth_continuity_m + depth_continuity_rate_mps × seconds since
-        the target was last seen, so a freshly-seen target is held tightly (a
-        person cannot close 0.6 m between two frames) while a target coasting
-        through a grace window is allowed to have walked. Disabled when the
+        the last KNOWN depth (last_depth_time), so a freshly-seen target is held
+        tightly (a person cannot close 0.6 m between two frames) while a target
+        coasting through a grace window — or a depth-unknown coast that kept
+        refreshing last_seen_time — is allowed to have walked. Disabled when the
         base tolerance is <= 0.
         """
         if self._depth_tol_m <= 0.0 or self._state is None:
             return True
-        age = max(0.0, now - self._state.last_seen_time)
+        anchor = self._state.last_depth_time
+        if anchor <= 0.0:
+            anchor = self._state.last_seen_time
+        age = max(0.0, now - anchor)
         tol = self._depth_tol_m + self._depth_tol_rate * age
         return abs(det.depth_m - self._state.raw_depth_m) <= tol
+
+    @staticmethod
+    def _depth_known(det: _FilteredDetection) -> bool:
+        return getattr(det, "depth_known", True)
+
+    def _reason_not_fresh(
+        self,
+        candidates: list[_FilteredDetection],
+        now: float,
+        *,
+        handoff: bool = False,
+        acquiring: bool = False,
+    ) -> str:
+        """Best-effort reason this tick did not select a fresh target.
+
+        When several candidates fail for different reasons, report the reason
+        of the candidate nearest in x to the committed target.
+        """
+        if not candidates:
+            return "no_candidates"
+        if acquiring:
+            has_qual = any(
+                c.confidence >= self._acquire_confidence and self._depth_known(c)
+                for c in candidates
+            )
+            return "acquiring" if has_qual else "below_acquire_conf"
+        st = self._state
+        if st is None:
+            return "no_candidates"
+        nearest = min(
+            candidates, key=lambda d: abs(d.normalized_x - st.normalized_x)
+        )
+        if self._depth_known(nearest) and not self._depth_consistent(nearest, now):
+            return "depth_gate"
+        age = max(0.0, now - st.last_seen_time)
+        x_tol = min(
+            1.0, self._NONE_ID_MATCH_NORM + self._REBIND_X_RATE_PER_S * age,
+        )
+        if abs(nearest.normalized_x - st.normalized_x) > x_tol:
+            return "x_gate"
+        if handoff:
+            has_qual = any(
+                c.confidence >= self._acquire_confidence and self._depth_known(c)
+                for c in candidates
+            )
+            if has_qual:
+                return "handoff_wait"
+        if nearest.confidence < self._acquire_confidence:
+            return "below_acquire_conf"
+        if handoff:
+            return "handoff_wait"
+        return "x_gate"
 
     def _find_committed(
         self, candidates: list[_FilteredDetection], now: float
@@ -561,14 +682,19 @@ class TargetTracker:
            person by the tracklet layer's judgement — that one must earn the
            lock through the sustained hand-off. Multi-candidate frames are
            byte-identical to the pre-rebind rule.
+
+        Depth-unknown candidates (depth_known False) skip the depth test on
+        all three paths: they may continue an existing lock but cannot be
+        acquired or used as a hand-off challenger (see _acquire).
         """
         st = self._state
         if st is None:
             return None
         if st.track_id is not None:
             for c in candidates:
-                if c.track_id == st.track_id and self._depth_consistent(c, now):
-                    return c
+                if c.track_id == st.track_id:
+                    if not self._depth_known(c) or self._depth_consistent(c, now):
+                        return c
             committed_id_present = any(
                 c.track_id == st.track_id for c in candidates
             )
@@ -590,7 +716,8 @@ class TargetTracker:
                     self._NONE_ID_MATCH_NORM + self._REBIND_X_RATE_PER_S * age,
                 )
                 depth_ok = (
-                    self._depth_tol_m <= 0.0
+                    not self._depth_known(c)
+                    or self._depth_tol_m <= 0.0
                     or abs(c.depth_m - st.raw_depth_m) <= self._depth_tol_m
                 )
                 if (
@@ -601,10 +728,15 @@ class TargetTracker:
                     return c
             pool = [
                 c for c in candidates
-                if c.track_id is None and self._depth_consistent(c, now)
+                if c.track_id is None and (
+                    not self._depth_known(c) or self._depth_consistent(c, now)
+                )
             ]
         else:
-            pool = [c for c in candidates if self._depth_consistent(c, now)]
+            pool = [
+                c for c in candidates
+                if (not self._depth_known(c) or self._depth_consistent(c, now))
+            ]
         if not pool:
             return None
         nearest = min(pool, key=lambda d: abs(d.normalized_x - st.normalized_x))
@@ -633,7 +765,10 @@ class TargetTracker:
 
         Returns the winning detection on the commit frame, else None (coast/lost).
         """
-        qualifying = [c for c in candidates if c.confidence >= self._acquire_confidence]
+        qualifying = [
+            c for c in candidates
+            if c.confidence >= self._acquire_confidence and self._depth_known(c)
+        ]
         if not qualifying:
             # No candidate clears the floor — do not grab a low-conf chicken.
             self._reset_pending()
@@ -683,27 +818,53 @@ class TargetTracker:
         self._pending_since = None
 
     def _apply_ema(self, det: _FilteredDetection, now: float) -> None:
+        known = self._depth_known(det)
         if self._state is None:
             smoothed_x = det.normalized_x
+            x_m = det.x_m
+            depth_m = det.depth_m
+            raw_depth_m = det.depth_m
+            last_depth_time = now
         else:
             smoothed_x = (
                 self._alpha * det.normalized_x
                 + (1.0 - self._alpha) * self._state.normalized_x
             )
+            if known:
+                x_m = det.x_m
+                depth_m = det.depth_m
+                raw_depth_m = det.depth_m
+                last_depth_time = now
+            else:
+                # x_m was computed with z=0; keep the last known range and metres.
+                x_m = self._state.x_m
+                depth_m = self._state.depth_m
+                raw_depth_m = self._state.raw_depth_m
+                last_depth_time = (
+                    self._state.last_depth_time or self._state.last_seen_time
+                )
+        if known:
+            self._depth_coast_since = None
+        elif self._depth_coast_since is None:
+            self._depth_coast_since = now
         self._state = _TargetState(
             normalized_x=smoothed_x,
-            x_m=det.x_m,
-            depth_m=det.depth_m,
+            x_m=x_m,
+            depth_m=depth_m,
             confidence=det.confidence,
             track_id=det.track_id,
             last_seen_time=now,
-            raw_depth_m=det.depth_m,
+            raw_depth_m=raw_depth_m,
+            depth_known=known,
+            last_depth_time=last_depth_time,
         )
 
     def reset(self) -> None:
         self._state = None
         self._fresh_raw_x_norm = None
         self._has_committed = False
+        self._depth_coast_since = None
+        self.last_reject_reason = None
         self._reset_pending()
 
     @property
@@ -1124,6 +1285,7 @@ class FollowMeController:
             switch_min_s=float(config.target_switch_min_s),
             depth_continuity_m=float(config.target_depth_continuity_m),
             depth_continuity_rate_mps=float(config.target_depth_continuity_rate_mps),
+            depth_coast_max_s=float(config.target_depth_coast_max_s),
         )
 
         # ── Layer 3: Steering (PID) ──────────────────────────────────────────
@@ -1187,6 +1349,7 @@ class FollowMeController:
         self._reacq_time: float = 0.0             # monotonic() of last lost→tracking transition
         self._last_fresh_steer: float = 0.0       # steer from last frame with fresh detection
         self._last_fresh_steer_time: float = 0.0  # monotonic() of that frame
+        self._last_fresh_speed: float = 0.0       # speed after turn scaling on last fresh tick
         # Decay telemetry (Items 2 + 3 from Grok review)
         self._steer_decay_factor: float = 1.0     # 1.0=fresh, 0.0=fully decayed
         self._steer_hold_active: bool = False     # True while coasting on held steer
@@ -1200,6 +1363,8 @@ class FollowMeController:
         self._last_distance_error: float | None = None
         self._last_speed_offset: float = 0.0
         self._last_steer_offset: float = 0.0
+        self._last_nearest_person_m: float | None = None
+        self._last_speed_depth_m: float | None = None
         self._last_num_detections: int = 0
         self._last_target_confidence: float = 0.0
         self._last_target_track_id: int | None = None
@@ -1380,6 +1545,30 @@ class FollowMeController:
         self._charger_inhibit = bool(charger_inhibit)
         self._emitted_forward_byte = emitted_forward_byte
 
+    def _nearest_person_range_m(
+        self, detections: list[PersonDetection]
+    ) -> float | None:
+        """Closest honest stereo range this frame, ignoring identity and bbox geometry.
+
+        Speed-cap input only. An edge sliver of a close person is exactly the
+        case this must see — DetectionFilter's width/edge/height rules do not
+        apply. ``z_m > 0`` and ``depth_status == "ok"`` (default) required so
+        a depth-unknown sample cannot pull the cap to 0.
+        """
+        conf_min = float(self._cfg.detection_confidence)
+        nearest: float | None = None
+        for det in detections:
+            if det.confidence < conf_min:
+                continue
+            if getattr(det, "depth_status", "ok") != "ok":
+                continue
+            z = det.z_m
+            if z <= 0.0:
+                continue
+            if nearest is None or z < nearest:
+                nearest = z
+        return nearest
+
     # ── Public API: main compute ─────────────────────────────────────────────
 
     def compute(self, detections: list[PersonDetection]) -> tuple[int, int]:
@@ -1392,6 +1581,8 @@ class FollowMeController:
         """
         now = time.monotonic()
         self._last_num_detections = len(detections)
+        nearest_person_m = self._nearest_person_range_m(detections)
+        self._last_nearest_person_m = nearest_person_m
 
         # ── Layers 1 + 2: filter and track (full rate) ───────────────────────
         filtered = self._filter.process(detections)
@@ -1430,11 +1621,13 @@ class FollowMeController:
             self._tracking = False
 
         # ── Trail breadcrumbs (full rate — accurate path needs every point) ───
-        # Gate on a FRESH commit, not raw `filtered`: during a grace-hold candidates
-        # exist (`filtered` non-empty) but the held target's coords are stale, so we
-        # must not seed the trail off them. fresh_raw_x_norm is None on hold/coast.
+        # Gate on a FRESH, depth-known commit: grace-hold frames have
+        # fresh_raw_x_norm=None; a depth-unknown coast is still fresh for
+        # steering (bbox x) but x_m/z were not measured this frame, so we
+        # must not seed the trail or update world position.
         if (self._trail_enabled and self._trail is not None
-                and self._tracker.fresh_raw_x_norm is not None and target_present):
+                and self._tracker.fresh_raw_x_norm is not None and target_present
+                and getattr(target, "depth_known", True)):
             odom = self._pick_odometry()
             if odom is not None:
                 wx, wy = odom.camera_to_world(target.x_m, target.depth_m)
@@ -1477,6 +1670,7 @@ class FollowMeController:
         self._turn_speed_scale = 1.0
 
         if not target_present:
+            self._last_speed_depth_m = None
             self._prev_fresh_detection = False
             # _handle_lost_target returns pre-mix (speed, steer) — NOT motor
             # bytes. It also sets self._last_speed_offset / _last_steer_offset
@@ -1484,6 +1678,17 @@ class FollowMeController:
             # the emission gate can apply the SAME steer slew cap + mixing to
             # every branch (tracking, persist, lost, search) uniformly.
             self._last_speed_offset, self._last_steer_offset = self._handle_lost_target(now)
+            # Blind trail / search pursuit must not drive into a person it can
+            # see: inside follow_distance_m the forward command is zero, as the
+            # speed law gives for a locked target at that range. Steer is kept
+            # so a search pivot can continue.
+            if (
+                bool(self._cfg.nearest_person_speed_limit_enabled)
+                and nearest_person_m is not None
+                and nearest_person_m <= float(self._cfg.follow_distance_m)
+                and self._last_speed_offset > 0.0
+            ):
+                self._last_speed_offset = 0.0
             # Recorder honesty: what the lost-target handler wanted this tick,
             # and which branch produced it. _handle_lost_target sets
             # _pursuit_mode to "trail"/"search" while coasting, or resets to
@@ -1496,9 +1701,28 @@ class FollowMeController:
             else:
                 self._last_steer_src = "lost"
         else:
-            # Layer 4: Speed (closed-loop when VESC telemetry is available)
+            # Layer 4: Speed (closed-loop when VESC telemetry is available).
+            # Identity (the locked target) does not hide a closer honest range:
+            # whoever that closer person is, do not drive into them.
+            #
+            # Engages only when someone is closer than the target's last
+            # ACCEPTED raw range by more than the margin — i.e. exactly the
+            # readings the identity gates refused. On an ordinary fresh tick
+            # the nearest person IS the target (nearest == raw range), so the
+            # smoothed target.depth_m keeps driving the speed law and the
+            # tracking path stays byte-identical.
+            speed_depth = target.depth_m
+            if (
+                bool(self._cfg.nearest_person_speed_limit_enabled)
+                and nearest_person_m is not None
+                and nearest_person_m
+                < float(getattr(target, "raw_depth_m", target.depth_m))
+                - float(self._cfg.nearest_person_margin_m)
+            ):
+                speed_depth = min(target.depth_m, nearest_person_m)
+            self._last_speed_depth_m = speed_depth
             speed = self._speed.compute(
-                target.depth_m,
+                speed_depth,
                 actual_speed_mps=self._actual_speed_mps,
                 dt=dt,
                 emitted_forward_byte=self._emitted_forward_byte,
@@ -1540,7 +1764,13 @@ class FollowMeController:
                 # Apply the steer decay factor so forward motion ramps to 0 in
                 # lock-step with the turn. (decay was computed from the pre-decay
                 # speed, so the steer profile is unchanged.)
-                speed = speed * decay
+                #
+                # Blind ticks must never accelerate: cap at the last FRESH
+                # post-turn-scale speed, then apply decay. Losing freshness
+                # may hold or reduce speed, never raise it (2026-09-20 15:49:
+                # turn_scale dropped on the hold tick and speed ramped 54→100
+                # toward the unscaled target under the accel limit).
+                speed = min(speed, self._last_fresh_speed) * decay
                 self._steer_decay_factor = decay
                 self._steer_hold_active = decay > 0.0
                 self._last_fresh_detection = False
@@ -1576,6 +1806,7 @@ class FollowMeController:
                             turn_scale = 1.0
                         speed = speed * turn_scale
                         self._turn_speed_scale = turn_scale
+                self._last_fresh_speed = speed
                 # Recorder: fresh tick — record the branch's raw steer BEFORE the
                 # reacq ramp, slip-comp, and slew cap, and which path produced it.
                 # _compute_steering sets _pursuit_mode to "trail" or "direct".
@@ -2175,6 +2406,9 @@ class FollowMeController:
         self._steer_decay_factor = 1.0
         self._steer_hold_active = False
         self._last_fresh_detection = False
+        self._last_fresh_speed = 0.0
+        self._last_nearest_person_m = None
+        self._last_speed_depth_m = None
         self._turn_speed_scale = 1.0
         self._pursuit_mode = "direct"
         self._last_pursuit_mode = "direct"
@@ -2343,6 +2577,18 @@ class FollowMeController:
             "follow_me_steer_hold_active": self._steer_hold_active,
             "turn_speed_scale": round(self._turn_speed_scale, 3),
             "follow_me_depth_filtered_m": self._depth_filter.value,
+            "follow_me_depth_known": (
+                self._tracker._state.depth_known
+                if self._tracker._state is not None else True
+            ),
+            "follow_me_depth_coast_s": (
+                0.0 if self._tracker._depth_coast_since is None
+                else max(0.0, now - self._tracker._depth_coast_since)
+            ),
+            "follow_me_tracker_reject_reason": self._tracker.last_reject_reason,
+            "follow_me_filter_rejects": dict(self._filter.last_reject_counts),
+            "follow_me_nearest_person_m": self._last_nearest_person_m,
+            "follow_me_speed_depth_m": self._last_speed_depth_m,
             # ── Visualization / troubleshooting (Items 2 + 4) ────────────
             "follow_mode": follow_mode,
             "target_distance_m": self._last_target_z,

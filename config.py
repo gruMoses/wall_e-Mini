@@ -333,6 +333,16 @@ class FollowMeConfig:
     follow_distance_m: float = 1.5        # desired following distance in metres
     min_distance_m: float = 0.5
     max_distance_m: float = 6.0
+    # Identity gates decide WHOM to follow; they must never hide a closer
+    # range from the speed command (2026-09-20 15:49: tracker held 3.0 m
+    # and rejected a true 1.2 m edge reading as an "occluder", then the
+    # speed layer drove at the held 3.0 m). When True, speed uses
+    # min(target.depth_m, nearest raw in-range person). False restores
+    # pre-fix behaviour (speed from the locked target only).
+    nearest_person_speed_limit_enabled: bool = True
+    # Only a range closer than the target's last accepted raw range by more than
+    # this engages the limit; keeps the smoothed range in charge on normal ticks.
+    nearest_person_margin_m: float = 0.3
     max_speed_error_m: float = 1.5   # distance error at which max speed is reached — tighter = more aggressive closing
     max_follow_speed_byte: int = 110
     # Legacy direct-pursuit PD gains (preserved; not used by new PID steering path)
@@ -413,6 +423,13 @@ class FollowMeConfig:
     # 0.0 disables the gate (pure id / x continuity, the pre-2026-09-19 rule).
     target_depth_continuity_m: float = 0.6
     target_depth_continuity_rate_mps: float = 1.5
+    # DEPTH-UNKNOWN COAST (2026-09-20): when the stereo sampler says it does
+    # not know the range (depth_status != "ok", z_m = 0), the tracker may
+    # CONTINUE an existing lock on bbox x and hold the last known depth.
+    # After this many seconds of unknown range the frame is treated as
+    # not-fresh so persistence decay stops the robot. A candidate that HAS
+    # a range and fails the depth-continuity gate is still rejected.
+    target_depth_coast_max_s: float = 1.0
 
     # ── Host-side tracklet layer (IoU + constant-velocity Kalman) ─────────────
     # Assigns stable track_ids to person detections on parse paths that the OAK
