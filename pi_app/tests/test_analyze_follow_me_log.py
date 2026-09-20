@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -157,6 +158,66 @@ class TestAnalyzeFollowMeLog(unittest.TestCase):
         data = json.loads(out.read_text(encoding="utf-8"))
         self.assertIn("jumpiness", data)
         self.assertIn("cuts", data["jumpiness"])
+
+    def test_direct_cap_falls_back_to_32_when_header_omits_it(self) -> None:
+        result = analyze([self.log_path])
+        self.assertEqual(result["steering"]["direct_cap"], 32.0)
+
+    def test_direct_cap_from_session_header(self) -> None:
+        header = _header()
+        header["config"]["follow_me"]["direct_mode_max_steer_byte"] = 40.0
+        path = Path(self._tmp.name) / "cap.jsonl"
+        path.write_text(
+            "".join(json.dumps(obj) + "\n" for obj in [header, _tick(0)]),
+            encoding="utf-8",
+        )
+        result = analyze([path])
+        self.assertEqual(result["steering"]["direct_cap"], 40.0)
+
+    def test_heading_yaw_fit_recovers_slope_and_lag(self) -> None:
+        """Heading derivative vs L-R delayed 3 ticks recovers slope 0.7.
+
+        Logged yaw_rate_dps is zero on alternate ticks so the old logged-rate
+        fit is the unreliable series the analyzer must still report.
+        """
+        n = 120
+        dt = DT
+        period = 80
+        omega = 2.0 * math.pi / (period * dt)
+        amp = 40.0
+        lag_ticks = 3
+        plant = 0.7
+        heading_off = 350.0
+        lines: list[dict] = [_header()]
+        for i in range(n):
+            t = i * dt
+            lr = amp * math.sin(omega * t)
+            heading_unw = heading_off - (plant * amp / omega) * math.cos(
+                omega * (t - lag_ticks * dt)
+            )
+            heading = heading_unw % 360.0
+            logged_rate = 0.0 if (i % 2 == 0) else 5.0
+            tk = _tick(i)
+            tk["motor"] = {"L": 160.0 + lr / 2.0, "R": 160.0 - lr / 2.0}
+            tk["imu"] = {
+                "heading_deg": heading,
+                "yaw_rate_dps": logged_rate,
+                "oak_imu": {
+                    "yaw_rate_world_dps": logged_rate,
+                    "heading_deg": heading,
+                },
+            }
+            tk["follow_me"]["speed_loop"]["actual_mps"] = 0.8
+            lines.append(tk)
+        path = Path(self._tmp.name) / "yaw_plant.jsonl"
+        path.write_text("".join(json.dumps(obj) + "\n" for obj in lines), encoding="utf-8")
+        result = analyze([path])
+        fit = result["steering"]["yaw_moving"]
+        self.assertEqual(fit["lag_ticks"], 3)
+        self.assertAlmostEqual(fit["slope"], 0.7, delta=0.05)
+        logged = fit["logged"]
+        self.assertGreaterEqual(logged["n_zero"], n // 2 - 1)
+        self.assertEqual(logged["n_samples"], n)
 
 
 if __name__ == "__main__":

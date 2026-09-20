@@ -1483,7 +1483,9 @@ class FollowMeController:
                     self._reacq_time = now  # mark reacquisition start
                 steer = self._compute_steering(target, speed, dt, now)
                 # Skid-steer cannot turn at full forward speed (mixer clips at
-                # 245; measured ~0.22 deg/s of yaw per L-R byte). Scale speed
+                # 245; yaw authority is 0.65-0.71 deg/s per L-R byte from the
+                # heading derivative, ~0.45 s lag — the 0.22 figure was
+                # zero-filled yaw-rate samples). Scale speed
                 # in direct pursuit from the fresh bbox x so the accel ramp
                 # sees the reduced request; the speed loop follows via
                 # emitted_forward_byte on the next tick.

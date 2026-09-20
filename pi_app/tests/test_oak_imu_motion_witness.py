@@ -362,9 +362,34 @@ class TestDuplicateBranchFreshnessBound(unittest.TestCase):
         self.assertEqual(d_fresh["integrate_status"], "duplicate")
         self.assertAlmostEqual(d_fresh["gz_dps"], 50.0, places=3)
 
-        # Same cum, age=0.3s: well past the tight duplicate-branch bound
-        # (max(0.05, 3*cadence) — cadence here is ~0.02s) -> zero, not 50.
+        # Same cum, age=0.3s: well past the duplicate-branch bound
+        # (max(0.20, 3*cadence) — cadence here is ~0.02s) -> zero, not 50.
         oak.age_s = 0.3
+        d_old = imu.read()
+        self.assertEqual(d_old["integrate_status"], "duplicate")
+        self.assertEqual(d_old["gz_dps"], 0.0)
+
+    def test_h_duplicate_age_015_live_025_zero(self):
+        """Vision-thread drain ages (~0.09-0.18 s) must still report live rate.
+
+        Bound is max(0.20, 3*cadence). age=0.15 s is inside it; age=0.25 s
+        is past 0.20 s and still below the 0.5 s stale threshold, so the
+        duplicate branch reports 0.0 rather than a wedged-thread rate.
+        """
+        rng = random.Random(SEED)
+        oak = _FakeOak()
+        imu = OakImuReader(oak, yaw_rate_source="gyro_y", yaw_rate_scale=1.0, nmni_enabled=False)
+        oak.feed([_packet(0.00, rng, gy_dps=50.0, gyro_noise_dps=0.0)])
+        imu.read()
+        oak.feed([_packet(0.02, rng, gy_dps=50.0, gyro_noise_dps=0.0)])
+        imu.read()
+
+        oak.age_s = 0.15
+        d_mid = imu.read()
+        self.assertEqual(d_mid["integrate_status"], "duplicate")
+        self.assertAlmostEqual(d_mid["gz_dps"], 50.0, places=3)
+
+        oak.age_s = 0.25
         d_old = imu.read()
         self.assertEqual(d_old["integrate_status"], "duplicate")
         self.assertEqual(d_old["gz_dps"], 0.0)

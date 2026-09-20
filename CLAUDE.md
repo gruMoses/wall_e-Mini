@@ -106,10 +106,8 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
 - Depth EMA filter on person position for smoothing.
 - **Second follow-me round (2026-09-19, from the 18:50 run log; analysis in
   `docs/follow_me_run_2026-09-19.md`, reproduce with
-  `tools/analyze_follow_me_log.py <log>`)**: measured yaw response is only
-  ~0.22 deg/s per byte of L-R differential at speed, so direct-pursuit
-  steering was retuned (`pid_lateral_kp` 0.8, `max_steer_offset_byte` 40,
-  `direct_mode_max_steer_byte` 40) and direct pursuit now slows into turns
+  `tools/analyze_follow_me_log.py <log>`)**: direct-pursuit steering was
+  retuned and direct pursuit now slows into turns
   (`direct_turn_speed_*`). `detect_min_bbox_width` 0.05 (0.09 rejected the
   operator beyond 4.3 m). The velocity PID targets the forward byte that
   actually reached the motors on the previous tick
@@ -119,6 +117,21 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
   400 px of support and 2-poll persistence (phantom obstacles in low sun).
   `VescConfig.max_erpm` 20000 (was 15000; 1.6 m/s top speed in every mode).
   **Not field-validated yet** -- procedure in the doc.
+- **Third follow-me round (2026-09-20, `docs/follow_me_run_2026-09-20.md`)**:
+  the 09-19 "0.22 deg/s per L-R byte" yaw gain was WRONG (64 % of logged
+  `imu.yaw_rate_dps` samples were 0.0: the duplicate-read freshness bound in
+  `oak_imu.py` was 50 ms while the sample age under follow-me load is
+  90-290 ms; now 0.20 s). From the heading derivative the plant is
+  **0.65-0.71 deg/s per byte with ~0.45 s lag**. The 09-19 gains made the
+  robot weave, so: `pid_lateral_kp` 0.5, `max_steer_offset_byte` 32,
+  `direct_mode_max_steer_byte` 32, `steer_slew_per_tick` 0.25. **Never fit a
+  plant from `yaw_rate_dps`; use the heading derivative (the analyzer does).**
+  The same run hard-stopped five times because the tracklet id on a lone
+  operator churned (narrow box + 0.12-0.35 s detection gaps + ego yaw => IoU
+  0) and the sticky lock read each new confirmed id as a different person.
+  Fix: centre-distance fallback in `TrackletTracker` (`tracklet_center_gate_*`)
+  and a single-candidate rebind in `TargetTracker._find_committed` (exactly
+  one candidate, <= 0.5 s, base depth gate). **Not field-validated yet.**
 - The onboard IMU is a **BMI270**: raw/calibrated accel + gyro only. `ROTATION_VECTOR` / `GAME_ROTATION_VECTOR` / magnetometer are BNO08x-only and return nothing on this device. Do not try them. Refer to `docs/oak_d_lite_capability_audit.md`.
 
 ### Waypoint Navigation
