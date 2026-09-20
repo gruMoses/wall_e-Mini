@@ -106,11 +106,19 @@ _NAV_HTML = r"""<!DOCTYPE html>
   /* ── Bottom Sheet ── */
   .bottom-sheet { position: fixed; bottom: 0; left: 0; right: 0;
     z-index: 900; background: #1a1d27; border-top: 1px solid #2a2d37;
-    border-radius: 16px 16px 0 0; transition: transform 0.3s ease;
+    border-radius: 16px 16px 0 0; transition: transform 0.3s ease, max-height 0.3s ease;
     max-height: 85vh; display: flex; flex-direction: column;
     padding-bottom: env(safe-area-inset-bottom, 0px); }
-  .sheet-handle { width: 36px; height: 4px; background: #3b3f54;
-    border-radius: 2px; margin: 8px auto 4px; flex-shrink: 0; cursor: grab; }
+  .bottom-sheet.dragging { transition: none; }
+  .bottom-sheet.collapsed { max-height: none; }
+  .bottom-sheet.half { max-height: 40vh; }
+  .bottom-sheet.full { max-height: 85vh; }
+  .sheet-handle { width: 48px; height: 24px; background: transparent;
+    margin: 4px auto 0; flex-shrink: 0; cursor: grab; touch-action: none;
+    position: relative; }
+  .sheet-handle::before { content: ''; position: absolute; left: 50%; top: 10px;
+    transform: translateX(-50%); width: 36px; height: 4px; background: #3b3f54;
+    border-radius: 2px; }
   .sheet-status { display: flex; align-items: center; gap: 10px;
     padding: 6px 16px 8px; font-size: 13px; color: #787c99; flex-shrink: 0; }
   .sheet-status .mode-label { font-weight: 700; color: #7aa2f7; }
@@ -155,7 +163,7 @@ _NAV_HTML = r"""<!DOCTYPE html>
   .wp-list li .wp-num { width: 26px; height: 26px; border-radius: 50%;
     background: #7aa2f7; color: #0f1117; font-weight: 700; font-size: 12px;
     display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-  .wp-list li .wp-coords { flex: 1; color: #787c99; font-size: 11px;
+  .wp-list li .wp-coords { flex: 1; color: #787c99; font-size: 12px;
     font-family: 'SF Mono', 'Fira Code', monospace; }
   .wp-list li .wp-dist { color: #565a6e; font-size: 11px; white-space: nowrap; min-width: 48px; text-align: right; }
   .wp-list li .wp-state { color: #787c99; border: 1px solid #2a2d37;
@@ -163,7 +171,7 @@ _NAV_HTML = r"""<!DOCTYPE html>
     padding: 2px 6px; text-transform: uppercase; }
   .wp-list li .wp-state.active { color: #ff9e64; border-color: #ff9e64; }
   .wp-list li .wp-state.done { color: #9ece6a; border-color: #9ece6a; }
-  .wp-list li .wp-del { width: 28px; height: 28px; border: none;
+  .wp-list li .wp-del { width: 44px; height: 44px; min-width: 44px; min-height: 44px; border: none;
     background: transparent; color: #f7768e; font-size: 16px; cursor: pointer;
     border-radius: 6px; display: flex; align-items: center; justify-content: center; }
   .wp-list li .wp-del:active { background: rgba(247,118,142,0.15); }
@@ -171,14 +179,16 @@ _NAV_HTML = r"""<!DOCTYPE html>
   .wp-list li.active .wp-num { background: #ff9e64;
     animation: pulse-wp 1.2s ease-in-out infinite; }
   .wp-list li .wp-drag { cursor: grab; color: #565a6e; font-size: 17px;
-    width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px; min-width: 44px; min-height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
     border-radius: 6px; background: #171b24; border: 1px solid #2a2d37;
     touch-action: none; user-select: none; }
   .wp-list li .wp-drag:active { background: #222838; }
   .wp-list li .wp-drag.disabled { opacity: 0.4; cursor: not-allowed; }
   .wp-list li .wp-del[disabled] { opacity: 0.35; cursor: not-allowed; }
   .wp-row-actions { display: inline-flex; align-items: center; gap: 6px; }
-  .wp-more { width: 24px; height: 24px; border-radius: 6px; border: 1px solid #2a2d37;
+  .wp-more { width: 44px; height: 44px; min-width: 44px; min-height: 44px;
+    border-radius: 6px; border: 1px solid #2a2d37;
     background: #171b24; color: #787c99; font-size: 14px; display: inline-flex;
     align-items: center; justify-content: center; cursor: pointer; }
   .wp-more:active { background: #222838; }
@@ -199,17 +209,28 @@ _NAV_HTML = r"""<!DOCTYPE html>
   .action-row button { flex: 1; height: 48px; border: none; border-radius: 10px;
     font-size: 14px; font-weight: 700; cursor: pointer; touch-action: manipulation;
     transition: all .15s; }
-  .btn-go { background: #2d4a22; color: #9ece6a; position: relative; overflow: hidden; }
+  .action-row button.btn-go { transition: opacity 0.25s ease, transform .15s; }
+  .btn-go { background: #2d4a22; color: #9ece6a; position: relative; overflow: hidden;
+    transition: opacity 0.25s ease, transform .15s; }
   .btn-go .go-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0;
     background: rgba(158,206,106,0.2); transition: width 0.05s linear; pointer-events: none; }
   .btn-go:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-go.armed-required { background: #3b2020; color: #f7768e; }
+  .btn-go.hiding { opacity: 0; pointer-events: none; }
   .btn-stop { background: #4a2222; color: #f7768e; display: none; }
   .btn-stop:active { background: #5a2a2a; }
   .btn-pause { background: #2e2a1a; color: #e0af68; display: none; border: 1px solid #5a4a2a !important; }
   .btn-resume { background: #1f3a2a; color: #9ece6a; display: none; border: 1px solid #2f5a3a !important; }
   .btn-skip { background: #1a1d27; color: #e0af68; border: 1px solid #2a2d37 !important; display: none; }
   .btn-clear { background: #1a1d27; color: #787c99; border: 1px solid #2a2d37 !important; }
+  .btn-destructive { background: #1a1d27; color: #f7768e; border: 1px solid #f7768e !important; }
+  .btn-destructive.confirm-pending { background: #3b2020; color: #f7768e; }
+  .go-launch-notice { display: none; margin: 0 0 8px; padding: 8px 10px;
+    border-radius: 8px; font-size: 12px; }
+  .go-launch-notice.err { display: block; color: #f7768e; border: 1px solid #f7768e;
+    background: #2a1518; }
+  .go-launch-notice.warn { display: block; color: #e0af68; border: 1px solid #e0af68;
+    background: #2a2415; }
 
   /* ── Save/Load Row ── */
   .route-row { display: flex; gap: 6px; margin-bottom: 10px; }
@@ -251,7 +272,7 @@ _NAV_HTML = r"""<!DOCTYPE html>
   .route-summary { border: 1px solid #2a2d37; background: #0f1117; border-radius: 10px;
     padding: 8px; margin: 8px 0 10px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
   .route-metric { border: 1px solid #252a36; border-radius: 8px; padding: 6px; background: #141925; }
-  .route-metric .k { font-size: 9px; color: #565a6e; text-transform: uppercase; letter-spacing: 0.3px; }
+  .route-metric .k { font-size: 12px; color: #565a6e; text-transform: uppercase; letter-spacing: 0.3px; }
   .route-metric .v { font-size: 12px; font-weight: 700; color: #c0caf5; margin-top: 3px; }
   .dryrun-row { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
   .dryrun-row input[type=range] { flex: 1; accent-color: #bb9af7; }
@@ -271,6 +292,9 @@ _NAV_HTML = r"""<!DOCTYPE html>
       border-left: 1px solid #2a2d37;
       padding-bottom: 0;
     }
+    .bottom-sheet.collapsed,
+    .bottom-sheet.half,
+    .bottom-sheet.full { max-height: none; }
     .sheet-handle { display: none; }
     .sheet-body { display: block !important; }
     .sheet-settings { display: block; }
@@ -310,8 +334,43 @@ _NAV_HTML = r"""<!DOCTYPE html>
     background: rgba(15,17,23,0.95); border: 1px solid #2a2d37;
     border-radius: 10px; padding: 8px 18px; font-size: 13px;
     color: #c0caf5; opacity: 0; transition: opacity 0.3s;
-    pointer-events: none; }
+    pointer-events: none; max-width: calc(100vw - 24px); text-align: center; }
   .toast.show { opacity: 1; }
+
+  /* Always-visible nav status (toolbar row, not inside .sheet-body) */
+  .nav-run-status { position: fixed; top: calc(env(safe-area-inset-top, 0px) + 56px);
+    left: 8px; max-width: calc(100vw - 148px); z-index: 800;
+    padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 700;
+    background: rgba(15,17,23,0.85); border: 1px solid #2a2d37; color: #c0caf5;
+    display: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nav-run-status.active { display: block; }
+
+  /* #45 fixed STOP — always visible during a run, outside the sheet */
+  .nav-estop {
+    position: fixed;
+    right: max(12px, env(safe-area-inset-right, 0px));
+    bottom: max(12px, env(safe-area-inset-bottom, 0px));
+    z-index: 1100;
+    width: 72px; height: 72px; min-width: 64px; min-height: 64px;
+    border: none; border-radius: 12px;
+    background: #f7768e; color: #fff;
+    font: 900 13px/1 inherit; letter-spacing: 0.12em;
+    box-shadow: 0 4px 26px rgba(247,118,142,0.45), 0 2px 4px rgba(0,0,0,.4);
+    display: none; align-items: center; justify-content: center;
+    touch-action: manipulation; overflow: hidden; cursor: pointer;
+  }
+  .nav-estop.visible { display: flex; }
+  .nav-estop::before {
+    content: ''; position: absolute; left: 0; right: 0; top: 0; height: 7px;
+    background: repeating-linear-gradient(-45deg, rgba(0,0,0,.32) 0 9px, transparent 9px 18px);
+    pointer-events: none;
+  }
+  .nav-estop::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 7px;
+    background: repeating-linear-gradient(-45deg, rgba(0,0,0,.32) 0 9px, transparent 9px 18px);
+    pointer-events: none;
+  }
+  .nav-estop:active { transform: scale(0.96); }
 
   .help-overlay { position: fixed; inset: 0; background: rgba(8,10,16,0.78); z-index: 1300;
     display: none; align-items: center; justify-content: center; padding: 16px; }
@@ -358,6 +417,7 @@ _NAV_HTML = r"""<!DOCTYPE html>
 
 <!-- GPS Badge -->
 <div class="gps-badge fix-none" id="gpsBadge">NO FIX</div>
+<div class="nav-run-status" id="navRunStatus"></div>
 
 <!-- Toast -->
 <div class="toast" id="toast"></div>
@@ -381,7 +441,7 @@ _NAV_HTML = r"""<!DOCTYPE html>
 <div id="map"></div>
 
 <!-- Bottom Sheet -->
-<div class="bottom-sheet half" id="sheet">
+<div class="bottom-sheet collapsed" id="sheet">
   <div class="sheet-handle" id="sheetHandle"></div>
   <div class="sheet-status">
     <span class="mode-label" id="sheetMode">NAVIGATE</span>
@@ -420,12 +480,12 @@ _NAV_HTML = r"""<!DOCTYPE html>
     </div>
 
     <!-- Actions -->
+    <div id="goLaunchNotice" class="go-launch-notice"></div>
     <div class="action-row">
       <button class="btn-go" id="btnGo" onpointerdown="goDown(event)" onpointerup="goUp()" onpointerleave="goUp()">
         <span class="go-fill" id="goFill"></span>
         HOLD TO GO
       </button>
-      <button class="btn-stop" id="btnStop" onclick="stopNav()">STOP</button>
       <button class="btn-pause" id="btnPause" onclick="pauseNav()">PAUSE</button>
       <button class="btn-resume" id="btnResume" onclick="resumeNav()">RESUME</button>
       <button class="btn-skip" id="btnSkip" onclick="skipWp()">SKIP &raquo;</button>
@@ -450,14 +510,14 @@ _NAV_HTML = r"""<!DOCTYPE html>
       <button class="btn-clear" id="btnRedo" onclick="redoRoute()">Redo</button>
     </div>
     <div class="action-row" style="margin-top:6px">
-      <button class="btn-clear" onclick="reverseRoute()">Reverse Route</button>
+      <button class="btn-clear btn-destructive" id="btnReverseRoute" onclick="reverseRoute()">Reverse Route</button>
     </div>
     <div class="action-row" style="margin-top:6px">
       <button class="btn-clear" onclick="cleanCloseWaypoints()">Clean Close</button>
       <button class="btn-clear" onclick="simplifyRouteSpacing()">Simplify 1.5m</button>
     </div>
     <div class="action-row" style="margin-top:6px">
-      <button class="btn-clear" onclick="clearAll()">Clear All</button>
+      <button class="btn-clear btn-destructive" id="btnClearAll" onclick="clearAll()">Clear All</button>
     </div>
 
     <!-- Settings (visible in full mode) -->
@@ -481,6 +541,9 @@ _NAV_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 </div>
+
+<!-- Fixed STOP — outside the sheet, always reachable during a run -->
+<button class="nav-estop" id="btnStop" onclick="stopNav()">STOP</button>
 
 <script>
 // ════════════════════════════════════════════════════════════════════════════
@@ -513,6 +576,8 @@ let headingAlignLocked = false;
 let headingAlignFrozen = false;
 let goTimer = null;
 let goStart = 0;
+let goLaunchPending = false;
+let reverseTapTimer = null;
 let missionDirty = false;
 let insertGhosts = [];
 let lastListRenderMs = 0;
@@ -662,7 +727,7 @@ function updateMissionStrip() {
   } else if (!isArmed) {
     gate.textContent = 'Arm Required';
     gate.classList.add('err');
-  } else if (gpsFix < 4) {
+  } else if (gpsFix !== 4) {
     gate.textContent = 'Low GPS';
     gate.classList.add('warn');
   } else {
@@ -728,7 +793,7 @@ function getRouteValidation() {
   });
   checks.push({
     label: gpsFix === 4 ? 'RTK fixed GPS ready' : (gpsFix === 5 ? 'RTK float only (need fix quality 4)' : 'GPS fix below RTK fixed (need fix quality 4)'),
-    status: gpsFix === 4 ? 'ok' : 'warn',
+    status: gpsFix === 4 ? 'ok' : 'err',
   });
   if (headingAlignRequired) {
     checks.push({
@@ -990,8 +1055,13 @@ function connectSSE() {
       gpsSats = d.gps_sats || 0;
       isArmed = !!d.is_armed;
       const navMode = d.mode || 'MANUAL';
-      isNavigating = navMode === 'WAYPOINT_NAV';
+      const nowNavigating = navMode === 'WAYPOINT_NAV';
+      if (!isNavigating && nowNavigating) {
+        collapseSheetOnNavStart();
+      }
+      isNavigating = nowNavigating;
       if (isNavigating) {
+        goLaunchPending = false;
         pausedMission = null;
         stopDryRun(false);
       }
@@ -1250,6 +1320,22 @@ function undoLastWaypoint() {
 function reverseRoute() {
   if (isNavigating) { showToast('Stop navigation before editing route'); return; }
   if (waypoints.length < 2) return;
+  const btn = document.getElementById('btnReverseRoute');
+  if (!btn || !btn.classList.contains('confirm-pending')) {
+    if (btn) {
+      btn.classList.add('confirm-pending');
+      btn.textContent = 'Tap again to reverse';
+      clearTimeout(reverseTapTimer);
+      reverseTapTimer = setTimeout(() => {
+        btn.classList.remove('confirm-pending');
+        btn.textContent = 'Reverse Route';
+      }, 3000);
+    }
+    return;
+  }
+  clearTimeout(reverseTapTimer);
+  btn.classList.remove('confirm-pending');
+  btn.textContent = 'Reverse Route';
   pushUndoState();
   waypoints.reverse();
   renumberWaypoints();
@@ -1745,27 +1831,78 @@ function reorderWaypoint(fromIdx, toIdx) {
 // ════════════════════════════════════════════════════════════════════════════
 // Navigation Controls
 // ════════════════════════════════════════════════════════════════════════════
+function isRunActive() {
+  return isNavigating || goLaunchPending || (pausedMission && pausedMission.length > 0);
+}
+
+function updateFixedStop() {
+  const btnStop = document.getElementById('btnStop');
+  if (!btnStop) return;
+  btnStop.classList.toggle('visible', isRunActive());
+}
+
+function revealStopAndHideGo() {
+  goLaunchPending = true;
+  updateFixedStop();
+  const btnGo = document.getElementById('btnGo');
+  if (btnGo) {
+    btnGo.classList.add('hiding');
+    setTimeout(() => {
+      btnGo.style.display = 'none';
+      btnGo.classList.remove('hiding');
+    }, 250);
+  }
+}
+
+function showGoNotice(msg, kind) {
+  const el = document.getElementById('goLaunchNotice');
+  if (!el) return;
+  el.className = 'go-launch-notice ' + kind;
+  el.textContent = msg;
+}
+
+function hideGoNotice() {
+  const el = document.getElementById('goLaunchNotice');
+  if (!el) return;
+  el.className = 'go-launch-notice';
+  el.textContent = '';
+}
+
+function formatNavStatusLine() {
+  const total = navWpTotal || waypoints.length;
+  const idx = (navWpIndex || 0) + 1;
+  let distStr = '';
+  if (waypoints.length && navWpIndex < waypoints.length && (robotLat !== 0 || robotLon !== 0)) {
+    const wp = waypoints[navWpIndex];
+    distStr = ' | ' + fmtDist(haversineM(robotLat, robotLon, wp.lat, wp.lon));
+  }
+  return navState + ' | WP ' + idx + '/' + total + distStr;
+}
+
 function updateGoButton() {
   const btn = document.getElementById('btnGo');
   const btnPause = document.getElementById('btnPause');
   const btnResume = document.getElementById('btnResume');
-  const btnStop = document.getElementById('btnStop');
   const btnSkip = document.getElementById('btnSkip');
   btn.classList.remove('armed-required');
   btnPause.style.display = 'none';
   btnResume.style.display = 'none';
-  btnStop.style.display = 'none';
   btnSkip.style.display = 'none';
+  updateFixedStop();
 
-  if (isNavigating) {
-    btn.style.display = 'none';
-    btnPause.style.display = '';
-    btnStop.style.display = '';
-    btnSkip.style.display = '';
+  if (isNavigating || goLaunchPending) {
+    if (!btn.classList.contains('hiding')) {
+      btn.style.display = 'none';
+    }
+    if (isNavigating) {
+      btnPause.style.display = '';
+      btnSkip.style.display = '';
+    }
     return;
   }
 
   btn.style.display = '';
+  btn.classList.remove('hiding');
   if (pausedMission && pausedMission.length > 0) {
     btnResume.style.display = '';
   }
@@ -1781,22 +1918,29 @@ function updateGoButton() {
     btn.innerHTML = '<span class="go-fill" id="goFill"></span>ARM REQUIRED';
     return;
   }
-  if (gpsFix < 4) {
+  if (gpsFix === 4) {
+    btn.disabled = false;
+    btn.innerHTML = '<span class="go-fill" id="goFill"></span>HOLD TO GO';
+  } else {
     btn.disabled = true;
-    btn.innerHTML = '<span class="go-fill" id="goFill"></span>LOW GPS FIX REQUIRED';
+    btn.innerHTML = '<span class="go-fill" id="goFill"></span>RTK FIXED GPS REQUIRED';
     return;
   }
-  btn.disabled = false;
-  btn.innerHTML = '<span class="go-fill" id="goFill"></span>HOLD TO GO';
   updateUndoRedoButtons();
 }
 
 function updateNavUI() {
   updateGoButton();
   const status = document.getElementById('sheetNavStatus');
+  const runStatus = document.getElementById('navRunStatus');
+  const paused = !isNavigating && pausedMission && pausedMission.length > 0;
+  const line = isNavigating ? formatNavStatusLine() : (paused ? 'PAUSED' : '');
+  if (status) status.textContent = line;
+  if (runStatus) {
+    runStatus.classList.toggle('active', isNavigating || paused);
+    runStatus.textContent = line;
+  }
   if (isNavigating) {
-    const herr = Number.isFinite(navHeadingErrorDeg) ? ` | err ${Math.abs(navHeadingErrorDeg).toFixed(1)}°` : '';
-    status.textContent = `WP ${navWpIndex + 1}/${navWpTotal} | ${navState}${herr}`;
     // Update waypoint marker styles
     waypoints.forEach((wp, i) => {
       const el = wp.marker.getElement();
@@ -1807,8 +1951,6 @@ function updateNavUI() {
       if (i < navWpIndex) mkr.classList.add('completed');
       if (i === navWpIndex) mkr.classList.add('active-target');
     });
-  } else {
-    status.textContent = '';
   }
   updateMissionStrip();
   const now = Date.now();
@@ -1823,6 +1965,18 @@ function goDown(e) {
   e.preventDefault();
   const btn = document.getElementById('btnGo');
   if (btn.disabled) return;
+  const checks = getRouteValidation();
+  const errors = checks.filter(c => c.status === 'err');
+  const warns = checks.filter(c => c.status === 'warn');
+  if (errors.length > 0) {
+    showGoNotice(errors.map(c => c.label).join(' · '), 'err');
+    return;
+  }
+  if (warns.length > 0) {
+    showGoNotice(warns.map(c => c.label).join(' · '), 'warn');
+  } else {
+    hideGoNotice();
+  }
   goStart = Date.now();
   const fill = document.getElementById('goFill');
 
@@ -1834,6 +1988,8 @@ function goDown(e) {
       clearInterval(goTimer);
       goTimer = null;
       if (fill) fill.style.width = '0';
+      revealStopAndHideGo();
+      showToast('Robot is moving. Releasing does NOT stop it. Use STOP.', 4000);
       startNav();
     }
   }, 30);
@@ -1850,19 +2006,10 @@ function goUp() {
 
 async function startNavWithWaypoints(wpData, isResume=false) {
   if (!wpData || wpData.length < 1) {
+    goLaunchPending = false;
+    updateGoButton();
     showToast('No waypoints to run');
     return;
-  }
-  const issues = getValidationWarnings();
-  if (issues.length > 0) {
-    const key = issues.map(i => i.label).join('|');
-    if (key !== lastValidationWarnKey) {
-      const msg = 'Validation warnings:\n- ' + issues.map(i => i.label).join('\n- ') + '\n\nProceed anyway?';
-      if (!confirm(msg)) return;
-      lastValidationWarnKey = key;
-    }
-  } else {
-    lastValidationWarnKey = '';
   }
   try {
     const resp = await fetch('/api/nav/start', {
@@ -1877,11 +2024,15 @@ async function startNavWithWaypoints(wpData, isResume=false) {
     const data = await resp.json();
     if (data.ok) {
       pausedMission = null;
-      showToast(isResume ? 'Navigation resumed' : 'Navigation started!');
+      if (isResume) showToast('Navigation resumed');
     } else {
+      goLaunchPending = false;
+      updateGoButton();
       showToast('Error: ' + (data.message || data.error || 'unknown'));
     }
   } catch(err) {
+    goLaunchPending = false;
+    updateGoButton();
     showToast(isResume ? 'Failed to resume navigation' : 'Failed to start navigation');
   }
 }
@@ -1892,12 +2043,17 @@ async function startNav() {
 }
 
 async function stopNav(showMsg=true) {
+  goLaunchPending = false;
   try {
     await fetch('/api/nav/stop', {method: 'POST'});
-    if (showMsg) showToast('Navigation stopped');
+    if (showMsg) {
+      pausedMission = null;
+      showToast('Navigation stopped');
+    }
   } catch(err) {
     if (showMsg) showToast('Failed to stop');
   }
+  updateGoButton();
 }
 
 async function pauseNav() {
@@ -2078,40 +2234,75 @@ async function loadRoute() {
 // ════════════════════════════════════════════════════════════════════════════
 // Bottom Sheet Drag
 // ════════════════════════════════════════════════════════════════════════════
+function setSheetState(state) {
+  const sheet = document.getElementById('sheet');
+  if (!sheet) return;
+  sheet.classList.remove('collapsed', 'half', 'full', 'dragging');
+  sheet.classList.add(state);
+  sheet.style.transform = '';
+}
+
+function collapseSheetOnNavStart() {
+  // Force the sheet collapsed when a run starts so the map and robot stay visible.
+  // Only called on the isNavigating false -> true transition; does not fight later user drags.
+  setSheetState('collapsed');
+}
+
+function initSheetDefaultState() {
+  const sheet = document.getElementById('sheet');
+  if (!sheet) return;
+  const narrow = window.matchMedia('(max-width: 1099px), (pointer: coarse)').matches;
+  if (!narrow) {
+    setSheetState('half');
+  }
+}
+
 (function() {
   const sheet = document.getElementById('sheet');
   const handle = document.getElementById('sheetHandle');
-  let startY = 0, startState = '';
+  if (!sheet || !handle) return;
+  let startY = 0, startState = '', startTime = 0;
   const states = ['collapsed', 'half', 'full'];
 
   handle.addEventListener('pointerdown', function(e) {
     e.preventDefault();
     startY = e.clientY;
+    startTime = Date.now();
     startState = states.find(s => sheet.classList.contains(s)) || 'half';
+    sheet.classList.add('dragging');
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
   });
 
   function onMove(e) {
-    // We just detect direction; snap on release
+    const dy = e.clientY - startY;
+    sheet.style.transform = 'translateY(' + dy + 'px)';
   }
 
   function onUp(e) {
     document.removeEventListener('pointermove', onMove);
     document.removeEventListener('pointerup', onUp);
+    sheet.classList.remove('dragging');
+    sheet.style.transform = '';
     const dy = e.clientY - startY;
+    const dt = Date.now() - startTime;
 
-    sheet.classList.remove('collapsed', 'half', 'full');
+    if (Math.abs(dy) < 8 && dt < 300) {
+      if (startState === 'collapsed') setSheetState('half');
+      else if (startState === 'half') setSheetState('collapsed');
+      else setSheetState(startState);
+      return;
+    }
+
     if (dy > 40) {
-      // Swiped down
-      if (startState === 'full') sheet.classList.add('half');
-      else sheet.classList.add('collapsed');
+      if (startState === 'full') setSheetState('half');
+      else setSheetState('collapsed');
     } else if (dy < -40) {
-      // Swiped up
-      if (startState === 'collapsed') sheet.classList.add('half');
-      else sheet.classList.add('full');
+      if (startState === 'collapsed') setSheetState('half');
+      else setSheetState('full');
     } else {
-      sheet.classList.add(startState);
+      setSheetState(startState);
     }
   }
 })();
@@ -2130,13 +2321,13 @@ function logEvent(msg) {
   el.innerHTML = eventLog.map(e => `<li><span>${e.msg}</span><span class="t">${e.t}</span></li>`).join('');
 }
 
-function showToast(msg) {
+function showToast(msg, durationMs) {
   logEvent(msg);
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.classList.add('show');
   clearTimeout(toastTimeout);
-  toastTimeout = setTimeout(() => el.classList.remove('show'), 2500);
+  toastTimeout = setTimeout(() => el.classList.remove('show'), durationMs || 2500);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2188,6 +2379,7 @@ document.addEventListener('visibilitychange', function() {
   if (document.hidden && dryRunPlaying) stopDryRun(false);
 });
 
+initSheetDefaultState();
 logEvent('Waypoint UI ready');
 initMap();
 </script>
