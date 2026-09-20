@@ -302,6 +302,23 @@ class ObstacleAvoidanceConfig:
     # A single-poll phantom cannot lower the corridor distance; a genuine
     # approaching obstacle is delayed by at most (this - 1) polls (~66 ms at 15 Hz).
     corridor_persistence_polls: int = 2
+    # Near support as a FRACTION of the corridor pixel count; the larger of
+    # this and corridor_min_support_px applies. 2026-09-19 19:53 (after
+    # sunset, garage approach): p5 sat at 367-429 mm for two minutes while
+    # the corridor median was 5-7 m and 10-13 percent of pixels were valid --
+    # max-disparity noise reading the minimum measurable depth. That noise was
+    # at least 5 percent of the VALID pixels (~560 px), so the 400 px floor
+    # alone does not catch it. A real obstacle at stop range covers far more:
+    # even a 5 cm pole at 0.4 m is ~57 px wide x the 200 px ROI = 11,000 px.
+    # 0.02 of the ~102k px corridor = ~2,000 px.
+    corridor_min_support_frac: float = 0.02
+    # MANUAL mode: the corridor stop is a floor, not a wall. The RC/phone
+    # operator can always creep forward at this fraction of the stick (0.15
+    # = ~0.24 m/s at full stick), so a phantom obstacle cannot strand the
+    # robot (2026-09-19 19:53: could not drive into the garage, had to back
+    # in). The YOLO person/animal stop tier (distance forced to 0.0) stays
+    # absolute. 0.0 restores the hard stop.
+    manual_obstacle_min_scale: float = 0.15
     update_rate_hz: float = 15.0
     stale_timeout_s: float = 0.5
     stale_policy: str = "stop"   # fail-safe: stop when depth data is stale

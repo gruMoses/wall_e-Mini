@@ -57,7 +57,19 @@ class ObstacleAvoidanceController:
             rng = self._cfg.slow_distance_m - self._cfg.stop_distance_m
             scale = (distance_m - self._cfg.stop_distance_m) / rng
 
-        self._last_scale = max(0.0, min(1.0, scale))
+        scale = max(0.0, min(1.0, scale))
+        # MANUAL: the corridor stop is a floor, not a wall. The operator can
+        # always creep forward at manual_obstacle_min_scale, so a phantom
+        # corridor obstacle cannot strand the robot (2026-09-19 19:53: max-
+        # disparity noise read 0.37 m for two minutes after sunset; the robot
+        # had to be backed into the garage). The YOLO person/animal stop tier
+        # arrives as distance 0.0 exactly (forced upstream) and stays absolute;
+        # a genuine corridor obstacle always reads >= min_depth_mm.
+        if is_manual and distance_m > 0.0:
+            floor = float(getattr(self._cfg, "manual_obstacle_min_scale", 0.0))
+            if floor > 0.0:
+                scale = max(scale, min(1.0, floor))
+        self._last_scale = scale
         return self._last_scale
 
     def get_status(self) -> dict:

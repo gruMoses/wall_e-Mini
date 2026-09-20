@@ -21,6 +21,7 @@ from pi_app.hardware.oak_depth import (
     OakDepthReader,
     _corridor_near_distance_mm,
     _CorridorPersistence,
+    _corridor_min_support_px,
 )
 
 
@@ -202,3 +203,48 @@ class TestPollDepthWiresSupportAndPersistence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCorridorSupportFraction(unittest.TestCase):
+    """Support floor as a fraction of the corridor (2026-09-19 19:53 phantom).
+
+    After sunset the corridor's 5th percentile sat at 367-429 mm for two
+    minutes while the median was 5-7 m and 10-13 percent of pixels were
+    valid: max-disparity noise reading the minimum measurable depth. That
+    noise was at least 5 percent of the VALID pixels (~560 of ~11,000), so
+    the absolute 400 px floor alone did not catch it. 2 percent of the
+    ~102k px corridor (~2,000 px) does, and a real obstacle at stop range
+    has far more (a 5 cm pole at 0.4 m is ~57 x 200 = 11,000 px).
+    """
+
+    CORRIDOR_PX = 102_400  # 640 x 0.8 wide x 400 x 0.5 tall
+
+    def test_fraction_wins_when_larger_than_the_absolute_floor(self):
+        self.assertEqual(_corridor_min_support_px(400, 0.02, self.CORRIDOR_PX), 2048)
+
+    def test_absolute_floor_wins_for_a_small_corridor(self):
+        self.assertEqual(_corridor_min_support_px(400, 0.02, 10_000), 400)
+
+    def test_zero_fraction_keeps_the_absolute_floor(self):
+        self.assertEqual(_corridor_min_support_px(400, 0.0, self.CORRIDOR_PX), 400)
+
+    def test_1953_phantom_is_rejected_by_the_fraction_floor(self):
+        # 600 noise px at 370 mm + 10,400 real px at 7,000 mm = 11,000 valid
+        # (10.7 percent of the corridor): the old rule (k = 5 percent of
+        # valid = 550) returned the phantom; the fraction floor (2,048) does not.
+        near = np.full(600, 370, dtype=np.uint16)
+        far = np.full(10_400, 7000, dtype=np.uint16)
+        valid = np.concatenate([near, far])
+        old_rule_px = _corridor_min_support_px(400, 0.0, self.CORRIDOR_PX)
+        self.assertAlmostEqual(_corridor_near_distance_mm(valid, old_rule_px), 370.0, places=0)
+        new_rule_px = _corridor_min_support_px(400, 0.02, self.CORRIDOR_PX)
+        self.assertAlmostEqual(_corridor_near_distance_mm(valid, new_rule_px), 7000.0, places=0)
+
+    def test_a_thin_pole_at_stop_range_still_stops(self):
+        # 5 cm pole at 0.4 m: ~57 px wide x 200 px ROI = 11,400 px at 400 mm,
+        # plus a sparse far background.
+        pole = np.full(11_400, 400, dtype=np.uint16)
+        far = np.full(8_000, 5000, dtype=np.uint16)
+        valid = np.concatenate([pole, far])
+        support = _corridor_min_support_px(400, 0.02, self.CORRIDOR_PX)
+        self.assertAlmostEqual(_corridor_near_distance_mm(valid, support), 400.0, places=0)

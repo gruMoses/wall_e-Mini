@@ -88,7 +88,7 @@ class TestControllerObstacleAvoidance(unittest.TestCase):
         return ctrl, motor
 
     def test_obstacle_scaling_reduces_speed(self):
-        cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5)
+        cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5, manual_obstacle_min_scale=0.0)
         ctrl, motor = self._make_controller(oa_config=cfg)
 
         # Arm
@@ -104,7 +104,7 @@ class TestControllerObstacleAvoidance(unittest.TestCase):
         self.assertEqual(cmd.right_byte, 126)
 
     def test_obstacle_far_away_no_scaling(self):
-        cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5)
+        cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5, manual_obstacle_min_scale=0.0)
         ctrl, motor = self._make_controller(oa_config=cfg)
 
         # Arm
@@ -124,7 +124,7 @@ class TestControllerObstacleAvoidance(unittest.TestCase):
         self.assertAlmostEqual(telem["obstacle_throttle_scale"], 1.0)
 
     def test_reverse_unaffected_by_front_obstacle(self):
-        cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5)
+        cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5, manual_obstacle_min_scale=0.0)
         ctrl, motor = self._make_controller(oa_config=cfg)
 
         ctrl.process(ARMED_RC, now_epoch_s=0.5)
@@ -139,8 +139,35 @@ class TestControllerObstacleAvoidance(unittest.TestCase):
         # Scale is still reported (computed) but not applied to reverse
         self.assertAlmostEqual(telem["obstacle_throttle_scale"], 0.0)
 
+    def test_manual_creep_floor_lets_the_operator_inch_past_a_corridor_stop(self):
+        """2026-09-19 19:53: max-disparity noise read 0.37 m after sunset and
+        the robot could not be driven into the garage. In MANUAL the corridor
+        stop is a floor (manual_obstacle_min_scale), not a wall."""
+        cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5,
+                                      manual_obstacle_min_scale=0.15)
+        ctrl, motor = self._make_controller(oa_config=cfg)
+        ctrl.process(ARMED_RC, now_epoch_s=0.5)
+        ctrl.set_obstacle_data(distance_m=0.37, age_s=0.0)
+        cmd, events, telem = ctrl.process(FWD_RC, now_epoch_s=1.0)
+        self.assertAlmostEqual(telem["obstacle_throttle_scale"], 0.15)
+        expected = round(126 + (254 - 126) * 0.15)
+        self.assertEqual(cmd.left_byte, expected)
+        self.assertEqual(cmd.right_byte, expected)
+
+    def test_manual_creep_floor_does_not_override_the_yolo_stop_tier(self):
+        """The person/animal stop tier arrives as distance 0.0 and stays absolute."""
+        cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5,
+                                      manual_obstacle_min_scale=0.15)
+        ctrl, motor = self._make_controller(oa_config=cfg)
+        ctrl.process(ARMED_RC, now_epoch_s=0.5)
+        ctrl.set_obstacle_data(distance_m=0.0, age_s=0.0)
+        cmd, events, telem = ctrl.process(FWD_RC, now_epoch_s=1.0)
+        self.assertAlmostEqual(telem["obstacle_throttle_scale"], 0.0)
+        self.assertEqual(cmd.left_byte, 126)
+        self.assertEqual(cmd.right_byte, 126)
+
     def test_hard_stop_obstacle_bypasses_slew_limiter(self):
-        oa_cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5)
+        oa_cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5, manual_obstacle_min_scale=0.0)
         slew_cfg = replace(
             default_config.slew_limiter,
             enabled=True,

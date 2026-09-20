@@ -126,13 +126,17 @@ The retune has not been driven. The field test (walk, brisk walk, two 90 degree 
 - #53 property map: `viewport-fit=cover` and safe-area insets on the top bar, canvas and calibration panel.
 - #49 arbitration: traced (comment on the issue): one source per tick, nav beats teleop by an `elif`, teleop is never told; the real gap is the hand-back to MANUAL after a mission while a teleop session is still armed. Fix not yet implemented.
 
-## F. 19:55 CDT: could not drive forward into the garage (logs not yet read)
+## F. 19:53 CDT: could not drive forward into the garage (confirmed from the logs)
 
-Kevin (2026-09-19, about 19:55 CDT): the robot would not drive forward and had to be backed into the garage. The Pi was powered down before the log window could be read; nothing in the code changed between the 18:44 waypoint run and 19:55 (the deployed SHA stayed 9838203, the last push was docs-only).
+Kevin (2026-09-19, about 19:55 CDT): the robot would not drive forward and had to be backed into the garage. Logs: `arm_20260919_184719.log` (tail) and `arm_20260919_195329.log`, plus the service journal.
 
-Working hypothesis, from the 18:50 run's last 30 s: the OAK-D Lite has no IR projector, so its stereo depth is passive and needs light and texture. After sunset the corridor keeps a few "valid" pixels that are noise, the 5th percentile of those is a phantom obstacle at 0.4-1.4 m, and obstacle avoidance gates FORWARD motion only (reverse is never gated, which is why backing in worked). The corridor fix in section D (400 px support floor, 2-poll persistence) targets exactly this. A second candidate is stale depth (frames stop arriving), which in MANUAL scales forward to 10 percent (`manual_stale_throttle_scale`).
+What the log says, per second from 19:52:30 to 19:54:31: `obstacle.depth_p5_mm` 367-429 (`distance_m` 0.4, `throttle_scale` 0.0) while `depth_p50_mm` was 5,000-7,300 and `depth_valid_pct` 10-13. Both sticks forward at 19:53:32-19:53:47 (ch1/ch2 1992-2104) produced motor bytes at neutral; reverse and pivots from 19:53:50 worked. Camera health was fine (depth age under 0.25 s, no reconnect, no `oak_health` event); no YOLO "Safety STOP" line. Nothing in the code changed: the deployed SHA was 9838203 from the 18:44 waypoint run through this event.
 
-To confirm when the Pi is back, pull `logs/run_*.log` / `arm_*.log` lines with `ts_iso` 19:50-19:56 and read: `obstacle.distance_m`, `obstacle.throttle_scale`, `obstacle.depth_p5_mm`, `obstacle.depth_valid_pct`, `motor.L/R` versus `rc.ch1/ch2`, the 1 Hz `slow` lines' `oak_camera_health` (`depth_age_s`, `is_stale`), any `oak_health` event lines, and `journalctl -u wall-e -a --since "2026-09-19 19:47" --until "2026-09-19 19:58"` for "Safety STOP" (YOLO stop tier) or reconnect messages.
+Diagnosis: a real object 0.37 m in front would pull the corridor median down with it; a 5th percentile at the minimum measurable depth (`min_depth_mm` 350) with a far median is max-disparity noise, which always reads "closest possible" and therefore stays steady to the centimetre. The OAK-D Lite has no IR projector; its stereo depth is passive and degrades after sunset. Obstacle avoidance gates forward motion only, which is why backing in worked. The noise population was at least 5 percent of the valid pixels (about 560 of about 11,000), so the section D support floor (400 px) alone does not reject it.
+
+Fixes (commit after 97e469c): near support is the larger of 400 px and `corridor_min_support_frac` 0.02 of the corridor (about 2,000 px; a 5 cm pole at 0.4 m covers about 11,000); `obstacle.corridor_near_px` (valid pixels claiming to be inside `slow_distance_m`) is logged so the next phantom can be sized; and in MANUAL the corridor stop is a floor (`manual_obstacle_min_scale` 0.15, about 0.24 m/s at full stick), so an operator can always creep forward past a phantom. The YOLO person/animal stop tier (distance forced to 0.0) stays absolute in every mode; autonomous modes keep the hard stop.
+
+Also seen: the OAK chip temperature was 82-83 C throughout (the 1 Hz `oak.chip_temp_c`); worth watching on a hot day.
 
 ## Technical Names
 

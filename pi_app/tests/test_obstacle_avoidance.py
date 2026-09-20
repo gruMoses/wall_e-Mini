@@ -69,3 +69,44 @@ class TestObstacleAvoidanceController(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestManualCreepFloor(unittest.TestCase):
+    """MANUAL: the corridor stop is a floor, not a wall (2026-09-19 19:53).
+
+    Max-disparity noise after sunset read 0.37 m for two minutes and the
+    robot could not be driven forward into the garage. The operator holds
+    the sticks, so in MANUAL the throttle scale never drops below
+    manual_obstacle_min_scale for a CORRIDOR obstacle. The YOLO stop tier
+    arrives as distance 0.0 exactly and stays absolute.
+    """
+
+    def _make(self, **overrides) -> ObstacleAvoidanceController:
+        cfg = ObstacleAvoidanceConfig(**overrides)
+        return ObstacleAvoidanceController(cfg)
+
+    def test_manual_floor_applies_to_a_corridor_stop(self):
+        c = self._make(manual_obstacle_min_scale=0.15)
+        self.assertAlmostEqual(c.compute_throttle_scale(0.37, 0.0, is_manual=True), 0.15)
+
+    def test_autonomous_modes_keep_the_hard_stop(self):
+        c = self._make(manual_obstacle_min_scale=0.15)
+        self.assertEqual(c.compute_throttle_scale(0.37, 0.0, is_manual=False), 0.0)
+
+    def test_safety_tier_zero_distance_is_absolute_in_manual(self):
+        c = self._make(manual_obstacle_min_scale=0.15)
+        self.assertEqual(c.compute_throttle_scale(0.0, 0.0, is_manual=True), 0.0)
+
+    def test_floor_never_raises_a_scale_already_above_it(self):
+        c = self._make(manual_obstacle_min_scale=0.15, slow_distance_m=1.5, stop_distance_m=0.4)
+        expected = (1.0 - 0.4) / (1.5 - 0.4)
+        self.assertAlmostEqual(c.compute_throttle_scale(1.0, 0.0, is_manual=True), expected)
+
+    def test_zero_floor_restores_the_hard_stop(self):
+        c = self._make(manual_obstacle_min_scale=0.0)
+        self.assertEqual(c.compute_throttle_scale(0.37, 0.0, is_manual=True), 0.0)
+
+    def test_stale_depth_path_is_unchanged(self):
+        c = self._make(manual_obstacle_min_scale=0.15, stale_timeout_s=0.5,
+                       stale_policy="stop", manual_stale_throttle_scale=0.10)
+        self.assertAlmostEqual(c.compute_throttle_scale(0.37, 5.0, is_manual=True), 0.10)

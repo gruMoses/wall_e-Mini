@@ -69,6 +69,7 @@ class DepthStats:
     valid_pixel_pct: float = 0.0
     corridor_valid_pct: float = 0.0
     corridor_support_px: int = 0
+    corridor_near_px: int = 0  # valid corridor pixels claiming <= slow_distance_m
     timestamp: float = 0.0
 
 
@@ -97,6 +98,15 @@ def _corridor_near_distance_mm(valid_depths, min_support_px: int) -> float | Non
     kth = k - 1
     partitioned = np.partition(valid_depths, kth)
     return float(partitioned[kth])
+
+
+def _corridor_min_support_px(min_px: int, min_frac: float, corridor_pixel_count: int) -> int:
+    """Pixels of near support a corridor estimate needs: max(min_px, min_frac * corridor).
+
+    Pure helper so the rule is unit-testable without a device.
+    """
+    frac_px = int(max(0.0, float(min_frac)) * max(0, int(corridor_pixel_count)))
+    return max(int(min_px), frac_px)
 
 
 class _CorridorPersistence:
@@ -1851,16 +1861,29 @@ class OakDepthReader:
             n_valid = int(valid_depths.size)
             corridor_support_px = n_valid
             corridor_valid_pct = 0.0
-            min_support_px = int(getattr(self._obs_cfg, "corridor_min_support_px", 400))
+            corridor_near_px = 0
+            if robot_half_mm > 0:
+                corridor_pixel_count = int(in_corridor.sum())
+            else:
+                corridor_pixel_count = int(roi.size)
+            # Support floor: the larger of the absolute floor and a fraction
+            # of the corridor. Max-disparity noise after sunset was >= 5
+            # percent of the VALID pixels (2026-09-19 19:53), which beat the
+            # absolute floor; it is well under 2 percent of the corridor.
+            min_support_px = _corridor_min_support_px(
+                int(getattr(self._obs_cfg, "corridor_min_support_px", 400)),
+                float(getattr(self._obs_cfg, "corridor_min_support_frac", 0.0)),
+                corridor_pixel_count,
+            )
             if n_valid == 0:
                 corridor_rejected = True
             else:
-                if robot_half_mm > 0:
-                    corridor_pixel_count = int(in_corridor.sum())
-                else:
-                    corridor_pixel_count = int(roi.size)
                 if corridor_pixel_count > 0:
                     corridor_valid_pct = (n_valid / corridor_pixel_count) * 100.0
+                # How many valid pixels claim to be inside the slow-down
+                # range: logged so the next phantom can be sized directly.
+                slow_mm = float(getattr(self._obs_cfg, "slow_distance_m", 1.5)) * 1000.0
+                corridor_near_px = int((valid_depths <= slow_mm).sum())
                 if corridor_valid_pct < min_valid_pct or n_valid < min_support_px:
                     corridor_rejected = True
                 else:
@@ -1942,6 +1965,7 @@ class OakDepthReader:
                 valid_pixel_pct=round(valid_pct, 1),
                 corridor_valid_pct=round(corridor_valid_pct, 1),
                 corridor_support_px=int(corridor_support_px),
+                corridor_near_px=int(corridor_near_px),
                 timestamp=now,
             )
             with self._lock:
