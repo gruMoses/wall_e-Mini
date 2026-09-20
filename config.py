@@ -960,7 +960,7 @@ class OakDetectionConfig:
     # 0 = unspecified (today's requestOutput calls, no fps=). Reserved for
     # the next A/B; when > 0 pass fps= to every Camera.requestOutput in the
     # YOLO pipeline (colour NN, colour preview/hand, both mono outputs).
-    camera_fps: float = 0.0
+    camera_fps: float = 15.0
     # Today's NeuralNetwork.setNumInferenceThreads value. Reserved for the next A/B.
     nn_inference_threads: int = 2
     # Today's NeuralNetwork.setNumShavesPerInferenceThread value.
