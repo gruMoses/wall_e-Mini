@@ -384,6 +384,14 @@ class TestTrackingModeByteIdentical(unittest.TestCase):
             trail_follow_enabled=False,  # isolate the DIRECT PID tracking path
             follow_distance_m=1.5,
             max_follow_speed_byte=90,
+            # EXPECTED_BYTES was recorded with the pre-2026-09-19 tuning. This
+            # test guards the CODE PATH, not the tuning, so pin the values that
+            # were the production defaults when the table was captured.
+            pid_lateral_kp=0.4,
+            max_steer_offset_byte=25.0,
+            direct_mode_max_steer_byte=18.0,
+            detect_min_bbox_width=0.09,
+            direct_turn_speed_min_scale=1.0,  # no turn slowdown (added 2026-09-19)
         )
         fm = FollowMeController(cfg)
 

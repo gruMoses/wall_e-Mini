@@ -89,6 +89,51 @@ This is the first waypoint run on this robot that turned toward the target and a
 
 Tests: 781 → 867, all pass, 4 skipped. Note: `pi_app/tests/test_log_gating.py` uses bare pytest functions, which `unittest discover` does not collect; its tests have never run under the project test command.
 
+## D. Follow-me run 2026-09-19 18:50 — analysis and second round (local commits, not pushed)
+
+Kevin's report: good but not great; jumpy toward the end; did not turn fast enough; the speed felt limited. Full analysis, evidence tables and the field-test procedure: `docs/follow_me_run_2026-09-19.md`. Reproduce with `tools/analyze_follow_me_log.py`.
+
+### D.1 What the log says (215 s, 1,833 ticks, direct pursuit)
+
+1. The detection filter rejected the operator beyond 4.3 m: a 0.45 m person is 0.086 of the frame there and `detect_min_bbox_width` was 0.09, with YOLO still at 0.86–0.90 confidence. One rejected frame at full speed cut the speed by 22 percent (0.3 s decay window); the robot stopped, then surged on re-acquisition. This is the stop-surge cycle.
+2. Steering authority was about 5 times too low: 0.22 deg/s of yaw per byte of L-R differential (IMU regression, 1,468 ticks), so the 18-byte direct cap allowed about 8 deg/s while a person crossing at 3 m sweeps about 25 deg/s. The operator walked out of the right frame edge at t = 32 s.
+3. The velocity PID wound up to its +21 byte clamp whenever the persistence decay, the accel ramp, the obstacle throttle or the slew limiter cut the command, and dumped it as a surge when the limit lifted.
+4. Last 30 s (low sun): the depth corridor reported phantom obstacles at 0.4–1.4 m with 2–7 percent valid pixels; the throttle went 0.9 → 0.0 → 0.4 → 0.8 while the operator was 3 m ahead. This is the "jumpy toward the end".
+5. Speed: `VescConfig.max_erpm` 15000 (1.2 m/s) was an unverified cap; the VESC duty was 0.58–0.65 at 13,000 eRPM (about 22,000 eRPM per unit duty).
+
+### D.2 Changes
+
+- Config: `max_erpm` 15000 → 20000 (1.6 m/s, every mode, RC manual included; the derived `speed_loop_mps_per_byte`, `trail_speed_scale_mps_per_byte` and `slip_cmd_diff_per_byte` follow); `detect_min_bbox_width` 0.09 → 0.05; `pid_lateral_kp` 0.4 → 0.8; `max_steer_offset_byte` 25 → 40; `direct_mode_max_steer_byte` 18 → 40.
+- `SpeedLayer`: the closed-loop target is the forward byte that reached the motors on the previous tick (`update_telemetry(emitted_forward_byte=...)`), never more than the open-loop request; logged as `speed_loop.target_byte`.
+- Persistence decay: `steer_hold_grace_s` (0.30 s hold before decay) and `steer_hold_decay_speed_floor` 0.5.
+- Direct pursuit slows into turns: `direct_turn_speed_knee_norm` 0.30, `direct_turn_speed_min_scale` 0.35; logged as `follow_me.turn_speed_scale`.
+- Depth corridor: k-th smallest valid depth with `corridor_min_support_px` 400 of support and `corridor_persistence_polls` 2; logged `obstacle.corridor_valid_pct`, `obstacle.corridor_support_px`.
+- Tool: `tools/analyze_follow_me_log.py` (timeline, jumpiness with cut attribution, detection-filter histograms, steering, yaw regression, speed-cap use, obstacle flicker).
+- Tests: the golden tracking-bytes test and the slip-compensator tests pin the pre-retune tuning (they guard code paths, not tuning); the top-speed test follows `max_erpm`.
+
+### D.3 Not validated
+
+The retune has not been driven. The field test (walk, brisk walk, two 90 degree turns at 3 m, walk out to 6 m) is in the doc. CAUTION: RC manual is 33 percent faster too.
+
+## E. Open issues from the UI audit
+
+- #45 + #46 nav page: STOP is a fixed 72 px control outside the sheet (same id `btnStop`, wired to the same handler), visible while a run is active, paused or launching; the sheet collapses on the MANUAL → WAYPOINT_NAV transition; the nav status line (state, waypoint, distance) is always visible under the toolbar. At 100 percent fill, STOP appears first, GO fades over 250 ms, and a 4 s toast says "Robot is moving. Releasing does NOT stop it. Use STOP."
+- #47 nav page: the JS gate is `gpsFix === 4` (backend requires RTK fixed); validation runs on pointerdown before the hold starts, errors block with an in-page notice, warnings show a non-blocking banner; no `confirm()` in the launch path.
+- #48 nav page: phone loads collapsed, wide screens load half; half is 40vh; the handle follows the finger (translateY), snaps on release, and a tap toggles collapsed/half.
+- #51 nav page: Clear All and Reverse Route are red-outlined, Reverse is two-tap; list controls are 44 px; the small numbers are 12 px.
+- #50 teleop: hide/pagehide send neutral and stop the drive loop; the deadman is an inline banner next to ARM ("Deadman tripped: the page was hidden or the connection paused. Press and hold ARM to resume.") instead of a full-screen lock; the loop restarts on re-arm, or on return if the session is still armed. The server cannot tell "tab hidden" from "connection lost" (both are a stale heartbeat), so one message covers both.
+- #52 dashboard: MJPEG streams are blanked while the tab is hidden and restored on return; the reconnect loop pauses while hidden.
+- #53 property map: `viewport-fit=cover` and safe-area insets on the top bar, canvas and calibration panel.
+- #49 arbitration: traced (comment on the issue): one source per tick, nav beats teleop by an `elif`, teleop is never told; the real gap is the hand-back to MANUAL after a mission while a teleop session is still armed. Fix not yet implemented.
+
+## F. 19:55 CDT: could not drive forward into the garage (logs not yet read)
+
+Kevin (2026-09-19, about 19:55 CDT): the robot would not drive forward and had to be backed into the garage. The Pi was powered down before the log window could be read; nothing in the code changed between the 18:44 waypoint run and 19:55 (the deployed SHA stayed 9838203, the last push was docs-only).
+
+Working hypothesis, from the 18:50 run's last 30 s: the OAK-D Lite has no IR projector, so its stereo depth is passive and needs light and texture. After sunset the corridor keeps a few "valid" pixels that are noise, the 5th percentile of those is a phantom obstacle at 0.4-1.4 m, and obstacle avoidance gates FORWARD motion only (reverse is never gated, which is why backing in worked). The corridor fix in section D (400 px support floor, 2-poll persistence) targets exactly this. A second candidate is stale depth (frames stop arriving), which in MANUAL scales forward to 10 percent (`manual_stale_throttle_scale`).
+
+To confirm when the Pi is back, pull `logs/run_*.log` / `arm_*.log` lines with `ts_iso` 19:50-19:56 and read: `obstacle.distance_m`, `obstacle.throttle_scale`, `obstacle.depth_p5_mm`, `obstacle.depth_valid_pct`, `motor.L/R` versus `rc.ch1/ch2`, the 1 Hz `slow` lines' `oak_camera_health` (`depth_age_s`, `is_stale`), any `oak_health` event lines, and `journalctl -u wall-e -a --since "2026-09-19 19:47" --until "2026-09-19 19:58"` for "Safety STOP" (YOLO stop tier) or reconnect messages.
+
 ## Technical Names
 
 IoU, eRPM, VESC, YOLOv8, NMS, PID, tracklet, grace hold, open-loop, pole pair, telemetry, `track_id`, `TrackletTracker`, `TargetTracker`, `RpmPlausibilityGate`, OAK-D Lite, BMI270, `OakImuReader`, ZUPT, SSE, GPS, RTK, `imu_source`, `invert_output`, chalk test, `heading_align`, DFRobot, Grok, Kevin.

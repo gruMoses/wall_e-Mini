@@ -56,6 +56,12 @@ def _make_speed_layer(
 
 
 def _make_fm(**overrides) -> FollowMeController:
+    # The slip-compensator tests below reason against fixed steer caps
+    # (DIRECT_CAP / GLOBAL_MAX_STEER). Pin them here so a re-tune of the
+    # production defaults (25/18 -> 40/40 on 2026-09-19) does not change
+    # what these tests measure. Explicit overrides still win.
+    overrides.setdefault("max_steer_offset_byte", GLOBAL_MAX_STEER)
+    overrides.setdefault("direct_mode_max_steer_byte", DIRECT_CAP)
     cfg = FollowMeConfig(**overrides)
     return FollowMeController(cfg)
 
@@ -275,8 +281,8 @@ class TestSlipDetection(unittest.TestCase):
 # 2b. Rewritten slip compensator: off-switch, anti-runaway, genuine-slip
 # ─────────────────────────────────────────────────────────────────────────────
 
-DIRECT_CAP = 18.0          # FollowMeConfig.direct_mode_max_steer_byte default
-GLOBAL_MAX_STEER = 25.0    # FollowMeConfig.max_steer_offset_byte default
+DIRECT_CAP = 18.0          # pinned by _make_fm (production default is 40 since 2026-09-19)
+GLOBAL_MAX_STEER = 25.0    # pinned by _make_fm (production default is 40 since 2026-09-19)
 
 
 class TestSlipCompensatorRewrite(unittest.TestCase):

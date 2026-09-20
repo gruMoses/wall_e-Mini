@@ -104,6 +104,21 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
 - Obstacle avoidance: depth corridor, valid-pixel % threshold, tiered speed reduction/stop.
 - Follow Me: **YOLOv8n** blob via `NeuralNetwork` node + host-side NMS (depthai v3). `SpatialDetectionNetwork` / `YoloDetectionNetwork` / `DetectionParser` yield zero detections with the CURRENT blob because it comes from a plain ultralytics ONNX export through blobconverter (decode head kept, no NN Archive `heads` metadata). The supported path is the Luxonis conversion tool → NN Archive, which also unblocks on-device `ObjectTracker` and spatial coordinates. Refer to `docs/oak_d_lite_capability_audit.md` before you re-convert the model.
 - Depth EMA filter on person position for smoothing.
+- **Second follow-me round (2026-09-19, from the 18:50 run log; analysis in
+  `docs/follow_me_run_2026-09-19.md`, reproduce with
+  `tools/analyze_follow_me_log.py <log>`)**: measured yaw response is only
+  ~0.22 deg/s per byte of L-R differential at speed, so direct-pursuit
+  steering was retuned (`pid_lateral_kp` 0.8, `max_steer_offset_byte` 40,
+  `direct_mode_max_steer_byte` 40) and direct pursuit now slows into turns
+  (`direct_turn_speed_*`). `detect_min_bbox_width` 0.05 (0.09 rejected the
+  operator beyond 4.3 m). The velocity PID targets the forward byte that
+  actually reached the motors on the previous tick
+  (`update_telemetry(emitted_forward_byte=...)`) so it cannot wind up against
+  the persistence decay, accel ramp, obstacle throttle or slew limiter; a
+  0.30 s grace hold precedes the persistence decay. The depth corridor needs
+  400 px of support and 2-poll persistence (phantom obstacles in low sun).
+  `VescConfig.max_erpm` 20000 (was 15000; 1.6 m/s top speed in every mode).
+  **Not field-validated yet** -- procedure in the doc.
 - The onboard IMU is a **BMI270**: raw/calibrated accel + gyro only. `ROTATION_VECTOR` / `GAME_ROTATION_VECTOR` / magnetometer are BNO08x-only and return nothing on this device. Do not try them. Refer to `docs/oak_d_lite_capability_audit.md`.
 
 ### Waypoint Navigation

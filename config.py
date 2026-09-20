@@ -201,7 +201,14 @@ class RcMapConfig:
 @dataclass(frozen=True)
 class VescConfig:
     # VESC expects electrical RPM (eRPM)
-    max_erpm: int = 15000
+    # 20000 since 2026-09-19 (was 15000 -- an arbitrary cap, see
+    # docs/gearing_memo.md). On the 18:50 follow-me run the wheels reached
+    # ~13,000 eRPM at a VESC duty of only 0.58-0.65 (~22,000 eRPM per unit
+    # duty), so 20000 still leaves ~10 percent of duty for the eRPM loop to
+    # regulate under load. Top speed 1.2 -> 1.6 m/s in EVERY mode, RC manual
+    # included. FollowMeConfig.speed_loop_mps_per_byte,
+    # trail_speed_scale_mps_per_byte and slip_cmd_diff_per_byte scale with it.
+    max_erpm: int = 20000
 
     # CAN IDs for each motor
     left_can_id: int = 2
@@ -289,6 +296,12 @@ class ObstacleAvoidanceConfig:
     camera_hfov_deg: float = 70.0
     min_depth_mm: int = 350            # OAK-D Lite extended disparity minimum (~0.35m)
     min_valid_pct: float = 8.0         # ignore corridor if fewer than this % of pixels are valid
+    # A real obstacle at 1 m and 0.3 m wide covers tens of thousands of corridor
+    # pixels; 400 px ≈ a 20x20 blob — anything smaller is noise.
+    corridor_min_support_px: int = 400
+    # A single-poll phantom cannot lower the corridor distance; a genuine
+    # approaching obstacle is delayed by at most (this - 1) polls (~66 ms at 15 Hz).
+    corridor_persistence_polls: int = 2
     update_rate_hz: float = 15.0
     stale_timeout_s: float = 0.5
     stale_policy: str = "stop"   # fail-safe: stop when depth data is stale
@@ -321,7 +334,12 @@ class FollowMeConfig:
     # exceeded xmin 0.60 and were wider (≥ 0.10) and tall (implied_h 1.68–3.02 m).
     # Set any value to 0 (or ≤ 0) to disable that individual check.
     detect_edge_margin: float = 0.15       # reject xmin > (1-margin) or xmax < margin; 0 = disabled
-    detect_min_bbox_width: float = 0.09   # reject normalized bbox width < this; 0 = disabled
+    # 0.09 -> 0.05 on 2026-09-19: the 18:50 run lost the operator at 4.3 m --
+    # a 0.45 m wide person is 0.086 of the 70 deg frame at 4.4 m -- with YOLO
+    # still at 0.86-0.90 confidence, and every loss stopped the robot. The
+    # edge rule above already rejects the frame-edge slivers this was added
+    # for; 0.05 keeps a person to ~6 m (max_distance_m).
+    detect_min_bbox_width: float = 0.05   # reject normalized bbox width < this; 0 = disabled
     detect_min_person_height_m: float = 1.20  # reject implied physical height < this (m); 0 = disabled
     # MEASURED from the factory EEPROM 2026-07-26 (`pi_app.cli.oak_intrinsics`):
     # CAM_A at the 640x352 YOLO input frame gives fy=456.89 -> VFOV 42.13 deg.
@@ -396,7 +414,13 @@ class FollowMeConfig:
 
     # ── Layer 3: Lateral PID steering ────────────────────────────────────────
     # Error = normalized horizontal offset (-1.0 to +1.0); output scales to ±max_steer_offset_byte.
-    pid_lateral_kp: float = 0.4
+    # 0.4 -> 0.8 on 2026-09-19 with max_steer_offset_byte 25 -> 40 and
+    # direct_mode_max_steer_byte 18 -> 40: the 18:50 run measured only
+    # 0.22 deg/s of yaw per byte of L-R differential at speed, so the old
+    # cap allowed ~8 deg/s while a person crossing at 3 m sweeps ~25 deg/s
+    # and walked out of the right edge of the frame. Close-range behaviour is
+    # still tame: steer_deadband_norm and steer_edge_knee are unchanged.
+    pid_lateral_kp: float = 0.8
     pid_lateral_ki: float = 0.0
     pid_lateral_kd: float = 0.2
     pid_lateral_integral_limit: float = 0.5  # anti-windup clamp (normalised units)
@@ -447,7 +471,7 @@ class FollowMeConfig:
     speed_kd: float = 0.0
     speed_integral_limit: float = 1.0    # anti-windup clamp (m/s·s); was 50 — absurd with a 0.2 m/s clamp
     speed_pid_max_correction_mps: float = 0.20   # |closed-loop correction| ceiling (≈ 21 bytes)
-    speed_loop_mps_per_byte: float = 0.009416    # kinematic WHEEL m/s per byte — see SCALE above
+    speed_loop_mps_per_byte: float = 0.012555    # kinematic WHEEL m/s per byte at max_erpm 20000 (1.607 m/s / 128) — see SCALE above
 
     # ── Slip detection & compensation ─────────────────────────────────────────
     # Hard off-switch. When False the slip compensator is a TRUE no-op: it returns
@@ -469,7 +493,7 @@ class FollowMeConfig:
     # deliberately crude — its only job is to cancel the commanded component so a
     # turn isn't mistaken for slip. Calibrate on hardware; over-estimating is safe
     # (it just makes the detector less sensitive), under-estimating less so.
-    slip_cmd_diff_per_byte: float = 40.0
+    slip_cmd_diff_per_byte: float = 53.3
     # The "going straight" guard must hold for this many consecutive ticks (on the
     # EMITTED/commanded steer, not the pre-correction PID value) before slip can
     # act — so a transient never triggers and the guard releases the instant a real
@@ -496,7 +520,7 @@ class FollowMeConfig:
     # Allow continued blind trail pursuit longer than short target-drop timeout.
     # This is the key behavior needed to keep moving around corners after LOS loss.
     lost_target_trail_pursuit_max_s: float = 3.0
-    max_steer_offset_byte: float = 25.0          # increased from 15 — lets robot turn harder to keep person in FOV
+    max_steer_offset_byte: float = 40.0          # 25 -> 40 on 2026-09-19, see pid_lateral_kp (was 15 before that)
     # Search-rotation steer magnitude (bytes) while pivoting in place to reacquire
     # a lost target. Was previously read via a phantom getattr fallback (30.0)
     # that had no backing field and EXCEEDED both max_steer_offset_byte (25) and
@@ -514,7 +538,7 @@ class FollowMeConfig:
 
     # Trail-following Pure Pursuit (breadcrumb path instead of direct pursuit)
     trail_follow_enabled: bool = True
-    trail_speed_scale_mps_per_byte: float = 0.0075  # calibrated on gravel via RTK GPS: 0.0075 at offsets 67–123 (2026-03-28)
+    trail_speed_scale_mps_per_byte: float = 0.0100  # 0.0075 calibrated on gravel via RTK GPS at max_erpm 15000 (2026-03-28), scaled 4/3 for 20000 on 2026-09-19 — re-calibrate
     trail_max_points: int = 100
     trail_min_spacing_m: float = 0.3
     trail_max_age_s: float = 30.0
@@ -545,12 +569,23 @@ class FollowMeConfig:
 
     # ── Steer hold/decay during detection dropout ─────────────────────────
     steer_hold_decay_s: float = 1.0  # seconds to decay held steer to 0 after losing fresh detection (speed-aware: shrinks at high speed)
+    # Hold last fresh speed/steer unchanged this long after a dropped frame so a
+    # single 15 fps miss does not already scale speed by 0.78 (then the accel
+    # ramp needs ~0.5 s to recover).
+    steer_hold_grace_s: float = 0.30
+    # Replaces the previous literal 0.3 floor on the speed-aware decay window.
+    steer_hold_decay_speed_floor: float = 0.5
 
     # ── SafetyLayer acceleration cap ─────────────────────────────────────────
     max_speed_accel_byte_per_s: float = 150.0  # max speed ramp-up rate (bytes/s) inside Follow Me SafetyLayer
 
     # ── Direct pursuit steering cap ──────────────────────────────────────────
-    direct_mode_max_steer_byte: float = 18.0   # max steer in direct pursuit (lower than trail to limit close-range overshoot)
+    direct_mode_max_steer_byte: float = 40.0   # 18 -> 40 on 2026-09-19, see pid_lateral_kp; the mixer clips at 254 anyway
+    # Direct-pursuit forward-speed reduction while the person is off-centre.
+    # The mixer clips at 245 and skid-steer scrub at speed is high (~0.22 deg/s
+    # of yaw per L-R byte); below the knee, scale is 1.0 (byte-identical).
+    direct_turn_speed_knee_norm: float = 0.30
+    direct_turn_speed_min_scale: float = 0.35
 
     # ── Steer deadband and slew limiter ──────────────────────────────────────
     steer_deadband_norm: float = 0.04   # |x_err| below this → treat error as 0 (suppresses gait-wobble chasing; ~2-3% frame width)

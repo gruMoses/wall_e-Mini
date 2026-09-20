@@ -63,14 +63,24 @@ class TestSpeedLoopScale(unittest.TestCase):
         self.assertAlmostEqual(FollowMeConfig().speed_loop_mps_per_byte, derived, places=5)
 
     def test_full_scale_byte_reproduces_documented_top_speed(self):
-        """docs/gearing_memo.md §a: byte 254 → 15000 eRPM → 1.205 m/s."""
+        """docs/gearing_memo.md §a: byte 254 → max_erpm → top speed.
+
+        At the memo's max_erpm 15000 that was 1.205 m/s. max_erpm became
+        20000 on 2026-09-19 (VESC duty was only 0.58-0.65 at 13,000 eRPM),
+        so full scale is now 1.607 m/s. The kinematic chain is unchanged.
+        """
         v = self._vesc_kw()
         erpm = byte_offset_to_erpm(128, max_erpm=v["max_erpm"])
-        self.assertAlmostEqual(erpm, 15000.0, places=6)
+        self.assertAlmostEqual(erpm, 20000.0, places=6)
         mps = erpm_to_wheel_mps(erpm, motor_poles=v["motor_poles"],
                                 drive_gear_ratio=v["drive_gear_ratio"],
                                 wheel_radius_m=v["wheel_radius_m"])
-        self.assertAlmostEqual(mps, 1.205, places=2)
+        self.assertAlmostEqual(mps, 1.607, places=2)
+        # The memo's number still holds for the memo's cap.
+        mps_memo = erpm_to_wheel_mps(15000.0, motor_poles=v["motor_poles"],
+                                     drive_gear_ratio=v["drive_gear_ratio"],
+                                     wheel_radius_m=v["wheel_radius_m"])
+        self.assertAlmostEqual(mps_memo, 1.205, places=2)
 
     def test_loop_scale_is_wheel_speed_not_ground_speed(self):
         """The GPS-calibrated trail scale (ground speed on gravel) is ~20 % lower

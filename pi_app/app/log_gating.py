@@ -285,8 +285,19 @@ def _session_header(config, path) -> dict:
                 "speed_loop_mps_per_byte": getattr(follow_me, "speed_loop_mps_per_byte", None),
                 "follow_distance_m": getattr(follow_me, "follow_distance_m", None),
                 "max_follow_speed_byte": getattr(follow_me, "max_follow_speed_byte", None),
+                # Steering and detection tunables retuned 2026-09-19; the
+                # analyzer (tools/analyze_follow_me_log.py) reads them here.
+                "pid_lateral_kp": getattr(follow_me, "pid_lateral_kp", None),
+                "pid_lateral_kd": getattr(follow_me, "pid_lateral_kd", None),
+                "max_steer_offset_byte": getattr(follow_me, "max_steer_offset_byte", None),
+                "direct_mode_max_steer_byte": getattr(follow_me, "direct_mode_max_steer_byte", None),
+                "detect_min_bbox_width": getattr(follow_me, "detect_min_bbox_width", None),
+                "steer_hold_grace_s": getattr(follow_me, "steer_hold_grace_s", None),
+                "direct_turn_speed_knee_norm": getattr(follow_me, "direct_turn_speed_knee_norm", None),
+                "direct_turn_speed_min_scale": getattr(follow_me, "direct_turn_speed_min_scale", None),
             },
             "vesc": {
+                "max_erpm": getattr(vesc, "max_erpm", None),
                 "rpm_plausibility_enabled": getattr(vesc, "rpm_plausibility_enabled", None),
                 "rpm_plausibility_min_cmd_bytes": getattr(
                     vesc, "rpm_plausibility_min_cmd_bytes", None
@@ -384,6 +395,12 @@ def build_log_obj(
             "depth_p5_mm": oak_depth_stats.p5_mm if oak_depth_stats else None,
             "depth_p50_mm": oak_depth_stats.p50_mm if oak_depth_stats else None,
             "depth_valid_pct": oak_depth_stats.valid_pixel_pct if oak_depth_stats else None,
+            # The corridor's own valid fraction and pixel support (2026-09-19):
+            # the full-frame figure above was 2-7 percent in low sun while the
+            # corridor produced phantom near hits; this is what the reject path
+            # and the support floor actually use (oak_depth._corridor_near_distance_mm).
+            "corridor_valid_pct": getattr(oak_depth_stats, "corridor_valid_pct", None) if oak_depth_stats else None,
+            "corridor_support_px": getattr(oak_depth_stats, "corridor_support_px", None) if oak_depth_stats else None,
         }),
         "follow_me": round1({
             "tracking": telem.get("follow_me_tracking"),
@@ -418,6 +435,9 @@ def build_log_obj(
             # open_loop_byte, target_mps, actual_mps, err_mps, p, i, d,
             # corr_mps, corr_byte, closed. See FollowMeController.get_status().
             "speed_loop": telem.get("speed_loop"),
+            # Direct-pursuit forward scale from the fresh bbox x (2026-09-19);
+            # 1.0 = no turn slowdown this tick.
+            "turn_speed_scale": telem.get("turn_speed_scale"),
         }),
         "detections": [
             {"x_m": round(d.x_m, 2), "z_m": round(d.z_m, 2),

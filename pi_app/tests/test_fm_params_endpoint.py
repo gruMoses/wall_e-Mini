@@ -36,8 +36,8 @@ def test_get_returns_exactly_five_params(client_and_fm):
     assert resp.status_code == 200
     body = resp.get_json()
     assert set(body.keys()) == set(TUNABLE_PARAM_BOUNDS.keys())
-    # Shipped defaults.
-    assert body["pid_lateral_kp"] == pytest.approx(0.4)
+    # Shipped defaults (read from config so a re-tune does not break this test).
+    assert body["pid_lateral_kp"] == pytest.approx(FollowMeConfig().pid_lateral_kp)
     assert body["steer_slew_per_tick"] == pytest.approx(0.1)
 
 
