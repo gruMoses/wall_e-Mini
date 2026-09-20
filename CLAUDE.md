@@ -2,7 +2,7 @@
 
 ## Architecture Overview
 
-Python control stack running on a Raspberry Pi 5. Entry point is `pi_app/app/main.py` (a tight control loop at ~30 Hz). All subsystem state is threaded and shared via lightweight dataclasses; the main loop reads latest snapshots and publishes commands.
+Python control stack running on a Raspberry Pi 5. Entry point is `pi_app/app/main.py` (a tight control loop at ~30 Hz; vision is 15 fps via `OakDetectionConfig.camera_fps`, not 30). All subsystem state is threaded and shared via lightweight dataclasses; the main loop reads latest snapshots and publishes commands.
 
 ```
 pi_app/
@@ -116,14 +116,16 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
   0.30 s grace hold precedes the persistence decay. The depth corridor needs
   400 px of support and 2-poll persistence (phantom obstacles in low sun).
   `VescConfig.max_erpm` 20000 (was 15000; 1.6 m/s top speed in every mode).
-  **Not field-validated yet** -- procedure in the doc.
-- **Third follow-me round (2026-09-20, `docs/follow_me_run_2026-09-20.md`)**:
+  Steering gains from this round were wrong (see round 3). Width filter,
+  corridor, `max_erpm` and the emitted-byte speed loop ran on the
+  2026-09-20 17:11 and 18:09 validations.
+- **Third follow-me round (2026-09-20 14:58, `docs/follow_me_run_2026-09-20.md`)**:
   the 09-19 "0.22 deg/s per L-R byte" yaw gain was WRONG (64 % of logged
   `imu.yaw_rate_dps` samples were 0.0: the duplicate-read freshness bound in
   `oak_imu.py` was 50 ms while the sample age under follow-me load is
   90-290 ms; now 0.20 s). From the heading derivative the plant is
-  **0.65-0.71 deg/s per byte with ~0.45 s lag**. The 09-19 gains made the
-  robot weave, so: `pid_lateral_kp` 0.5, `max_steer_offset_byte` 32,
+  **0.65-0.71 deg/s per byte**. The 09-19 gains made the robot weave, so:
+  `pid_lateral_kp` 0.5, `max_steer_offset_byte` 32,
   `direct_mode_max_steer_byte` 32, `steer_slew_per_tick` 0.25. **Never fit a
   plant from `yaw_rate_dps`; use the heading derivative (the analyzer does).**
   The same run hard-stopped five times because the tracklet id on a lone
@@ -131,7 +133,26 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
   0) and the sticky lock read each new confirmed id as a different person.
   Fix: centre-distance fallback in `TrackletTracker` (`tracklet_center_gate_*`)
   and a single-candidate rebind in `TargetTracker._find_committed` (exactly
-  one candidate, <= 0.5 s, base depth gate). **Not field-validated yet.**
+  one candidate, <= 0.5 s, base depth gate). **Validated** first 50 s of
+  the 15:49 run (100 % fresh, no hard stops, no weave).
+- **Fourth follow-me round (2026-09-20 15:49 near-run-over; validated 17:11)**:
+  identity gates decide whom to follow; they never hide a closer range from
+  the speed command. Config/telemetry:
+  `nearest_person_speed_limit_enabled`, `nearest_person_margin_m`,
+  `close_unknown_bbox_height`, `target_depth_coast_max_s`. Sampler
+  `depth_status`: `ok` / `no_support` / `ambiguous` / `far_veto` /
+  `no_frame` / `height_veto` (off). `person_depth_*` knobs in
+  `FollowMeConfig`. Log: `arm_20260920_154844.log` / `arm_20260920_171057.log`.
+- **Fifth follow-me round (vision latency, validated 18:09
+  `arm_20260920_180915.log`)**: `OakDetectionConfig.camera_fps = 15.0` is
+  **load-bearing — NEVER remove it without re-measuring `oak.det_latency_s`**.
+  Also: `nn_input_queue_size = 1` (alone did not fix latency),
+  `vision_deadline_sleep`, `poll_detections_first`, MediaPipe Hands is not
+  run in RC-started FOLLOW_ME. Idle A/B: read `oak.det_latency_s` from
+  `logs/latest.log` (no field walk). Under load p50 0.20 s at 15 fps
+  (was 0.80 s at 8 fps). Motor→yaw lag 0.47 → 0.12 s was heading latency
+  from a blocked vision thread, not the drivetrain. Steer gains left at
+  kp 0.5 / cap 32.
 - The onboard IMU is a **BMI270**: raw/calibrated accel + gyro only. `ROTATION_VECTOR` / `GAME_ROTATION_VECTOR` / magnetometer are BNO08x-only and return nothing on this device. Do not try them. Refer to `docs/oak_d_lite_capability_audit.md`.
 
 ### Waypoint Navigation
@@ -147,10 +168,20 @@ Daly SPIM08HP over BLE (`bleak`). Polls SOC / cell voltages / temp / MOSFET stat
 
 ## Known Issues
 
-- **VESC RPM telemetry — RESOLVED 2026-06-11**: bench test (`tools/vesc_rpm_bench.py`, wheels off ground) proved ERPM readback works: commanded +1500, steady-state error −1.0% L / −0.4% R, ~100 Hz per STATUS type, zero parse errors. The old "always 0" observation did not reproduce. Two follow-ups: (1) confirm `vesc_left_rpm`/`vesc_right_rpm` in /api/telemetry go nonzero during the next real drive, then consider re-enabling the velocity PID (`speed_kp/ki/kd` in config.py, currently 0). (2) VESC firmware has a ~1 s command timeout — motors stop if drive commands are not refreshed (confirmed on hardware; the service's 15–30 Hz loop clears it easily, and it acts as a free deadman).
+- **VESC RPM telemetry — RESOLVED 2026-06-11**: bench test (`tools/vesc_rpm_bench.py`, wheels off ground) proved ERPM readback works: commanded +1500, steady-state error −1.0% L / −0.4% R, ~100 Hz per STATUS type, zero parse errors. The old "always 0" observation did not reproduce. Velocity PID is on (`speed_kp` 0.6, `speed_ki` 0.15, `speed_kd` 0.0); 2026-09-20 follow-me logs show nonzero `left_rpm`/`right_rpm`. VESC firmware has a ~1 s command timeout — motors stop if drive commands are not refreshed (confirmed on hardware; the service's ~30 Hz control loop clears it easily, and it acts as a free deadman).
 - **OAK USB disconnect — RESOLVED 2026-06-11**: `OakDepthReader._run_pipeline` is now a supervisor loop (`pi_app/hardware/oak_depth.py`). On a fatal device/communication error (USB drop / XLink teardown), the worker thread closes the device defensively, marks health `connected=False`, backs off (2s → 5s → then every 10s, interruptible by `stop()` via `Event.wait`), optionally waits for re-enumeration, then rebuilds the pipeline and resumes — no service restart needed. The depth timestamp is **not** refreshed during the outage, so `get_min_distance()` age keeps growing and the staleness fail-safe still stops autonomous motion. `get_health()` adds `connected`, `reconnect_count`, `last_disconnect_ts`. Covered by `pi_app/tests/test_oak_reconnect.py`.
 - **IMU heading drift**: gyro-only integration drifts over time (minutes). GPS COG alignment (in progress) will partially mitigate this at session start.
 - **OAK yaw chalk under-report (2026)**: Two layers. (1) Sample identity — no host-dt double-integrate of cached packets (6950e14). (2) Host-side loss — shared vision loop drained IMU at poll rate but kept only latest/bounded tail; sparse snapshots gap-froze and under-reported (~73/81° for physical 90° at scale=1 under load; light pipeline accurate). **Fix**: `ImuYawProducer` integrates every drained packet on the producer (`oak_depth._poll_imu`); enlarged nonblocking host IMU queue (512 **message slots**, multi-second at batch≈1 — not a hard 5.1 s guarantee; multi-packet msgs possible); producer `max_packets_per_drain=512` aligned so a full host backlog is not silently halved; `OakImuReader` applies scale once and preserves unread cum across generation bumps (incl. +turn/−turn back to cum≈0). Freeze only on integrated-counter rewind — never near-zero cum heuristic. **Production defaults (field-validated 2026-07-12): `oak_yaw_rate_source="gyro_y"`, `oak_yaw_rate_scale=1.0` — never restore auto/0.46.** Loss proof is integrated≈received + backlog/gap + drain-batch size — not coalesced=0 and not host-queue occupancy (overwrite not observable via tryGet). See `docs/heading_tuning.md`.
+- **Hand gestures do not work as deployed**: FIVE is only honoured in
+  gesture phase `ACTIVE` (RC-started FOLLOW_ME never enters it); a 3-4-3
+  start is cancelled one tick later by RC ch4 low; MediaPipe Hands on the
+  640×480 stream sees ~22 px at 1.5 m vs 40-60 px needed. Fix, do not
+  remove; RC stays the authority for now. See
+  `docs/gesture_review_2026-09-20.md`.
+- **Video recording is suppressed whenever gestures are configured**
+  (`oak_depth.py`: the H.265 encoder is skipped when `GestureConfig.enabled`
+  and `pi_app/models/hand/` exists; journal line
+  `OAK recorder: no recording queues available`).
 
 ## Config
 
