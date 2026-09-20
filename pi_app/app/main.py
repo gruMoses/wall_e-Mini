@@ -980,6 +980,7 @@ def run() -> None:
                         imu_dt_ms=imu_dt_ms,
                         imu_motion_witness_still=imu_motion_witness_still,
                         events=events,
+                        oak_camera_health=oak_camera_health,
                     )
                     line = json.dumps(log_obj)
                     # Do not print structured JSON to console; keep file logging only

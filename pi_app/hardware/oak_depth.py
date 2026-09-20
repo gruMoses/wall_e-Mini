@@ -109,6 +109,239 @@ def _corridor_min_support_px(min_px: int, min_frac: float, corridor_pixel_count:
     return max(int(min_px), frac_px)
 
 
+# Person-range sampler (2026-09-20). OAK-D Lite is PASSIVE stereo; outdoors
+# only 5-10 percent of depth pixels are valid. See FollowMeConfig comments
+# next to depth_ema_alpha for the three field failures this replaces.
+_PERSON_DEPTH_EDGE_EPS = 0.01
+_VISION_RATE_WINDOW_S = 2.0
+
+
+@dataclass(frozen=True)
+class PersonDepthSample:
+    """Stereo person-range sample. z_m is 0.0 whenever depth_status != "ok"."""
+    x_m: float = 0.0
+    z_m: float = 0.0
+    depth_status: str = "no_frame"  # "ok" | "no_support" | "height_veto" | "no_frame"
+    depth_valid_px: int = 0
+    depth_roi_px: int = 0
+    z_stereo_m: float = 0.0
+    z_height_m: float = 0.0
+    z_spread_m: float = 0.0
+
+
+def _record_event_ts(times: list, now: float, window_s: float = _VISION_RATE_WINDOW_S) -> None:
+    """Append ``now`` and drop samples older than the moving-rate window."""
+    times.append(now)
+    cutoff = now - window_s
+    n_drop = 0
+    for t in times:
+        if t < cutoff:
+            n_drop += 1
+        else:
+            break
+    if n_drop:
+        del times[:n_drop]
+
+
+def _window_rate(times, now: float, window_s: float = _VISION_RATE_WINDOW_S) -> float:
+    """Events-per-second over the last ``window_s`` seconds (count / window)."""
+    cutoff = now - window_s
+    n = 0
+    for t in times:
+        if t >= cutoff:
+            n += 1
+    return n / window_s if window_s > 0.0 else 0.0
+
+
+def _nn_msg_latency_s(msg) -> float | None:
+    """Host age of an NN/detection message, or None if no usable timestamp.
+
+    DepthAI NNData / ImgDetections expose getTimestamp() as a host-synced
+    timedelta on this stack (see tools/perf/oak_timing_probe.py). Device
+    timestamps (getTimestampDevice) are on the device clock and cannot be
+    subtracted from time.monotonic(). If getTimestamp is missing, or the
+    implied age is negative / implausibly large (wrong time base), latency
+    is omitted.
+    """
+    getter = getattr(msg, "getTimestamp", None)
+    if not callable(getter):
+        return None
+    try:
+        ts = getter()
+    except Exception:
+        return None
+    if ts is None:
+        return None
+    try:
+        ts_s = float(ts.total_seconds()) if hasattr(ts, "total_seconds") else float(ts)
+    except (TypeError, ValueError):
+        return None
+    age = time.monotonic() - ts_s
+    if age < 0.0 or age > 5.0:
+        return None
+    return age
+
+
+def sample_person_depth(
+    bbox,
+    depth_frame,
+    fx: float,
+    cx_principal: float,
+    *,
+    min_distance_m: float = 0.5,
+    person_depth_sample_max_m: float = 9.0,
+    person_depth_min_valid_px: int = 12,
+    person_depth_min_valid_frac: float = 0.02,
+    person_assumed_height_m: float = 1.75,
+    person_depth_height_veto_ratio: float = 0.0,
+    detect_camera_vfov_deg: float = 42.13,
+) -> PersonDepthSample:
+    """Torso-band stereo range for a person bbox. Pure; no device I/O.
+
+    ROI is the torso band (inner 50 percent of width, 20-55 percent of
+    height from the top). If the box touches the left frame edge the
+    horizontal ROI shifts to the right half of the box (50-90 percent of
+    width); if it touches the right edge, 10-50 percent — erosion only
+    moves the sample window, it discards nothing. Valid pixels use
+    (min_distance_m, person_depth_sample_max_m) so a person at 6.0-6.5 m
+    is not discarded by FollowMeConfig.max_distance_m. z_height_m is
+    computed as a diagnostic (never a source of z). The height-consistency
+    veto is off unless person_depth_height_veto_ratio > 0; ratio <= 0
+    never returns "height_veto". z_m is 0.0 unless depth_status == "ok".
+    """
+    import numpy as np
+
+    xmin, ymin, xmax, ymax = (
+        float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]),
+    )
+    bbox_w = xmax - xmin
+    bbox_h = ymax - ymin
+
+    # Same VFOV convention as DetectionFilter Rule 3: implied_h =
+    # bbox_h * z * 2 * tan(vfov/2), so z_height = assumed_h / (bbox_h * 2 * tan).
+    top_bottom_clipped = (
+        ymin <= _PERSON_DEPTH_EDGE_EPS or ymax >= (1.0 - _PERSON_DEPTH_EDGE_EPS)
+    )
+    if (not top_bottom_clipped) and bbox_h > 0.0 and detect_camera_vfov_deg > 0.0:
+        z_height_m = float(person_assumed_height_m) / (
+            bbox_h * 2.0 * math.tan(math.radians(float(detect_camera_vfov_deg)) / 2.0)
+        )
+    else:
+        z_height_m = 0.0
+
+    def _result(
+        *,
+        status: str,
+        x_m: float = 0.0,
+        z_m: float = 0.0,
+        valid_px: int = 0,
+        roi_px: int = 0,
+        z_stereo_m: float = 0.0,
+        z_spread_m: float = 0.0,
+    ) -> PersonDepthSample:
+        return PersonDepthSample(
+            x_m=float(x_m),
+            z_m=float(z_m),
+            depth_status=status,
+            depth_valid_px=int(valid_px),
+            depth_roi_px=int(roi_px),
+            z_stereo_m=float(z_stereo_m),
+            z_height_m=float(z_height_m),
+            z_spread_m=float(z_spread_m),
+        )
+
+    if depth_frame is None:
+        return _result(status="no_frame")
+
+    frame = np.asarray(depth_frame)
+    if frame.ndim < 2 or frame.shape[0] <= 0 or frame.shape[1] <= 0:
+        return _result(status="no_support")
+
+    dh, dw = int(frame.shape[0]), int(frame.shape[1])
+
+    left_edge = xmin <= _PERSON_DEPTH_EDGE_EPS
+    right_edge = xmax >= (1.0 - _PERSON_DEPTH_EDGE_EPS)
+    if left_edge and not right_edge:
+        # Box against the left edge: sample the right half of the box.
+        x0_n = xmin + 0.50 * bbox_w
+        x1_n = xmin + 0.90 * bbox_w
+    elif right_edge and not left_edge:
+        # Box against the right edge: sample the left half of the box.
+        x0_n = xmin + 0.10 * bbox_w
+        x1_n = xmin + 0.50 * bbox_w
+    else:
+        x0_n = xmin + 0.25 * bbox_w
+        x1_n = xmin + 0.75 * bbox_w
+    y0_n = ymin + 0.20 * bbox_h
+    y1_n = ymin + 0.55 * bbox_h
+
+    x0d = max(0, min(dw, int(x0_n * dw)))
+    x1d = max(0, min(dw, int(x1_n * dw)))
+    y0d = max(0, min(dh, int(y0_n * dh)))
+    y1d = max(0, min(dh, int(y1_n * dh)))
+    if x1d <= x0d:
+        x1d = min(dw, x0d + 1)
+    if y1d <= y0d:
+        y1d = min(dh, y0d + 1)
+
+    roi = frame[y0d:y1d, x0d:x1d]
+    roi_px = int(roi.size)
+    min_mm = int(float(min_distance_m) * 1000.0)
+    max_mm = int(float(person_depth_sample_max_m) * 1000.0)
+    if roi_px <= 0:
+        return _result(status="no_support", roi_px=0)
+
+    valid = roi[(roi > min_mm) & (roi < max_mm)]
+    valid_px = int(valid.size)
+    z_stereo_m = 0.0
+    z_spread_m = 0.0
+    if valid_px > 0:
+        z_stereo_m = float(np.median(valid)) / 1000.0
+        p25, p75 = np.percentile(valid, [25.0, 75.0])
+        z_spread_m = (float(p75) - float(p25)) / 1000.0
+
+    min_px = int(person_depth_min_valid_px)
+    min_frac_px = float(person_depth_min_valid_frac) * float(roi_px)
+    if valid_px < min_px or valid_px < min_frac_px:
+        return _result(
+            status="no_support",
+            valid_px=valid_px,
+            roi_px=roi_px,
+            z_stereo_m=z_stereo_m,
+            z_spread_m=z_spread_m,
+        )
+
+    ratio = float(person_depth_height_veto_ratio)
+    if (
+        ratio > 0.0
+        and z_height_m > 0.0
+        and z_stereo_m < ratio * z_height_m
+    ):
+        return _result(
+            status="height_veto",
+            valid_px=valid_px,
+            roi_px=roi_px,
+            z_stereo_m=z_stereo_m,
+            z_spread_m=z_spread_m,
+        )
+
+    z_m = z_stereo_m
+    x_m = 0.0
+    if fx > 0.0 and z_m > 0.0:
+        # ROI-independent bbox centre, same pinhole projection as before.
+        cx_d = int(((xmin + xmax) / 2.0) * dw)
+        x_m = ((float(cx_d) - float(cx_principal)) / float(fx)) * z_m
+    return _result(
+        status="ok",
+        x_m=x_m,
+        z_m=z_m,
+        valid_px=valid_px,
+        roi_px=roi_px,
+        z_stereo_m=z_stereo_m,
+        z_spread_m=z_spread_m,
+    )
+
+
 class _CorridorPersistence:
     """Report max(current, last persistence_polls-1 corridor estimates).
 
@@ -260,6 +493,7 @@ class ObjectDetection:
     z_m: float        # forward distance in metres
     bbox: tuple       # (xmin, ymin, xmax, ymax) normalised 0-1
     safety_tier: str  # "stop", "slow", or "log"
+    depth_status: str = "ok"  # person-sampler status; default "ok" for device-spatial paths
 
 
 @dataclass
@@ -661,6 +895,12 @@ class OakDepthReader:
         self._last_depth_recv_ts = 0.0
         self._depth_recv_count = 0
         self._depth_quality_reject_count = 0
+        # 2 s moving rates for the vision thread (2026-09-20): the 14:58 run
+        # suggested the loop runs at 6-10 Hz in follow-me, not the 15 Hz
+        # everything assumes, and nothing logged it.
+        self._det_event_ts: list[float] = []
+        self._depth_event_ts: list[float] = []
+        self._det_latency_s: float | None = None
         self._last_detection_poll_ts = 0.0
         self._last_rgb_poll_ts = 0.0
         self._last_pipeline_error_msg = ""
@@ -1002,6 +1242,9 @@ class OakDepthReader:
             chip_temp_c = self._chip_temp_c
             chip_temp_css_c = self._chip_temp_css_c
             chip_temp_mss_c = self._chip_temp_mss_c
+            det_event_ts = list(self._det_event_ts)
+            depth_event_ts = list(self._depth_event_ts)
+            det_latency_s = self._det_latency_s
 
         loop_age_s = (now - loop_ts) if loop_ts > 0.0 else float("inf")
         depth_age_s = (now - depth_ts) if depth_ts > 0.0 else float("inf")
@@ -1019,6 +1262,8 @@ class OakDepthReader:
         # "Critical" stale means obstacle/depth safety path is unhealthy.
         # Detection/RGB stalls are degraded but should not hard-mark pipeline stale.
         critical_stale = loop_stale or depth_stale
+        det_fps = _window_rate(det_event_ts, now)
+        depth_fps = _window_rate(depth_event_ts, now)
 
         return {
             "pipeline_running": running,
@@ -1051,6 +1296,9 @@ class OakDepthReader:
             "chip_temp_c": round(chip_temp_c, 1) if chip_temp_c is not None else None,
             "chip_temp_css_c": round(chip_temp_css_c, 1) if chip_temp_css_c is not None else None,
             "chip_temp_mss_c": round(chip_temp_mss_c, 1) if chip_temp_mss_c is not None else None,
+            "det_fps": round(det_fps, 2),
+            "depth_fps": round(depth_fps, 2),
+            "det_latency_s": round(det_latency_s, 3) if det_latency_s is not None else None,
         }
 
     @property
@@ -1864,6 +2112,7 @@ class OakDepthReader:
                 self._last_depth_recv_ts = recv_now
                 self._depth_recv_count += 1
                 self._depth_state.raw_frame = frame
+                _record_event_ts(self._depth_event_ts, recv_now)
             h, w = frame.shape
 
             rh = self._obs_cfg.roi_height_pct
@@ -1984,10 +2233,12 @@ class OakDepthReader:
             # safety_stop_radius_m forces the effective obstacle distance to 0,
             # regardless of what the depth corridor reports.
             safety_stop_radius = float(getattr(self._obs_cfg, "safety_stop_radius_m", 0.8))
+            safety_stop_bbox_width = float(getattr(self._obs_cfg, "safety_stop_bbox_width", 0.0))
             with self._lock:
                 all_dets = list(self._all_dets_state.detections)
             effective_min_mm, _stop_det = self._apply_safety_tier_override(
-                all_dets, corridor_p5_mm, safety_stop_radius
+                all_dets, corridor_p5_mm, safety_stop_radius,
+                safety_stop_bbox_width=safety_stop_bbox_width,
             )
             if _stop_det is not None:
                 logger.info(
@@ -2087,7 +2338,8 @@ class OakDepthReader:
 
     @staticmethod
     def _apply_safety_tier_override(detections, corridor_p5_mm: float,
-                                    safety_stop_radius_m: float):
+                                    safety_stop_radius_m: float,
+                                    safety_stop_bbox_width: float = 0.0):
         """Canonical YOLO person/animal stop tier (pure, hardware-free).
 
         Lowers the effective forward obstacle distance (mm) for "stop"-tier
@@ -2095,7 +2347,12 @@ class OakDepthReader:
           * a stop-tier detection within ``safety_stop_radius_m`` forces a hard
             stop — returns (0.0, that detection);
           * a more-distant stop-tier detection nearer than the corridor reading
-            pulls the effective distance down to it.
+            pulls the effective distance down to it;
+          * a stop-tier detection whose depth_status is not "ok" (getattr
+            default "ok") and whose bbox width >= ``safety_stop_bbox_width``
+            forces the same hard stop. Default 0.0 disables the size rule so
+            existing callers are unchanged. Detections with z_m <= 0 are
+            ignored by the distance rule (unchanged).
 
         The returned distance is what poll_depth stores as ``min_distance_m``,
         so it flows through get_min_distance() ->
@@ -2106,13 +2363,28 @@ class OakDepthReader:
         that forced the hard stop, else ``None``.
         """
         effective_min_mm = corridor_p5_mm
+        width_thresh = float(safety_stop_bbox_width)
         for det in detections:
-            if getattr(det, "safety_tier", "") == "stop" and getattr(det, "z_m", 0) > 0:
+            if getattr(det, "safety_tier", "") != "stop":
+                continue
+            z_m = getattr(det, "z_m", 0)
+            if z_m > 0:
                 if det.z_m < safety_stop_radius_m:
                     return 0.0, det
                 det_mm = det.z_m * 1000.0
                 if det_mm < effective_min_mm:
                     effective_min_mm = det_mm
+                continue
+            if width_thresh <= 0.0:
+                continue
+            if getattr(det, "depth_status", "ok") == "ok":
+                continue
+            bbox = getattr(det, "bbox", None)
+            if bbox is None or len(bbox) < 4:
+                continue
+            width = float(bbox[2]) - float(bbox[0])
+            if width >= width_thresh:
+                return 0.0, det
         return effective_min_mm, None
 
     @staticmethod
@@ -2176,6 +2448,30 @@ class OakDepthReader:
                 results.append((int(c), float(cls_scores[i]), x1n, y1n, x2n, y2n))
         return results
 
+    def _sample_person_depth_from_bbox(self, bbox, depth_frame) -> PersonDepthSample:
+        """Full person-range sample (torso ROI, support floor; height is diagnostic)."""
+        fx = 1.0
+        cx_principal = 0.0
+        if depth_frame is not None:
+            dh, dw = depth_frame.shape[0], depth_frame.shape[1]
+            fx, _fy, cx_principal, _cy = self._intrinsics_for(dw, dh)
+        cfg = self._fm_cfg
+        return sample_person_depth(
+            bbox,
+            depth_frame,
+            fx,
+            cx_principal,
+            min_distance_m=float(cfg.min_distance_m),
+            person_depth_sample_max_m=float(getattr(cfg, "person_depth_sample_max_m", 9.0)),
+            person_depth_min_valid_px=int(getattr(cfg, "person_depth_min_valid_px", 12)),
+            person_depth_min_valid_frac=float(getattr(cfg, "person_depth_min_valid_frac", 0.02)),
+            person_assumed_height_m=float(getattr(cfg, "person_assumed_height_m", 1.75)),
+            person_depth_height_veto_ratio=float(
+                getattr(cfg, "person_depth_height_veto_ratio", 0.0)
+            ),
+            detect_camera_vfov_deg=float(getattr(cfg, "detect_camera_vfov_deg", 42.13)),
+        )
+
     def _compute_spatial_from_depth(
         self,
         x1_n: float,
@@ -2186,36 +2482,15 @@ class OakDepthReader:
     ) -> tuple:
         """Sample the stereo depth frame at a bbox to get (x_m, z_m).
 
-        Uses the inner 50% of the bounding box to avoid background contamination,
-        then derives lateral x_m via pinhole projection with the camera's HFoV.
-        Returns (0.0, 0.0) when no valid depth pixels are found.
+        Delegates to the torso-band sampler. z_m is 0.0 when the sample is
+        not "ok" (no frame, too few valid pixels, or height veto if that
+        check is enabled). Existing callers that only want the pair keep
+        this signature.
         """
-        import math
-        import numpy as np
-
-        if depth_frame is None:
-            return 0.0, 0.0
-
-        dh, dw = depth_frame.shape
-        min_depth_mm = int(self._fm_cfg.min_distance_m * 1000)
-        max_depth_mm = int(self._fm_cfg.max_distance_m * 1000)
-
-        cx_d = int(((x1_n + x2_n) / 2.0) * dw)
-        cy_d = int(((y1_n + y2_n) / 2.0) * dh)
-        bw_half = max(1, int((x2_n - x1_n) * 0.5 * dw / 2))
-        bh_half = max(1, int((y2_n - y1_n) * 0.5 * dh / 2))
-        x0d = max(0, cx_d - bw_half); x1d = min(dw, cx_d + bw_half)
-        y0d = max(0, cy_d - bh_half); y1d = min(dh, cy_d + bh_half)
-
-        roi = depth_frame[y0d:y1d, x0d:x1d]
-        valid = roi[(roi > min_depth_mm) & (roi < max_depth_mm)]
-        if valid.size == 0:
-            return 0.0, 0.0
-
-        z_m = float(np.median(valid)) / 1000.0
-        fx, _fy, cx_principal, _cy = self._intrinsics_for(dw, depth_frame.shape[0])
-        x_m = ((cx_d - cx_principal) / fx) * z_m
-        return x_m, z_m
+        sample = self._sample_person_depth_from_bbox(
+            (x1_n, y1_n, x2_n, y2_n), depth_frame,
+        )
+        return sample.x_m, sample.z_m
 
     def _assign_track_ids(self, persons: list) -> list:
         """Run the host-side tracklet layer over person detections.
@@ -2257,6 +2532,12 @@ class OakDepthReader:
                     break
                 in_det = newer
 
+            det_now = time.monotonic()
+            det_latency_s = _nn_msg_latency_s(in_det)
+            with self._lock:
+                _record_event_ts(self._det_event_ts, det_now)
+                self._det_latency_s = det_latency_s
+
             person_label = self._person_label
             fm_conf = self._fm_cfg.detection_confidence
             persons: list[PersonDetection] = []
@@ -2283,17 +2564,25 @@ class OakDepthReader:
                     depth_frame = self._depth_state.raw_frame
 
                 for (cls_id, conf, x1n, y1n, x2n, y2n) in parsed:
-                    x_m, z_m = self._compute_spatial_from_depth(x1n, y1n, x2n, y2n, depth_frame)
-                    label_name = self._get_label_name(cls_id)
                     bbox = (x1n, y1n, x2n, y2n)
+                    sample = self._sample_person_depth_from_bbox(bbox, depth_frame)
+                    x_m, z_m = sample.x_m, sample.z_m
+                    label_name = self._get_label_name(cls_id)
                     tier = self._get_safety_tier(cls_id)
                     all_dets.append(ObjectDetection(
                         label=cls_id, label_name=label_name, confidence=conf,
                         x_m=x_m, z_m=z_m, bbox=bbox, safety_tier=tier,
+                        depth_status=sample.depth_status,
                     ))
-                    if cls_id == person_label and conf >= fm_conf and z_m > 0.0:
+                    if cls_id == person_label and conf >= fm_conf:
                         persons.append(PersonDetection(
                             x_m=x_m, z_m=z_m, confidence=conf, bbox=bbox,
+                            depth_status=sample.depth_status,
+                            depth_valid_px=sample.depth_valid_px,
+                            depth_roi_px=sample.depth_roi_px,
+                            z_stereo_m=sample.z_stereo_m,
+                            z_height_m=sample.z_height_m,
+                            z_spread_m=sample.z_spread_m,
                         ))
 
                 persons = self._assign_track_ids(persons)
