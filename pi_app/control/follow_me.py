@@ -82,6 +82,19 @@ class PersonDetection:
     confidence: float
     bbox: tuple[float, float, float, float]  # xmin, ymin, xmax, ymax (normalised 0–1)
     track_id: int | None = None
+    # Person-range diagnostics from the stereo sampler (2026-09-20). z_m is 0.0
+    # whenever depth_status != "ok": the sampler says "I don't know" instead
+    # of publishing a median of stray pixels.
+    #   "ok"          stereo median with enough support, consistent with bbox height
+    #   "no_support"  too few valid stereo pixels in the ROI
+    #   "height_veto" stereo disagrees with the range the bbox height implies
+    #   "no_frame"    no depth frame was available
+    depth_status: str = "ok"
+    depth_valid_px: int = -1     # valid stereo pixels in the sampled ROI (-1 = not reported)
+    depth_roi_px: int = -1       # ROI size in pixels (-1 = not reported)
+    z_stereo_m: float = 0.0      # raw stereo median even when vetoed (diagnostic only)
+    z_height_m: float = 0.0      # range implied by bbox height; 0.0 when the box is clipped top/bottom
+    z_spread_m: float = 0.0      # p75 - p25 of the valid stereo pixels (m)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
