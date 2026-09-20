@@ -16,6 +16,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from config import FollowMeConfig, ObstacleAvoidanceConfig
+from pi_app.control.follow_me import PersonDetection
 from pi_app.hardware.oak_depth import (
     OakDepthReader,
     sample_person_depth,
@@ -32,12 +33,14 @@ def _fx_cx(frame):
 def _sample(bbox, frame, **over):
     cfg = FollowMeConfig()
     kwargs = dict(
-        min_distance_m=cfg.min_distance_m,
+        person_depth_sample_min_m=cfg.person_depth_sample_min_m,
         person_depth_sample_max_m=cfg.person_depth_sample_max_m,
         person_depth_min_valid_px=cfg.person_depth_min_valid_px,
         person_depth_min_valid_frac=cfg.person_depth_min_valid_frac,
         person_assumed_height_m=cfg.person_assumed_height_m,
         person_depth_height_veto_ratio=cfg.person_depth_height_veto_ratio,
+        person_depth_fullheight_max_m=cfg.person_depth_fullheight_max_m,
+        person_depth_max_spread_m=cfg.person_depth_max_spread_m,
         detect_camera_vfov_deg=cfg.detect_camera_vfov_deg,
     )
     kwargs.update(over)
@@ -175,6 +178,79 @@ class TestPersonDepthSampler(unittest.TestCase):
         self.assertAlmostEqual(result.z_m, 0.9, delta=0.05)
         self.assertAlmostEqual(result.z_height_m, 2.5, delta=0.15)
 
+    def test_close_person_pixels_below_follow_min_are_kept(self):
+        # H2a: 400 mm is below min_distance_m 0.5 but above the sampler
+        # floor 0.30. 30 stray far pixels must not win the median.
+        bbox = (0.20, 0.10, 0.80, 0.90)
+        frame = np.zeros((200, 200), dtype=np.uint16)
+        _fill_norm(frame, 0.35, 0.26, 0.65, 0.54, 400)
+        frame[100, 100:130] = 4000
+        result = _sample(bbox, frame)
+        self.assertEqual(result.depth_status, "ok")
+        self.assertAlmostEqual(result.z_m, 0.4, delta=0.05)
+        self.assertLess(result.z_m, 1.0)
+
+    def test_fullheight_background_is_far_veto(self):
+        # H2b: box clipped top AND bottom, only background pixels valid.
+        bbox = (0.40, 0.0, 0.60, 1.0)
+        frame = np.zeros((200, 200), dtype=np.uint16)
+        frame[50:52, 90:110] = 5000  # 40 px at 5.0 m, rest invalid
+        result = _sample(bbox, frame)
+        self.assertEqual(result.depth_status, "far_veto")
+        self.assertEqual(result.z_m, 0.0)
+        self.assertAlmostEqual(result.z_stereo_m, 5.0, delta=0.05)
+
+    def test_unclipped_far_person_in_front_of_wall_is_ok(self):
+        # H2b: same 40 background-range pixels, box NOT clipped — a far
+        # small person in front of a wall is a legitimate measurement.
+        bbox = (0.40, 0.10, 0.60, 0.90)
+        frame = np.zeros((200, 200), dtype=np.uint16)
+        frame[60:62, 90:110] = 5000
+        result = _sample(bbox, frame)
+        self.assertEqual(result.depth_status, "ok")
+        self.assertAlmostEqual(result.z_m, 5.0, delta=0.05)
+
+    def test_bimodal_roi_is_ambiguous(self):
+        # H2c: two surfaces; median is not a measurement.
+        bbox = (0.40, 0.10, 0.60, 0.90)
+        frame = np.zeros((200, 200), dtype=np.uint16)
+        frame[60, 90:110] = 2600
+        frame[61, 90:110] = 5800
+        result = _sample(bbox, frame)
+        self.assertEqual(result.depth_status, "ambiguous")
+        self.assertEqual(result.z_m, 0.0)
+        self.assertGreater(result.z_spread_m, 1.0)
+
+    def test_tight_far_cluster_is_ok(self):
+        bbox = (0.20, 0.10, 0.80, 0.90)
+        frame = np.zeros((200, 200), dtype=np.uint16)
+        _fill_norm(frame, 0.35, 0.26, 0.65, 0.54, 5800)
+        frame[52, 70:130] = 5700
+        frame[107, 70:130] = 5900
+        result = _sample(bbox, frame)
+        self.assertEqual(result.depth_status, "ok")
+        self.assertGreaterEqual(result.z_m, 5.7)
+        self.assertLessEqual(result.z_m, 5.9)
+
+    def test_nan_bbox_publishes_no_frame(self):
+        # H5: int(nan) must not freeze the person list.
+        frame = np.zeros((200, 200), dtype=np.uint16)
+        _fill_norm(frame, 0.20, 0.10, 0.80, 0.90, 2500)
+        reader = OakDepthReader(ObstacleAvoidanceConfig(), FollowMeConfig())
+        nan_bbox = (float("nan"), 0.10, 0.80, 0.90)
+        sample = reader._sample_person_depth_from_bbox(nan_bbox, frame)
+        self.assertEqual(sample.depth_status, "no_frame")
+        self.assertEqual(sample.z_m, 0.0)
+        persons = [PersonDetection(
+            x_m=sample.x_m, z_m=sample.z_m, confidence=0.9, bbox=nan_bbox,
+            depth_status=sample.depth_status,
+        )]
+        self.assertEqual(len(persons), 1)
+        self.assertEqual(persons[0].depth_status, "no_frame")
+        # A later good box on the same reader still publishes.
+        good = reader._sample_person_depth_from_bbox((0.20, 0.10, 0.80, 0.90), frame)
+        self.assertEqual(good.depth_status, "ok")
+
     def test_compute_spatial_from_depth_still_returns_pair(self):
         bbox = (0.20, 0.10, 0.80, 0.90)
         frame = np.zeros((200, 200), dtype=np.uint16)
@@ -213,9 +289,12 @@ class TestSafetyStopSizeBackstop(unittest.TestCase):
         self.assertEqual(eff_mm, 0.0)
         self.assertIs(stop_det, det)
 
-    def test_height_veto_narrow_bbox_does_not_stop(self):
-        # Injects depth_status; does not depend on the (now off) default veto.
-        det = _StopDet("stop", 0.0, "height_veto", bbox=(0.82, 0.10, 1.00, 0.72))  # width 0.18
+    def test_unknown_range_narrow_bbox_does_not_estop(self):
+        # Incident-width box (0.18) with no range must not e-stop MANUAL
+        # driving: the obstacle stop tier is mode-independent. Follow-me
+        # handles this case itself with its close-by-geometry rule
+        # (full-height box + unknown range => zero forward speed).
+        det = _StopDet("stop", 0.0, "no_frame", bbox=(0.82, 0.10, 1.00, 0.72))  # width 0.18
         eff_mm, stop_det = OakDepthReader._apply_safety_tier_override(
             [det],
             corridor_p5_mm=3000.0,

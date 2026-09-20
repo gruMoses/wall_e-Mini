@@ -121,7 +121,7 @@ class PersonDepthSample:
     """Stereo person-range sample. z_m is 0.0 whenever depth_status != "ok"."""
     x_m: float = 0.0
     z_m: float = 0.0
-    depth_status: str = "no_frame"  # "ok" | "no_support" | "height_veto" | "no_frame"
+    depth_status: str = "no_frame"  # "ok" | "no_support" | "height_veto" | "far_veto" | "ambiguous" | "no_frame"
     depth_valid_px: int = 0
     depth_roi_px: int = 0
     z_stereo_m: float = 0.0
@@ -188,12 +188,14 @@ def sample_person_depth(
     fx: float,
     cx_principal: float,
     *,
-    min_distance_m: float = 0.5,
+    person_depth_sample_min_m: float = 0.30,
     person_depth_sample_max_m: float = 9.0,
     person_depth_min_valid_px: int = 12,
     person_depth_min_valid_frac: float = 0.02,
     person_assumed_height_m: float = 1.75,
     person_depth_height_veto_ratio: float = 0.0,
+    person_depth_fullheight_max_m: float = 3.5,
+    person_depth_max_spread_m: float = 1.0,
     detect_camera_vfov_deg: float = 42.13,
 ) -> PersonDepthSample:
     """Torso-band stereo range for a person bbox. Pure; no device I/O.
@@ -203,11 +205,22 @@ def sample_person_depth(
     horizontal ROI shifts to the right half of the box (50-90 percent of
     width); if it touches the right edge, 10-50 percent — erosion only
     moves the sample window, it discards nothing. Valid pixels use
-    (min_distance_m, person_depth_sample_max_m) so a person at 6.0-6.5 m
-    is not discarded by FollowMeConfig.max_distance_m. z_height_m is
-    computed as a diagnostic (never a source of z). The height-consistency
-    veto is off unless person_depth_height_veto_ratio > 0; ratio <= 0
-    never returns "height_veto". z_m is 0.0 unless depth_status == "ok".
+    (person_depth_sample_min_m, person_depth_sample_max_m), NOT
+    FollowMeConfig.min_distance_m / max_distance_m, so a person at 0.4 m
+    or 6.0-6.5 m is not discarded. z_height_m is a diagnostic (never a
+    source of z). The too-close height veto is off unless
+    person_depth_height_veto_ratio > 0.
+
+    depth_status (z_m is 0.0 unless "ok"; downstream treats any other
+    value as unknown):
+      "ok"          stereo median with enough support
+      "no_support"  too few valid stereo pixels in the ROI
+      "height_veto" too-close vs bbox height (only if the ratio is > 0)
+      "far_veto"    box clipped top AND bottom, z_stereo above
+                    person_depth_fullheight_max_m — background past a
+                    close person (impossible-far; safe direction)
+      "ambiguous"   p75-p25 too large; ROI holds two surfaces
+      "no_frame"    no depth frame, or the sampler raised
     """
     import numpy as np
 
@@ -286,7 +299,7 @@ def sample_person_depth(
 
     roi = frame[y0d:y1d, x0d:x1d]
     roi_px = int(roi.size)
-    min_mm = int(float(min_distance_m) * 1000.0)
+    min_mm = int(float(person_depth_sample_min_m) * 1000.0)
     max_mm = int(float(person_depth_sample_max_m) * 1000.0)
     if roi_px <= 0:
         return _result(status="no_support", roi_px=0)
@@ -319,6 +332,38 @@ def sample_person_depth(
     ):
         return _result(
             status="height_veto",
+            valid_px=valid_px,
+            roi_px=roi_px,
+            z_stereo_m=z_stereo_m,
+            z_spread_m=z_spread_m,
+        )
+
+    # H2b: both-edges clip + stereo farther than a full-height adult can be.
+    fullheight_max_m = float(person_depth_fullheight_max_m)
+    both_clipped = (
+        ymin <= _PERSON_DEPTH_EDGE_EPS and ymax >= (1.0 - _PERSON_DEPTH_EDGE_EPS)
+    )
+    if (
+        fullheight_max_m > 0.0
+        and both_clipped
+        and z_stereo_m > fullheight_max_m
+    ):
+        return _result(
+            status="far_veto",
+            valid_px=valid_px,
+            roi_px=roi_px,
+            z_stereo_m=z_stereo_m,
+            z_spread_m=z_spread_m,
+        )
+
+    # H2c: two surfaces in the ROI; the median is not a measurement.
+    spread_cap = max(
+        float(person_depth_max_spread_m),
+        0.35 * z_stereo_m,
+    )
+    if z_spread_m > spread_cap:
+        return _result(
+            status="ambiguous",
             valid_px=valid_px,
             roi_px=roi_px,
             z_stereo_m=z_stereo_m,
@@ -901,6 +946,8 @@ class OakDepthReader:
         self._det_event_ts: list[float] = []
         self._depth_event_ts: list[float] = []
         self._det_latency_s: float | None = None
+        # H5: sampler exception log-once-per-episode (reset on the next success).
+        self._person_sample_exc_logged = False
         self._last_detection_poll_ts = 0.0
         self._last_rgb_poll_ts = 0.0
         self._last_pipeline_error_msg = ""
@@ -2449,28 +2496,53 @@ class OakDepthReader:
         return results
 
     def _sample_person_depth_from_bbox(self, bbox, depth_frame) -> PersonDepthSample:
-        """Full person-range sample (torso ROI, support floor; height is diagnostic)."""
+        """Full person-range sample (torso ROI, support floor; height is diagnostic).
+
+        Never raises: a sampler exception (H5, e.g. int(nan) from a NaN bbox)
+        becomes depth_status "no_frame", z_m 0.0 so the person list is still
+        published. WARNING is logged once per episode.
+        """
         fx = 1.0
         cx_principal = 0.0
         if depth_frame is not None:
             dh, dw = depth_frame.shape[0], depth_frame.shape[1]
             fx, _fy, cx_principal, _cy = self._intrinsics_for(dw, dh)
         cfg = self._fm_cfg
-        return sample_person_depth(
-            bbox,
-            depth_frame,
-            fx,
-            cx_principal,
-            min_distance_m=float(cfg.min_distance_m),
-            person_depth_sample_max_m=float(getattr(cfg, "person_depth_sample_max_m", 9.0)),
-            person_depth_min_valid_px=int(getattr(cfg, "person_depth_min_valid_px", 12)),
-            person_depth_min_valid_frac=float(getattr(cfg, "person_depth_min_valid_frac", 0.02)),
-            person_assumed_height_m=float(getattr(cfg, "person_assumed_height_m", 1.75)),
-            person_depth_height_veto_ratio=float(
-                getattr(cfg, "person_depth_height_veto_ratio", 0.0)
-            ),
-            detect_camera_vfov_deg=float(getattr(cfg, "detect_camera_vfov_deg", 42.13)),
-        )
+        try:
+            sample = sample_person_depth(
+                bbox,
+                depth_frame,
+                fx,
+                cx_principal,
+                person_depth_sample_min_m=float(
+                    getattr(cfg, "person_depth_sample_min_m", 0.30)
+                ),
+                person_depth_sample_max_m=float(getattr(cfg, "person_depth_sample_max_m", 9.0)),
+                person_depth_min_valid_px=int(getattr(cfg, "person_depth_min_valid_px", 12)),
+                person_depth_min_valid_frac=float(getattr(cfg, "person_depth_min_valid_frac", 0.02)),
+                person_assumed_height_m=float(getattr(cfg, "person_assumed_height_m", 1.75)),
+                person_depth_height_veto_ratio=float(
+                    getattr(cfg, "person_depth_height_veto_ratio", 0.0)
+                ),
+                person_depth_fullheight_max_m=float(
+                    getattr(cfg, "person_depth_fullheight_max_m", 3.5)
+                ),
+                person_depth_max_spread_m=float(
+                    getattr(cfg, "person_depth_max_spread_m", 1.0)
+                ),
+                detect_camera_vfov_deg=float(getattr(cfg, "detect_camera_vfov_deg", 42.13)),
+            )
+            self._person_sample_exc_logged = False
+            return sample
+        except Exception as exc:
+            if not self._person_sample_exc_logged:
+                logger.warning(
+                    "Person-depth sampler failed (%s); publishing no_frame",
+                    exc,
+                    exc_info=True,
+                )
+                self._person_sample_exc_logged = True
+            return PersonDepthSample(depth_status="no_frame")
 
     def _compute_spatial_from_depth(
         self,
@@ -2483,9 +2555,9 @@ class OakDepthReader:
         """Sample the stereo depth frame at a bbox to get (x_m, z_m).
 
         Delegates to the torso-band sampler. z_m is 0.0 when the sample is
-        not "ok" (no frame, too few valid pixels, or height veto if that
-        check is enabled). Existing callers that only want the pair keep
-        this signature.
+        not "ok" (no frame, too few valid pixels, far_veto, ambiguous, or
+        height veto if that check is enabled). Existing callers that only
+        want the pair keep this signature.
         """
         sample = self._sample_person_depth_from_bbox(
             (x1_n, y1_n, x2_n, y2_n), depth_frame,
@@ -2635,8 +2707,10 @@ class OakDepthReader:
                         float(getattr(src, "xmax", 0.0)),
                         float(getattr(src, "ymax", 0.0)),
                     )
+                    depth_status = "ok" if z_m > 0.0 else "no_frame"
                     persons.append(PersonDetection(
                         x_m=x_m, z_m=z_m, confidence=conf, bbox=bbox, track_id=track_id,
+                        depth_status=depth_status,
                     ))
                     all_dets.append(ObjectDetection(
                         label=person_label,
@@ -2646,6 +2720,7 @@ class OakDepthReader:
                         z_m=z_m,
                         bbox=bbox,
                         safety_tier=self._get_safety_tier(person_label),
+                        depth_status=depth_status,
                     ))
             else:
                 # Raw SpatialDetectionNetwork output (all classes for YOLO, person-only for MobileNet)
@@ -2665,15 +2740,18 @@ class OakDepthReader:
                         float(getattr(det, "ymax", 0.0)),
                     )
                     tier = self._get_safety_tier(label)
+                    depth_status = "ok" if z_m > 0.0 else "no_frame"
                     all_dets.append(ObjectDetection(
                         label=label, label_name=label_name, confidence=conf,
                         x_m=x_m, z_m=z_m, bbox=bbox, safety_tier=tier,
+                        depth_status=depth_status,
                     ))
                     # Person filter: Follow Me only cares about the person class
                     is_person = label == person_label or label_name == "person"
                     if is_person and conf >= fm_conf:
                         persons.append(PersonDetection(
                             x_m=x_m, z_m=z_m, confidence=conf, bbox=bbox,
+                            depth_status=depth_status,
                         ))
                     elif tier in ("stop", "slow") and label != person_label:
                         logger.debug(

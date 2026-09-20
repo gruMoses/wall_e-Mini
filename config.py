@@ -505,12 +505,28 @@ class FollowMeConfig:
     #       safety_stop_radius_m 0.8, so the robot kept driving.
     #   (3) bbox near the left edge (x=[0.08, 0.27]) read 1.5-1.7 m then
     #       2.8 m one frame later.
-    # DetectionFilter still applies max_distance_m later; the sampler must
-    # not discard the person's own pixels at 6.0-6.5 m.
+    # DetectionFilter still applies min_distance_m / max_distance_m later;
+    # the sampler must not discard the person's own pixels at 0.3-0.5 m
+    # (H2a) or at 6.0-6.5 m.
+    person_depth_sample_min_m: float = 0.30      # NOT min_distance_m; stereo floor on this camera is ~0.35 m
     person_depth_sample_max_m: float = 9.0
     person_depth_min_valid_px: int = 12          # absolute support floor
     person_depth_min_valid_frac: float = 0.02    # fraction of torso-ROI pixels
     person_assumed_height_m: float = 1.75        # standing adult; z_height_m diagnostic only, never a source of z
+    # Impossible-FAR veto (H2b, safe direction only: discarding a far range
+    # cannot hide a close person). A standing adult overflows the 42.13 deg
+    # vertical frame inside ~2.3 m. When the box is clipped at BOTH top and
+    # bottom (ymin <= 0.01 and ymax >= 0.99) and z_stereo_m is above this,
+    # the median is background seen past a close person: depth_status
+    # "far_veto", z_m = 0.0 (z_stereo_m still reported). Downstream treats
+    # any status other than "ok" as unknown. Documented here because
+    # follow_me.PersonDetection's comment list is owned by another file.
+    person_depth_fullheight_max_m: float = 3.5
+    # Bimodal ROI (H2c). If p75-p25 exceeds max(this, 0.35 * z_stereo_m)
+    # the ROI holds two surfaces and the median is not a measurement:
+    # depth_status "ambiguous", z_m = 0.0. This is the 5.8 -> 3.7 -> 2.6 m
+    # flap at long range.
+    person_depth_max_spread_m: float = 1.0
     # Height-consistency veto is OFF (0.0 disables). z_height_m is still
     # computed and logged as a diagnostic. Do not enable this without field
     # evidence of a real too-close stereo artifact on a box that is NOT
