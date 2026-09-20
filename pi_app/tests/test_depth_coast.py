@@ -76,6 +76,9 @@ class TestDepthUnknownCoast(unittest.TestCase):
         self.assertIsNone(trk.last_reject_reason)
 
     def test_coast_expires_after_one_second(self):
+        # H1c: timer starts on the FIRST unknown frame; expiry is >= max_s
+        # from that instant (the first unknown used to be skipped because
+        # _depth_coast_since was assigned in _apply_ema after the check).
         trk = _tracker()
         t = 100.0
         trk.update([_det(depth_m=5.8, track_id=10)], now=t)
@@ -87,7 +90,7 @@ class TestDepthUnknownCoast(unittest.TestCase):
             if coast_start is None:
                 coast_start = t
             elapsed = t - coast_start
-            if elapsed <= 1.0 + 1e-9:
+            if elapsed < 1.0 - 1e-9:
                 self.assertIsNotNone(
                     trk.fresh_raw_x_norm, f"still fresh at coast {elapsed:.1f}s"
                 )
@@ -95,7 +98,8 @@ class TestDepthUnknownCoast(unittest.TestCase):
                 self.assertIsNone(trk.last_reject_reason)
             else:
                 self.assertIsNone(
-                    trk.fresh_raw_x_norm, f"must expire after 1.0 s (elapsed={elapsed})"
+                    trk.fresh_raw_x_norm,
+                    f"must expire at 1.0 s from first unknown (elapsed={elapsed})",
                 )
                 self.assertEqual(trk.last_reject_reason, "depth_coast_expired")
                 self.assertEqual(st.depth_m, 5.8)
@@ -398,10 +402,14 @@ class TestNearestPersonSpeedLimit(unittest.TestCase):
             self.assertEqual(fm.get_status()["follow_me_target_track_id"], 10)
 
     def test_no_support_does_not_count_toward_nearest(self):
+        # Contract change 2026-09-20 (H1b): a FULL-HEIGHT no_support box is
+        # now a close-unknown stop (see test_close_unknown_full_height_zeros_speed).
+        # This test only checks that z_m=0 / no_support is not a nearest_person
+        # range, so the ghost is a SMALL box that the geometry rule ignores.
         fm = self._make()
         op = self._person(z_m=3.0, track_id=10)
         ghost = self._person(
-            z_m=0.0, bbox=(0.82, 0.0, 1.0, 1.0), track_id=11,
+            z_m=0.0, bbox=(0.40, 0.25, 0.60, 0.75), track_id=11,
             depth_status="no_support",
         )
         t = 100.0
@@ -416,6 +424,116 @@ class TestNearestPersonSpeedLimit(unittest.TestCase):
             status = fm.get_status()
             self.assertAlmostEqual(status["follow_me_nearest_person_m"], 3.0)
             self.assertGreater(fm._last_speed_offset, 0.0)
+            self.assertFalse(status["follow_me_close_unknown"])
+
+    def test_close_unknown_full_height_zeros_speed(self):
+        fm = self._make()
+        op = self._person(z_m=3.0, track_id=10)
+        t = 100.0
+        with patch("pi_app.control.follow_me.time") as mt:
+            for _ in range(12):
+                t += 0.1
+                mt.monotonic.return_value = t
+                fm.compute([op])
+            self.assertGreater(fm._last_speed_offset, 50.0)
+            t += 0.1
+            mt.monotonic.return_value = t
+            fm.compute([self._person(
+                z_m=0.0, bbox=(0.82, 0.0, 1.0, 1.0), track_id=10,
+                depth_status="no_support",
+            )])
+            self.assertEqual(fm._last_speed_offset, 0.0)
+            self.assertTrue(fm.get_status()["follow_me_close_unknown"])
+
+    def test_h3_accepted_close_range_caps_while_depth_filter_lags(self):
+        """Tracker accepts 1.2 m after the gate ages; DepthFilter still holds ~3.0.
+
+        Speed must be 0 from the first 1.2 m reading (S1 vs smoothed depth),
+        including the later FRESH ticks where raw_depth_m has already jumped.
+        """
+        fm = self._make()
+        op = self._person(z_m=3.0, track_id=10)
+        close = self._person(z_m=1.2, bbox=(0.82, 0.0, 1.0, 1.0), track_id=10)
+        t = 100.0
+        with patch("pi_app.control.follow_me.time") as mt:
+            for _ in range(8):
+                t += 0.1
+                mt.monotonic.return_value = t
+                fm.compute([op])
+            self.assertGreater(fm._last_speed_offset, 0.0)
+            for i in range(12):
+                t += 0.1
+                mt.monotonic.return_value = t
+                fm.compute([close])
+                status = fm.get_status()
+                self.assertAlmostEqual(
+                    status["follow_me_speed_depth_m"], 1.2,
+                    msg=f"tick {i}: speed_depth must stay on the 1.2 m person",
+                )
+                self.assertEqual(fm._last_speed_offset, 0.0, f"tick {i}")
+
+    def test_h4_ramp_in_progress_not_fresh_never_rises(self):
+        # Depth gate would reject 1.5 -> 4.0; this test is about SafetyLayer
+        # vs last request, so disable continuity.
+        fm = self._make(target_depth_continuity_m=0.0)
+        hold = self._person(z_m=1.5, track_id=10)
+        far = self._person(z_m=4.0, track_id=10)
+        t = 100.0
+        with patch("pi_app.control.follow_me.time") as mt:
+            t += 0.1
+            mt.monotonic.return_value = t
+            fm.compute([hold])  # seeds SafetyLayer at speed 0
+            fm._depth_filter.reset()  # next 4.0 m must not bounce off the 5 m/s gate
+            for _ in range(3):
+                t += 0.1
+                mt.monotonic.return_value = t
+                fm.compute([far])
+            s_fresh = fm._last_speed_offset
+            self.assertGreater(s_fresh, 0.0)
+            self.assertLess(s_fresh, 80.0, "ramp must still be below the request")
+            for _ in range(2):
+                t += 0.1  # inside steer_hold_grace_s=0.30
+                mt.monotonic.return_value = t
+                fm.compute([])
+                self.assertLessEqual(fm._last_speed_offset, s_fresh + 1e-6)
+
+    def test_unknown_small_box_coast_does_not_rise_or_zero(self):
+        fm = self._make()
+        op = self._person(z_m=3.0, track_id=10)
+        small = self._person(
+            z_m=0.0, bbox=(0.40, 0.25, 0.60, 0.75), track_id=10,
+            depth_status="no_support",
+        )
+        t = 100.0
+        with patch("pi_app.control.follow_me.time") as mt:
+            for _ in range(12):
+                t += 0.1
+                mt.monotonic.return_value = t
+                fm.compute([op])
+            s0 = fm._last_speed_offset
+            self.assertGreater(s0, 50.0)
+            for _ in range(4):
+                t += 0.1
+                mt.monotonic.return_value = t
+                fm.compute([small])
+                self.assertLessEqual(fm._last_speed_offset, s0 + 1e-6)
+                self.assertGreater(fm._last_speed_offset, 0.0)
+                self.assertFalse(fm.get_status()["follow_me_close_unknown"])
+                self.assertFalse(fm.get_status()["follow_me_depth_known"])
+
+    def test_lost_target_close_unknown_zeros_forward(self):
+        fm = self._make()
+        ghost = self._person(
+            z_m=0.0, bbox=(0.82, 0.0, 1.0, 1.0), track_id=None,
+            confidence=0.5, depth_status="no_support",
+        )
+        with patch("pi_app.control.follow_me.time") as mt, \
+                patch.object(fm, "_handle_lost_target", return_value=(60.0, 5.0)):
+            mt.monotonic.return_value = 100.1
+            fm.compute([ghost])
+            self.assertEqual(fm._last_speed_offset, 0.0)
+            self.assertEqual(fm._last_steer_offset, 5.0)
+            self.assertTrue(fm.get_status()["follow_me_close_unknown"])
 
 
 if __name__ == "__main__":

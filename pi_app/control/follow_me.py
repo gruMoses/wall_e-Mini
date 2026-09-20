@@ -504,10 +504,15 @@ class TargetTracker:
             # if its confidence dropped below the acquire floor (Layer-1's 0.45
             # base filter already gated it). This is the normal single-person path.
             self._reset_pending()
+            if not self._depth_known(committed_det):
+                # Start the timer on this first unknown frame so the cap is
+                # target_depth_coast_max_s from the first unknown, not the second.
+                if self._depth_coast_since is None:
+                    self._depth_coast_since = now
             if (
                 not self._depth_known(committed_det)
                 and self._depth_coast_since is not None
-                and (now - self._depth_coast_since) > self._depth_coast_max_s
+                and (now - self._depth_coast_since) >= self._depth_coast_max_s
             ):
                 # Steering blind on range for too long: not fresh, do not
                 # refresh last_seen_time, let persistence decay stop the robot.
@@ -1365,6 +1370,7 @@ class FollowMeController:
         self._last_steer_offset: float = 0.0
         self._last_nearest_person_m: float | None = None
         self._last_speed_depth_m: float | None = None
+        self._last_close_unknown: bool = False
         self._last_num_detections: int = 0
         self._last_target_confidence: float = 0.0
         self._last_target_track_id: int | None = None
@@ -1569,6 +1575,28 @@ class FollowMeController:
                 nearest = z
         return nearest
 
+    def _close_unknown_person(
+        self, detections: list[PersonDetection]
+    ) -> bool:
+        """True when a confident detection has no range and a near-filling bbox.
+
+        A standing adult overflows the 42 deg vertical frame inside ~2.3 m.
+        Without stereo we cannot prove they are far, so geometry saying
+        "near" must stop forward speed.
+        """
+        min_h = float(self._cfg.close_unknown_bbox_height)
+        if min_h <= 0.0:
+            return False
+        conf_min = float(self._cfg.detection_confidence)
+        for det in detections:
+            if det.confidence < conf_min:
+                continue
+            if getattr(det, "depth_status", "ok") == "ok":
+                continue
+            if (det.bbox[3] - det.bbox[1]) >= min_h:
+                return True
+        return False
+
     # ── Public API: main compute ─────────────────────────────────────────────
 
     def compute(self, detections: list[PersonDetection]) -> tuple[int, int]:
@@ -1582,7 +1610,9 @@ class FollowMeController:
         now = time.monotonic()
         self._last_num_detections = len(detections)
         nearest_person_m = self._nearest_person_range_m(detections)
+        close_unknown = self._close_unknown_person(detections)
         self._last_nearest_person_m = nearest_person_m
+        self._last_close_unknown = close_unknown
 
         # ── Layers 1 + 2: filter and track (full rate) ───────────────────────
         filtered = self._filter.process(detections)
@@ -1679,15 +1709,21 @@ class FollowMeController:
             # every branch (tracking, persist, lost, search) uniformly.
             self._last_speed_offset, self._last_steer_offset = self._handle_lost_target(now)
             # Blind trail / search pursuit must not drive into a person it can
-            # see: inside follow_distance_m the forward command is zero, as the
-            # speed law gives for a locked target at that range. Steer is kept
-            # so a search pivot can continue.
+            # see: inside follow_distance_m + the speed dead zone the forward
+            # command is zero, as the speed law gives for a locked target at
+            # that range. Steer is kept so a search pivot can continue.
+            lost_stop_m = float(self._cfg.follow_distance_m)
+            dead_zone = getattr(self._speed, "_dead_zone", None)
+            if isinstance(dead_zone, (int, float)):
+                lost_stop_m += float(dead_zone)
             if (
                 bool(self._cfg.nearest_person_speed_limit_enabled)
                 and nearest_person_m is not None
-                and nearest_person_m <= float(self._cfg.follow_distance_m)
+                and nearest_person_m <= lost_stop_m
                 and self._last_speed_offset > 0.0
             ):
+                self._last_speed_offset = 0.0
+            if close_unknown and self._last_speed_offset > 0.0:
                 self._last_speed_offset = 0.0
             # Recorder honesty: what the lost-target handler wanted this tick,
             # and which branch produced it. _handle_lost_target sets
@@ -1705,21 +1741,23 @@ class FollowMeController:
             # Identity (the locked target) does not hide a closer honest range:
             # whoever that closer person is, do not drive into them.
             #
-            # Engages only when someone is closer than the target's last
-            # ACCEPTED raw range by more than the margin — i.e. exactly the
-            # readings the identity gates refused. On an ordinary fresh tick
-            # the nearest person IS the target (nearest == raw range), so the
-            # smoothed target.depth_m keeps driving the speed law and the
-            # tracking path stays byte-identical.
+            # Engages when someone is closer than the range the speed law
+            # would otherwise use (smoothed target.depth_m), not raw_depth_m:
+            # after the tracker accepts a true close range, DepthFilter can
+            # still hold the far value for several frames (H3).
+            prev_post_safety_speed = self._last_speed_offset
             speed_depth = target.depth_m
             if (
                 bool(self._cfg.nearest_person_speed_limit_enabled)
                 and nearest_person_m is not None
                 and nearest_person_m
-                < float(getattr(target, "raw_depth_m", target.depth_m))
-                - float(self._cfg.nearest_person_margin_m)
+                < target.depth_m - float(self._cfg.nearest_person_margin_m)
             ):
                 speed_depth = min(target.depth_m, nearest_person_m)
+            if close_unknown:
+                speed_depth = min(
+                    speed_depth, float(self._cfg.follow_distance_m),
+                )
             self._last_speed_depth_m = speed_depth
             speed = self._speed.compute(
                 speed_depth,
@@ -1765,12 +1803,15 @@ class FollowMeController:
                 # lock-step with the turn. (decay was computed from the pre-decay
                 # speed, so the steer profile is unchanged.)
                 #
-                # Blind ticks must never accelerate: cap at the last FRESH
-                # post-turn-scale speed, then apply decay. Losing freshness
-                # may hold or reduce speed, never raise it (2026-09-20 15:49:
-                # turn_scale dropped on the hold tick and speed ramped 54→100
-                # toward the unscaled target under the accel limit).
-                speed = min(speed, self._last_fresh_speed) * decay
+                # Blind ticks must never accelerate. Cap at the last FRESH
+                # post-turn-scale REQUEST and at the previous tick's
+                # post-SafetyLayer speed (_last_speed_offset, not yet
+                # overwritten) so a ramp-in-progress cannot keep climbing
+                # toward a stale request (H4). Then apply decay.
+                speed = (
+                    min(speed, self._last_fresh_speed, prev_post_safety_speed)
+                    * decay
+                )
                 self._steer_decay_factor = decay
                 self._steer_hold_active = decay > 0.0
                 self._last_fresh_detection = False
@@ -1806,7 +1847,14 @@ class FollowMeController:
                             turn_scale = 1.0
                         speed = speed * turn_scale
                         self._turn_speed_scale = turn_scale
-                self._last_fresh_speed = speed
+                if getattr(target, "depth_known", True):
+                    self._last_fresh_speed = speed
+                else:
+                    # Depth-unknown coast is fresh for steering (bbox x) but
+                    # must not raise speed toward the held far range (H1/H4).
+                    speed = min(
+                        speed, self._last_fresh_speed, prev_post_safety_speed,
+                    )
                 # Recorder: fresh tick — record the branch's raw steer BEFORE the
                 # reacq ramp, slip-comp, and slew cap, and which path produced it.
                 # _compute_steering sets _pursuit_mode to "trail" or "direct".
@@ -2409,6 +2457,7 @@ class FollowMeController:
         self._last_fresh_speed = 0.0
         self._last_nearest_person_m = None
         self._last_speed_depth_m = None
+        self._last_close_unknown = False
         self._turn_speed_scale = 1.0
         self._pursuit_mode = "direct"
         self._last_pursuit_mode = "direct"
@@ -2589,6 +2638,7 @@ class FollowMeController:
             "follow_me_filter_rejects": dict(self._filter.last_reject_counts),
             "follow_me_nearest_person_m": self._last_nearest_person_m,
             "follow_me_speed_depth_m": self._last_speed_depth_m,
+            "follow_me_close_unknown": self._last_close_unknown,
             # ── Visualization / troubleshooting (Items 2 + 4) ────────────
             "follow_mode": follow_mode,
             "target_distance_m": self._last_target_z,

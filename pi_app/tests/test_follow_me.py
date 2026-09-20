@@ -393,6 +393,11 @@ class TestTrackingModeByteIdentical(unittest.TestCase):
             steer_slew_per_tick=0.1,
             detect_min_bbox_width=0.09,
             direct_turn_speed_min_scale=1.0,  # no turn slowdown (added 2026-09-19)
+            # Table captured before the nearest-person speed limit. This
+            # sequence closes at 5 m/s so raw runs ahead of the smoothed
+            # range; the limit would change the bytes. Pin off so the table
+            # still guards the pre-limit tracking path.
+            nearest_person_speed_limit_enabled=False,
         )
         fm = FollowMeController(cfg)
 

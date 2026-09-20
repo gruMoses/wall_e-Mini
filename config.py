@@ -346,9 +346,16 @@ class FollowMeConfig:
     # min(target.depth_m, nearest raw in-range person). False restores
     # pre-fix behaviour (speed from the locked target only).
     nearest_person_speed_limit_enabled: bool = True
-    # Only a range closer than the target's last accepted raw range by more than
-    # this engages the limit; keeps the smoothed range in charge on normal ticks.
+    # Only a range closer than the speed law's current depth (smoothed
+    # target.depth_m) by more than this engages the limit. Comparing against
+    # raw_depth_m disabled the cap exactly when DepthFilter was still holding
+    # a far range after the tracker accepted a close one (H3, 2026-09-20).
     nearest_person_margin_m: float = 0.3
+    # Depth-unknown + geometry says near: a standing adult overflows the
+    # 42 deg vertical frame inside ~2.3 m, so bbox height at/above this
+    # with depth_status != "ok" forces the speed law to follow_distance_m
+    # (zero forward). 0.0 disables.
+    close_unknown_bbox_height: float = 0.85
     max_speed_error_m: float = 1.5   # distance error at which max speed is reached — tighter = more aggressive closing
     max_follow_speed_byte: int = 110
     # Legacy direct-pursuit PD gains (preserved; not used by new PID steering path)

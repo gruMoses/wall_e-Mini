@@ -440,6 +440,7 @@ def build_log_obj(
             "filter_rejects": telem.get("follow_me_filter_rejects"),
             "nearest_person_m": telem.get("follow_me_nearest_person_m"),
             "speed_depth_m": telem.get("follow_me_speed_depth_m"),
+            "close_unknown": telem.get("follow_me_close_unknown"),
             # Speed-loop instrumentation (SpeedLayer + velocity PIDController):
             # open_loop_byte, target_mps, actual_mps, err_mps, p, i, d,
             # corr_mps, corr_byte, closed. See FollowMeController.get_status().

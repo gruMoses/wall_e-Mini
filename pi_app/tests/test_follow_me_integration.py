@@ -110,8 +110,13 @@ class TestLostTargetTrailFollow(unittest.TestCase):
         t += 0.1
         fm.update_pose(heading_deg=0.0, motor_l=160, motor_r=160, timestamp=t)
 
+        # 2026-09-20: past target_persistence_s (2.0 s) so this exercises the
+        # LOST-TARGET branch the test is named for. At +0.2 s the tracker is
+        # still in its persistence hold, and a blind hold tick may no longer
+        # raise speed above what was last emitted (0 here) — see the 15:49
+        # near-run-over. Trail pursuit after the hold still gets its floor.
         with patch("pi_app.control.follow_me.time") as mock_time:
-            mock_time.monotonic.return_value = fm._last_valid_time + 0.2
+            mock_time.monotonic.return_value = fm._last_valid_time + 2.5
             left, right = fm.compute([])
 
         # The MIN_LOST_TARGET_SPEED fix: fwd = max(0 * 0.5, 5) = 5
