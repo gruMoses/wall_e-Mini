@@ -25,6 +25,7 @@ from pi_app.control.gesture_control import (
     GestureStateMachine, GestureEvent, HandData,
     hand_poll_wanted as _hand_poll_wanted,
 )
+from pi_app.control.arms_up import ArmsUpDetector, PoseSample
 from pi_app.control.waypoint_nav import WaypointNavController, NavState, mix_to_bytes
 from pi_app.control.gps_heading_align import GpsHeadingAligner
 from pi_app.control.rpm_plausibility import (
@@ -160,6 +161,17 @@ class Controller:
         self._gps_reading: GpsReading | None = None
         self._person_detections: list[PersonDetection] = []
         self._hand_data: HandData | None = None
+        self._pose_sample: PoseSample | None = None
+        self._pose_status: dict = {}
+        self._arms_up = ArmsUpDetector(getattr(config, "arms_up", None))
+        # Bench-test reverse twitch. Times are compared against process()'s
+        # mono_now — do not call time.monotonic() here (controller tests
+        # pin the init call count).
+        self._twitch_until: float = 0.0
+        self._twitch_cooldown_until: float = 0.0
+        self._twitch_count: int = 0
+        self._twitch_blocked_reason: Optional[str] = None
+        self._twitch_active: bool = False
 
         # Charger inhibit: set True when BMS reports charging; blocks motor output.
         # Fail-open by design — cleared externally if BMS becomes unreachable.
@@ -245,6 +257,14 @@ class Controller:
     def set_hand_data(self, data: HandData | None) -> None:
         """Feed latest hand landmark data from OakDepthReader."""
         self._hand_data = data
+
+    def set_pose_sample(self, sample: PoseSample | None) -> None:
+        """Feed latest PoseSample from PoseWorker (None = no pose this frame)."""
+        self._pose_sample = sample
+
+    def set_pose_status(self, status: dict | None) -> None:
+        """Feed PoseWorker diagnostics (pose_ms / pose_hz / mp_pose_loaded / ...)."""
+        self._pose_status = dict(status) if status else {}
 
     def set_gps_reading(self, reading: GpsReading | None) -> None:
         """Feed latest reading from RtkGpsReader."""
@@ -632,7 +652,12 @@ class Controller:
                 left_temp_c=self._actual_left_temp_c,
                 right_temp_c=self._actual_right_temp_c,
                 charger_inhibit=self._charger_inhibit,
-                emitted_forward_byte=self._last_follow_me_emitted_forward_byte,
+                # During a twitch, pass 0 forward so the speed PID does not
+                # wind up against the reverse pulse.
+                emitted_forward_byte=(
+                    0.0 if self._twitch_active
+                    else self._last_follow_me_emitted_forward_byte
+                ),
             )
             detections = self._person_detections or []
             left, right = self._follow_me.compute(detections)
@@ -646,6 +671,97 @@ class Controller:
             right_byte=right,
             steering_input=steering_input,
         )
+
+    def _update_arms_up_twitch(self, now: float) -> None:
+        """Debounce the pose sample and arm/cancel the reverse bench twitch.
+
+        Called once per process() tick, after safety/mode are current and
+        before per-mode L/R bytes are chosen, so FOLLOW_ME compute still
+        runs during a twitch but can be told to treat emitted forward as 0.
+        """
+        self._arms_up.update(self._pose_sample, now)
+        self._twitch_blocked_reason = None
+        cfg = getattr(config, "arms_up", None)
+
+        if self._twitch_until > 0.0:
+            if (
+                (not self._safety_state.is_armed)
+                or self._safety_state.emergency_active
+                or self._mode == "WAYPOINT_NAV"
+            ):
+                self._twitch_until = 0.0
+
+        if self._arms_up.rising_edge:
+            if (
+                cfg is not None
+                and bool(getattr(cfg, "enabled", True))
+                and bool(getattr(cfg, "twitch_test_enabled", False))
+            ):
+                reason = self._twitch_start_block_reason(now)
+                if reason is None:
+                    duration = float(getattr(cfg, "twitch_duration_s", 0.25))
+                    cooldown = float(getattr(cfg, "twitch_cooldown_s", 3.0))
+                    reverse_n = int(getattr(cfg, "twitch_reverse_byte", 22))
+                    self._twitch_until = now + duration
+                    self._twitch_cooldown_until = now + cooldown
+                    self._twitch_count += 1
+                    _logger.warning(
+                        "ARMS-UP twitch: reverse %s bytes for %s s",
+                        reverse_n,
+                        duration,
+                    )
+                else:
+                    self._twitch_blocked_reason = reason
+
+        self._twitch_active = now < self._twitch_until
+
+    def _twitch_start_block_reason(self, now: float) -> Optional[str]:
+        if self._safety_state.emergency_active:
+            return "emergency"
+        if not self._safety_state.is_armed:
+            return "disarmed"
+        if self._charger_inhibit:
+            return "charger"
+        if self._mode not in ("MANUAL", "FOLLOW_ME"):
+            return "mode"
+        if now < self._twitch_cooldown_until:
+            return "cooldown"
+        return None
+
+    def _arms_up_telemetry(self) -> dict:
+        sample = self._pose_sample
+        status = self._pose_status or {}
+        min_vis = None
+        l_wrist_y = r_wrist_y = l_shoulder_y = r_shoulder_y = None
+        if sample is not None:
+            l_wrist_y = sample.l_wrist.y
+            r_wrist_y = sample.r_wrist.y
+            l_shoulder_y = sample.l_shoulder.y
+            r_shoulder_y = sample.r_shoulder.y
+            min_vis = min(
+                sample.l_wrist.visibility,
+                sample.r_wrist.visibility,
+                sample.l_shoulder.visibility,
+                sample.r_shoulder.visibility,
+            )
+        return {
+            "raw": self._arms_up.raw,
+            "active": self._arms_up.active,
+            "streak_s": self._arms_up.streak_s,
+            "sample_age_s": self._arms_up.last_sample_age_s,
+            "l_wrist_y": l_wrist_y,
+            "r_wrist_y": r_wrist_y,
+            "l_shoulder_y": l_shoulder_y,
+            "r_shoulder_y": r_shoulder_y,
+            "min_visibility_seen": min_vis,
+            "twitch_active": self._twitch_active,
+            "twitch_count": self._twitch_count,
+            "twitch_blocked_reason": self._twitch_blocked_reason,
+            "pose_ms": status.get("pose_ms"),
+            "pose_hz": status.get("pose_hz"),
+            "pose_enabled": status.get("pose_enabled"),
+            "mp_pose_loaded": status.get("mp_pose_loaded"),
+        }
 
     def process(
         self,
@@ -860,6 +976,8 @@ class Controller:
                 emergency_active=self._safety_state.emergency_active,
             )
             self._last_follow_me_emitted_forward_byte = None
+            self._twitch_until = 0.0
+            self._twitch_active = False
             return cmd, [SafetyEvent.RC_STALE], {"mode": "MANUAL", "rc_stale": True, "rc_age_s": rc_age}
 
         # Update safety. This now runs on EVERY tick before the calibration
@@ -969,6 +1087,7 @@ class Controller:
 
         # Command computation
         telemetry["mode"] = self._mode
+        self._update_arms_up_twitch(mono_now)
         if self._gesture is not None:
             telemetry["gesture_phase"] = self._gesture.phase_name
             if gesture_event is not None:
@@ -1237,6 +1356,17 @@ class Controller:
                 pass
         telemetry["imu_correction_applied"] = corr_applied
 
+        # Arms-up bench twitch: replace the mode's L/R with a short equal
+        # reverse pulse. Injected HERE — after per-mode command + IMU, before
+        # obstacle scaling, disarm, charger inhibit, pack-low, RPM-plausibility
+        # (telemetry only), and the slew limiter. Reverse is never gated by
+        # the forward obstacle layer (is_forward_motion requires net forward).
+        if self._twitch_active:
+            cfg = getattr(config, "arms_up", None)
+            n = int(getattr(cfg, "twitch_reverse_byte", 22) if cfg is not None else 22)
+            byte = max(MIN_OUTPUT, min(MAX_OUTPUT, CENTER_OUTPUT_VALUE - n))
+            left = right = byte
+
         # Obstacle avoidance throttle scaling — front camera only gates forward motion.
         # Reverse commands must not be blocked by front camera detections.
         # "Forward motion" must be true net forward (sum of byte offsets > 0), not just
@@ -1420,9 +1550,12 @@ class Controller:
         # obstacle scaling and the slew limiter). Next FOLLOW_ME tick's
         # velocity PID targets this so it cannot wind up against a limit.
         if self._mode == "FOLLOW_ME":
-            self._last_follow_me_emitted_forward_byte = (
-                (left + right) / 2.0 - CENTER_OUTPUT_VALUE
-            )
+            if self._twitch_active:
+                self._last_follow_me_emitted_forward_byte = 0.0
+            else:
+                self._last_follow_me_emitted_forward_byte = (
+                    (left + right) / 2.0 - CENTER_OUTPUT_VALUE
+                )
         else:
             self._last_follow_me_emitted_forward_byte = None
         telemetry["straight_intent"] = is_moving_straight
@@ -1473,6 +1606,7 @@ class Controller:
         telemetry["heading_offset_frozen"] = heading_align["frozen"]
         telemetry["heading_offset_refining"] = heading_align["refining"]
         telemetry["corrected_heading_deg"] = heading_align["corrected_heading_deg"]
+        telemetry["arms_up"] = self._arms_up_telemetry()
         return cmd, events, telemetry
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:

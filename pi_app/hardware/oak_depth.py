@@ -7,6 +7,7 @@ APIs consumed by the main control loop:
   - get_person_detections() -> list[PersonDetection]  for Follow Me
   - get_depth_stats()       -> DepthStats              for enriched telemetry
   - get_hand_data()         -> HandData | None          for gesture control
+  - get_latest_rgb_frame()  -> (frame, ts)              640x480 BGR preview copy
 
 When recording is enabled, exposes additional queues for the recorder:
   - get_recording_queues()  -> dict of XLinkOut queue names
@@ -972,6 +973,10 @@ class OakDepthReader:
         self._depth_stats_counter = 0
         self._rgb_poll_enabled = False
         self._rgb_always_poll = False  # set True for YOLO (passthrough monitoring)
+        # Pose worker needs the same 640x480 preview the hand/web path uses.
+        # Separate from _rgb_poll_enabled so the recorder toggling that flag
+        # cannot starve Pose, and Pose cannot starve the recorder.
+        self._pose_rgb_wanted = False
         self._imu_poll_interval_s = 1.0 / max(1.0, float(imu_poll_hz))
         mode = str(imu_packet_mode or "latest").strip().lower()
         self._imu_packet_mode = mode if mode in ("latest", "bounded") else "latest"
@@ -1039,6 +1044,10 @@ class OakDepthReader:
             self._thread.join(timeout=3.0)
             self._thread = None
 
+    def is_stopped(self) -> bool:
+        """True after stop() has been requested. PoseWorker polls this."""
+        return self._stop_event.is_set()
+
     def get_min_distance(self) -> tuple[float, float]:
         """Return (min_distance_m, age_s). Thread-safe."""
         with self._lock:
@@ -1061,9 +1070,19 @@ class OakDepthReader:
             return self._depth_state.raw_frame
 
     def get_latest_rgb_frame(self):
-        """Return the most recent RGB preview frame (BGR numpy) or None. Thread-safe."""
+        """Return (frame, ts) of the most recent RGB preview. Thread-safe.
+
+        Copies the numpy buffer once so the vision thread can overwrite
+        ``_rgb_state`` on the next poll without racing consumers. ``ts`` is
+        monotonic; ``frame`` is BGR or None.
+        """
         with self._lock:
-            return self._rgb_state.frame
+            frame = self._rgb_state.frame
+            ts = self._rgb_state.timestamp
+            if frame is None:
+                return None, ts
+            copied = frame.copy() if hasattr(frame, "copy") else frame
+            return copied, ts
 
     def get_hand_data(self) -> HandData | None:
         """Return latest hand landmark data or None. Thread-safe."""
@@ -1084,6 +1103,15 @@ class OakDepthReader:
         """Enable/disable host RGB preview polling to reduce host copy load."""
         with self._lock:
             self._rgb_poll_enabled = bool(enabled)
+
+    def set_pose_rgb_wanted(self, wanted: bool) -> None:
+        """Keep the 640x480 preview queue polled while the pose worker is on.
+
+        Does not request a new camera output. ORs into the existing
+        ``_rgb_poll_enabled`` / ``_rgb_always_poll`` / hand-poll path.
+        """
+        with self._lock:
+            self._pose_rgb_wanted = bool(wanted)
 
     def set_hand_poll_enabled(self, enabled: bool) -> None:
         """Enable/disable host-side MediaPipe Hands inference.
@@ -1339,7 +1367,9 @@ class OakDepthReader:
             det_err = self._last_detection_error_msg
             rgb_err = self._last_rgb_error_msg
             imu_err = self._last_imu_error_msg
-            rgb_expected = bool(self._rgb_poll_enabled or self._rgb_always_poll)
+            rgb_expected = bool(
+                self._rgb_poll_enabled or self._rgb_always_poll or self._pose_rgb_wanted
+            )
             chip_temp_c = self._chip_temp_c
             chip_temp_css_c = self._chip_temp_css_c
             chip_temp_mss_c = self._chip_temp_mss_c
@@ -1972,7 +2002,11 @@ class OakDepthReader:
                     self._poll_hand(hand_queues)
                     hand_s = time.monotonic() - t_hand
                 with self._lock:
-                    rgb_enabled = self._rgb_poll_enabled or self._rgb_always_poll
+                    rgb_enabled = (
+                        self._rgb_poll_enabled
+                        or self._rgb_always_poll
+                        or self._pose_rgb_wanted
+                    )
                 if hand_queues is not None and not hand_enabled:
                     # The hand queue and the RGB preview queue are the same object
                     # when gestures are configured. _poll_hand normally refreshes

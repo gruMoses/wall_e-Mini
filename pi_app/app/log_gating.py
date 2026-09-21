@@ -366,6 +366,7 @@ def build_log_obj(
     """
     _oak = oak_camera_health if isinstance(oak_camera_health, dict) else {}
     _g = telem.get("gesture") if isinstance(telem.get("gesture"), dict) else {}
+    _au = telem.get("arms_up") if isinstance(telem.get("arms_up"), dict) else {}
     return {
         "ts": round(now_ts, 3),
         "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
@@ -576,6 +577,24 @@ def build_log_obj(
             "event": _g.get("event"),
             "event_reason": _g.get("event_reason"),
             "hand_poll_enabled": _g.get("hand_poll_enabled"),
+        },
+        "arms_up": {
+            "raw": _au.get("raw"),
+            "active": _au.get("active"),
+            "streak_s": _au.get("streak_s"),
+            "sample_age_s": _au.get("sample_age_s"),
+            "l_wrist_y": _au.get("l_wrist_y"),
+            "r_wrist_y": _au.get("r_wrist_y"),
+            "l_shoulder_y": _au.get("l_shoulder_y"),
+            "r_shoulder_y": _au.get("r_shoulder_y"),
+            "min_visibility_seen": _au.get("min_visibility_seen"),
+            "twitch_active": _au.get("twitch_active"),
+            "twitch_count": _au.get("twitch_count"),
+            "twitch_blocked_reason": _au.get("twitch_blocked_reason"),
+            "pose_ms": _au.get("pose_ms"),
+            "pose_hz": _au.get("pose_hz"),
+            "pose_enabled": _au.get("pose_enabled"),
+            "mp_pose_loaded": _au.get("mp_pose_loaded"),
         },
     }
 

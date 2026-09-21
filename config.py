@@ -868,6 +868,30 @@ class GestureConfig:
 
 
 @dataclass(frozen=True)
+class ArmsUpConfig:
+    """Body-pose both-wrists-above-shoulders detector and garage bench twitch.
+
+    The agreed trigger is BODY POSE (both wrists raised above the shoulders),
+    not palms/fingers: the 640x480 stream cannot resolve a hand beyond ~0.5 m.
+
+    twitch_test_enabled is a BENCH TEST acknowledgement, to be replaced by
+    the real back-up-and-follow behaviour. 22 bytes * ~0.0126 m/s per byte
+    * 0.25 s is under 7 cm before ramp losses ("inches").
+    """
+    enabled: bool = True
+    min_visibility: float = 0.6
+    wrist_above_shoulder_frac: float = 0.25
+    hold_s: float = 0.4
+    release_s: float = 0.3
+    stale_s: float = 0.5
+    pose_max_hz: float = 10.0
+    twitch_test_enabled: bool = True
+    twitch_reverse_byte: int = 22  # offset below neutral 126, applied to BOTH motors
+    twitch_duration_s: float = 0.25
+    twitch_cooldown_s: float = 3.0
+
+
+@dataclass(frozen=True)
 class BmsConfig:
     """Configuration for Daly BMS Bluetooth communication (SPIM08HP)."""
     enabled: bool = True                   # enabled -- BMS MAC confirmed 2026-04-01
@@ -995,6 +1019,9 @@ class Config:
 
     # Hand-gesture Follow Me activation
     gesture: GestureConfig = GestureConfig()
+
+    # Both-wrists-up body-pose detector (bench twitch; real reverse-follow later)
+    arms_up: ArmsUpConfig = ArmsUpConfig()
 
     # Final motor-output slew limiter
     slew_limiter: SlewLimiterConfig = SlewLimiterConfig()
