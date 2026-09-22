@@ -2338,6 +2338,63 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         return Response(json.dumps({"ok": True, "applied": applied}),
                         content_type="application/json")
 
+    @app.route("/api/arms_up/twitch_test", methods=["GET"])
+    def api_arms_up_twitch_test_get():
+        """Gated gesture-to-motion bench latch.
+
+        This latch enables a gated gesture-to-motion path. It is volatile,
+        needs the robot armed in MANUAL at the moment of enabling, and clears
+        on disarm, mode change, expiry and budget. It must NOT be reused for
+        the continuous back-up feature, which needs its own latch and review.
+        """
+        if controller is None or not hasattr(controller, "get_twitch_test_state"):
+            return Response(json.dumps({"error": "no controller"}), status=503,
+                            content_type="application/json")
+        return Response(json.dumps(controller.get_twitch_test_state()),
+                        content_type="application/json")
+
+    @app.route("/api/arms_up/twitch_test", methods=["POST"])
+    def api_arms_up_twitch_test_post():
+        """Gated gesture-to-motion bench latch.
+
+        POST is local-only so that only a shell on the robot can enable
+        the latch. Any other peer gets 403 and nothing is applied. GET
+        stays open.
+
+        This latch enables a gated gesture-to-motion path. It is volatile,
+        needs the robot armed in MANUAL at the moment of enabling, and clears
+        on disarm, mode change, expiry and budget. It must NOT be reused for
+        the continuous back-up feature, which needs its own latch and review.
+
+        Body is exactly ``{"enabled": true}`` or ``{"enabled": false}``.
+        """
+        if request.remote_addr not in ("127.0.0.1", "::1"):
+            return Response(
+                json.dumps({"error": "local only"}),
+                status=403, content_type="application/json")
+        if controller is None or not hasattr(controller, "request_twitch_test"):
+            return Response(json.dumps({"error": "no controller"}), status=503,
+                            content_type="application/json")
+        payload = request.get_json(silent=True)
+        if (
+            not isinstance(payload, dict)
+            or set(payload.keys()) != {"enabled"}
+            or type(payload.get("enabled")) is not bool
+        ):
+            return Response(
+                json.dumps({"error": "body must be exactly {\"enabled\": true|false}"}),
+                status=400, content_type="application/json")
+        ok, reason = controller.request_twitch_test(payload["enabled"])
+        if not ok:
+            return Response(
+                json.dumps({"ok": False, "reason": reason}),
+                status=409, content_type="application/json")
+        state = controller.get_twitch_test_state()
+        body = {"ok": True}
+        if isinstance(state, dict):
+            body.update(state)
+        return Response(json.dumps(body), content_type="application/json")
+
     # -- Legacy teleop (RETIRED) ----------------------------------------------
     #
     # These endpoints used to write /tmp/wall_e_bt_latest.json directly, with

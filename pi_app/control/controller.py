@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Protocol, Tuple, List, Optional
+from typing import Any, Protocol, Tuple, List, Optional
 import logging
 import math
 import time
@@ -25,6 +25,7 @@ from pi_app.control.gesture_control import (
     GestureStateMachine, GestureEvent, HandData,
     hand_poll_wanted as _hand_poll_wanted,
 )
+from pi_app.control.arms_up import ArmsUpDetector, PoseSample
 from pi_app.control.waypoint_nav import WaypointNavController, NavState, mix_to_bytes
 from pi_app.control.gps_heading_align import GpsHeadingAligner
 from pi_app.control.rpm_plausibility import (
@@ -160,6 +161,33 @@ class Controller:
         self._gps_reading: GpsReading | None = None
         self._person_detections: list[PersonDetection] = []
         self._hand_data: HandData | None = None
+        self._pose_sample: PoseSample | None = None
+        self._pose_status: dict = {}
+        self._arms_up = ArmsUpDetector(getattr(config, "arms_up", None))
+        # Bench-test reverse twitch. Times are compared against process()'s
+        # mono_now — do not call time.monotonic() here (controller tests
+        # pin the init call count). The web thread mutates the latch through
+        # request_twitch_test(); process() mutates it under the same lock.
+        self._twitch_lock = threading.Lock()
+        self._twitch_test_latched: bool = False
+        self._twitch_budget_left: int = 0
+        self._twitch_expires_at: float = 0.0
+        self._twitch_until: float = 0.0
+        self._twitch_cooldown_until: float = 0.0
+        self._twitch_count: int = 0
+        self._twitch_blocked_reason: Optional[str] = None
+        self._twitch_cancel_reason: Optional[str] = None
+        self._twitch_cleared_reason: Optional[str] = None
+        self._twitch_active: bool = False
+        self._twitch_edge_pending: bool = False
+        # Set by an accepted enable; the control thread resets the detector.
+        self._twitch_detector_reset_pending: bool = False
+        # Pulse cancelled on the way into calibration: the next calibration
+        # process() tick owes one neutral write, then stops fighting the wizard.
+        self._twitch_calib_neutral_pending: bool = False
+        self._twitch_reverse_n: int = 22
+        self._twitch_still_since: Optional[float] = None
+        self._twitch_clamp_warned: bool = False
 
         # Charger inhibit: set True when BMS reports charging; blocks motor output.
         # Fail-open by design — cleared externally if BMS becomes unreachable.
@@ -245,6 +273,110 @@ class Controller:
     def set_hand_data(self, data: HandData | None) -> None:
         """Feed latest hand landmark data from OakDepthReader."""
         self._hand_data = data
+
+    def set_pose_sample(self, sample: PoseSample | None) -> None:
+        """Feed latest PoseSample from PoseWorker (None = no pose this frame)."""
+        self._pose_sample = sample
+
+    def set_pose_status(self, status: dict | None) -> None:
+        """Feed PoseWorker diagnostics (pose_ms / pose_hz / mp_pose_loaded / ...)."""
+        self._pose_status = dict(status) if status else {}
+
+    def pose_wanted(self) -> bool:
+        """True only while the bench-twitch latch is on.
+
+        The main loop uses this to skip MediaPipe Pose unless the gated
+        bench test is enabled. FOLLOW_ME, WAYPOINT_NAV, disarm, expiry,
+        and a spent budget clear the latch, so pose stays off there.
+        """
+        return bool(self._twitch_test_latched)
+
+    def request_twitch_test(self, enabled: bool) -> tuple[bool, str]:
+        """Latch or clear the bench-twitch test. Called from the web thread.
+
+        ``enabled=True`` is accepted only while the feature is permitted and
+        the robot is armed, in MANUAL, not in emergency, not charger-inhibited,
+        not pack-low latched, and not in calibration. Otherwise the latch is
+        left unchanged and the reason is returned.
+
+        ``enabled=True`` while the latch is already on returns
+        ``(False, "already_latched")`` and does not refill the budget or
+        extend the expiry.
+
+        An accepted enable asks the control thread to reset the detector
+        streak. ``ArmsUpDetector.reset()`` keeps the re-arm latch.
+
+        ``enabled=False`` clears the latch and cancels an active pulse.
+        The latch is volatile. It must not be reused for continuous back-up.
+        """
+        now = time.monotonic()
+        cfg = getattr(config, "arms_up", None)
+        with self._twitch_lock:
+            if not enabled:
+                self._cancel_twitch_pulse_locked(now, "api")
+                self._twitch_test_latched = False
+                self._twitch_budget_left = 0
+                self._twitch_expires_at = 0.0
+                self._twitch_edge_pending = False
+                _logger.warning("ARMS-UP twitch test DISABLED (reason %s)", "api")
+                return True, "ok"
+            if self._twitch_test_latched:
+                return False, "already_latched"
+            reason = self._twitch_enable_refusal_locked(cfg)
+            if reason is not None:
+                return False, reason
+            budget = int(getattr(cfg, "twitch_test_budget", 3))
+            max_s = float(getattr(cfg, "twitch_test_max_s", 300.0))
+            self._twitch_test_latched = True
+            self._twitch_budget_left = budget
+            self._twitch_expires_at = now + max_s
+            self._twitch_detector_reset_pending = True
+            _logger.warning(
+                "ARMS-UP twitch test ENABLED (budget %d, expires in %.0f s)",
+                budget,
+                max_s,
+            )
+            return True, "ok"
+
+    def get_twitch_test_state(self) -> dict:
+        """Latch snapshot for the web thread and telemetry consumers."""
+        now = time.monotonic()
+        with self._twitch_lock:
+            return self._twitch_state_locked(now)
+
+    def _twitch_enable_refusal_locked(self, cfg: Any) -> Optional[str]:
+        if cfg is None or not bool(getattr(cfg, "enabled", True)):
+            return "disabled"
+        if not self._safety_state.is_armed:
+            return "disarmed"
+        if self._safety_state.emergency_active:
+            return "emergency"
+        if self._mode != "MANUAL":
+            return "mode"
+        if self._charger_inhibit:
+            return "charger"
+        if self._vesc_pack_low_latched:
+            return "pack_low"
+        if self._calibration_mode:
+            return "calibration"
+        return None
+
+    def _twitch_state_locked(self, now: float) -> dict:
+        if self._twitch_test_latched:
+            expires: Optional[float] = self._twitch_expires_at - now
+            if expires < 0.0:
+                expires = 0.0
+        else:
+            expires = None
+        return {
+            "latched": self._twitch_test_latched,
+            "budget_left": int(self._twitch_budget_left),
+            "expires_in_s": expires,
+            "twitch_count": int(self._twitch_count),
+            "twitch_active": bool(self._twitch_active),
+            "twitch_blocked_reason": self._twitch_blocked_reason,
+            "twitch_cancel_reason": self._twitch_cancel_reason,
+        }
 
     def set_gps_reading(self, reading: GpsReading | None) -> None:
         """Feed latest reading from RtkGpsReader."""
@@ -343,11 +475,25 @@ class Controller:
         """Pause normal control; process() will output neutral commands."""
         self._mode = "MANUAL"
         self._calibration_mode = True
+        now = time.monotonic()
+        with self._twitch_lock:
+            pulse_live = now < self._twitch_until or self._twitch_active
+            if pulse_live:
+                self._twitch_calib_neutral_pending = True
+            self._twitch_edge_pending = False
+            if self._twitch_test_latched or pulse_live:
+                self._clear_twitch_latch_locked(now, "calibration")
+                # _cancel records the reason from the time window only.
+                # _twitch_active is also a live pulse.
+                if pulse_live:
+                    self._twitch_cancel_reason = "calibration"
         self._motor.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
 
     def exit_calibration_mode(self) -> None:
         """Resume normal control loop."""
         self._calibration_mode = False
+        with self._twitch_lock:
+            self._twitch_calib_neutral_pending = False
         self._motor.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
 
     @property
@@ -647,6 +793,318 @@ class Controller:
             steering_input=steering_input,
         )
 
+    def _update_arms_up_twitch(self, now: float) -> None:
+        """Debounce the pose sample. A rising edge stays pending until the
+        injection point accepts or rejects it on this same tick.
+
+        An accepted enable sets ``_twitch_detector_reset_pending``. Reset
+        runs here, on the control thread, before this tick's sample.
+        """
+        with self._twitch_lock:
+            reset_detector = self._twitch_detector_reset_pending
+            self._twitch_detector_reset_pending = False
+        if reset_detector:
+            self._arms_up.reset()
+        self._arms_up.update(self._pose_sample, now)
+        if self._arms_up.rising_edge:
+            self._twitch_edge_pending = True
+
+    def _maintain_twitch_latch(self, now: float) -> None:
+        """Clear the latch when a tick is no longer a legal bench-test tick.
+
+        Budget exhaustion waits until the current pulse has finished.
+        Clearing the latch also cancels a pulse that is still running.
+        """
+        with self._twitch_lock:
+            self._twitch_cleared_reason = None
+            if (
+                not self._twitch_test_latched
+                and not (now < self._twitch_until)
+                and not self._twitch_active
+            ):
+                return
+            reason = self._twitch_latch_clear_reason_locked(now)
+            if reason is not None:
+                self._clear_twitch_latch_locked(now, reason)
+
+    def _twitch_latch_clear_reason_locked(self, now: float) -> Optional[str]:
+        if self._safety_state.emergency_active:
+            return "emergency"
+        if not self._safety_state.is_armed:
+            return "disarmed"
+        if self._mode != "MANUAL":
+            return "mode"
+        if self._calibration_mode:
+            return "calibration"
+        if self._twitch_test_latched and now >= self._twitch_expires_at:
+            return "expiry"
+        if (
+            self._twitch_test_latched
+            and self._twitch_budget_left <= 0
+            and not (now < self._twitch_until)
+        ):
+            return "budget"
+        return None
+
+    def _clear_twitch_latch_locked(self, now: float, reason: str) -> None:
+        self._twitch_cleared_reason = reason
+        if self._twitch_test_latched:
+            self._twitch_test_latched = False
+            self._twitch_budget_left = 0
+            self._twitch_expires_at = 0.0
+            _logger.warning("ARMS-UP twitch test DISABLED (reason %s)", reason)
+        self._cancel_twitch_pulse_locked(now, reason)
+
+    def _cancel_twitch_pulse_locked(self, now: float, reason: str) -> None:
+        # Time, not the latched _twitch_active flag: that flag stays True
+        # until the injection point, so a pulse that already reached its
+        # end would be reported as cancelled by the latch clear that follows.
+        pulse_live = now < self._twitch_until
+        self._twitch_until = 0.0
+        self._twitch_active = False
+        if pulse_live:
+            self._twitch_cancel_reason = reason
+
+    def _twitch_early_exit(self, now: float, reason: str) -> bool:
+        """RC-stale and calibration returns: drop the latch, the pulse, and
+        the detector streak. The re-arm latch inside the detector is kept.
+
+        Returns True when this call cleared a pulse that was still live.
+        """
+        with self._twitch_lock:
+            self._twitch_edge_pending = False
+            pulse_live = now < self._twitch_until or self._twitch_active
+            if (
+                self._twitch_test_latched
+                or self._twitch_active
+                or now < self._twitch_until
+            ):
+                self._clear_twitch_latch_locked(now, reason)
+            else:
+                self._twitch_until = 0.0
+                self._twitch_active = False
+        self._arms_up.reset()
+        self._twitch_still_since = None
+        return pulse_live
+
+    def _sticks_within_twitch_band(self, left: int, right: int, cfg: Any) -> bool:
+        band = int(getattr(cfg, "twitch_stick_neutral_band", 6) if cfg is not None else 6)
+        return (
+            abs(int(left) - CENTER_OUTPUT_VALUE) <= band
+            and abs(int(right) - CENTER_OUTPUT_VALUE) <= band
+        )
+
+    def _twitch_still_ok(self, now: float, cfg: Any) -> bool:
+        """True when neutral has been held and both track eRPMs are in cap.
+
+        A missing eRPM fails closed. The start gate reports that as
+        ``no_rpm``; time and speed failures stay ``not_still``.
+        """
+        left_rpm = self._actual_left_rpm
+        right_rpm = self._actual_right_rpm
+        if left_rpm is None or right_rpm is None:
+            return False
+        since = self._twitch_still_since
+        min_s = float(getattr(cfg, "twitch_min_still_s", 0.5) if cfg is not None else 0.5)
+        if since is None or (now - since) < min_s - 1e-9:
+            return False
+        limit = float(getattr(cfg, "twitch_max_still_erpm", 300.0) if cfg is not None else 300.0)
+        return abs(float(left_rpm)) <= limit and abs(float(right_rpm)) <= limit
+
+    def _clamped_twitch_params(self, cfg: Any) -> tuple[int, float]:
+        raw_n = int(getattr(cfg, "twitch_reverse_byte", 22) if cfg is not None else 22)
+        raw_d = float(getattr(cfg, "twitch_duration_s", 0.25) if cfg is not None else 0.25)
+        n = max(0, min(30, raw_n))
+        dur = max(0.0, min(0.4, raw_d))
+        if (n != raw_n or dur != raw_d) and not self._twitch_clamp_warned:
+            self._twitch_clamp_warned = True
+            _logger.warning(
+                "ARMS-UP twitch config clamped: reverse_byte %s -> %s, duration_s %s -> %s",
+                raw_n, n, raw_d, dur,
+            )
+        return n, dur
+
+    def _twitch_start_block_locked(
+        self,
+        now: float,
+        left: int,
+        right: int,
+        bt: tuple[int, int] | None,
+        cfg: Any,
+    ) -> Optional[str]:
+        if cfg is None or not bool(getattr(cfg, "enabled", True)):
+            return "disabled"
+        if not self._twitch_test_latched:
+            return self._twitch_cleared_reason or "latch"
+        if self._twitch_budget_left <= 0:
+            return "budget"
+        if self._safety_state.emergency_active:
+            return "emergency"
+        if not self._safety_state.is_armed:
+            return "disarmed"
+        if self._mode != "MANUAL":
+            return "mode"
+        if self._charger_inhibit:
+            return "charger"
+        if self._vesc_pack_low_latched:
+            return "pack_low"
+        if self._calibration_mode:
+            return "calibration"
+        if bt is not None:
+            return "bt_override"
+        if not self._sticks_within_twitch_band(left, right, cfg):
+            return "stick"
+        if self._actual_left_rpm is None or self._actual_right_rpm is None:
+            return "no_rpm"
+        if not self._twitch_still_ok(now, cfg):
+            return "not_still"
+        if now < self._twitch_cooldown_until:
+            return "cooldown"
+        return None
+
+    def _twitch_continue_block_locked(
+        self,
+        left: int,
+        right: int,
+        bt: tuple[int, int] | None,
+        cfg: Any,
+    ) -> Optional[str]:
+        # (a) latch only — a spent budget does not cancel the pulse it paid for.
+        if not self._twitch_test_latched:
+            return self._twitch_cleared_reason or "latch"
+        if self._safety_state.emergency_active:
+            return "emergency"
+        if not self._safety_state.is_armed:
+            return "disarmed"
+        if self._mode != "MANUAL":
+            return "mode"
+        if self._charger_inhibit:
+            return "charger"
+        if self._vesc_pack_low_latched:
+            return "pack_low"
+        if self._calibration_mode:
+            return "calibration"
+        if bt is not None:
+            return "bt_override"
+        if not self._sticks_within_twitch_band(left, right, cfg):
+            return "stick"
+        return None
+
+    def _service_twitch_injection(
+        self,
+        now: float,
+        left: int,
+        right: int,
+        bt: tuple[int, int] | None,
+    ) -> tuple[int, int]:
+        """Start or continue the reverse pulse, after the per-mode command
+        and the IMU correction. A blocked edge is consumed here.
+        """
+        cfg = getattr(config, "arms_up", None)
+        with self._twitch_lock:
+            if self._twitch_edge_pending:
+                self._twitch_edge_pending = False
+                reason = self._twitch_start_block_locked(now, left, right, bt, cfg)
+                if reason is None:
+                    n, dur = self._clamped_twitch_params(cfg)
+                    cooldown = float(
+                        getattr(cfg, "twitch_cooldown_s", 3.0) if cfg is not None else 3.0
+                    )
+                    self._twitch_reverse_n = n
+                    self._twitch_budget_left = max(0, self._twitch_budget_left - 1)
+                    self._twitch_until = now + dur
+                    self._twitch_cooldown_until = now + cooldown
+                    self._twitch_count += 1
+                    self._twitch_blocked_reason = None
+                    _logger.warning(
+                        "ARMS-UP twitch: reverse %s bytes for %s s",
+                        n,
+                        dur,
+                    )
+                else:
+                    self._twitch_blocked_reason = reason
+            pulse = now < self._twitch_until
+            if pulse:
+                reason = self._twitch_continue_block_locked(left, right, bt, cfg)
+                if reason is not None:
+                    self._twitch_until = 0.0
+                    self._twitch_active = False
+                    self._twitch_cancel_reason = reason
+                    pulse = False
+                    _logger.warning("ARMS-UP twitch cancelled (reason %s)", reason)
+                else:
+                    byte = CENTER_OUTPUT_VALUE - int(self._twitch_reverse_n)
+                    byte = max(MIN_OUTPUT, min(MAX_OUTPUT, byte))
+                    left = right = byte
+            self._twitch_active = pulse
+        return left, right
+
+    def _note_twitch_still(self, now: float, left: int, right: int) -> None:
+        """Track how long the final emitted bytes have stayed at neutral.
+
+        Only MANUAL counts. Disarm, any other mode, and any non-neutral
+        byte clear it. The RC-stale and calibration returns clear it
+        themselves before they return.
+        """
+        if (
+            not self._safety_state.is_armed
+            or self._mode != "MANUAL"
+            or int(left) != CENTER_OUTPUT_VALUE
+            or int(right) != CENTER_OUTPUT_VALUE
+        ):
+            self._twitch_still_since = None
+            return
+        if self._twitch_still_since is None:
+            self._twitch_still_since = now
+
+    def _arms_up_telemetry(self, now: float) -> dict:
+        sample = self._pose_sample
+        status = self._pose_status or {}
+        min_vis = None
+        l_wrist_y = r_wrist_y = l_shoulder_y = r_shoulder_y = None
+        if sample is not None:
+            l_wrist_y = sample.l_wrist.y
+            r_wrist_y = sample.r_wrist.y
+            l_shoulder_y = sample.l_shoulder.y
+            r_shoulder_y = sample.r_shoulder.y
+            min_vis = min(
+                sample.l_wrist.visibility,
+                sample.r_wrist.visibility,
+                sample.l_shoulder.visibility,
+                sample.r_shoulder.visibility,
+            )
+        return {
+            "raw": self._arms_up.raw,
+            "active": self._arms_up.active,
+            "streak_s": self._arms_up.streak_s,
+            "sample_age_s": self._arms_up.last_sample_age_s,
+            "l_wrist_y": l_wrist_y,
+            "r_wrist_y": r_wrist_y,
+            "l_shoulder_y": l_shoulder_y,
+            "r_shoulder_y": r_shoulder_y,
+            "min_visibility_seen": min_vis,
+            "twitch_active": self._twitch_active,
+            "twitch_count": self._twitch_count,
+            "twitch_blocked_reason": self._twitch_blocked_reason,
+            "twitch_cancel_reason": self._twitch_cancel_reason,
+            "test_latched": self._twitch_test_latched,
+            "test_budget_left": int(self._twitch_budget_left),
+            "test_expires_in_s": (
+                max(0.0, self._twitch_expires_at - now)
+                if self._twitch_test_latched else None
+            ),
+            "still_s": (
+                0.0 if self._twitch_still_since is None
+                else max(0.0, now - self._twitch_still_since)
+            ),
+            "crop_y0": sample.crop_y0 if sample is not None else None,
+            "crop_y1": sample.crop_y1 if sample is not None else None,
+            "pose_ms": status.get("pose_ms"),
+            "pose_hz": status.get("pose_hz"),
+            "pose_enabled": status.get("pose_enabled"),
+            "mp_pose_loaded": status.get("mp_pose_loaded"),
+        }
+
     def process(
         self,
         rc: RCInputs,
@@ -860,6 +1318,7 @@ class Controller:
                 emergency_active=self._safety_state.emergency_active,
             )
             self._last_follow_me_emitted_forward_byte = None
+            self._twitch_early_exit(mono_now, "rc_stale")
             return cmd, [SafetyEvent.RC_STALE], {"mode": "MANUAL", "rc_stale": True, "rc_age_s": rc_age}
 
         # Update safety. This now runs on EVERY tick before the calibration
@@ -902,6 +1361,15 @@ class Controller:
                 emergency_active=self._safety_state.emergency_active,
             )
             self._last_follow_me_emitted_forward_byte = None
+            cleared_pulse = self._twitch_early_exit(mono_now, "calibration")
+            with self._twitch_lock:
+                write_neutral = bool(
+                    self._twitch_calib_neutral_pending or cleared_pulse
+                )
+                if write_neutral:
+                    self._twitch_calib_neutral_pending = False
+            if write_neutral:
+                self._motor.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
             return cmd, events, {
                 "mode": "CALIBRATING",
                 "calibration": True,
@@ -969,6 +1437,8 @@ class Controller:
 
         # Command computation
         telemetry["mode"] = self._mode
+        self._maintain_twitch_latch(mono_now)
+        self._update_arms_up_twitch(mono_now)
         if self._gesture is not None:
             telemetry["gesture_phase"] = self._gesture.phase_name
             if gesture_event is not None:
@@ -1237,6 +1707,16 @@ class Controller:
                 pass
         telemetry["imu_correction_applied"] = corr_applied
 
+        # Arms-up bench twitch: replace the mode's L/R with a short equal
+        # reverse pulse. Injected HERE — after per-mode command + IMU, before
+        # obstacle scaling, disarm, charger inhibit, pack-low, RPM-plausibility
+        # (telemetry only), and the slew limiter. Reverse is never gated by
+        # the forward obstacle layer (is_forward_motion requires net forward).
+        # MANUAL only. A blocked rising edge is consumed on this tick.
+        left, right = self._service_twitch_injection(
+            mono_now, left, right, bt_override_bytes
+        )
+
         # Obstacle avoidance throttle scaling — front camera only gates forward motion.
         # Reverse commands must not be blocked by front camera detections.
         # "Forward motion" must be true net forward (sum of byte offsets > 0), not just
@@ -1473,6 +1953,8 @@ class Controller:
         telemetry["heading_offset_frozen"] = heading_align["frozen"]
         telemetry["heading_offset_refining"] = heading_align["refining"]
         telemetry["corrected_heading_deg"] = heading_align["corrected_heading_deg"]
+        self._note_twitch_still(mono_now, left, right)
+        telemetry["arms_up"] = self._arms_up_telemetry(mono_now)
         return cmd, events, telemetry
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:

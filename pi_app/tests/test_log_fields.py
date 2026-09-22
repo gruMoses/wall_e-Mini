@@ -423,5 +423,66 @@ class BuildLogObjCommitCTests(unittest.TestCase):
         self.assertEqual(obj["imu"]["oak_imu"]["heading_deg"], 1.0)
 
 
+class BuildLogObjArmsUpBlockTests(unittest.TestCase):
+    _KEYS = (
+        "raw", "active", "streak_s", "sample_age_s",
+        "l_wrist_y", "r_wrist_y", "l_shoulder_y", "r_shoulder_y",
+        "min_visibility_seen", "twitch_active", "twitch_count",
+        "twitch_blocked_reason", "twitch_cancel_reason",
+        "test_latched", "test_budget_left", "test_expires_in_s",
+        "still_s", "crop_y0", "crop_y1",
+        "pose_ms", "pose_hz", "pose_enabled",
+        "mp_pose_loaded",
+    )
+
+    def test_block_present_with_values(self):
+        telem = {
+            "arms_up": {
+                "raw": True, "active": True, "streak_s": 0.4,
+                "sample_age_s": 0.05, "l_wrist_y": 0.21, "r_wrist_y": 0.22,
+                "l_shoulder_y": 0.40, "r_shoulder_y": 0.41,
+                "min_visibility_seen": 0.8, "twitch_active": True,
+                "twitch_count": 2, "twitch_blocked_reason": None,
+                "twitch_cancel_reason": None,
+                "test_latched": True, "test_budget_left": 2,
+                "test_expires_in_s": 12.0, "still_s": 0.5,
+                "crop_y0": 0.10, "crop_y1": 0.90,
+                "pose_ms": 41.2, "pose_hz": 9.5, "pose_enabled": True,
+                "mp_pose_loaded": True,
+            },
+        }
+        obj = build_log_obj(**_base_kwargs(telem=telem))
+        self.assertIn("arms_up", obj)
+        au = obj["arms_up"]
+        self.assertIs(au["raw"], True)
+        self.assertIs(au["active"], True)
+        self.assertEqual(au["twitch_count"], 2)
+        self.assertIsNone(au["twitch_blocked_reason"])
+        self.assertIsNone(au["twitch_cancel_reason"])
+        self.assertIs(au["test_latched"], True)
+        self.assertEqual(au["test_budget_left"], 2)
+        self.assertEqual(au["test_expires_in_s"], 12.0)
+        self.assertEqual(au["still_s"], 0.5)
+        self.assertEqual(au["crop_y0"], 0.10)
+        self.assertEqual(au["crop_y1"], 0.90)
+        self.assertEqual(au["pose_ms"], 41.2)
+        self.assertTrue(au["mp_pose_loaded"])
+
+    def test_missing_keys_render_none(self):
+        obj = build_log_obj(**_base_kwargs())
+        self.assertIn("arms_up", obj)
+        au = obj["arms_up"]
+        for key in self._KEYS:
+            self.assertIsNone(au.get(key), key)
+
+    def test_partial_block_fills_missing_with_none(self):
+        obj = build_log_obj(**_base_kwargs(telem={"arms_up": {"raw": False}}))
+        au = obj["arms_up"]
+        self.assertIs(au["raw"], False)
+        self.assertIsNone(au["active"])
+        self.assertIsNone(au["twitch_blocked_reason"])
+        self.assertIsNone(au["pose_ms"])
+
+
 if __name__ == "__main__":
     unittest.main()

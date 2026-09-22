@@ -21,6 +21,7 @@ try:
     from pi_app.hardware.arduino_rc import ArduinoRCReader
     from pi_app.hardware.imu_reader import ImuReader
     from pi_app.hardware.oak_depth import OakDepthReader
+    from pi_app.hardware.pose_worker import PoseWorker
     from pi_app.hardware.oak_recorder import OakRecorder, RecordingTelemetry
     from pi_app.hardware.rtk_gps import RtkGpsReader
     from pi_app.hardware.bms import BmsService
@@ -50,6 +51,7 @@ except ModuleNotFoundError:
     from pi_app.hardware.arduino_rc import ArduinoRCReader  # type: ignore
     from pi_app.hardware.imu_reader import ImuReader  # type: ignore
     from pi_app.hardware.oak_depth import OakDepthReader  # type: ignore
+    from pi_app.hardware.pose_worker import PoseWorker  # type: ignore
     from pi_app.hardware.oak_recorder import OakRecorder, RecordingTelemetry  # type: ignore
     from pi_app.hardware.rtk_gps import RtkGpsReader  # type: ignore
     from pi_app.hardware.bms import BmsService  # type: ignore
@@ -170,6 +172,7 @@ def run() -> None:
     obstacle_ctrl = None
     follow_me_ctrl = None
     gesture_ctrl = None
+    pose_worker = None
     if config.obstacle_avoidance.enabled or config.follow_me.enabled:
         try:
             if OakDepthReader.detect():
@@ -222,6 +225,18 @@ def run() -> None:
         except Exception as e:
             print(f"OAK-D Lite initialization failed: {e}")
             print("  Continuing without depth camera")
+
+    if (
+        oak_reader is not None
+        and bool(getattr(getattr(config, "arms_up", None), "enabled", False))
+    ):
+        try:
+            pose_worker = PoseWorker(oak_reader, config.arms_up)
+            pose_worker.start()
+            print("  Arms-up pose worker started (bench twitch)")
+        except Exception as e:
+            print(f"  Arms-up pose worker init failed: {e}")
+            pose_worker = None
 
     # Initialize IMU and steering compensator (after OAK-D so oak_d fallback is available).
     # Priority: external I2C IMU (best quality) > OAK-D onboard IMU > none.
@@ -539,6 +554,9 @@ def run() -> None:
                     controller.set_person_detections(oak_persons)
                 if gesture_ctrl is not None:
                     controller.set_hand_data(oak_reader.get_hand_data())
+                if pose_worker is not None:
+                    controller.set_pose_sample(pose_worker.get_pose_sample())
+                    controller.set_pose_status(pose_worker.get_status())
                 if oak_health_getter is not None:
                     try:
                         oak_camera_health = oak_health_getter()
@@ -599,6 +617,10 @@ def run() -> None:
                 oak_reader.set_hand_poll_enabled(
                     controller.hand_poll_wanted(cmd.is_armed)
                 )
+            # Pose runs only while the bench-twitch latch is on. That is
+            # MANUAL and armed, and it is off in FOLLOW_ME and WAYPOINT_NAV.
+            if pose_worker is not None:
+                pose_worker.set_pose_enabled(controller.pose_wanted())
 
             # P3: BMS discharge FET safety — rate-limited warning + post-grace safety timeout.
             if bms_service is not None and cmd.is_armed:
@@ -771,7 +793,10 @@ def run() -> None:
                         ),
                     )
                     depth_frame = oak_reader.get_latest_depth_frame() if (oak_reader and need_depth) else None
-                    rgb_frame = oak_reader.get_latest_rgb_frame() if (oak_reader and need_rgb) else None
+                    if oak_reader and need_rgb:
+                        rgb_frame, _rgb_ts = oak_reader.get_latest_rgb_frame()
+                    else:
+                        rgb_frame = None
                     oak_recorder.update(rec_telem, depth_frame=depth_frame, rgb_frame=rgb_frame)
                 except Exception:
                     pass
@@ -1107,6 +1132,11 @@ def run() -> None:
         try:
             if oak_recorder is not None:
                 oak_recorder.stop()
+        except Exception:
+            pass
+        try:
+            if pose_worker is not None:
+                pose_worker.stop()
         except Exception:
             pass
         try:
