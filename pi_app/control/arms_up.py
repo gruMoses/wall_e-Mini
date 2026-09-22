@@ -126,8 +126,10 @@ class ArmsUpDetector:
     It becomes False after ``release_s`` of false/None, or when no new
     sample has arrived for ``stale_s``.
 
-    After a rising edge, another rising edge waits for a NEW sample that
-    is raw False. None, a stale dropout, and ``reset()`` do not re-arm.
+    After a rising edge, another rising edge waits for
+    ``min_hold_samples`` consecutive NEW samples that are raw False.
+    None, a stale dropout, and a new raw-True sample reset that count.
+    ``reset()`` clears the count and keeps the re-arm latch.
     """
 
     def __init__(self, cfg: Any = None) -> None:
@@ -139,18 +141,21 @@ class ArmsUpDetector:
         self.rising_edge: bool = False
         self._true_since_ts: Optional[float] = None
         self._true_count: int = 0
+        self._false_count: int = 0
         self._false_since_now: Optional[float] = None
         self._last_seen_ts: Optional[float] = None
         self._last_new_sample_now: Optional[float] = None
         self._last_update_now: Optional[float] = None
-        # True until a rising edge; a raw-False NEW sample sets it again.
+        # True until a rising edge. min_hold_samples consecutive raw-False
+        # NEW samples set it again.
         self._rearmed: bool = True
 
     def reset(self) -> None:
         """Clear the streak, active state, and gap trackers.
 
         The re-arm latch is kept: a rising edge that already fired stays
-        consumed across a calibration / RC-stale reset.
+        consumed across a calibration / RC-stale reset. The consecutive
+        raw-False count is cleared.
         """
         self.active = False
         self.raw = False
@@ -159,6 +164,7 @@ class ArmsUpDetector:
         self.rising_edge = False
         self._true_since_ts = None
         self._true_count = 0
+        self._false_count = 0
         self._false_since_now = None
         self._last_seen_ts = None
         self._last_new_sample_now = None
@@ -178,6 +184,7 @@ class ArmsUpDetector:
             and (now - self._last_update_now) > max_gap
         ):
             self._reset_streak()
+            self._false_count = 0
         self._last_update_now = now
 
         is_new_sample = False
@@ -190,6 +197,7 @@ class ArmsUpDetector:
                     and (sample.ts - self._last_seen_ts) > max_gap
                 ):
                     self._reset_streak()
+                    self._false_count = 0
                 self._last_seen_ts = sample.ts
                 self._last_new_sample_now = now
         else:
@@ -209,14 +217,18 @@ class ArmsUpDetector:
             and (now - self._last_new_sample_now) >= stale_s - _TIME_EPS_S
         )
         if stale:
-            # Stale drops active. It does not re-arm the rising edge.
+            # Stale drops active. It does not re-arm the rising edge, and
+            # it breaks the consecutive raw-False run.
             self.active = False
             self._reset_streak()
+            self._false_count = 0
         elif is_new_sample:
             self._apply_observation(sample.ts if sample is not None else now, now, hold_s, release_s)
         elif sample is None:
             # None is not a timestamped sample; it still counts as false
-            # for the release timer (wall clock). It does not re-arm.
+            # for the release timer (wall clock). It does not re-arm, and
+            # it breaks the consecutive raw-False run.
+            self._false_count = 0
             self._apply_false(now, release_s)
 
         return {
@@ -227,17 +239,22 @@ class ArmsUpDetector:
             "rising_edge": self.rising_edge,
         }
 
+    def _min_hold_samples(self) -> int:
+        min_n = _cfg_int(self._cfg, "min_hold_samples", 3)
+        if min_n < 1:
+            return 1
+        return min_n
+
     def _apply_observation(self, sample_ts: float, now: float, hold_s: float, release_s: float) -> None:
         if self.raw:
+            self._false_count = 0
             self._false_since_now = None
             if self._true_since_ts is None:
                 self._true_since_ts = sample_ts
                 self._true_count = 0
             self._true_count += 1
             self.streak_s = max(0.0, sample_ts - self._true_since_ts)
-            min_n = _cfg_int(self._cfg, "min_hold_samples", 3)
-            if min_n < 1:
-                min_n = 1
+            min_n = self._min_hold_samples()
             if (
                 (not self.active)
                 and self._rearmed
@@ -248,8 +265,10 @@ class ArmsUpDetector:
                 self.rising_edge = True
                 self._rearmed = False
         else:
-            # A NEW raw-False sample is the only re-arm.
-            self._rearmed = True
+            # Re-arm only after a sustained arms-down, not one glitch frame.
+            self._false_count += 1
+            if self._false_count >= self._min_hold_samples():
+                self._rearmed = True
             self._apply_false(now, release_s)
 
     def _apply_false(self, now: float, release_s: float) -> None:

@@ -913,7 +913,8 @@ class ArmsUpConfig:
     twitch_cooldown_s: float = 3.0
     # Per-mode command must sit within this many bytes of neutral to start
     # or to keep a pulse. The robot must also have been emitting neutral
-    # for twitch_min_still_s, and (when RPM is present) be under the eRPM cap.
+    # for twitch_min_still_s, and both track eRPMs must be present and at
+    # or under twitch_max_still_erpm. A missing eRPM blocks the start.
     twitch_stick_neutral_band: int = 6
     twitch_min_still_s: float = 0.5
     twitch_max_still_erpm: float = 300.0

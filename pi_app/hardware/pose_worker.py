@@ -19,7 +19,7 @@ import time
 from typing import Any, Optional, Sequence
 
 from config import config
-from pi_app.control.arms_up import PoseJoint, PoseSample
+from pi_app.control.arms_up import _TIME_EPS_S, PoseJoint, PoseSample
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,6 @@ _L_ELBOW, _R_ELBOW = 13, 14
 _L_WRIST, _R_WRIST = 15, 16
 
 _PERSON_MIN_CONF = 0.5
-_EXPAND_X = 0.15
-_EXPAND_Y = 0.10
 _TIMING_WINDOW_S = 2.0
 
 
@@ -88,42 +86,6 @@ def select_person_bbox(
         except (TypeError, ValueError):
             continue
     return best
-
-
-def person_crop_box(
-    bbox: tuple[float, float, float, float],
-    frame_w: int,
-    frame_h: int,
-    expand_x: float = _EXPAND_X,
-    expand_y: float = _EXPAND_Y,
-) -> tuple[int, int, int, int]:
-    """Expand a normalised bbox and clamp to the frame as a pixel crop.
-
-    ``expand_x`` / ``expand_y`` are fractional size increases (0.15 = 15 %
-    wider). Returns ``(x0, y0, x1, y1)`` in pixel coordinates.
-    """
-    xmin, ymin, xmax, ymax = bbox
-    cx = 0.5 * (xmin + xmax)
-    cy = 0.5 * (ymin + ymax)
-    half_w = 0.5 * (xmax - xmin) * (1.0 + expand_x)
-    half_h = 0.5 * (ymax - ymin) * (1.0 + expand_y)
-    x0 = int(round((cx - half_w) * frame_w))
-    y0 = int(round((cy - half_h) * frame_h))
-    x1 = int(round((cx + half_w) * frame_w))
-    y1 = int(round((cy + half_h) * frame_h))
-    if frame_w < 1:
-        frame_w = 1
-    if frame_h < 1:
-        frame_h = 1
-    x0 = max(0, min(frame_w, x0))
-    x1 = max(0, min(frame_w, x1))
-    y0 = max(0, min(frame_h, y0))
-    y1 = max(0, min(frame_h, y1))
-    if x1 < x0:
-        x0, x1 = x1, x0
-    if y1 < y0:
-        y0, y1 = y1, y0
-    return x0, y0, x1, y1
 
 
 def _intr_usable(intr: Any) -> bool:
@@ -546,7 +508,10 @@ class PoseWorker:
         self._publish(sample)
 
     def _detections_fresh(self, frame_ts: Any) -> bool:
-        """False when the person list is older than max_det_age_s vs the frame."""
+        """False when the person list is unpublished or older than max_det_age_s.
+
+        A detection stamp of 0 is the unpublished sentinel.
+        """
         ts_fn = getattr(self._oak, "get_person_detections_ts", None)
         if not callable(ts_fn):
             return False
@@ -555,8 +520,13 @@ class PoseWorker:
             frame_t = float(frame_ts)
         except (TypeError, ValueError):
             return False
+        # 0 is the unpublished sentinel from get_person_detections_ts.
+        if det_ts == 0.0:
+            return False
         max_age = float(getattr(self._cfg, "max_det_age_s", 0.3))
-        return (frame_t - det_ts) <= max_age
+        # Same float tolerance as the detector timers: 1.3 - 1.0 is
+        # 0.30000000000000004, which must still count as 0.3 s old.
+        return (frame_t - det_ts) <= max_age + _TIME_EPS_S
 
     def _publish(self, sample: Optional[PoseSample]) -> None:
         if self._stop.is_set():

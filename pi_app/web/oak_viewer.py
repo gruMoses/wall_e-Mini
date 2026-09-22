@@ -2357,6 +2357,10 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
     def api_arms_up_twitch_test_post():
         """Gated gesture-to-motion bench latch.
 
+        POST is local-only so that only a shell on the robot can enable
+        the latch. Any other peer gets 403 and nothing is applied. GET
+        stays open.
+
         This latch enables a gated gesture-to-motion path. It is volatile,
         needs the robot armed in MANUAL at the moment of enabling, and clears
         on disarm, mode change, expiry and budget. It must NOT be reused for
@@ -2364,6 +2368,10 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
 
         Body is exactly ``{"enabled": true}`` or ``{"enabled": false}``.
         """
+        if request.remote_addr not in ("127.0.0.1", "::1"):
+            return Response(
+                json.dumps({"error": "local only"}),
+                status=403, content_type="application/json")
         if controller is None or not hasattr(controller, "request_twitch_test"):
             return Response(json.dumps({"error": "no controller"}), status=503,
                             content_type="application/json")

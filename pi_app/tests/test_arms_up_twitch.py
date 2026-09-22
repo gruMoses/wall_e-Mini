@@ -8,6 +8,9 @@ controller scenario can step a few tenths of a second.
 
 The bench latch is runtime state. Each test that expects a pulse calls
 request_twitch_test(True) while armed in MANUAL.
+
+Both track RPMs start at 0. A missing RPM blocks a start (``no_rpm``),
+so a success-path test must not clear them.
 """
 
 import unittest
@@ -118,6 +121,10 @@ class TestControllerArmsUpTwitch(unittest.TestCase):
                     safety_params=params,
                     follow_me=follow_me,
                 )
+        # A missing eRPM blocks the start. Success paths are a stopped robot
+        # that has reported 0, not a robot with no telemetry.
+        c._actual_left_rpm = 0
+        c._actual_right_rpm = 0
         return c, motor, fake_now
 
     def _request(self, c, cfg, clock, enabled, t=None):
@@ -487,6 +494,66 @@ class TestTwitchStartGates(TestControllerArmsUpTwitch):
         c._actual_right_rpm = None
         self._later(c, cfg, clock, rc, 1.2, 1.1, 0)
 
+    def test_both_rpms_missing_after_still_blocks_with_no_rpm(self):
+        cfg = _cfg(twitch_min_still_s=0.5)
+        c, _, clock = self._make(cfg)
+        rc = self._arm_and_latch(c, cfg, clock, 1.0)
+        self._process(c, cfg, clock, 1.5, rc)
+        c._actual_left_rpm = None
+        c._actual_right_rpm = None
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.6, rc, pose=_pose(ts=1.6),
+        )
+        self.assertEqual(telem["arms_up"]["twitch_blocked_reason"], "no_rpm")
+        self.assertEqual(telem["arms_up"]["twitch_count"], 0)
+        self.assertFalse(telem["arms_up"]["twitch_active"])
+        self.assertEqual(cmd.left_byte, NEUTRAL)
+
+    def test_one_rpm_missing_blocks_with_no_rpm(self):
+        cfg = _cfg(twitch_min_still_s=0.5)
+        c, _, clock = self._make(cfg)
+        rc = self._arm_and_latch(c, cfg, clock, 1.0)
+        self._process(c, cfg, clock, 1.5, rc)
+        c._actual_left_rpm = None
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.6, rc, pose=_pose(ts=1.6),
+        )
+        self.assertEqual(telem["arms_up"]["twitch_blocked_reason"], "no_rpm")
+        self.assertEqual(telem["arms_up"]["twitch_count"], 0)
+        self.assertEqual(cmd.left_byte, NEUTRAL)
+
+        c._actual_left_rpm = 0
+        c._actual_right_rpm = None
+        self._process(c, cfg, clock, 1.7, rc, pose=_down(1.7))
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.8, rc, pose=_pose(ts=1.8),
+        )
+        self.assertEqual(telem["arms_up"]["twitch_blocked_reason"], "no_rpm")
+        self.assertEqual(telem["arms_up"]["twitch_count"], 0)
+        self.assertEqual(cmd.left_byte, NEUTRAL)
+
+    def test_still_time_not_counted_outside_manual(self):
+        cfg = _cfg(twitch_min_still_s=0.5)
+        c, _, clock = self._make(cfg)
+        rc = _arm_rc()
+        self._process(c, cfg, clock, 1.0, rc)
+        c._mode = "FOLLOW_ME"
+        cmd, _, _ = self._process(c, cfg, clock, 1.1, rc)
+        self.assertEqual((cmd.left_byte, cmd.right_byte), (NEUTRAL, NEUTRAL))
+        cmd, _, _ = self._process(c, cfg, clock, 1.6, rc)
+        self.assertEqual((cmd.left_byte, cmd.right_byte), (NEUTRAL, NEUTRAL))
+        self.assertIsNone(c._twitch_still_since)
+        c._mode = "MANUAL"
+        ok, reason = self._request(c, cfg, clock, True, 1.6)
+        self.assertEqual((ok, reason), (True, "ok"))
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.6, rc, pose=_pose(ts=1.6),
+        )
+        self.assertEqual(telem["arms_up"]["twitch_blocked_reason"], "not_still")
+        self.assertEqual(telem["arms_up"]["twitch_count"], 0)
+        self.assertFalse(telem["arms_up"]["twitch_active"])
+        self.assertEqual(cmd.left_byte, NEUTRAL)
+
 
 def replace_rc(rc, **kwargs):
     return RCInputs(
@@ -656,6 +723,66 @@ class TestTwitchContinue(TestControllerArmsUpTwitch):
         self.assertEqual(state["twitch_cancel_reason"], "api")
         self._no_resume(c, cfg, clock, rc)
 
+    def test_expiry_during_pulse_cancels_it(self):
+        cfg = _cfg(twitch_test_max_s=0.2)
+        c, _, clock, cfg, rc = self._start(cfg)
+        # 1.25 is inside the 0.25 s pulse that began at 1.1, and past expiry.
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.25, rc, pose=_pose(ts=1.1),
+        )
+        self.assertEqual(telem["arms_up"]["twitch_cancel_reason"], "expiry")
+        self.assertFalse(telem["arms_up"]["twitch_active"])
+        self.assertEqual(cmd.left_byte, NEUTRAL)
+        self.assertFalse(c.pose_wanted())
+
+    def test_disarm_during_pulse_cancels_it(self):
+        c, _, clock, cfg, rc = self._start()
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.2, _arm_rc(ch3=1000), pose=_pose(ts=1.1),
+        )
+        self.assertEqual(telem["arms_up"]["twitch_cancel_reason"], "disarmed")
+        self.assertFalse(telem["arms_up"]["twitch_active"])
+        self.assertEqual((cmd.left_byte, cmd.right_byte), (NEUTRAL, NEUTRAL))
+
+    def test_last_budget_pulse_runs_then_latch_clears(self):
+        cfg = _cfg(twitch_test_budget=1, twitch_duration_s=0.25)
+        c, _, clock = self._make(cfg)
+        rc = self._arm_and_latch(c, cfg, clock, 1.0)
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.10, rc, pose=_pose(ts=1.10),
+        )
+        self.assertTrue(telem["arms_up"]["twitch_active"])
+        self.assertEqual(telem["arms_up"]["test_budget_left"], 0)
+        self.assertTrue(telem["arms_up"]["test_latched"])
+        self.assertEqual(cmd.left_byte, TWITCH_BYTE)
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.20, rc, pose=_pose(ts=1.10),
+        )
+        self.assertTrue(telem["arms_up"]["twitch_active"])
+        self.assertEqual(cmd.left_byte, TWITCH_BYTE)
+        self.assertTrue(c.pose_wanted())
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.40, rc, pose=_pose(ts=1.10),
+        )
+        self.assertFalse(telem["arms_up"]["twitch_active"])
+        self.assertEqual(cmd.left_byte, NEUTRAL)
+        self.assertFalse(c.pose_wanted())
+        self.assertEqual(c._twitch_cleared_reason, "budget")
+        self.assertIsNone(telem["arms_up"]["twitch_cancel_reason"])
+
+    def test_calibration_during_pulse_neutrals_once_on_next_tick(self):
+        c, motor, clock, cfg, rc = self._start()
+        self.assertTrue(c._twitch_active)
+        c.enter_calibration_mode()
+        after_enter = len(motor.commands)
+        self.assertEqual(motor.commands[-1], (126, 126))
+        self._process(c, cfg, clock, 1.2, rc, pose=_pose(ts=1.1))
+        self.assertEqual(len(motor.commands), after_enter + 1)
+        self.assertEqual(motor.commands[-1], (126, 126))
+        after_tick = len(motor.commands)
+        self._process(c, cfg, clock, 1.3, rc, pose=_pose(ts=1.1))
+        self.assertEqual(len(motor.commands), after_tick)
+
 
 class TestTwitchLatch(TestControllerArmsUpTwitch):
     def test_refused_when_disarmed_not_manual_charger_pack_low(self):
@@ -701,6 +828,44 @@ class TestTwitchLatch(TestControllerArmsUpTwitch):
         state = self._state(c, clock, 2.0)
         self.assertFalse(state["latched"])
         self.assertEqual(state["budget_left"], 0)
+
+    def test_second_enable_while_latched_does_not_refill(self):
+        cfg = _cfg(twitch_test_budget=3, twitch_test_max_s=300.0)
+        c, _, clock = self._make(cfg)
+        rc = self._arm_and_latch(c, cfg, clock, 1.0)
+        self._process(c, cfg, clock, 1.1, rc, pose=_pose(ts=1.1))
+        state = self._state(c, clock, 5.0)
+        self.assertEqual(state["budget_left"], 2)
+        self.assertTrue(state["latched"])
+        expires = state["expires_in_s"]
+        ok, reason = self._request(c, cfg, clock, True, 5.0)
+        self.assertEqual((ok, reason), (False, "already_latched"))
+        state2 = self._state(c, clock, 5.0)
+        self.assertEqual(state2["budget_left"], 2)
+        self.assertAlmostEqual(state2["expires_in_s"], expires)
+        self.assertTrue(state2["latched"])
+
+    def test_enable_resets_partial_detector_streak(self):
+        cfg = _cfg(min_hold_samples=3, hold_s=0.0, max_sample_gap_s=1.0)
+        c, _, clock = self._make(cfg)
+        rc = _arm_rc()
+        self._process(c, cfg, clock, 1.0, rc)
+        self._process(c, cfg, clock, 1.10, rc, pose=_pose(ts=1.10))
+        self._process(c, cfg, clock, 1.20, rc, pose=_pose(ts=1.20))
+        ok, reason = self._request(c, cfg, clock, True, 1.20)
+        self.assertEqual((ok, reason), (True, "ok"))
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.30, rc, pose=_pose(ts=1.30),
+        )
+        self.assertEqual(telem["arms_up"]["twitch_count"], 0)
+        self.assertFalse(telem["arms_up"]["twitch_active"])
+        self.assertNotEqual(cmd.left_byte, TWITCH_BYTE)
+        self._process(c, cfg, clock, 1.40, rc, pose=_pose(ts=1.40))
+        cmd, _, telem = self._process(
+            c, cfg, clock, 1.50, rc, pose=_pose(ts=1.50),
+        )
+        self.assertTrue(telem["arms_up"]["twitch_active"])
+        self.assertEqual(telem["arms_up"]["twitch_count"], 1)
 
 
 class TestPoseWanted(TestControllerArmsUpTwitch):

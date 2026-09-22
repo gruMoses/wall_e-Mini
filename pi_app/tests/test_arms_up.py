@@ -239,3 +239,67 @@ class TestArmsUpContinuity(unittest.TestCase):
         st = det.update(_pose(ts=2.0), now=2.0)
         self.assertFalse(st["rising_edge"])
         self.assertFalse(st["active"])
+
+
+class TestArmsUpRearm(unittest.TestCase):
+    def _det(self) -> ArmsUpDetector:
+        return ArmsUpDetector(ArmsUpConfig(
+            hold_s=0.0, min_hold_samples=3, release_s=0.0,
+            stale_s=10.0, max_sample_gap_s=1.0,
+        ))
+
+    def _ups(self, det: ArmsUpDetector, t0: float) -> dict:
+        st = None
+        for i in range(3):
+            ts = round(t0 + i * 0.1, 10)
+            st = det.update(_pose(ts=ts), now=ts)
+        return st
+
+    def test_one_false_between_holds_does_not_rearm(self):
+        det = self._det()
+        self.assertTrue(self._ups(det, 1.0)["rising_edge"])
+        det.update(_down(1.3), now=1.3)
+        st = self._ups(det, 1.4)
+        self.assertFalse(st["rising_edge"])
+        self.assertFalse(det.active)
+
+    def test_three_consecutive_false_frames_rearm(self):
+        det = self._det()
+        self.assertTrue(self._ups(det, 1.0)["rising_edge"])
+        for ts in (1.3, 1.4, 1.5):
+            det.update(_down(ts), now=ts)
+        st = self._ups(det, 1.6)
+        self.assertTrue(st["rising_edge"])
+
+    def test_none_between_false_frames_resets_the_count(self):
+        det = self._det()
+        self.assertTrue(self._ups(det, 1.0)["rising_edge"])
+        det.update(_down(1.3), now=1.3)
+        det.update(_down(1.4), now=1.4)
+        det.update(None, now=1.45)
+        det.update(_down(1.5), now=1.5)
+        # Two false, a None, one false. Without the reset that is three.
+        st = self._ups(det, 1.6)
+        self.assertFalse(st["rising_edge"])
+
+    def test_raw_true_resets_false_count(self):
+        det = self._det()
+        self.assertTrue(self._ups(det, 1.0)["rising_edge"])
+        det.update(_down(1.3), now=1.3)
+        det.update(_down(1.4), now=1.4)
+        det.update(_pose(ts=1.5), now=1.5)
+        det.update(_down(1.6), now=1.6)
+        det.update(_down(1.7), now=1.7)
+        st = self._ups(det, 1.8)
+        self.assertFalse(st["rising_edge"])
+
+    def test_reset_clears_false_count_and_keeps_latch(self):
+        det = self._det()
+        self.assertTrue(self._ups(det, 1.0)["rising_edge"])
+        det.update(_down(1.3), now=1.3)
+        det.update(_down(1.4), now=1.4)
+        det.reset()
+        self.assertFalse(det._rearmed)
+        det.update(_down(1.5), now=1.5)
+        st = self._ups(det, 1.6)
+        self.assertFalse(st["rising_edge"])

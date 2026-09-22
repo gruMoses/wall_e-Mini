@@ -125,3 +125,50 @@ class TestArmsUpTwitchEndpoint(unittest.TestCase):
         self.assertEqual(client.get("/api/arms_up/twitch_test").status_code, 503)
         resp = client.post("/api/arms_up/twitch_test", json={"enabled": True})
         self.assertEqual(resp.status_code, 503)
+
+    def test_already_latched_is_409(self):
+        fake = _FakeController(accept=False, reason="already_latched")
+        before = dict(fake.state)
+        resp = self._client(fake).post(
+            "/api/arms_up/twitch_test", json={"enabled": True},
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["reason"], "already_latched")
+        self.assertEqual(fake.state, before)
+        self.assertEqual(fake.calls, [("refused", True)])
+
+    def test_post_is_local_only(self):
+        fake = _FakeController()
+        client = self._client(fake)
+        remote = client.post(
+            "/api/arms_up/twitch_test",
+            json={"enabled": True},
+            environ_base={"REMOTE_ADDR": "192.168.86.10"},
+        )
+        self.assertEqual(remote.status_code, 403)
+        self.assertEqual(remote.get_json(), {"error": "local only"})
+        self.assertEqual(fake.calls, [])
+        self.assertFalse(fake.state["latched"])
+
+        got = client.get(
+            "/api/arms_up/twitch_test",
+            environ_base={"REMOTE_ADDR": "192.168.86.10"},
+        )
+        self.assertEqual(got.status_code, 200)
+
+        local = client.post(
+            "/api/arms_up/twitch_test",
+            json={"enabled": True},
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+        self.assertEqual(local.status_code, 200)
+        self.assertIs(local.get_json()["ok"], True)
+        self.assertEqual(fake.calls, [("applied", True)])
+
+        ipv6 = client.post(
+            "/api/arms_up/twitch_test",
+            json={"enabled": False},
+            environ_base={"REMOTE_ADDR": "::1"},
+        )
+        self.assertEqual(ipv6.status_code, 200)
+        self.assertEqual(fake.calls[-1], ("applied", False))

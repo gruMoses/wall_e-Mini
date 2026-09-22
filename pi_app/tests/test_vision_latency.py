@@ -329,5 +329,31 @@ class TestBuildLogObjLatencyFields(unittest.TestCase):
         self.assertIsNone(h["nn_input_queue_size"])
 
 
+class _CopiedFrame:
+    pass
+
+
+class _StoredFrame:
+    def __init__(self, reader):
+        self.reader = reader
+
+    def copy(self):
+        if self.reader._lock.locked():
+            raise AssertionError("frame copy ran while the reader lock was held")
+        return _CopiedFrame()
+
+
+class TestRgbFrameCopy(unittest.TestCase):
+    def test_returns_copy_and_timestamp(self):
+        reader = _make_reader()
+        stored = _StoredFrame(reader)
+        reader._rgb_state.frame = stored
+        reader._rgb_state.timestamp = 4.5
+        frame, ts = reader.get_latest_rgb_frame()
+        self.assertEqual(ts, 4.5)
+        self.assertIsNot(frame, stored)
+        self.assertIsInstance(frame, _CopiedFrame)
+
+
 if __name__ == "__main__":
     unittest.main()

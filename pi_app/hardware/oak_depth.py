@@ -1082,17 +1082,18 @@ class OakDepthReader:
     def get_latest_rgb_frame(self):
         """Return (frame, ts) of the most recent RGB preview. Thread-safe.
 
-        Copies the numpy buffer once so the vision thread can overwrite
-        ``_rgb_state`` on the next poll without racing consumers. ``ts`` is
-        monotonic; ``frame`` is BGR or None.
+        The frame reference and timestamp are read under the lock. The
+        copy runs after the lock is released: the vision thread assigns a
+        new array on every poll, so the reference stays stable. ``ts`` is
+        monotonic; ``frame`` is a BGR copy or None.
         """
         with self._lock:
             frame = self._rgb_state.frame
             ts = self._rgb_state.timestamp
-            if frame is None:
-                return None, ts
-            copied = frame.copy() if hasattr(frame, "copy") else frame
-            return copied, ts
+        if frame is None:
+            return None, ts
+        copied = frame.copy() if hasattr(frame, "copy") else frame
+        return copied, ts
 
     def get_hand_data(self) -> HandData | None:
         """Return latest hand landmark data or None. Thread-safe."""
