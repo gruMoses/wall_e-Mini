@@ -1,35 +1,47 @@
 # Next session: start here
 
 Written 2026-09-20 (evening), at the end of the follow-me session.
+Updated 2026-09-22 (evening): `fm-armsup` hardened after three Grok safety reviews and merged (sections 2 and 6).
 This document uses Simplified Technical English where practical.
 
 ## 1. State of the robot
 
-- The robot runs `main` at commit `8eb6cc5` plus documentation-only commits.
+- 2026-09-22: `main` gains the `fm-armsup` merge (`b758f7a`, section 2). Before that, the robot ran `main` at commit `8eb6cc5` plus documentation-only commits.
 - Kevin validated this build in the field at 18:09 on 2026-09-20. His words: "that was gorgeous".
 - All changes from 2026-09-20 are live: tracking fix, steering retune, speed-safety logic, honest person-range sampler, vision-latency fix.
 - The full record of the day is `docs/follow_me_run_2026-09-20.md`.
 - The end goal and the owner's constraints are in `CLAUDE.md` and in the auto-memory file `project-walle-north-star.md`.
 
-## 2. Work that is NOT on `main`
+## 2. Branch `fm-armsup`: arms-up bench test (merged 2026-09-22, NOT field-tested)
 
-### Branch `fm-armsup` (pushed to origin, NOT merged, NOT deployed)
+Purpose: bench test for the "both arms up" gesture. When the robot sees both wrists above the shoulders, it gives one small reverse pulse (22 bytes for 0.25 s, approximately 7 cm). This is the acknowledgement test that Kevin asked for. It is the first step toward the back-up feature (section 4, item 2).
 
-Purpose: bench test for the "both arms up" gesture. When the robot sees both wrists above the shoulders for 0.4 s, it gives one small reverse pulse (22 bytes for 0.25 s, less than 7 cm). The cooldown is 3 s. This is the acknowledgement test that Kevin asked for. It is the first step toward the back-up feature (section 4, item 2).
+WARNING: This feature commands motion from a camera gesture. Enable it only while Kevin is at the robot with the RC.
 
-WARNING: This branch commands motion from a camera gesture. Do not merge it to `main` while Kevin is absent. `main` deploys to the robot automatically.
+How the gate works:
 
-Status at the end of the session: refer to section 6 of this document.
+- A deploy does not enable the pulse. Only a runtime latch enables it: `POST /api/arms_up/twitch_test` with the body `{"enabled": true}`. The POST is accepted only from the robot itself (127.0.0.1). The latch is refused unless the robot is armed in MANUAL.
+- The latch clears on disarm, e-stop, mode change, calibration, RC stale, 5 minutes, or 3 pulses. A second enable while latched is refused. A restart clears the latch.
+- A pulse starts only when the sticks are within 6 bytes of neutral, web teleop is off, the output was neutral for 0.5 s, both wheel eRPMs are present and at or below 300, and the 3 s cooldown is over.
+- A stick input, disarm, e-stop, charger, pack-low, calibration or a mode change cancels a pulse. A cancelled pulse does not resume.
+- The gesture needs 3 fresh pose samples over 0.4 s. After a pulse, the camera must see the arms down (3 samples) before the next pulse.
+- MediaPipe Pose loads at startup and runs only while the latch is on. It does not run in FOLLOW_ME or WAYPOINT_NAV.
 
-Procedure for the next session:
+Procedure (bench test with Kevin):
 
-1. Read the diff of `fm-armsup` against `main`.
-2. Run the full test suite on the branch.
-3. Run a Grok safety review of the diff (`grok_review`, focus: unintended motion, twitch outside the safety chain, pose worker effect on vision latency).
-4. Correct all findings.
-5. Ask Kevin for approval. Merge and push only when Kevin is with the robot.
-6. After the deploy, read `oak.det_latency_s` at idle. It must stay near 0.20 s. If it does not, move the pose worker to a lower rate or revert.
-7. Bench test with Kevin: armed, MANUAL, garage. Both arms up. The robot must move back less than 3 inches, one time. One arm up must do nothing.
+1. Kevin approves the push to `main` in the chat while at the robot. Push. Confirm the merge on the Pi with `git merge-base --is-ancestor`. The service restarts when the robot is disarmed.
+2. Garage. Clear floor behind the robot. Armed, MANUAL, sticks centred. Kevin stands 2.5 m to 3 m in front of the robot with the arms down.
+3. Latency baseline: with the latch off, Kevin stays in view for 30 s.
+4. Enable the latch from a shell on the robot:
+   `ssh pi@192.168.86.54 'curl -s -X POST -H "Content-Type: application/json" -d "{\"enabled\": true}" http://127.0.0.1:8080/api/arms_up/twitch_test'`
+5. Kevin raises both arms above the head for approximately 1 s. The robot must move back approximately 7 cm, one time. One arm up must do nothing. Arms down for 1 s, then both arms up again: one more pulse.
+6. Read the arm log: the `arms_up` block (`twitch_count`, `twitch_blocked_reason`, `twitch_cancel_reason`, `pose_ms`, `pose_hz`) and `oak.det_latency_s` with the latch on, compared with the 30 s baseline.
+
+CAUTION: MediaPipe Pose runs only while the latch is on. A latency reading taken while disarmed or with the latch off does not measure the pose worker.
+
+If `det_latency_s` p50 increases by more than approximately 0.05 s with the latch on, reduce `pose_max_hz` before the back-up feature runs the worker in FOLLOW_ME.
+
+Known limit (deferred): detection freshness compares host poll times, not capture times. The crop can lag the person by the NN latency (approximately 0.2 s). The result is a missed trigger, not a false one. Use capture timestamps before the back-up feature.
 
 ## 3. Rules learned on 2026-09-20 (obey these)
 
@@ -42,17 +54,19 @@ Procedure for the next session:
 - Get a Grok safety review of each motion-safety diff before the push. The first review on 2026-09-20 found four real defects after 980 tests passed.
 - Workflow that worked: diagnosis on the session model, `grok_second_opinion` on the plan, implementation by headless Grok CLI jobs in separate git worktrees with a written specification, diff review, full test suite, Grok safety review, then Kevin approves the push.
 - Kevin wants short replies. Give the instruction first.
+- (2026-09-22) Measure a code path in the state where it runs. The pose worker runs only while the bench latch is on, so a disarmed "idle" latency reading does not measure it.
+- (2026-09-22) Give `grok_review` exact line ranges for a scoped re-review. An open focus used all 25 turns on reading and gave no verdict.
 
 ## 4. Backlog, in priority order
 
-1. **`fm-armsup` bench test.** Refer to section 2.
+1. **`fm-armsup` bench test.** Merged 2026-09-22. Refer to section 2.
 2. **Back-up feature.** Both arms up while Kevin walks toward the robot: the robot reverses, keeps Kevin centred, and keeps its distance. Agreed: trigger is both arms raised (the camera cannot see palms or fingers beyond 0.5 m); reverse speed cap 0.4 m/s; the robot stops when the arms go down (approximately 0.3 s); a maximum distance for each reverse movement; the RC always overrides; there are no rear sensors and Kevin accepts that. Skid-steer yaw sign does not depend on the travel direction, thus the keep-centred steering law stays the same. Write a design first, then get a Grok second opinion and a Grok safety review.
 3. **Video recording is off.** The H.265 encoder is skipped when gestures are configured (`pi_app/hardware/oak_depth.py`, the condition `hand_queues is None` near the `VideoEncoder` block; journal line `OAK recorder: no recording queues available`). Kevin wants recording back. The comment says "ISP limits", but the hand stream replaces the preview stream, thus the count of camera outputs is the same as in the gestures-off configuration. Plan: a config flag, `fps=` on the 1080p output, encoder preset at the camera frame rate, then an idle A/B of `det_latency_s`, `det_fps` and `depth_fps`. Revert if latency increases.
 4. **Hand gestures.** Decision: fix them, do not remove them. The RC stays the authority for now. Fix order: (a) mode ownership between RC channel 4 and gestures (an RC-started follow-me must put the state machine in phase ACTIVE so that the stop palm is checked; a gesture start must survive or be refused with a logged reason); (b) count the hold on new hand results, not on 30 Hz control ticks; (c) range: a hand crop from the person box at a higher resolution, or the on-device hand models. Refer to `docs/gesture_review_2026-09-20.md`.
 5. **Phantom obstacle on gravel.** In the 15:49 run the corridor read 0.5 m to 0.9 m for 3 s with 9 to 11 percent valid pixels and nothing in front. The 18:09 run had throttle on 3 percent of ticks only. Recording (item 3) gives the footage that this item needs.
 6. **Steering gain.** Left at `pid_lateral_kp` 0.5 and cap 32 on purpose. The simulation shows margin, but at forward 110 the outside wheel is at the mixer limit, thus more steer cap is inside-wheel braking. Optional experiment with Kevin present: `POST /api/follow_me/params {"pid_lateral_kp": 0.6}`. It needs no deploy and reverts in seconds.
 7. **Lidar.** Recommendation: Slamtec RPLIDAR S2L (IP65, 80 klux, approximately 299 USD). Refer to `docs/lidar_selection_2026-09-20.md`. Verify the prices before an order. Do not start the integration before Kevin has the unit. Kevin also plans a T-bar handle to ride on the back axle: a rider changes the mass, the stopping distance and the yaw plant, thus measure them again.
-8. **Housekeeping.** Remove the merged worktrees and branches under `.claude/worktrees/` (`fm-tracking`, `fm-steer`, `fm-depth`, `fm-coast`, `fm-latency`, `fm-docs`, `fable-follow-fixes`, and the older ones that `git worktree list` shows as prunable). Keep `fm-armsup`. The untracked files `docs/code-review-wave3-wave4.md` and `docs/code-review-wave5-debug-tab.md` are from an earlier session: ask Kevin before you commit or delete them.
+8. **Housekeeping.** Remove the merged worktrees and branches under `.claude/worktrees/` (`fm-tracking`, `fm-steer`, `fm-depth`, `fm-coast`, `fm-latency`, `fm-docs`, `fable-follow-fixes`, and the older ones that `git worktree list` shows as prunable). Keep `fm-armsup` until the bench test passes; then remove it and the local `merge-armsup` branch. The untracked files `docs/code-review-wave3-wave4.md` and `docs/code-review-wave5-debug-tab.md` are from an earlier session: ask Kevin before you commit or delete them.
 
 ## 5. Known residual risks in the live build (from the second safety review)
 
@@ -63,22 +77,20 @@ All of them end in a stop, or they last 1 s or less.
 3. A close person whose box is short and whose range is unknown: the speed holds (it does not increase) for a maximum of 1 s.
 4. The range status `ambiguous` can occur frequently beyond approximately 5 m, because one pixel of disparity is approximately 1 m at that distance.
 
-## 6. Status of `fm-armsup` at the end of the session
+## 6. Status of `fm-armsup` at the end of the 2026-09-22 session
 
-- Branch commit: `d23c252` on `fm-armsup` (one commit on top of `main`).
-- Full test suite on the branch: 1038 tests, OK (4 skipped). `main` has 1011 tests.
-- Implemented: `pi_app/control/arms_up.py` (pure detector and debounce), `pi_app/hardware/pose_worker.py` (MediaPipe Pose lite on the person crop, own thread, armed only, maximum 10 Hz, no new camera output), the twitch in `pi_app/control/controller.py`, the per-tick `arms_up` log block, and the tests.
-- Verified on the robot: MediaPipe Pose lite loads on the Pi 5 and takes approximately 40 ms for each 640x480 frame. The model file downloaded to the Pi one time.
-- NOT done: Grok safety review. Field test. Latency check with the pose worker active.
-- Known design points to examine in the review:
-  1. `ArmsUpConfig.twitch_test_enabled` defaults to `True`. A merge makes the twitch live immediately.
-  2. In MANUAL, the twitch replaces the RC stick command for 0.25 s.
-  3. The twitch is injected before the obstacle scale, the disarm override, the charger inhibit, the pack-low override and the slew limiter. The forward obstacle layer does not gate reverse motion (this is the existing behaviour).
-  4. The pose worker uses the largest confident person box, not the locked follow-me target. A second person with raised arms can trigger the twitch.
-  5. The 640x480 frame and the 640x352 detection frame have different crops. The worker applies the normalised person box to the 640x480 frame, as the recorder does. Examine the vertical offset before you trust the wrist and shoulder positions near the box edges.
+- Commits: `d23c252` (detector and twitch), `b36db07` (hardening after review 1), `d2ba2b0` (fixes after review 2). Merge commit on `main`: `b758f7a`.
+- Full test suite: 1137 tests, OK (4 skipped).
+- Grok safety review 1 found 11 defects: twitch on by default; no RC override during the pulse; a twitch in FOLLOW_ME; a fake hold across a calibration gap; a pulse that resumed after charger or pack-low; the model load on the first armed frame; re-arm after a detection dropout; the unmapped crop; tracking on a moving crop; pose load in follow-me; a stop race.
+- Grok safety review 2 found 3 bounded holes: a LAN client could refill the latch; the still check passed with no eRPM; a reverse byte could stay in the VESC across calibration.
+- Grok safety review 3: no must-fix item for a supervised bench test.
+- The largest confident person box is still the pose target, not the follow-me lock. This is acceptable for the MANUAL bench test only. The back-up feature must use the locked target.
+- Idle baseline before the merge (2026-09-22 17:04, disarmed, `39044dc`): `det_latency_s` p10/p50/p90 0.174/0.197/0.219 s, `det_fps` 15.0, `vision_work_ms` 8.7.
+- NOT done: bench test. Latency with the latch on.
 
 ## 7. Session costs and tools (for the budget check)
 
 - Grok CLI implementation jobs on 2026-09-20: approximately 12 USD of xAI credit in total. The documentation job was the most expensive (2.29 USD, 46 turns): give documentation jobs less to read next time.
-- The session model was Fable 5.1. Kevin's budget for Fable was tight that week. The global rule is Opus 5 as the orchestrator: ask Kevin to change the model at the start of the next session.
+- The 2026-09-20 session model was Fable 5.1. The 2026-09-22 session model was Opus 5.5.
+- Grok on 2026-09-22: review 1 0.60 USD; second opinion 0.03 USD; implementation round 1 2.94 USD (42 turns); review 2 0.90 USD; implementation round 2 1.69 USD (39 turns); review 3 0.89 USD (ran out of turns, no verdict) and 0.22 USD (scoped retry). Total approximately 7.30 USD.
 - A push to `main` needs Kevin's approval in the chat. The auto-mode classifier blocks an unapproved push as a production deploy. That is the correct behaviour.

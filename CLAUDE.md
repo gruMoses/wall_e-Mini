@@ -153,6 +153,14 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
   (was 0.80 s at 8 fps). Motor→yaw lag 0.47 → 0.12 s was heading latency
   from a blocked vision thread, not the drivetrain. Steer gains left at
   kp 0.5 / cap 32.
+- **Arms-up bench twitch (2026-09-22, `docs/NEXT_SESSION.md` section 2)**:
+  MediaPipe Pose on the person crop (`pi_app/hardware/pose_worker.py`,
+  `pi_app/control/arms_up.py`) gives one 22-byte, 0.25 s reverse pulse.
+  Only the volatile latch `POST /api/arms_up/twitch_test` enables it
+  (local-only, armed + MANUAL, 3 pulses / 5 min). Pose runs only while
+  that latch is on, so measure latency in that state. Do NOT reuse the
+  latch for the continuous back-up feature: it needs its own latch and
+  its own Grok safety review.
 - The onboard IMU is a **BMI270**: raw/calibrated accel + gyro only. `ROTATION_VECTOR` / `GAME_ROTATION_VECTOR` / magnetometer are BNO08x-only and return nothing on this device. Do not try them. Refer to `docs/oak_d_lite_capability_audit.md`.
 
 ### Waypoint Navigation
