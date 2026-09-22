@@ -617,9 +617,10 @@ def run() -> None:
                 oak_reader.set_hand_poll_enabled(
                     controller.hand_poll_wanted(cmd.is_armed)
                 )
-            # Pose runs only while armed (disarmed is most of uptime).
+            # Pose runs only while the bench-twitch latch is on. That is
+            # MANUAL and armed, and it is off in FOLLOW_ME and WAYPOINT_NAV.
             if pose_worker is not None:
-                pose_worker.set_pose_enabled(cmd.is_armed)
+                pose_worker.set_pose_enabled(controller.pose_wanted())
 
             # P3: BMS discharge FET safety — rate-limited warning + post-grace safety timeout.
             if bms_service is not None and cmd.is_armed:

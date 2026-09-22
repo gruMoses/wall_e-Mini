@@ -34,6 +34,10 @@ class PoseSample:
     l_wrist: PoseJoint
     r_wrist: PoseJoint
     nose_y: float
+    # Full-frame normalised crop window the landmarks were estimated in.
+    # None keeps constructors that predate the crop-edge check working.
+    crop_y0: Optional[float] = None
+    crop_y1: Optional[float] = None
 
 
 def _cfg(cfg: Any, name: str, default: float) -> float:
@@ -42,13 +46,26 @@ def _cfg(cfg: Any, name: str, default: float) -> float:
     return float(getattr(cfg, name, default))
 
 
+def _cfg_int(cfg: Any, name: str, default: int) -> int:
+    if cfg is None:
+        return default
+    try:
+        return int(getattr(cfg, name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def arms_up(sample: Optional[PoseSample], cfg: Any = None) -> bool:
     """True only when BOTH wrists are raised above BOTH shoulders.
 
-    Requires wrist and shoulder visibility >= min_visibility on both
-    sides, each wrist_y < shoulder_y - margin, and (when visible) each
-    elbow not hanging more than margin below its shoulder. One arm up
-    is not a trigger. Degenerate shoulder width returns False.
+    Requires wrist, shoulder, and elbow visibility >= min_visibility on
+    both sides, each wrist_y < shoulder_y - margin, and each elbow_y
+    <= shoulder_y + margin. One arm up is not a trigger. Degenerate
+    shoulder width returns False.
+
+    When the sample carries a crop window (crop_y0 and crop_y1), a wrist
+    pinned at the top of that crop is False: the landmark is on the crop
+    boundary, not a measured point above the shoulders.
     """
     if sample is None:
         return False
@@ -58,6 +75,8 @@ def arms_up(sample: Optional[PoseSample], cfg: Any = None) -> bool:
     if sample.l_wrist.visibility < min_vis or sample.r_wrist.visibility < min_vis:
         return False
     if sample.l_shoulder.visibility < min_vis or sample.r_shoulder.visibility < min_vis:
+        return False
+    if sample.l_elbow.visibility < min_vis or sample.r_elbow.visibility < min_vis:
         return False
 
     shoulder_width = abs(sample.l_shoulder.x - sample.r_shoulder.x)
@@ -70,16 +89,22 @@ def arms_up(sample: Optional[PoseSample], cfg: Any = None) -> bool:
     if sample.r_wrist.y >= sample.r_shoulder.y - margin:
         return False
 
-    # Elbows, when visible, must not hang more than `margin` below the
-    # shoulder. Rejects a landmark glitch that puts wrists "up" while the
-    # arms hang; a box carried on the shoulder still has both wrists up
-    # and elbows near the shoulders, which is acceptable.
-    if sample.l_elbow.visibility >= min_vis:
-        if sample.l_elbow.y > sample.l_shoulder.y + margin:
-            return False
-    if sample.r_elbow.visibility >= min_vis:
-        if sample.r_elbow.y > sample.r_shoulder.y + margin:
-            return False
+    # Both elbows are required. A low-visibility elbow used to be ignored;
+    # that let a glitch put the wrists "up" while the arm was unmeasured.
+    if sample.l_elbow.y > sample.l_shoulder.y + margin:
+        return False
+    if sample.r_elbow.y > sample.r_shoulder.y + margin:
+        return False
+
+    crop_y0 = sample.crop_y0
+    crop_y1 = sample.crop_y1
+    if crop_y0 is not None and crop_y1 is not None:
+        span = float(crop_y1) - float(crop_y0)
+        if span > 0.0:
+            edge = _cfg(cfg, "crop_edge_margin", 0.03)
+            limit = float(crop_y0) + edge * span
+            if sample.l_wrist.y < limit or sample.r_wrist.y < limit:
+                return False
     return True
 
 
@@ -92,9 +117,17 @@ class ArmsUpDetector:
     """Debounced both-arms-up state.
 
     ``active`` becomes True after ``arms_up`` has been continuously true
-    for ``hold_s``, counting only NEW samples (distinct ``PoseSample.ts``).
+    for ``hold_s`` AND at least ``min_hold_samples`` new raw-true samples
+    have arrived in the current streak. The streak counts only consecutive
+    NEW samples (distinct ``PoseSample.ts``) whose timestamps are at most
+    ``max_sample_gap_s`` apart. A larger gap, or an ``update()`` call more
+    than ``max_sample_gap_s`` after the previous call, restarts the streak.
+
     It becomes False after ``release_s`` of false/None, or when no new
     sample has arrived for ``stale_s``.
+
+    After a rising edge, another rising edge waits for a NEW sample that
+    is raw False. None, a stale dropout, and ``reset()`` do not re-arm.
     """
 
     def __init__(self, cfg: Any = None) -> None:
@@ -105,19 +138,58 @@ class ArmsUpDetector:
         self.last_sample_age_s: Optional[float] = None
         self.rising_edge: bool = False
         self._true_since_ts: Optional[float] = None
+        self._true_count: int = 0
         self._false_since_now: Optional[float] = None
         self._last_seen_ts: Optional[float] = None
         self._last_new_sample_now: Optional[float] = None
+        self._last_update_now: Optional[float] = None
+        # True until a rising edge; a raw-False NEW sample sets it again.
+        self._rearmed: bool = True
+
+    def reset(self) -> None:
+        """Clear the streak, active state, and gap trackers.
+
+        The re-arm latch is kept: a rising edge that already fired stays
+        consumed across a calibration / RC-stale reset.
+        """
+        self.active = False
+        self.raw = False
+        self.streak_s = 0.0
+        self.last_sample_age_s = None
+        self.rising_edge = False
+        self._true_since_ts = None
+        self._true_count = 0
+        self._false_since_now = None
+        self._last_seen_ts = None
+        self._last_new_sample_now = None
+        self._last_update_now = None
+
+    def _reset_streak(self) -> None:
+        self._true_since_ts = None
+        self._true_count = 0
+        self.streak_s = 0.0
 
     def update(self, sample: Optional[PoseSample], now: float) -> dict:
         """Advance debounce state. ``now`` is monotonic seconds."""
         self.rising_edge = False
-        is_new_sample = False
+        max_gap = _cfg(self._cfg, "max_sample_gap_s", 0.25)
+        if (
+            self._last_update_now is not None
+            and (now - self._last_update_now) > max_gap
+        ):
+            self._reset_streak()
+        self._last_update_now = now
 
+        is_new_sample = False
         if sample is not None:
             self.raw = arms_up(sample, self._cfg)
             if sample.ts != self._last_seen_ts:
                 is_new_sample = True
+                if (
+                    self._last_seen_ts is not None
+                    and (sample.ts - self._last_seen_ts) > max_gap
+                ):
+                    self._reset_streak()
                 self._last_seen_ts = sample.ts
                 self._last_new_sample_now = now
         else:
@@ -137,14 +209,14 @@ class ArmsUpDetector:
             and (now - self._last_new_sample_now) >= stale_s - _TIME_EPS_S
         )
         if stale:
+            # Stale drops active. It does not re-arm the rising edge.
             self.active = False
-            self._true_since_ts = None
-            self.streak_s = 0.0
+            self._reset_streak()
         elif is_new_sample:
             self._apply_observation(sample.ts if sample is not None else now, now, hold_s, release_s)
         elif sample is None:
             # None is not a timestamped sample; it still counts as false
-            # for the release timer (wall clock).
+            # for the release timer (wall clock). It does not re-arm.
             self._apply_false(now, release_s)
 
         return {
@@ -160,15 +232,29 @@ class ArmsUpDetector:
             self._false_since_now = None
             if self._true_since_ts is None:
                 self._true_since_ts = sample_ts
+                self._true_count = 0
+            self._true_count += 1
             self.streak_s = max(0.0, sample_ts - self._true_since_ts)
-            if (not self.active) and self.streak_s >= hold_s - _TIME_EPS_S:
+            min_n = _cfg_int(self._cfg, "min_hold_samples", 3)
+            if min_n < 1:
+                min_n = 1
+            if (
+                (not self.active)
+                and self._rearmed
+                and self._true_count >= min_n
+                and self.streak_s >= hold_s - _TIME_EPS_S
+            ):
                 self.active = True
                 self.rising_edge = True
+                self._rearmed = False
         else:
+            # A NEW raw-False sample is the only re-arm.
+            self._rearmed = True
             self._apply_false(now, release_s)
 
     def _apply_false(self, now: float, release_s: float) -> None:
         self._true_since_ts = None
+        self._true_count = 0
         self.streak_s = 0.0
         if self._false_since_now is None:
             self._false_since_now = now

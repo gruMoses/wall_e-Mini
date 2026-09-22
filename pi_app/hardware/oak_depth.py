@@ -1059,6 +1059,16 @@ class OakDepthReader:
         with self._lock:
             return list(self._det_state.persons)
 
+    def get_person_detections_ts(self) -> float:
+        """Monotonic time at which the current person list was published.
+
+        0.0 until the first list is published. Thread-safe. The pose worker
+        drops a list older than ``ArmsUpConfig.max_det_age_s`` relative to
+        the preview frame.
+        """
+        with self._lock:
+            return float(self._det_state.timestamp)
+
     def get_depth_stats(self) -> DepthStats:
         """Return rich depth ROI statistics. Thread-safe."""
         with self._lock:

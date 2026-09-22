@@ -5,7 +5,11 @@ No MediaPipe import: the mapping helpers are ordinary arithmetic.
 
 import unittest
 
-from pi_app.hardware.pose_worker import landmark_to_full_frame, person_crop_box
+from pi_app.hardware.pose_worker import (
+    det_bbox_to_frame,
+    landmark_to_full_frame,
+    person_crop_box,
+)
 
 
 class TestPersonCropBox(unittest.TestCase):
@@ -56,3 +60,34 @@ class TestLandmarkToFullFrame(unittest.TestCase):
         x, y = landmark_to_full_frame(1.0, 1.0, crop, nw, nh)
         self.assertAlmostEqual(x, 0.50)
         self.assertAlmostEqual(y, 0.80)
+
+
+class TestDetBboxToFrame(unittest.TestCase):
+    # NN 640x352, principal point on the vertical centre. Preview 640x480.
+    DET_WH = (640, 352)
+    DET_INTR = (456.89, 456.89, 320.0, 176.0)
+    FRAME_WH = (640, 480)
+    FRAME_INTR = (462.2, 462.2, 320.0, 240.0)
+
+    def test_centred_box_stays_centred(self):
+        mapped = det_bbox_to_frame(
+            (0.40, 0.40, 0.60, 0.60),
+            self.DET_WH, self.DET_INTR, self.FRAME_WH, self.FRAME_INTR,
+        )
+        self.assertAlmostEqual(0.5 * (mapped[0] + mapped[2]), 0.5, places=3)
+        self.assertAlmostEqual(0.5 * (mapped[1] + mapped[3]), 0.5, places=3)
+
+    def test_nn_top_maps_near_0_13(self):
+        mapped = det_bbox_to_frame(
+            (0.40, 0.0, 0.60, 0.20),
+            self.DET_WH, self.DET_INTR, self.FRAME_WH, self.FRAME_INTR,
+        )
+        self.assertAlmostEqual(mapped[1], 0.13, delta=0.005)
+
+    def test_fallback_ratio_maps_top_near_0_133(self):
+        mapped = det_bbox_to_frame(
+            (0.40, 0.0, 0.60, 0.20),
+            self.DET_WH, None, self.FRAME_WH, None,
+        )
+        self.assertAlmostEqual(mapped[0], 0.40, places=5)
+        self.assertAlmostEqual(mapped[1], 0.133, delta=0.002)

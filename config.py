@@ -874,9 +874,16 @@ class ArmsUpConfig:
     The agreed trigger is BODY POSE (both wrists raised above the shoulders),
     not palms/fingers: the 640x480 stream cannot resolve a hand beyond ~0.5 m.
 
-    twitch_test_enabled is a BENCH TEST acknowledgement, to be replaced by
-    the real back-up-and-follow behaviour. 22 bytes * ~0.0126 m/s per byte
-    * 0.25 s is under 7 cm before ramp losses ("inches").
+    ``enabled`` permits the feature (an AND gate). The bench twitch itself is
+    a runtime latch (``Controller.request_twitch_test``), not a config flag.
+    That latch is volatile, requires the robot armed in MANUAL at the moment
+    of enabling, and clears on disarm, mode change, expiry, and budget. It
+    must not be reused for the continuous back-up feature, which needs its
+    own latch and review.
+
+    22 bytes * ~0.0126 m/s per byte * 0.25 s is under 7 cm before ramp
+    losses ("inches"). Reverse offset is clamped to [0, 30] bytes and
+    duration to [0, 0.4] s at use.
     """
     enabled: bool = True
     min_visibility: float = 0.6
@@ -884,11 +891,32 @@ class ArmsUpConfig:
     hold_s: float = 0.4
     release_s: float = 0.3
     stale_s: float = 0.5
+    # A hold counts only consecutive new samples this close together.
+    # A longer gap, or an update() call this late, restarts the streak.
+    max_sample_gap_s: float = 0.25
+    min_hold_samples: int = 3
+    # Wrist y below crop_y0 + this fraction of the crop height is "pinned
+    # at the crop top" and is not a trigger.
+    crop_edge_margin: float = 0.03
     pose_max_hz: float = 10.0
-    twitch_test_enabled: bool = True
+    # Asymmetric person-crop expand, fractions of the mapped box.
+    # x is the total widening (split across both sides).
+    crop_expand_x_frac: float = 0.20
+    crop_expand_up_frac: float = 0.35
+    crop_expand_down_frac: float = 0.05
+    # Person-detection list older than this vs the preview frame is dropped.
+    max_det_age_s: float = 0.3
+    twitch_test_budget: int = 3
+    twitch_test_max_s: float = 300.0
     twitch_reverse_byte: int = 22  # offset below neutral 126, applied to BOTH motors
     twitch_duration_s: float = 0.25
     twitch_cooldown_s: float = 3.0
+    # Per-mode command must sit within this many bytes of neutral to start
+    # or to keep a pulse. The robot must also have been emitting neutral
+    # for twitch_min_still_s, and (when RPM is present) be under the eRPM cap.
+    twitch_stick_neutral_band: int = 6
+    twitch_min_still_s: float = 0.5
+    twitch_max_still_erpm: float = 300.0
 
 
 @dataclass(frozen=True)

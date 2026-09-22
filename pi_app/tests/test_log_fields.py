@@ -428,7 +428,10 @@ class BuildLogObjArmsUpBlockTests(unittest.TestCase):
         "raw", "active", "streak_s", "sample_age_s",
         "l_wrist_y", "r_wrist_y", "l_shoulder_y", "r_shoulder_y",
         "min_visibility_seen", "twitch_active", "twitch_count",
-        "twitch_blocked_reason", "pose_ms", "pose_hz", "pose_enabled",
+        "twitch_blocked_reason", "twitch_cancel_reason",
+        "test_latched", "test_budget_left", "test_expires_in_s",
+        "still_s", "crop_y0", "crop_y1",
+        "pose_ms", "pose_hz", "pose_enabled",
         "mp_pose_loaded",
     )
 
@@ -440,6 +443,10 @@ class BuildLogObjArmsUpBlockTests(unittest.TestCase):
                 "l_shoulder_y": 0.40, "r_shoulder_y": 0.41,
                 "min_visibility_seen": 0.8, "twitch_active": True,
                 "twitch_count": 2, "twitch_blocked_reason": None,
+                "twitch_cancel_reason": None,
+                "test_latched": True, "test_budget_left": 2,
+                "test_expires_in_s": 12.0, "still_s": 0.5,
+                "crop_y0": 0.10, "crop_y1": 0.90,
                 "pose_ms": 41.2, "pose_hz": 9.5, "pose_enabled": True,
                 "mp_pose_loaded": True,
             },
@@ -451,6 +458,13 @@ class BuildLogObjArmsUpBlockTests(unittest.TestCase):
         self.assertIs(au["active"], True)
         self.assertEqual(au["twitch_count"], 2)
         self.assertIsNone(au["twitch_blocked_reason"])
+        self.assertIsNone(au["twitch_cancel_reason"])
+        self.assertIs(au["test_latched"], True)
+        self.assertEqual(au["test_budget_left"], 2)
+        self.assertEqual(au["test_expires_in_s"], 12.0)
+        self.assertEqual(au["still_s"], 0.5)
+        self.assertEqual(au["crop_y0"], 0.10)
+        self.assertEqual(au["crop_y1"], 0.90)
         self.assertEqual(au["pose_ms"], 41.2)
         self.assertTrue(au["mp_pose_loaded"])
 
