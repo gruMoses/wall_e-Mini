@@ -2,6 +2,7 @@
 
 Written 2026-09-20 (evening), at the end of the follow-me session.
 Updated 2026-09-22 (evening): `fm-armsup` hardened after three Grok safety reviews and merged (sections 2 and 6).
+Updated 2026-09-24 (evening): `fb9420e` deployed; the arms-up bench test PASSED on the test stand (section 2, "Bench result").
 This document uses Simplified Technical English where practical.
 
 ## 1. State of the robot
@@ -12,7 +13,7 @@ This document uses Simplified Technical English where practical.
 - The full record of the day is `docs/follow_me_run_2026-09-20.md`.
 - The end goal and the owner's constraints are in `CLAUDE.md` and in the auto-memory file `project-walle-north-star.md`.
 
-## 2. Branch `fm-armsup`: arms-up bench test (merged 2026-09-22, NOT field-tested)
+## 2. Branch `fm-armsup`: arms-up bench test (deployed 2026-09-24, bench test PASSED)
 
 Purpose: bench test for the "both arms up" gesture. When the robot sees both wrists above the shoulders, it gives one small reverse pulse (22 bytes for 0.25 s, approximately 7 cm). This is the acknowledgement test that Kevin asked for. It is the first step toward the back-up feature (section 4, item 2).
 
@@ -43,6 +44,18 @@ If `det_latency_s` p50 increases by more than approximately 0.05 s with the latc
 
 Known limit (deferred): detection freshness compares host poll times, not capture times. The crop can lag the person by the NN latency (approximately 0.2 s). The result is a missed trigger, not a false one. Use capture timestamps before the back-up feature.
 
+Bench result (2026-09-24, 18:35 to 18:40, robot on the test stand with the wheels off the ground, `fb9420e`):
+
+- Deploy: `DEPLOYED 39044dc -> fb9420e` at 18:30:06, service restarted. MediaPipe Pose loaded at boot.
+- The latch was enabled from the Pi shell at 18:35:16. Pulses at 18:37:07 and 18:38:26. Kevin: "it definitely twitched backwards".
+- Each pulse: bytes 110, 104, 112, 126; peak eRPM approximately -3600; wheel travel approximately 9 cm (integrated eRPM, no load); wheels stopped approximately 0.6 s after the start.
+- One arm up: 78 distinct one-arm poses in 60 s gave no trigger.
+- Re-arm: the second pulse came only after the camera saw the arms down.
+- Expiry at 18:40:16 cleared the latch (1 pulse unused), and pose stopped (`pose_hz` 0).
+- Latency (armed, MANUAL, person in view): `det_latency_s` p50 0.179 s with the latch off and 0.182 s with the latch on. `vision_work_ms` p50 26.7 to 32.0. Control loop unchanged. Pose inference approximately 75 ms per frame at 10 Hz (static-image mode).
+- Camera geometry: at 2.5 m to 3 m, the shoulders are at 0.09 to 0.13 of the preview height and the NN box is clipped at the top. Raised hands are out of view at that range. The trigger fired only when Kevin stood farther back.
+- Not tested: a stick cancel during a pulse, the third-pulse budget cutoff, and travel on the ground.
+
 ## 3. Rules learned on 2026-09-20 (obey these)
 
 - Identity gates decide whom to follow. They must never hide a closer range from the speed command.
@@ -59,8 +72,9 @@ Known limit (deferred): detection freshness compares host poll times, not captur
 
 ## 4. Backlog, in priority order
 
-1. **`fm-armsup` bench test.** Merged 2026-09-22. Refer to section 2.
+1. **`fm-armsup` bench test.** PASSED 2026-09-24 on the test stand (section 2). Optional: one pulse on the ground to measure the real travel.
 2. **Back-up feature.** Both arms up while Kevin walks toward the robot: the robot reverses, keeps Kevin centred, and keeps its distance. Agreed: trigger is both arms raised (the camera cannot see palms or fingers beyond 0.5 m); reverse speed cap 0.4 m/s; the robot stops when the arms go down (approximately 0.3 s); a maximum distance for each reverse movement; the RC always overrides; there are no rear sensors and Kevin accepts that. Skid-steer yaw sign does not depend on the travel direction, thus the keep-centred steering law stays the same. Write a design first, then get a Grok second opinion and a Grok safety review.
+   CAUTION (bench test, 2026-09-24): with the camera as mounted, raised hands leave the frame when Kevin is closer than approximately 3.5 m to 4.5 m. That is the range where the back-up feature must work. Before the design, choose a trigger that the camera sees at 1 m to 3 m (for example arms out to the sides, or palms forward at chest height), or tilt the camera up and re-measure the corridor geometry. Also required first: capture-time detection freshness, and the pose target from the follow-me lock instead of the largest box.
 3. **Video recording is off.** The H.265 encoder is skipped when gestures are configured (`pi_app/hardware/oak_depth.py`, the condition `hand_queues is None` near the `VideoEncoder` block; journal line `OAK recorder: no recording queues available`). Kevin wants recording back. The comment says "ISP limits", but the hand stream replaces the preview stream, thus the count of camera outputs is the same as in the gestures-off configuration. Plan: a config flag, `fps=` on the 1080p output, encoder preset at the camera frame rate, then an idle A/B of `det_latency_s`, `det_fps` and `depth_fps`. Revert if latency increases.
 4. **Hand gestures.** Decision: fix them, do not remove them. The RC stays the authority for now. Fix order: (a) mode ownership between RC channel 4 and gestures (an RC-started follow-me must put the state machine in phase ACTIVE so that the stop palm is checked; a gesture start must survive or be refused with a logged reason); (b) count the hold on new hand results, not on 30 Hz control ticks; (c) range: a hand crop from the person box at a higher resolution, or the on-device hand models. Refer to `docs/gesture_review_2026-09-20.md`.
 5. **Phantom obstacle on gravel.** In the 15:49 run the corridor read 0.5 m to 0.9 m for 3 s with 9 to 11 percent valid pixels and nothing in front. The 18:09 run had throttle on 3 percent of ticks only. Recording (item 3) gives the footage that this item needs.
@@ -86,7 +100,7 @@ All of them end in a stop, or they last 1 s or less.
 - Grok safety review 3: no must-fix item for a supervised bench test.
 - The largest confident person box is still the pose target, not the follow-me lock. This is acceptable for the MANUAL bench test only. The back-up feature must use the locked target.
 - Idle baseline before the merge (2026-09-22 17:04, disarmed, `39044dc`): `det_latency_s` p10/p50/p90 0.174/0.197/0.219 s, `det_fps` 15.0, `vision_work_ms` 8.7.
-- NOT done: bench test. Latency with the latch on.
+- Bench test and latency with the latch on: done 2026-09-24, PASSED (section 2, "Bench result").
 
 ## 7. Session costs and tools (for the budget check)
 
