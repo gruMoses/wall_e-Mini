@@ -1,6 +1,6 @@
 # Design: "pump to back up"
 
-Status: DRAFT, 2026-09-24. Not implemented. Kevin decides the open items in section 10.
+Status: design APPROVED by Kevin, 2026-09-24 (section 10). Not implemented. Step 1 of section 9 (log only) is next.
 This document uses Simplified Technical English (ASD-STE100) as far as is reasonably possible. The appendix lists the technical names.
 
 ## 1. Purpose
@@ -131,13 +131,13 @@ Grok agreed with the box-width signal and rejected MediaPipe Pose for this range
 3. **Ground, short.** Garage, cap 0.2 m/s, maximum 1 m, a spotter behind the robot.
 4. **Ground, full.** Cap 0.4 m/s, maximum 3 m.
 
-## 10. Open decisions for Kevin
+## 10. Decisions (Kevin, 2026-09-24: all four recommendations accepted)
 
-1. Stop time: after the hands go down, the robot stops in approximately 0.7 s plus the slew ramp. At 0.4 m/s that is approximately 0.3 m more travel.
-2. Speed cap 0.4 m/s: walk slowly toward the robot.
-3. Limits for each movement: 8 s (hard) and 3 m.
-4. FOLLOW_ME only in version 1: the robot must already follow you.
-5. Keep distance of at least 2.0 m during the movement (the follow distance is 1.5 m).
+1. Stop time: after the hands go down, the robot stops in approximately 0.7 s plus the slew ramp. At 0.4 m/s that is approximately 0.3 m more travel. ACCEPTED.
+2. Speed cap 0.4 m/s: walk slowly toward the robot. (Agreed on 2026-09-20.)
+3. Limits for each movement: 8 s (hard) and 3 m. ACCEPTED.
+4. FOLLOW_ME only in version 1: the robot must already follow you. ACCEPTED.
+5. Keep distance of at least 2.0 m during the movement (the follow distance is 1.5 m). ACCEPTED.
 
 ## Appendix: technical names
 
