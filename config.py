@@ -921,6 +921,46 @@ class ArmsUpConfig:
 
 
 @dataclass(frozen=True)
+class PumpGestureConfig:
+    """Log-only low two-hand "pump" detector.
+
+    ``enabled`` turns the log on. This step has no motion path: the
+    controller records the detector output and does not read it when it
+    chooses motor bytes, mode, or follow-me behaviour.
+
+    Thresholds are the first values from the 2026-09-24 box-width trial
+    (docs/backup_pump_design.md). Every comparison the detector makes
+    reads one of these fields.
+    """
+    enabled: bool = True
+    min_range_m: float = 1.0
+    max_range_m: float = 5.0
+    # Normalised. A box with xmin <= margin or xmax >= 1 - margin touches
+    # the side of the NN frame.
+    edge_margin: float = 0.01
+    min_body_w_m: float = 0.3
+    max_body_w_m: float = 2.2
+    rest_window_s: float = 3.0
+    rest_min_samples: int = 8
+    rest_min_span_s: float = 1.5
+    freeze_ratio: float = 1.4
+    out_ratio: float = 1.5
+    edge_out_frac: float = 0.25
+    max_centre_shift_m: float = 0.15
+    min_out_frames: int = 3
+    peak_end_ratio: float = 1.4
+    start_peaks: int = 2
+    start_window_s: float = 3.0
+    continue_window_s: float = 0.7
+    no_detection_stop_s: float = 0.3
+    max_active_s: float = 8.0
+    cooldown_s: float = 2.0
+    rearm_rest_ratio: float = 1.3
+    rearm_rest_s: float = 1.0
+    log_nearest_outside_follow_me: bool = True
+
+
+@dataclass(frozen=True)
 class BmsConfig:
     """Configuration for Daly BMS Bluetooth communication (SPIM08HP)."""
     enabled: bool = True                   # enabled -- BMS MAC confirmed 2026-04-01
@@ -1051,6 +1091,9 @@ class Config:
 
     # Both-wrists-up body-pose detector (bench twitch; real reverse-follow later)
     arms_up: ArmsUpConfig = ArmsUpConfig()
+
+    # Log-only low two-hand pump detector. No motor path in this step.
+    pump: PumpGestureConfig = PumpGestureConfig()
 
     # Final motor-output slew limiter
     slew_limiter: SlewLimiterConfig = SlewLimiterConfig()

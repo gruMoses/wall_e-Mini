@@ -484,5 +484,55 @@ class BuildLogObjArmsUpBlockTests(unittest.TestCase):
         self.assertIsNone(au["pose_ms"])
 
 
+class BuildLogObjPumpBlockTests(unittest.TestCase):
+    _KEYS = (
+        "enabled", "state", "accepted", "reject_reason",
+        "w_m", "c_m", "rest_w", "ratio",
+        "out", "out_run", "peaks",
+        "start_event", "stop_event", "stop_reason",
+        "active_s", "track_id", "would_start_count",
+        "src", "error",
+    )
+
+    def test_block_present_with_values(self):
+        telem = {
+            "pump": {
+                "state": "active", "accepted": True, "reject_reason": None,
+                "w_m": 1.6, "c_m": 0.01, "rest_w": 0.52, "ratio": 3.08,
+                "out": True, "out_run": 4, "peaks": 2,
+                "start_event": True, "stop_event": False, "stop_reason": None,
+                "active_s": 0.4, "track_id": 7, "would_start_count": 1,
+                "src": "target",
+            },
+        }
+        obj = build_log_obj(**_base_kwargs(telem=telem))
+        self.assertIn("pump", obj)
+        pump = obj["pump"]
+        self.assertEqual(pump["state"], "active")
+        self.assertIs(pump["accepted"], True)
+        self.assertIs(pump["start_event"], True)
+        self.assertEqual(pump["peaks"], 2)
+        self.assertEqual(pump["track_id"], 7)
+        self.assertEqual(pump["src"], "target")
+        self.assertEqual(pump["ratio"], 3.08)
+        self.assertIsNone(pump["enabled"])
+        self.assertIsNone(pump["error"])
+
+    def test_missing_keys_render_none(self):
+        obj = build_log_obj(**_base_kwargs())
+        self.assertIn("pump", obj)
+        pump = obj["pump"]
+        for key in self._KEYS:
+            self.assertIsNone(pump.get(key), key)
+
+    def test_disabled_and_partial_fill_missing_with_none(self):
+        obj = build_log_obj(**_base_kwargs(telem={"pump": {"enabled": False}}))
+        pump = obj["pump"]
+        self.assertIs(pump["enabled"], False)
+        self.assertIsNone(pump["state"])
+        self.assertIsNone(pump["src"])
+        self.assertIsNone(pump["would_start_count"])
+
+
 if __name__ == "__main__":
     unittest.main()

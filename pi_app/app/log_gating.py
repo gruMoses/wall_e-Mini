@@ -367,6 +367,7 @@ def build_log_obj(
     _oak = oak_camera_health if isinstance(oak_camera_health, dict) else {}
     _g = telem.get("gesture") if isinstance(telem.get("gesture"), dict) else {}
     _au = telem.get("arms_up") if isinstance(telem.get("arms_up"), dict) else {}
+    _pump = telem.get("pump") if isinstance(telem.get("pump"), dict) else {}
     return {
         "ts": round(now_ts, 3),
         "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
@@ -602,6 +603,27 @@ def build_log_obj(
             "pose_hz": _au.get("pose_hz"),
             "pose_enabled": _au.get("pose_enabled"),
             "mp_pose_loaded": _au.get("mp_pose_loaded"),
+        },
+        "pump": {
+            "enabled": _pump.get("enabled"),
+            "state": _pump.get("state"),
+            "accepted": _pump.get("accepted"),
+            "reject_reason": _pump.get("reject_reason"),
+            "w_m": _pump.get("w_m"),
+            "c_m": _pump.get("c_m"),
+            "rest_w": _pump.get("rest_w"),
+            "ratio": _pump.get("ratio"),
+            "out": _pump.get("out"),
+            "out_run": _pump.get("out_run"),
+            "peaks": _pump.get("peaks"),
+            "start_event": _pump.get("start_event"),
+            "stop_event": _pump.get("stop_event"),
+            "stop_reason": _pump.get("stop_reason"),
+            "active_s": _pump.get("active_s"),
+            "track_id": _pump.get("track_id"),
+            "would_start_count": _pump.get("would_start_count"),
+            "src": _pump.get("src"),
+            "error": _pump.get("error"),
         },
     }
 

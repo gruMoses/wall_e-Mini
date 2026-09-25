@@ -26,6 +26,7 @@ from pi_app.control.gesture_control import (
     hand_poll_wanted as _hand_poll_wanted,
 )
 from pi_app.control.arms_up import ArmsUpDetector, PoseSample
+from pi_app.control.pump_gesture import PumpDetector, PumpObservation
 from pi_app.control.waypoint_nav import WaypointNavController, NavState, mix_to_bytes
 from pi_app.control.gps_heading_align import GpsHeadingAligner
 from pi_app.control.rpm_plausibility import (
@@ -160,10 +161,19 @@ class Controller:
         self._obstacle_age_s: float | None = None
         self._gps_reading: GpsReading | None = None
         self._person_detections: list[PersonDetection] = []
+        self._person_detections_ts: float = 0.0
+        # (w, h) -> (fx, fy, cx, cy). Called every tick; the reader caches.
+        self._intrinsics_getter = None
         self._hand_data: HandData | None = None
         self._pose_sample: PoseSample | None = None
         self._pose_status: dict = {}
         self._arms_up = ArmsUpDetector(getattr(config, "arms_up", None))
+        # Log only. process() must not read this detector when it chooses
+        # motor bytes, mode, follow-me, safety, or slew. No monotonic()
+        # here: controller tests pin the init call count.
+        self._pump = PumpDetector(getattr(config, "pump", None))
+        self._pump_telem: dict = {"enabled": True}
+        self._pump_fault_logged: bool = False
         # Bench-test reverse twitch. Times are compared against process()'s
         # mono_now — do not call time.monotonic() here (controller tests
         # pin the init call count). The web thread mutates the latch through
@@ -269,6 +279,18 @@ class Controller:
     def set_person_detections(self, detections: list[PersonDetection]) -> None:
         """Feed latest person detections from OakDepthReader."""
         self._person_detections = detections
+
+    def set_person_detections_ts(self, ts: float) -> None:
+        """Monotonic time the current person list was published."""
+        self._person_detections_ts = float(ts)
+
+    def set_intrinsics_getter(self, fn) -> None:
+        """``fn(width, height) -> (fx, fy, cx, cy)`` for the NN frame.
+
+        Called on each ``process()`` tick. Do not cache the tuple here;
+        the reader is cheap after calibration.
+        """
+        self._intrinsics_getter = fn
 
     def set_hand_data(self, data: HandData | None) -> None:
         """Feed latest hand landmark data from OakDepthReader."""
@@ -808,6 +830,106 @@ class Controller:
         self._arms_up.update(self._pose_sample, now)
         if self._arms_up.rising_edge:
             self._twitch_edge_pending = True
+
+    def _update_pump(self, now: float) -> None:
+        """Log-only pump detector. A fault here must not stop the tick.
+
+        The returned dict is stored for telemetry and the two warning
+        lines. Nothing in the motor, mode, follow-me, safety, or slew
+        path reads it.
+        """
+        pcfg = getattr(config, "pump", None)
+        if pcfg is not None and not bool(getattr(pcfg, "enabled", True)):
+            self._pump_telem = {"enabled": False}
+            return
+        try:
+            obs, src = self._pump_observation()
+            oak = getattr(config, "oak_detection", None)
+            frame_w = int(getattr(oak, "input_width", 640) if oak is not None else 640)
+            frame_h = int(getattr(oak, "input_height", 352) if oak is not None else 352)
+            intr = None
+            getter = self._intrinsics_getter
+            if callable(getter):
+                got = getter(frame_w, frame_h)
+                if got is not None:
+                    intr = tuple(got)
+            result = self._pump.update(obs, intr, frame_w, now)
+            telem = dict(result)
+            telem["src"] = src
+            self._pump_telem = telem
+            if result.get("start_event"):
+                ratio = result.get("ratio")
+                if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
+                    ratio = float("nan")
+                z = float(obs.z_m) if obs is not None else float("nan")
+                _logger.warning(
+                    "PUMP would-start (log only): src %s track %s z %.2f ratio %.2f peaks %d",
+                    src,
+                    result.get("track_id"),
+                    z,
+                    float(ratio),
+                    int(result.get("peaks") or 0),
+                )
+            if result.get("stop_event"):
+                active_s = result.get("active_s")
+                if not isinstance(active_s, (int, float)) or isinstance(active_s, bool):
+                    active_s = 0.0
+                _logger.warning(
+                    "PUMP would-stop (log only): %s after %.1f s",
+                    result.get("stop_reason"),
+                    float(active_s),
+                )
+        except Exception:
+            if not self._pump_fault_logged:
+                self._pump_fault_logged = True
+                _logger.exception(
+                    "PUMP detector failed (log only); control continues"
+                )
+            self._pump_telem = {"enabled": True, "error": True, "src": None}
+
+    def _pump_observation(self) -> tuple[PumpObservation | None, str | None]:
+        """Pick the box the log watches. Does not modify follow-me state."""
+        dets = self._person_detections or []
+        ts = float(self._person_detections_ts)
+        pcfg = getattr(config, "pump", None)
+        log_nearest = (
+            True if pcfg is None
+            else bool(getattr(pcfg, "log_nearest_outside_follow_me", True))
+        )
+        if self._mode == "FOLLOW_ME" and self._follow_me is not None:
+            tid = self._follow_me.target_track_id()
+            if tid is not None:
+                for det in dets:
+                    if getattr(det, "track_id", None) == tid:
+                        return self._pump_obs_from(det, ts), "target"
+                return None, "target"
+        if log_nearest:
+            best = None
+            best_z = None
+            for det in dets:
+                if getattr(det, "depth_status", "ok") != "ok":
+                    continue
+                try:
+                    z = float(det.z_m)
+                except (TypeError, ValueError):
+                    continue
+                if best is None or z < best_z:
+                    best = det
+                    best_z = z
+            if best is not None:
+                return self._pump_obs_from(best, ts), "nearest"
+            return None, "nearest"
+        return None, None
+
+    def _pump_obs_from(self, det: PersonDetection, ts: float) -> PumpObservation:
+        bbox = det.bbox
+        return PumpObservation(
+            ts=float(ts),
+            bbox=(float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
+            z_m=float(det.z_m),
+            depth_ok=(getattr(det, "depth_status", "ok") == "ok"),
+            track_id=getattr(det, "track_id", None),
+        )
 
     def _maintain_twitch_latch(self, now: float) -> None:
         """Clear the latch when a tick is no longer a legal bench-test tick.
@@ -1439,6 +1561,7 @@ class Controller:
         telemetry["mode"] = self._mode
         self._maintain_twitch_latch(mono_now)
         self._update_arms_up_twitch(mono_now)
+        self._update_pump(mono_now)
         if self._gesture is not None:
             telemetry["gesture_phase"] = self._gesture.phase_name
             if gesture_event is not None:
@@ -1955,6 +2078,7 @@ class Controller:
         telemetry["corrected_heading_deg"] = heading_align["corrected_heading_deg"]
         self._note_twitch_still(mono_now, left, right)
         telemetry["arms_up"] = self._arms_up_telemetry(mono_now)
+        telemetry["pump"] = self._pump_telem
         return cmd, events, telemetry
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:

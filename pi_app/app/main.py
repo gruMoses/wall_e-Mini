@@ -417,6 +417,10 @@ def run() -> None:
         gesture_controller=gesture_ctrl,
         gps_heading_aligner=gps_heading_aligner,
     )
+    # Pump log reads NN intrinsics through the reader (cached after the
+    # EEPROM load in start()). No motion path.
+    if oak_reader is not None:
+        controller.set_intrinsics_getter(oak_reader.get_intrinsics)
     bt_server = None  # Set to None to indicate external SPP service is used
 
     # Start web viewer (only needs OAK-D camera; recorder is optional)
@@ -552,6 +556,9 @@ def run() -> None:
                 if follow_me_ctrl is not None:
                     oak_persons = oak_reader.get_person_detections()
                     controller.set_person_detections(oak_persons)
+                    controller.set_person_detections_ts(
+                        oak_reader.get_person_detections_ts()
+                    )
                 if gesture_ctrl is not None:
                     controller.set_hand_data(oak_reader.get_hand_data())
                 if pose_worker is not None:

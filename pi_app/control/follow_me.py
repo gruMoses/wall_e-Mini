@@ -2578,6 +2578,17 @@ class FollowMeController:
             self._trail._rejected_jump_count = 0
             self._trail._rejected_speed_count = 0
 
+    def target_track_id(self) -> int | None:
+        """track_id of the current tracked target, or None when none is locked.
+
+        Read-only. The lock is the tracker's committed state, including a
+        grace hold. A lost target (state cleared) is None.
+        """
+        st = self._tracker._state
+        if st is None:
+            return None
+        return st.track_id
+
     def get_status(self, now: float | None = None) -> dict:
         """Return telemetry dict for web viewer / SSE / logging."""
         # Determine human-readable follow mode
