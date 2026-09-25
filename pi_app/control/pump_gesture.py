@@ -83,6 +83,7 @@ class PumpDetector:
         self._edge_out_frac = _cfg_float(cfg, "edge_out_frac", 0.25)
         self._max_centre_shift_m = _cfg_float(cfg, "max_centre_shift_m", 0.15)
         self._min_out_frames = _cfg_int(cfg, "min_out_frames", 3)
+        self._max_hold_s = _cfg_float(cfg, "max_hold_s", 0.4)
         self._peak_end_ratio = _cfg_float(cfg, "peak_end_ratio", 1.4)
         self._start_peaks = _cfg_int(cfg, "start_peaks", 2)
         self._start_window_s = _cfg_float(cfg, "start_window_s", 3.0)
@@ -167,6 +168,11 @@ class PumpDetector:
                 accepted = True
                 self._last_accepted_ts = now
                 self._apply_accepted(now)
+            elif self._state == "idle" and reject != "depth":
+                # A box at the frame side, out of range or of an impossible
+                # width breaks a pump in progress. Only a brief depth
+                # dropout is bridged.
+                self._out_run = 0
 
         if self._state == "active":
             self._maybe_stop(now)
@@ -321,13 +327,20 @@ class PumpDetector:
             and self._w < self._peak_end_ratio * self._rest_w
         )
         armed = self._out_run >= self._min_out_frames
-        if armed and not below_end:
+        # The hold is short: a slow drift through the band (a turn, a
+        # carried board), or a long bridged gap, is not a pump.
+        expired = (
+            armed
+            and self._last_out_ts is not None
+            and _reached(now - self._last_out_ts, self._max_hold_s)
+        )
+        if armed and not below_end and not expired:
             # A peak that already has its out frames holds through the
             # band between peak_end_ratio and out_ratio (and through a
             # wide frame that fails symmetry). Resetting here dropped
             # real pumps whose descent landed one frame in that band.
             return
-        if count_peak and armed and below_end:
+        if count_peak and armed and below_end and not expired:
             self._peak_times.append(now)
         self._out_run = 0
 

@@ -948,6 +948,9 @@ class PumpGestureConfig:
     edge_out_frac: float = 0.25
     max_centre_shift_m: float = 0.15
     min_out_frames: int = 3
+    # An armed run may hold through the 1.4x-1.5x band on its way down,
+    # but only this long after its last out frame.
+    max_hold_s: float = 0.4
     peak_end_ratio: float = 1.4
     start_peaks: int = 2
     start_window_s: float = 3.0

@@ -500,6 +500,43 @@ class TestPumpGesture(unittest.TestCase):
                 t += DT
         self.assertEqual(last["state"], "active")
 
+    def _armed_then(self, gap_frames, tail=(REST_W, REST_W)):
+        """Rest, 4 out frames, the given gap observations, then tail widths."""
+        self._rest()
+        t = 45 * DT
+        last = None
+        for _ in range(4):
+            last = self.step(t, obs(t, PUMP_W))
+            t += DT
+        self.assertGreaterEqual(last["out_run"], 4)
+        for make in gap_frames:
+            last = self.step(t, make(t))
+            t += DT
+        for w in tail:
+            last = self.step(t, obs(t, w))
+            t += DT
+        return last
+
+    def test_edge_reject_inside_an_armed_run_breaks_the_peak(self):
+        edge_box = (0.005, 0.2, 0.5, 0.8)
+        last = self._armed_then(
+            [lambda t: obs(t, PUMP_W, bbox=edge_box)] * 2
+        )
+        self.assertEqual(last["peaks"], 0)
+
+    def test_depth_dropout_inside_an_armed_run_is_bridged(self):
+        last = self._armed_then([lambda t: obs(t, PUMP_W, depth_ok=False)])
+        self.assertEqual(last["peaks"], 1)
+
+    def test_slow_drift_through_the_band_is_not_a_peak(self):
+        # 8 band frames (> max_hold_s at 15 Hz), then rest: not a pump.
+        band = REST_W * 1.45
+        last = self._armed_then([lambda t: obs(t, band)] * 8)
+        self.assertEqual(last["peaks"], 0)
+
+    def test_max_hold_default(self):
+        self.assertEqual(PumpGestureConfig().max_hold_s, 0.4)
+
 
 if __name__ == "__main__":
     unittest.main()
