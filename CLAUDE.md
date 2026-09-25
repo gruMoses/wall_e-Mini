@@ -208,5 +208,8 @@ python3 -m unittest discover -s pi_app/tests -p "test_*.py"
 
 ## Branches
 
+- `main` auto-deploys to the robot every 5 minutes (`bin/auto_deploy.sh`); a change under `docs/` or to a root `*.md` pulls without a service restart.
+- `fm-pump`: log-only pump gesture detector (step 1 of `docs/backup_pump_design.md`). Not deployed as of 2026-09-24.
 - `research/follow-me-trail-strategies`: research notes (not merged; 1 commit ahead of main).
-- Remote merged branches (`origin/codex/*`, `origin/feature/property-map`, `origin/feature/trail-follow-pure-pursuit`) can be pruned with `git remote prune origin`.
+- `codex/initialize-_last_imu_update-in-controller`: one unmerged Codex commit ("Clamp IMU dt to prevent PID spike"), not reviewed.
+- Merged branches were deleted from GitHub on 2026-09-24; the restore SHAs are in `docs/NEXT_SESSION.md`, backlog item 8.
