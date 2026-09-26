@@ -184,6 +184,40 @@ def _record_windowed(samples: list, item: tuple, window_s: float) -> None:
         del samples[:n_drop]
 
 
+def _color_stall_check(
+    now: float,
+    session_start_ts: float,
+    fresh_ts: float | None,
+    cfg,
+) -> tuple[bool, float]:
+    """Decide whether a colour-stream stall should end the OAK session.
+
+    Returns ``(restart_now, stalled_for_s)``. ``stalled_for_s`` is the age
+    of the last fresh NN packet, or the session age when none has arrived.
+
+    Disabled when ``color_stall_restart_s <= 0``. Otherwise the reference
+    time is ``max(fresh_ts or 0.0, session_start_ts + warmup)``: a session
+    that has never produced a fresh packet restarts at
+    ``session_start + warmup + restart_s``, and a later stall restarts
+    ``restart_s`` after its last fresh packet, never inside the warm-up.
+
+    The retry cap is not decided here. The reader keeps the restart times.
+    """
+    restart_s = 5.0
+    warmup_s = 10.0
+    if cfg is not None:
+        restart_s = float(getattr(cfg, "color_stall_restart_s", 5.0))
+        warmup_s = float(getattr(cfg, "color_stall_warmup_s", 10.0))
+    if fresh_ts:
+        stalled_for_s = now - fresh_ts
+    else:
+        stalled_for_s = now - session_start_ts
+    if restart_s <= 0.0:
+        return False, stalled_for_s
+    reference = max(fresh_ts or 0.0, session_start_ts + warmup_s)
+    return (now - reference) >= restart_s, stalled_for_s
+
+
 def vision_loop_sleep_s(period: float, elapsed: float, deadline_flag: bool) -> float:
     """Seconds to sleep at the end of a vision-loop iteration.
 
@@ -1069,6 +1103,14 @@ class OakDepthReader:
         self._det_fresh_ts: float | None = None
         self._det_last_seq: int | None = None
         self._det_seq_stuck_packets: int = 0
+        # Colour-stall watchdog (2026-09-25 CAM_A). Times are monotonic
+        # stamps of watchdog restarts, pruned to color_stall_window_s.
+        # The count is the total since this reader was created. The fault
+        # latches when the window is full and stays until a fresh NN
+        # packet arrives or the service restarts.
+        self._color_stall_restart_times: list[float] = []
+        self._color_stall_restart_count: int = 0
+        self._color_stall_fault: bool = False
         self._last_rgb_poll_ts = 0.0
         self._last_pipeline_error_msg = ""
         self._last_depth_error_msg = ""
@@ -1478,6 +1520,8 @@ class OakDepthReader:
             det_seq = self._det_last_seq
             det_seq_stuck_packets = self._det_seq_stuck_packets
             vision_stale_s = self._vision_stale_s
+            color_stall_restarts = self._color_stall_restart_count
+            color_stall_fault = bool(self._color_stall_fault)
             vision_iter_samples = list(self._vision_iter_samples)
             hand_detect_samples = list(self._hand_detect_samples)
             nn_input_queue_size = self._nn_input_queue_size
@@ -1567,6 +1611,8 @@ class OakDepthReader:
             "det_seq": det_seq,
             "det_seq_stuck_packets": det_seq_stuck_packets,
             "vision_stale": vision_stale,
+            "color_stall_restarts": color_stall_restarts,
+            "color_stall_fault": color_stall_fault,
         }
 
     @property
@@ -1792,6 +1838,82 @@ class OakDepthReader:
         else:
             self._poll_depth(depth_q, spatial_depth_q, np)
             self._poll_detections(det_q)
+
+    def _color_stall_after_poll(
+        self,
+        now: float,
+        session_start_ts: float,
+        det_q_present: bool,
+    ) -> bool:
+        """Apply the colour-stall watchdog after one vision poll.
+
+        Returns True when the session loop should exit so the supervisor
+        rebuilds the device. A latched fault does not end the session:
+        depth stays up, and follow-me keeps refusing the stale stream.
+        ``stop()`` never counts as a watchdog restart.
+        """
+        if not det_q_present or self._stop_event.is_set():
+            return False
+        with self._lock:
+            fresh_ts = self._det_fresh_ts
+            fault = self._color_stall_fault
+            depth_recv_ts = self._last_depth_recv_ts
+            vision_stale_s = self._vision_stale_s
+        restart_now, stalled_for_s = _color_stall_check(
+            now, session_start_ts, fresh_ts, self._det_cfg,
+        )
+        # A packet younger than the follow-me gate means CAM_A is back.
+        # The restart history stays, so a flap cannot reset the cap.
+        if fault and fresh_ts is not None and (now - fresh_ts) < vision_stale_s:
+            with self._lock:
+                self._color_stall_fault = False
+            logger.warning(
+                "OAK colour stream recovered after a stall fault"
+            )
+            return False
+        if not restart_now or fault:
+            return False
+
+        cfg = self._det_cfg
+        window_s = 900.0
+        max_restarts = 3
+        if cfg is not None:
+            window_s = float(getattr(cfg, "color_stall_window_s", 900.0))
+            max_restarts = int(getattr(cfg, "color_stall_max_restarts", 3))
+        if depth_recv_ts > 0.0:
+            depth_age_s = now - depth_recv_ts
+        else:
+            depth_age_s = float("inf")
+
+        with self._lock:
+            cutoff = now - window_s
+            self._color_stall_restart_times = [
+                t for t in self._color_stall_restart_times if t >= cutoff
+            ]
+            in_window = len(self._color_stall_restart_times)
+            if in_window >= max_restarts:
+                self._color_stall_fault = True
+                latched = True
+            else:
+                self._color_stall_restart_times.append(now)
+                self._color_stall_restart_count += 1
+                in_window = len(self._color_stall_restart_times)
+                self._last_pipeline_error_msg = "color_stall"
+                latched = False
+        if latched:
+            logger.error(
+                "OAK colour stream still stalled after %d restarts in %.0f min; "
+                "auto-restart disabled (restart the service to retry)",
+                in_window, window_s / 60.0,
+            )
+            return False
+        logger.warning(
+            "OAK colour stream stalled: no fresh NN packet for %.1f s "
+            "(depth age %.1f s); restarting the OAK session "
+            "(%d in the last %.0f min)",
+            stalled_for_s, depth_age_s, in_window, window_s / 60.0,
+        )
+        return True
 
     def _run_pipeline_once(self, dai, np) -> bool:
         """Build + open one device session and run the poll loops.
@@ -2103,12 +2225,20 @@ class OakDepthReader:
             next_imu_poll = time.monotonic()
             period = 1.0 / self._obs_cfg.update_rate_hz
             deadline_sleep = bool(getattr(self._det_cfg, "vision_deadline_sleep", True))
+            # 2026-09-25: CAM_A can stall with the pipeline still running.
+            # Warm-up is measured from here, not from pipeline.start().
+            session_start_ts = time.monotonic()
             while not self._stop_event.is_set() and pipeline.isRunning():
                 loop_start = time.monotonic()
                 hand_s = 0.0
                 with self._lock:
                     self._last_pipeline_loop_ts = loop_start
                 self._poll_vision_queues(depth_q, spatial_depth_q, det_q, np)
+                # No detection queue means there are never NN packets.
+                if self._color_stall_after_poll(
+                    time.monotonic(), session_start_ts, det_q is not None,
+                ):
+                    break
                 with self._lock:
                     hand_enabled = self._hand_poll_enabled
                 if hand_queues is not None and hand_enabled:

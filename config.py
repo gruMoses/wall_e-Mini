@@ -1027,6 +1027,19 @@ class OakDetectionConfig:
     # is older than this. The stored list is left unchanged, so a stale
     # close person still forces the person/animal stop.
     vision_stale_s: float = 1.5
+    # 2026-09-25 17:43: CAM_A (the YOLO input and the preview) stalled
+    # after 23 h. Mono and depth kept running, and no exception was
+    # raised, so the session never ended. End the session when no fresh
+    # NN packet has arrived for this long and let the supervisor rebuild
+    # it. 0 disables the watchdog.
+    color_stall_restart_s: float = 5.0
+    # No watchdog restart in the first seconds of a session.
+    color_stall_warmup_s: float = 10.0
+    # After this many watchdog restarts inside color_stall_window_s,
+    # stop restarting and latch a fault. Depth stays up; follow-me keeps
+    # refusing the stale stream. Restart the service to try again.
+    color_stall_max_restarts: int = 3
+    color_stall_window_s: float = 900.0
 
 
 @dataclass(frozen=True)
