@@ -1,0 +1,13 @@
+[Unit]
+Description=I2C bus 1 auto-unlock guard
+After=multi-user.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /home/pi/wall_e-Mini/bin/i2c_bus_guard.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
