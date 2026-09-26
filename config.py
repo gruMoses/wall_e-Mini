@@ -312,21 +312,33 @@ class ObstacleAvoidanceConfig:
     # even a 5 cm pole at 0.4 m is ~57 px wide x the 200 px ROI = 11,000 px.
     # 0.02 of the ~102k px corridor = ~2,000 px.
     corridor_min_support_frac: float = 0.02
-    # Speckle filter (2026-09-26, 45 raw frames in logs/depth_snapshots):
-    # false stereo matches on repeated structures (iron gate bars) put
-    # 1,000-2,000 near pixels in the corridor as 150-500 tiny blobs (median
-    # 2 px, largest 95 px) and reported a 0.70-0.81 m obstacle that never
-    # came closer. Near pixels (<= slow_distance_m) in 8-connected blobs
-    # smaller than this are dropped before the support rule; a phantom
-    # would need support-floor pixels (700-1,700) in blobs >= 80 px, and
-    # the phantom frames had at most 129 px in blobs >= 50. Kept at the
-    # right range: gate bars at 1.0 m, a trash can at 0.87 m, an umbrella
-    # pole at 0.88 m, sunlit siding at 1.35 m (tape 1.346 m). Woven wire
-    # fence is the limiting case: 200 lost it in one frame at ~1.2 m; at 80
-    # it reads 0.96-1.03 m there and 1.73-1.75 m at the 1.7 m histogram peak,
-    # where the old code read the fence's own speckle as 0.58-0.73 m.
-    # 0 disables.
-    corridor_min_blob_px: int = 80
+    # Speckle filter (2026-09-26, 45 raw frames in logs/depth_snapshots on
+    # the robot). False stereo matches on repeated structures (iron gate
+    # bars) put 1,000-2,000 near pixels in the corridor as sparse specks at
+    # random depths (0.35-1.5 m) and reported a 0.70-0.81 m obstacle that
+    # never came closer. A near pixel (<= slow_distance_m) stays only when
+    # at least corridor_speckle_min_neighbours near pixels in its
+    # corridor_speckle_window_px square lie within one 100 mm depth bin of
+    # it. A blob-size rule was tried first and rejected: woven wire fence
+    # looks like speckle at the pixel level, and with 30 percent of its
+    # pixels removed (worse light) every blob variant lost the fence at 1 m.
+    # This rule, over 252 frames (the 45 plus random and clumped dropout to
+    # 70 and 60 percent), lost no real obstacle the old code saw and left no
+    # gate phantom for any count from 12 to 22 at window 13; 16 is the
+    # middle. Real obstacles kept at their range: gate bars 1.0 m, trash can
+    # 0.87 m, wire fence ~1.0 m and 1.74 m (the old code read the fence's
+    # own speckle as 0.58-0.73 m), sunlit siding (tape 1.346 m). The
+    # corridor's density and support checks use the pixels before this
+    # filter, and if too few pixels remain to measure, the unfiltered
+    # reading stands. 0 disables.
+    corridor_speckle_window_px: int = 13
+    corridor_speckle_min_neighbours: int = 16
+    # The filter runs only when the near pixels reach the support floor
+    # (below it the reading is beyond slow_distance_m either way) and do not
+    # exceed this (a near region this large can only be a real surface; the
+    # unfiltered reading is the cautious one, and it bounds the cost: ~7 ms
+    # per frame on the Pi 5 at ~2-12k near px, ~20 ms at ~90k).
+    corridor_speckle_max_near_px: int = 20000
     # Person mask (2026-09-26): the corridor masks each person box so the
     # followed person does not count twice (persons already set the obstacle
     # distance through the stop tier). The whole-box mask also hid anything

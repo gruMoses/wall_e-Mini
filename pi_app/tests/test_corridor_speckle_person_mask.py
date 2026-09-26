@@ -1,11 +1,13 @@
 """Corridor speckle filter and depth-aware person mask (2026-09-26).
 
 Field evidence: 45 raw frames (logs/depth_snapshots on the robot). False
-stereo matches on an iron gate gave 1,000-2,000 near pixels as tiny blobs
-(largest 95 px) and a 0.70-0.81 m phantom. Real obstacles (gate bars, a
-trash can, an umbrella pole, siding, woven wire fence) were kept at 80 px.
-The person mask used to blank the whole person box, which also hid an
-obstacle between the robot and the person.
+stereo matches on an iron gate gave 1,000-2,000 sparse near pixels at
+random depths and a 0.70-0.81 m phantom. A near pixel now needs 16 near
+neighbours within one 100 mm depth bin in its 13 x 13 window; real
+surfaces (gate bars, a trash can, siding, woven wire fence, also with 30
+percent of pixels removed) keep their range. The person mask used to blank
+the whole person box, which also hid an obstacle between the robot and the
+person.
 """
 
 import unittest
@@ -21,7 +23,7 @@ from config import FollowMeConfig, ObstacleAvoidanceConfig
 from pi_app.control.follow_me import PersonDetection
 from pi_app.hardware.oak_depth import (
     OakDepthReader,
-    _drop_small_near_blobs,
+    _drop_unsupported_near_pixels,
     _mask_person_boxes,
 )
 
@@ -85,67 +87,81 @@ def _speckle_frame(background_mm=3000, speckle_mm=700):
     return frame
 
 
+WIN, NEED = 13, 16
+
+
 @unittest.skipUnless(cv2 is not None, "OpenCV not installed")
-class TestDropSmallNearBlobs(unittest.TestCase):
+class TestDropUnsupportedNearPixels(unittest.TestCase):
     def _band(self, fill=3000):
         return np.full((200, W), fill, dtype=np.uint16)
 
-    def test_isolated_near_pixels_are_dropped(self):
-        band = self._band()
-        band[::4, ::4] = 700
+    def _run(self, band):
         valid = band > 350
-        kept, dropped = _drop_small_near_blobs(band, valid, SLOW_MM, 80)
-        self.assertEqual(dropped, int((band == 700).sum()))
-        self.assertFalse((kept & (band <= SLOW_MM)).any())
-        self.assertTrue(kept[band == 3000].all())  # far pixels untouched
+        return valid, _drop_unsupported_near_pixels(band, valid, SLOW_MM, WIN, NEED)
 
-    def test_solid_block_is_kept_and_speckle_around_it_dropped(self):
+    def test_sparse_random_depth_speckle_is_dropped(self):
         band = self._band()
-        # Offset grid: no speckle pixel touches the block. A speckle pixel
-        # 8-adjacent to a real blob joins that blob and is kept (by design).
-        band[2::4, 2::4] = 600
-        band[80:120, 300:340] = 900                # 1,600 px solid
-        valid = band > 350
-        kept, dropped = _drop_small_near_blobs(band, valid, SLOW_MM, 80)
-        self.assertTrue(kept[80:120, 300:340].all())
-        self.assertFalse(kept[band == 600].any())
-        self.assertEqual(dropped, int((band == 600).sum()))
+        rng = np.random.default_rng(3)
+        ys, xs = np.nonzero(rng.random(band.shape) < 0.03)
+        band[ys, xs] = rng.integers(360, 1500, size=ys.size)
+        valid, (kept, dropped) = self._run(band)
+        near = valid & (band <= SLOW_MM)
+        self.assertGreater(near.sum(), 3000)
+        self.assertEqual(dropped, int(near.sum()))
+        self.assertTrue(kept[band == 3000].all())   # far pixels untouched
 
-    def test_connected_thin_lattice_is_kept(self):
-        # A wire-fence-like grid of 1 px lines is one 8-connected blob.
+    def test_solid_block_is_kept(self):
         band = self._band()
-        band[20:180:10, 100:500] = 1000
-        band[20:180, 100:500:10] = 1000
-        valid = band > 350
-        kept, dropped = _drop_small_near_blobs(band, valid, SLOW_MM, 80)
+        band[80:120, 300:340] = 900
+        valid, (kept, dropped) = self._run(band)
         self.assertEqual(dropped, 0)
-        self.assertTrue(kept[band == 1000].all())
+        self.assertTrue(kept[80:120, 300:340].all())
 
-    def test_threshold_boundary(self):
+    def test_fence_like_lattice_with_holes_is_kept(self):
+        # 2 px wires every 12 px at ~1 m, then 30 percent of pixels removed.
         band = self._band()
-        band[10, 10:89] = 800        # 79 px line: dropped
-        band[50, 10:90] = 800        # 80 px line: kept
-        valid = band > 350
-        kept, dropped = _drop_small_near_blobs(band, valid, SLOW_MM, 80)
-        self.assertEqual(dropped, 79)
-        self.assertFalse(kept[10, 10:89].any())
-        self.assertTrue(kept[50, 10:90].all())
+        for y in range(20, 180, 12):
+            band[y:y + 2, 100:500] = 1000
+        for x in range(100, 500, 12):
+            band[20:180, x:x + 2] = 1000
+        rng = np.random.default_rng(5)
+        band[(rng.random(band.shape) < 0.3) & (band == 1000)] = 0
+        valid, (kept, dropped) = self._run(band)
+        wire = band == 1000
+        self.assertGreater(kept[wire].mean(), 0.95)
+
+    def test_neighbour_count_boundary(self):
+        band = self._band()
+        band[50:54, 100:104] = 800       # 4 x 4 = 16 agreeing px: kept
+        band[150:153, 100:105] = 800     # 3 x 5 = 15: dropped
+        valid, (kept, dropped) = self._run(band)
+        self.assertTrue(kept[50:54, 100:104].all())
+        self.assertFalse(kept[150:153, 100:105].any())
+        self.assertEqual(dropped, 15)
+
+    def test_single_pixel_line_is_dropped_by_design(self):
+        # A 13 px window holds at most 13 px of a 1 px line (< 16). Stereo
+        # renders real wires 2-4 px wide; a lone strand is below the corridor
+        # support floor with or without this filter.
+        band = self._band()
+        band[50, 100:300] = 800
+        valid, (kept, dropped) = self._run(band)
+        self.assertEqual(dropped, 200)
+
+    def test_depths_outside_one_bin_do_not_count(self):
+        band = self._band()
+        band[50:54, 100:104] = 800
+        band[50:52, 100:104] = 1200      # half the block is 400 mm away
+        valid, (kept, dropped) = self._run(band)
+        self.assertEqual(dropped, 16)
 
     def test_zero_disables(self):
         band = self._band()
         band[::4, ::4] = 700
         valid = band > 350
-        kept, dropped = _drop_small_near_blobs(band, valid, SLOW_MM, 0)
+        kept, dropped = _drop_unsupported_near_pixels(band, valid, SLOW_MM, WIN, 0)
         self.assertEqual(dropped, 0)
         self.assertIs(kept, valid)
-
-    def test_isolated_far_pixels_are_never_dropped(self):
-        band = np.zeros((200, W), dtype=np.uint16)
-        band[::4, ::4] = 2500
-        valid = band > 350
-        kept, dropped = _drop_small_near_blobs(band, valid, SLOW_MM, 80)
-        self.assertEqual(dropped, 0)
-        self.assertTrue((kept == valid).all())
 
 
 class TestMaskPersonBoxes(unittest.TestCase):
@@ -191,9 +207,9 @@ class TestMaskPersonBoxes(unittest.TestCase):
 @unittest.skipUnless(cv2 is not None, "OpenCV not installed")
 class TestPollDepthSpeckleAndMask(unittest.TestCase):
     def test_speckle_field_no_longer_reports_a_phantom(self):
-        legacy, _ = _poll_twice(_reader(corridor_min_blob_px=0), _speckle_frame())
+        legacy, _ = _poll_twice(_reader(corridor_speckle_min_neighbours=0), _speckle_frame())
         self.assertAlmostEqual(legacy, 0.7, places=1)   # the old phantom
-        dist, stats = _poll_twice(_reader(corridor_min_blob_px=80), _speckle_frame())
+        dist, stats = _poll_twice(_reader(), _speckle_frame())
         self.assertGreater(dist, 2.9)
         self.assertEqual(stats.corridor_speckle_px, 48 * 110 - self._outside(_speckle_frame()))
 
@@ -210,7 +226,7 @@ class TestPollDepthSpeckleAndMask(unittest.TestCase):
     def test_real_obstacle_among_speckle_is_reported(self):
         frame = _speckle_frame(speckle_mm=500)
         frame[140:260, 290:350] = 900            # 7,200 px solid, in corridor
-        dist, _ = _poll_twice(_reader(corridor_min_blob_px=80), frame)
+        dist, _ = _poll_twice(_reader(), frame)
         self.assertAlmostEqual(dist, 0.9, places=1)
 
     def _person_scene(self, person_z_m):
@@ -225,22 +241,59 @@ class TestPollDepthSpeckleAndMask(unittest.TestCase):
 
     def test_obstacle_between_robot_and_person_is_seen(self):
         frame, persons = self._person_scene(2.5)
-        reader = _reader(corridor_min_blob_px=80, person_mask_depth_margin_m=0.5)
+        reader = _reader(person_mask_depth_margin_m=0.5)
         reader._det_state.persons = persons
         dist, _ = _poll_twice(reader, frame)
         self.assertAlmostEqual(dist, 1.0, places=1)
 
     def test_whole_box_mask_hid_that_obstacle(self):
         frame, persons = self._person_scene(2.5)
-        reader = _reader(corridor_min_blob_px=80, person_mask_depth_margin_m=0.0)
+        reader = _reader(person_mask_depth_margin_m=0.0)
         reader._det_state.persons = persons
         dist, _ = _poll_twice(reader, frame)
         self.assertGreater(dist, 2.0)
 
+    def test_filter_never_turns_a_measurable_corridor_into_clear(self):
+        # Sparse scene: valid density sits just above min_valid_pct and most
+        # valid pixels are unsupported near specks. Dropping them must not
+        # push the corridor under the density floor and publish "clear".
+        frame = np.zeros((H, W), dtype=np.uint16)
+        rng = np.random.default_rng(9)
+        band = frame[100:300]
+        ys, xs = np.nonzero(rng.random(band.shape) < 0.16)
+        band[ys, xs] = rng.integers(360, 1500, size=ys.size)  # random-depth specks
+        dist, stats = _poll_twice(_reader(), frame)
+        legacy, _ = _poll_twice(_reader(corridor_speckle_min_neighbours=0), frame)
+        self.assertLess(legacy, 1.5)
+        self.assertLess(dist, 1.5)               # unfiltered reading stands
+        self.assertTrue(stats.corridor_speckle_fallback)
+
+    def test_filter_skipped_below_the_support_floor(self):
+        # 300 isolated near specks: fewer than the support floor, so the
+        # reading is beyond slow_distance_m either way; the filter does not
+        # run (no cost on a clear path).
+        frame = np.full((H, W), 3000, dtype=np.uint16)
+        frame[120:280:8, 280:400:8] = 700
+        dist, stats = _poll_twice(_reader(), frame)
+        self.assertEqual(stats.corridor_speckle_px, 0)
+        self.assertGreater(dist, 1.5)
+
+    def test_filter_skipped_for_a_huge_near_region(self):
+        # A wall at 1.0 m filling the band is a real surface: above
+        # corridor_speckle_max_near_px the unfiltered reading stands.
+        frame = np.full((H, W), 1000, dtype=np.uint16)
+        frame[104:296:4, 120:560:4] = 400        # specks nearer than the wall
+        dist, stats = _poll_twice(_reader(corridor_speckle_max_near_px=20000), frame)
+        self.assertEqual(stats.corridor_speckle_px, 0)
+        self.assertLess(dist, 1.0)                # cautious unfiltered reading
+        dist2, stats2 = _poll_twice(_reader(corridor_speckle_max_near_px=10**9), frame)
+        self.assertGreater(stats2.corridor_speckle_px, 0)
+        self.assertAlmostEqual(dist2, 1.0, places=1)
+
     def test_unknown_range_person_counts_as_depth(self):
         frame = np.full((H, W), 4000, dtype=np.uint16)
         frame[:, 256:384] = 1200                  # a close person, range unknown
-        reader = _reader(corridor_min_blob_px=80, person_mask_depth_margin_m=0.5)
+        reader = _reader(person_mask_depth_margin_m=0.5)
         reader._det_state.persons = [PersonDetection(
             x_m=0.0, z_m=0.0, confidence=0.9,
             bbox=(0.40, 0.00, 0.60, 1.00), track_id=1, depth_status="no_support",

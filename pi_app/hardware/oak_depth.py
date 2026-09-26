@@ -73,7 +73,8 @@ class DepthStats:
     corridor_support_px: int = 0
     corridor_near_px: int = 0  # valid corridor pixels claiming <= slow_distance_m
     timestamp: float = 0.0
-    corridor_speckle_px: int = 0  # near pixels dropped by the blob-size filter
+    corridor_speckle_px: int = 0  # near pixels dropped by the speckle filter
+    corridor_speckle_fallback: bool = False  # filter left too few pixels; unfiltered reading used
 
 
 def _corridor_near_distance_mm(valid_depths, min_support_px: int) -> float | None:
@@ -142,43 +143,79 @@ def _mask_person_boxes(band, person_boxes, y0: int, h: int, w: int,
     return out
 
 
-_BLOB_FILTER_UNAVAILABLE_LOGGED = False
+_SPECKLE_FILTER_UNAVAILABLE_LOGGED = False
+_SPECKLE_BIN_MM = 100.0
 
 
-def _drop_small_near_blobs(depths, valid_mask, slow_mm: float, min_blob_px: int):
-    """Drop near pixels that belong to small blobs. Pure.
+def _drop_unsupported_near_pixels(depths, valid_mask, slow_mm: float,
+                                  window_px: int, min_neighbours: int):
+    """Drop near pixels that no nearby surface agrees with. Pure.
 
-    Near = ``valid_mask`` and ``depths <= slow_mm``. Near pixels in
-    8-connected blobs smaller than ``min_blob_px`` are removed from the
-    returned mask; far pixels are never touched. Returns
-    ``(valid_mask, dropped_px)``. ``min_blob_px <= 0`` or no OpenCV returns
-    the mask unchanged.
+    Near = ``valid_mask`` and ``depths <= slow_mm``. A near pixel stays only
+    when at least ``min_neighbours`` near pixels (itself included) in the
+    ``window_px`` x ``window_px`` box around it lie within one 100 mm depth
+    bin of its own. False stereo matches are sparse and have random depths,
+    so they have few agreeing neighbours; a real surface, even a woven
+    wire fence with holes, agrees with itself. Far pixels are never
+    touched. Returns ``(kept_mask, dropped_px)``. ``min_neighbours <= 0``
+    or no OpenCV returns the mask unchanged.
+
+    Cost: one uint8 box filter per occupied depth bin over the bounding box
+    of the near pixels (about 7 ms per frame on the Pi 5 for a band-wide
+    speckle field).
     """
-    global _BLOB_FILTER_UNAVAILABLE_LOGGED
-    if min_blob_px <= 0:
+    global _SPECKLE_FILTER_UNAVAILABLE_LOGGED
+    if min_neighbours <= 0 or window_px <= 0:
         return valid_mask, 0
     import numpy as np
     near = valid_mask & (depths <= slow_mm)
-    if not near.any():
+    ys, xs = np.nonzero(near)
+    if ys.size == 0:
         return valid_mask, 0
     try:
         import cv2
     except ImportError:
-        if not _BLOB_FILTER_UNAVAILABLE_LOGGED:
-            _BLOB_FILTER_UNAVAILABLE_LOGGED = True
+        if not _SPECKLE_FILTER_UNAVAILABLE_LOGGED:
+            _SPECKLE_FILTER_UNAVAILABLE_LOGGED = True
             logger.warning("Corridor speckle filter disabled: OpenCV not importable")
         return valid_mask, 0
-    n, labels, blob_stats, _ = cv2.connectedComponentsWithStats(
-        near.astype(np.uint8), connectivity=8)
-    if n <= 1:
-        return valid_mask, 0
-    small = np.zeros(n, dtype=bool)
-    small[1:] = blob_stats[1:, cv2.CC_STAT_AREA] < int(min_blob_px)
-    drop = small[labels]
-    dropped = int(drop.sum())
+    half = int(window_px) // 2
+    h, w = depths.shape
+    y0 = max(0, int(ys.min()) - half)
+    y1 = min(h, int(ys.max()) + half + 1)
+    x0 = max(0, int(xs.min()) - half)
+    x1 = min(w, int(xs.max()) + half + 1)
+    ly = ys - y0
+    lx = xs - x0
+    bins = (depths[ys, xs] // _SPECKLE_BIN_MM).astype(np.int32)
+    present = np.unique(bins)
+    ksize = (int(window_px), int(window_px))
+    # A 13 x 13 window holds at most 169 pixels, so uint8 sums cannot
+    # overflow for windows up to 15 x 15 (225).
+    indicator = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    per_bin = {}
+    for k in present:
+        indicator[:] = 0
+        sel = bins == k
+        indicator[ly[sel], lx[sel]] = 1
+        per_bin[int(k)] = cv2.boxFilter(indicator, -1, ksize, normalize=False,
+                                        borderType=cv2.BORDER_CONSTANT)
+    agree = np.zeros(ys.size, dtype=np.int32)
+    for k in present:
+        sel = np.nonzero(bins == k)[0]
+        py = ly[sel]
+        px = lx[sel]
+        for kk in (int(k) - 1, int(k), int(k) + 1):
+            counts = per_bin.get(kk)
+            if counts is not None:
+                agree[sel] += counts[py, px]
+    bad = agree < int(min_neighbours)
+    dropped = int(bad.sum())
     if dropped == 0:
         return valid_mask, 0
-    return valid_mask & ~drop, dropped
+    kept = valid_mask.copy()
+    kept[ys[bad], xs[bad]] = False
+    return kept, dropped
 
 
 def _corridor_min_support_px(min_px: int, min_frac: float, corridor_pixel_count: int) -> int:
@@ -2715,7 +2752,9 @@ class OakDepthReader:
             robot_half_mm = getattr(self._obs_cfg, "robot_width_m", 0.0) * 500.0
             min_depth_mm = int(getattr(self._obs_cfg, "min_depth_mm", 600))
             slow_mm = float(getattr(self._obs_cfg, "slow_distance_m", 1.5)) * 1000.0
-            min_blob_px = int(getattr(self._obs_cfg, "corridor_min_blob_px", 0))
+            speckle_window = int(getattr(self._obs_cfg, "corridor_speckle_window_px", 0))
+            speckle_min_n = int(getattr(self._obs_cfg, "corridor_speckle_min_neighbours", 0))
+            speckle_max_near = int(getattr(self._obs_cfg, "corridor_speckle_max_near_px", 0))
             min_valid_pct = float(getattr(self._obs_cfg, "min_valid_pct", 8.0))
             p50 = None
             valid_pct = None
@@ -2736,18 +2775,18 @@ class OakDepthReader:
                 depths_f = band.astype(np.float32)
                 in_corridor = (depths_f * x_offsets[np.newaxis, :]) <= threshold
                 valid_mask = (band > min_depth_mm) & in_corridor
-                valid_mask, speckle_px = _drop_small_near_blobs(
-                    band, valid_mask, slow_mm, min_blob_px)
-                valid_depths = band[valid_mask]
+                speckle_src = band
+                valid_raw = band[valid_mask]
+                valid_depths = valid_raw
             else:
                 rw = self._obs_cfg.roi_width_pct
                 x0 = int(w * (0.5 - rw / 2))
                 x1 = int(w * (0.5 + rw / 2))
                 roi = band[:, x0:x1]
                 valid_mask = roi > min_depth_mm
-                valid_mask, speckle_px = _drop_small_near_blobs(
-                    roi, valid_mask, slow_mm, min_blob_px)
-                valid_depths = roi[valid_mask]
+                speckle_src = roi
+                valid_raw = roi[valid_mask]
+                valid_depths = valid_raw
 
             # Use device-side spatial calculator for median only.
             if in_spatial is not None:
@@ -2766,8 +2805,12 @@ class OakDepthReader:
             # percentile. See _corridor_near_distance_mm.
             corridor_p5_mm = float("inf")
             corridor_rejected = False
-            n_valid = int(valid_depths.size)
+            # Density and support use the pixels BEFORE the speckle filter:
+            # dropping speckle must never turn a measurable corridor into a
+            # rejected (published as clear) one.
+            n_valid = int(valid_raw.size)
             corridor_support_px = n_valid
+            speckle_fallback = False
             corridor_valid_pct = 0.0
             corridor_near_px = 0
             if robot_half_mm > 0:
@@ -2783,6 +2826,18 @@ class OakDepthReader:
                 float(getattr(self._obs_cfg, "corridor_min_support_frac", 0.0)),
                 corridor_pixel_count,
             )
+            # Speckle filter, run only where it can matter: with fewer near
+            # pixels than the support floor the reading is beyond
+            # slow_distance_m either way, and a near region above
+            # corridor_speckle_max_near_px can only be a real surface (keep
+            # the cautious unfiltered reading; this also bounds the cost).
+            speckle_px = 0
+            near_raw = int((valid_raw <= slow_mm).sum()) if n_valid else 0
+            if min_support_px <= near_raw <= speckle_max_near:
+                kept_mask, speckle_px = _drop_unsupported_near_pixels(
+                    speckle_src, valid_mask, slow_mm, speckle_window, speckle_min_n)
+                if speckle_px:
+                    valid_depths = speckle_src[kept_mask]
             if n_valid == 0:
                 corridor_rejected = True
             else:
@@ -2795,6 +2850,11 @@ class OakDepthReader:
                     corridor_rejected = True
                 else:
                     near_mm = _corridor_near_distance_mm(valid_depths, min_support_px)
+                    if near_mm is None and speckle_px:
+                        # The filter left too few pixels to measure: keep the
+                        # unfiltered reading (the pre-2026-09-26 behaviour).
+                        near_mm = _corridor_near_distance_mm(valid_raw, min_support_px)
+                        speckle_fallback = True
                     if near_mm is None:
                         corridor_rejected = True
                     else:
@@ -2877,6 +2937,7 @@ class OakDepthReader:
                 corridor_near_px=int(corridor_near_px),
                 timestamp=now,
                 corridor_speckle_px=int(speckle_px),
+                corridor_speckle_fallback=bool(speckle_fallback),
             )
             with self._lock:
                 self._depth_state.min_distance_m = effective_min_m
