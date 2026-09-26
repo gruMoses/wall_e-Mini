@@ -109,25 +109,40 @@ def _temp_payload(max_raw: int = 65, min_raw: int = 63) -> bytes:
     return bytes(buf)
 
 
-def _mosfet_payload(charge_on: bool = True, discharge_on: bool = True) -> bytes:
+def _mosfet_payload(charge_on: bool = True, discharge_on: bool = True, mode: int = 0) -> bytes:
     """8-byte payload for MOSFET status (0x93).
 
     cb8d2f6 fix(bms): byte 0 is a mode enum (not a bitmask); charge FET on/off
     is at byte 1 and discharge FET on/off is at byte 2 (plain boolean).
     """
     buf = bytearray(8)
-    # byte 0: mode enum — leave 0 (normal operation)
+    # byte 0: mode enum (0 idle, 1 charging, 2 discharging)
+    buf[0] = mode & 0xFF
     buf[1] = 0x01 if charge_on else 0x00
     buf[2] = 0x01 if discharge_on else 0x00
     return bytes(buf)
 
 
-def _status_payload(num_cells: int = 8, cycles: int = 42) -> bytes:
-    """8-byte payload for pack status (0x94)."""
+def _status_payload(num_cells: int = 8, cycles: int = 42, charger: int = 0, load: int = 0) -> bytes:
+    """8-byte payload for pack status (0x94). Bytes 2/3: charger/load flags."""
     buf = bytearray(8)
     buf[0] = num_cells
+    buf[2] = charger & 0xFF
+    buf[3] = load & 0xFF
     struct.pack_into(">H", buf, 5, cycles)
     return bytes(buf)
+
+
+def _all_responses(mosfet: bytes = None, status: bytes = None) -> dict:
+    """A response for every polled Daly command, so no 3 s timeout fires."""
+    return {
+        "soc": _make_daly_response(0x90, _soc_payload()),
+        "cell_voltage_range": _make_daly_response(0x91, _cell_range_payload()),
+        "temp_range": _make_daly_response(0x92, _temp_payload()),
+        "mosfet_status": mosfet or _make_daly_response(0x93, _mosfet_payload()),
+        "status": status or _make_daly_response(0x94, _status_payload()),
+        "errors": _make_daly_response(0x98, _errors_payload()),
+    }
 
 
 def _errors_payload(flags: int = 0) -> bytes:
@@ -227,6 +242,70 @@ class TestDalyParsing(unittest.TestCase):
         state = self._run_poll_with_responses({"status": resp})
         self.assertEqual(state.num_cells, 8)
         self.assertEqual(state.cycle_count, 42)
+
+    def test_mode_byte_parsed(self):
+        for code, name in ((0, "idle"), (1, "charging"), (2, "discharging"), (7, "unknown_7")):
+            resp = _make_daly_response(0x93, _mosfet_payload(mode=code))
+            state = self._run_poll_with_responses(_all_responses(mosfet=resp))
+            self.assertEqual(state.bms_mode, name)
+            self.assertTrue(state.charge_fet_on)
+            self.assertTrue(state.discharge_fet_on)
+
+    def test_charger_and_load_flags_parsed(self):
+        resp = _make_daly_response(0x94, _status_payload(num_cells=10, cycles=7, charger=1, load=0))
+        state = self._run_poll_with_responses(_all_responses(status=resp))
+        self.assertIs(state.charger_connected, True)
+        self.assertIs(state.load_connected, False)
+        self.assertEqual(state.num_cells, 10)
+        self.assertEqual(state.cycle_count, 7)
+
+    def test_flags_stay_none_without_a_status_response(self):
+        # A reply framed for another command is ignored by the parser (and,
+        # unlike a missing reply, costs no 3 s timeout).
+        wrong = _make_daly_response(0x90, _soc_payload())
+        state = self._run_poll_with_responses(_all_responses(mosfet=wrong, status=wrong))
+        self.assertIsNone(state.charger_connected)
+        self.assertIsNone(state.load_connected)
+        self.assertIsNone(state.bms_mode)
+
+    def test_charger_flag_change_logs_a_warning_once_per_change(self):
+        cfg = _BmsCfg()
+        svc = BmsService(cfg)
+        _cmd_to_name = {v: k for k, v in _DALY_CMD.items()}
+
+        def poll(charger):
+            responses = _all_responses(
+                status=_make_daly_response(0x94, _status_payload(charger=charger))
+            )
+
+            async def run():
+                buf = bytearray()
+                event = asyncio.Event()
+
+                async def fake_write(char, data, response=False):
+                    name = _cmd_to_name.get(bytes(data))
+                    if name and name in responses:
+                        buf.clear()
+                        buf.extend(responses[name])
+                        event.set()
+
+                client = MagicMock()
+                client.write_gatt_char = fake_write
+                await svc._do_poll(client, "fake-char", buf, event)
+
+            asyncio.run(run())
+
+        with self.assertLogs("pi_app.hardware.bms", level="WARNING") as captured:
+            poll(1)
+            poll(1)
+            poll(0)
+            poll(0)
+            poll(1)
+        lines = [r.getMessage() for r in captured.records if r.getMessage().startswith("BMS charger flag")]
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("BMS charger flag: connected"))
+        self.assertTrue(lines[1].startswith("BMS charger flag: disconnected"))
+        self.assertTrue(lines[2].startswith("BMS charger flag: connected"))
 
     def test_error_flags_parsed(self):
         # b3718aa fix(bms): alarm bit table was corrected; pattern is

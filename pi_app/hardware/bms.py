@@ -46,6 +46,9 @@ _DALY_CMD = {
 # Standard Daly Smart BMS protocol (verified against maland16/daly-bms-uart,
 # python-daly-bms, and raw 0x98 response cross-checked against live BMS state).
 # Pattern: even bit = Warning (L1), odd bit = Trip/Protection (L2)
+# Daly 0x93 byte 0: the BMS's own charge/discharge classification.
+_DALY_MODES = {0: "idle", 1: "charging", 2: "discharging"}
+
 _DALY_0x98_ALARM_BITS: List[Tuple[int, int, str]] = [
     # Byte 0 — Voltage (bits 0-3: cell; bits 4-7: pack)
     (0, 0, "Cell OVP Warning"),    (0, 1, "Cell OVP Trip"),
@@ -96,6 +99,15 @@ class BmsState:
     # MOSFET / charger state
     charge_fet_on: Optional[bool] = None
     discharge_fet_on: Optional[bool] = None
+    # Daly 0x93 byte 0: the BMS's own classification of the pack
+    # ("idle" / "charging" / "discharging"). Daly 0x94 bytes 2 and 3: the
+    # charger and load "connected" flags. Logged only (2026-09-25): the
+    # charger inhibit follows current, so a full pack on the charger is not
+    # inhibited. Whether this BMS sets the charger flag with 0 A on a full
+    # pack is not yet verified on the robot.
+    bms_mode: Optional[str] = None
+    charger_connected: Optional[bool] = None
+    load_connected: Optional[bool] = None
 
     # Pack info
     num_cells: Optional[int] = None
@@ -140,6 +152,8 @@ class BmsService:
         """
         self._cfg = bms_config
         self._state = BmsState()
+        # Last logged Daly charger flag (None until the first 0x94 response).
+        self._last_charger_flag: Optional[bool] = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -363,14 +377,17 @@ class BmsService:
         resp = await send_recv(_DALY_CMD["mosfet_status"])
         if len(resp) >= 13 and resp[2] == 0x93:
             p = resp[4:12]
+            new.bms_mode = _DALY_MODES.get(p[0], f"unknown_{p[0]}")
             new.charge_fet_on = bool(p[1])
             new.discharge_fet_on = bool(p[2])
 
-        # --- Pack status: cell count, cycle count ---
+        # --- Pack status: cell count, charger/load flags, cycle count ---
         resp = await send_recv(_DALY_CMD["status"])
         if len(resp) >= 13 and resp[2] == 0x94:
             p = resp[4:12]
             new.num_cells = p[0]
+            new.charger_connected = bool(p[2])
+            new.load_connected = bool(p[3])
             new.cycle_count = struct.unpack(">H", p[5:7])[0]
 
         # --- Active protection / error flags ---
@@ -401,6 +418,22 @@ class BmsService:
 
         if new.error_flags:
             logger.error("BMS protection flags active: %s", ", ".join(new.error_flags))
+
+        # WARNING (the app drops INFO) on each change of the charger flag, so
+        # an unplug/replug test shows up in the journal.
+        if (
+            new.charger_connected is not None
+            and new.charger_connected != self._last_charger_flag
+        ):
+            logger.warning(
+                "BMS charger flag: %s (mode %s, %.2f V, %.1f A, SOC %.0f%%)",
+                "connected" if new.charger_connected else "disconnected",
+                new.bms_mode,
+                new.pack_voltage_v or 0.0,
+                new.pack_current_a or 0.0,
+                new.soc_pct or 0.0,
+            )
+            self._last_charger_flag = new.charger_connected
 
         # Charge-detect debounce: this poll "looks like charging" only when the
         # charge FET is on AND pack current exceeds the noise-rejecting
