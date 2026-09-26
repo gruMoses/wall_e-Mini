@@ -1853,6 +1853,68 @@ def _depth_frame_to_jpeg(depth_frame) -> bytes | None:
         return None
 
 
+# Raw depth snapshots for offline study of the obstacle corridor (2026-09-26:
+# phantom 0.6-0.9 m obstacles in front of an iron gate and lap siding).
+DEPTH_SNAPSHOT_DIR = Path(__file__).resolve().parents[2] / "logs" / "depth_snapshots"
+
+
+def _capture_depth_snapshot(oak_reader) -> dict | None:
+    """Copy the reader's latest raw depth frame and its context.
+
+    Returns the arrays for ``numpy.savez_compressed``, or None when the
+    reader has no depth frame yet. Uses only the reader's thread-safe
+    getters. The reader replaces its frame on each poll and never writes
+    into it; the copy here is defensive.
+    """
+    import dataclasses
+
+    import numpy as np
+
+    frame = oak_reader.get_latest_depth_frame()
+    if frame is None:
+        return None
+    depth = np.array(frame, dtype=np.uint16, copy=True)
+    h, w = depth.shape[:2]
+    try:
+        intrinsics = [float(v) for v in oak_reader.get_intrinsics(w, h)]
+    except Exception:
+        intrinsics = None
+    persons = []
+    for p in oak_reader.get_person_detections():
+        persons.append({
+            "bbox": [float(v) for v in getattr(p, "bbox", ()) or ()],
+            "x_m": float(getattr(p, "x_m", 0.0)),
+            "z_m": float(getattr(p, "z_m", 0.0)),
+            "confidence": float(getattr(p, "confidence", 0.0)),
+            "track_id": getattr(p, "track_id", None),
+            "depth_status": getattr(p, "depth_status", None),
+        })
+    stats = oak_reader.get_depth_stats()
+    stats_d = dataclasses.asdict(stats) if dataclasses.is_dataclass(stats) else {}
+    rgb_jpeg = b""
+    rgb, _rgb_ts = oak_reader.get_latest_rgb_frame()
+    if rgb is not None:
+        try:
+            import cv2
+            ok, buf = cv2.imencode(".jpg", rgb, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                rgb_jpeg = buf.tobytes()
+        except Exception:
+            rgb_jpeg = b""
+    meta = {
+        "wall_time": time.time(),
+        "shape": [int(h), int(w)],
+        "intrinsics": intrinsics,
+        "persons": persons,
+        "depth_stats": stats_d,
+    }
+    return {
+        "depth": depth,
+        "rgb_jpeg": np.frombuffer(rgb_jpeg, dtype=np.uint8),
+        "meta": np.array(json.dumps(meta)),
+    }
+
+
 def sse_detection_dict(d) -> dict:
     """Serialize one PersonDetection for the /api/telemetry SSE `detections` array.
 
@@ -2394,6 +2456,66 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         if isinstance(state, dict):
             body.update(state)
         return Response(json.dumps(body), content_type="application/json")
+
+    # -- Raw depth snapshot (debug) ------------------------------------------
+
+    @app.route("/api/debug/depth_snapshot", methods=["POST"])
+    def api_debug_depth_snapshot():
+        """Save raw depth frames for offline study of the obstacle corridor.
+
+        POST is local-only: any peer other than 127.0.0.1 / ::1 gets 403.
+        It reads the OAK reader's latest frames and never touches motion.
+        Each file is logs/depth_snapshots/<stamp>_<i>.npz with ``depth``
+        (uint16 mm), ``rgb_jpeg`` (bytes) and ``meta`` (JSON string:
+        intrinsics, person boxes, corridor stats).
+
+        Body (optional): {"count": 1-10, "interval_s": 0.1-1.0}.
+        """
+        def _err(status, msg):
+            return Response(json.dumps({"error": msg}), status=status,
+                            content_type="application/json")
+
+        if request.remote_addr not in ("127.0.0.1", "::1"):
+            return _err(403, "local only")
+        if oak_reader is None:
+            return _err(503, "no oak reader")
+        payload = request.get_json(silent=True)
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or not set(payload) <= {"count", "interval_s"}:
+            return _err(400, "body keys: count, interval_s")
+        try:
+            count = int(payload.get("count", 3))
+            interval_s = float(payload.get("interval_s", 0.5))
+        except (TypeError, ValueError):
+            return _err(400, "count must be an integer, interval_s a number")
+        if not 1 <= count <= 10 or not 0.1 <= interval_s <= 1.0:
+            return _err(400, "count 1-10, interval_s 0.1-1.0")
+
+        import numpy as np
+
+        out_dir = DEPTH_SNAPSHOT_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        saved = []
+        for i in range(count):
+            if i:
+                time.sleep(interval_s)
+            snap = _capture_depth_snapshot(oak_reader)
+            if snap is None:
+                continue
+            path = out_dir / f"{stamp}_{i}.npz"
+            np.savez_compressed(path, **snap)
+            stats = json.loads(str(snap["meta"]))["depth_stats"]
+            saved.append({
+                "path": str(path),
+                "corridor_near_px": stats.get("corridor_near_px"),
+                "p5_mm": stats.get("p5_mm"),
+            })
+        if not saved:
+            return _err(503, "no depth frame")
+        return Response(json.dumps({"ok": True, "saved": saved}),
+                        content_type="application/json")
 
     # -- Legacy teleop (RETIRED) ----------------------------------------------
     #
