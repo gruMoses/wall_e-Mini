@@ -312,6 +312,29 @@ class ObstacleAvoidanceConfig:
     # even a 5 cm pole at 0.4 m is ~57 px wide x the 200 px ROI = 11,000 px.
     # 0.02 of the ~102k px corridor = ~2,000 px.
     corridor_min_support_frac: float = 0.02
+    # Speckle filter (2026-09-26, 45 raw frames in logs/depth_snapshots):
+    # false stereo matches on repeated structures (iron gate bars) put
+    # 1,000-2,000 near pixels in the corridor as 150-500 tiny blobs (median
+    # 2 px, largest 95 px) and reported a 0.70-0.81 m obstacle that never
+    # came closer. Near pixels (<= slow_distance_m) in 8-connected blobs
+    # smaller than this are dropped before the support rule; a phantom
+    # would need support-floor pixels (700-1,700) in blobs >= 80 px, and
+    # the phantom frames had at most 129 px in blobs >= 50. Kept at the
+    # right range: gate bars at 1.0 m, a trash can at 0.87 m, an umbrella
+    # pole at 0.88 m, sunlit siding at 1.35 m (tape 1.346 m). Woven wire
+    # fence is the limiting case: 200 lost it in one frame at ~1.2 m; at 80
+    # it reads 0.96-1.03 m there and 1.73-1.75 m at the 1.7 m histogram peak,
+    # where the old code read the fence's own speckle as 0.58-0.73 m.
+    # 0 disables.
+    corridor_min_blob_px: int = 80
+    # Person mask (2026-09-26): the corridor masks each person box so the
+    # followed person does not count twice (persons already set the obstacle
+    # distance through the stop tier). The whole-box mask also hid anything
+    # between the robot and the person inside that outline. Now only pixels
+    # at or beyond (person z - this margin) are masked; nearer pixels stay
+    # in the corridor. A person with an unknown range is not masked. 0.0
+    # restores the whole-box mask.
+    person_mask_depth_margin_m: float = 0.5
     # MANUAL mode: the corridor stop is a floor, not a wall. The RC/phone
     # operator can always creep forward at this fraction of the stick (0.15
     # = ~0.24 m/s at full stick), so a phantom obstacle cannot strand the

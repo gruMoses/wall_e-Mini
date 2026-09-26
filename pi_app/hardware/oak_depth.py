@@ -73,6 +73,7 @@ class DepthStats:
     corridor_support_px: int = 0
     corridor_near_px: int = 0  # valid corridor pixels claiming <= slow_distance_m
     timestamp: float = 0.0
+    corridor_speckle_px: int = 0  # near pixels dropped by the blob-size filter
 
 
 def _corridor_near_distance_mm(valid_depths, min_support_px: int) -> float | None:
@@ -100,6 +101,84 @@ def _corridor_near_distance_mm(valid_depths, min_support_px: int) -> float | Non
     kth = k - 1
     partitioned = np.partition(valid_depths, kth)
     return float(partitioned[kth])
+
+
+def _mask_person_boxes(band, person_boxes, y0: int, h: int, w: int,
+                       margin_m: float):
+    """Remove person pixels from the corridor band. Pure; returns a new array
+    when it masks anything and never writes into ``band``.
+
+    ``person_boxes`` holds ``(bbox, z_m)`` pairs: bbox normalised
+    (xmin, ymin, xmax, ymax) on the full frame, z_m the person's range (0.0
+    when unknown). ``y0`` is the band's first row in the full frame.
+
+    ``margin_m > 0``: inside each box only pixels at or beyond
+    ``z_m - margin_m`` are zeroed, so an obstacle between the robot and the
+    person stays in the corridor. A person with ``z_m <= 0`` is not masked.
+    ``margin_m <= 0``: the whole box is zeroed (behaviour before 2026-09-26).
+    Zeroed pixels fail the ``> min_depth_mm`` validity test.
+    """
+    out = band
+    copied = False
+    band_h = band.shape[0]
+    for bbox, z_m in person_boxes:
+        bx1, by1, bx2, by2 = bbox
+        px1 = max(0, int(bx1 * w))
+        px2 = min(w, int(bx2 * w))
+        py1 = max(0, int(by1 * h) - y0)
+        py2 = min(band_h, int(by2 * h) - y0)
+        if not (py1 < py2 and px1 < px2):
+            continue
+        if margin_m > 0.0 and z_m <= 0.0:
+            continue
+        if not copied:
+            out = band.copy()
+            copied = True
+        region = out[py1:py2, px1:px2]
+        if margin_m > 0.0:
+            region[region >= max(0.0, (z_m - margin_m) * 1000.0)] = 0
+        else:
+            region[...] = 0
+    return out
+
+
+_BLOB_FILTER_UNAVAILABLE_LOGGED = False
+
+
+def _drop_small_near_blobs(depths, valid_mask, slow_mm: float, min_blob_px: int):
+    """Drop near pixels that belong to small blobs. Pure.
+
+    Near = ``valid_mask`` and ``depths <= slow_mm``. Near pixels in
+    8-connected blobs smaller than ``min_blob_px`` are removed from the
+    returned mask; far pixels are never touched. Returns
+    ``(valid_mask, dropped_px)``. ``min_blob_px <= 0`` or no OpenCV returns
+    the mask unchanged.
+    """
+    global _BLOB_FILTER_UNAVAILABLE_LOGGED
+    if min_blob_px <= 0:
+        return valid_mask, 0
+    import numpy as np
+    near = valid_mask & (depths <= slow_mm)
+    if not near.any():
+        return valid_mask, 0
+    try:
+        import cv2
+    except ImportError:
+        if not _BLOB_FILTER_UNAVAILABLE_LOGGED:
+            _BLOB_FILTER_UNAVAILABLE_LOGGED = True
+            logger.warning("Corridor speckle filter disabled: OpenCV not importable")
+        return valid_mask, 0
+    n, labels, blob_stats, _ = cv2.connectedComponentsWithStats(
+        near.astype(np.uint8), connectivity=8)
+    if n <= 1:
+        return valid_mask, 0
+    small = np.zeros(n, dtype=bool)
+    small[1:] = blob_stats[1:, cv2.CC_STAT_AREA] < int(min_blob_px)
+    drop = small[labels]
+    dropped = int(drop.sum())
+    if dropped == 0:
+        return valid_mask, 0
+    return valid_mask & ~drop, dropped
 
 
 def _corridor_min_support_px(min_px: int, min_frac: float, corridor_pixel_count: int) -> int:
@@ -2618,22 +2697,25 @@ class OakDepthReader:
             # previous-frame when depth is polled first, same-frame when
             # poll_detections_first (strictly fresher; one-frame lag was
             # always acceptable).
+            # Only the person is masked, not the whole box: pixels nearer
+            # than (person z - person_mask_depth_margin_m) stay, so an
+            # obstacle between the robot and the person is still seen.
             with self._lock:
-                person_bboxes = [p.bbox for p in self._det_state.persons if p.bbox]
-            if person_bboxes:
-                band = band.copy()  # avoid mutating the shared raw_frame
-                band_h = band.shape[0]
-                for bbox in person_bboxes:
-                    bx1, by1, bx2, by2 = bbox
-                    px1 = max(0, int(bx1 * w))
-                    px2 = min(w, int(bx2 * w))
-                    py1 = max(0, int(by1 * h) - y0)
-                    py2 = min(band_h, int(by2 * h) - y0)
-                    if py1 < py2 and px1 < px2:
-                        band[py1:py2, px1:px2] = 0  # zeroed pixels fail > min_depth_mm
+                person_boxes = [
+                    (p.bbox, float(getattr(p, "z_m", 0.0) or 0.0))
+                    for p in self._det_state.persons if p.bbox
+                ]
+            if person_boxes:
+                # Returns a copy: the shared raw_frame is never written.
+                band = _mask_person_boxes(
+                    band, person_boxes, y0, h, w,
+                    float(getattr(self._obs_cfg, "person_mask_depth_margin_m", 0.0)),
+                )
 
             robot_half_mm = getattr(self._obs_cfg, "robot_width_m", 0.0) * 500.0
             min_depth_mm = int(getattr(self._obs_cfg, "min_depth_mm", 600))
+            slow_mm = float(getattr(self._obs_cfg, "slow_distance_m", 1.5)) * 1000.0
+            min_blob_px = int(getattr(self._obs_cfg, "corridor_min_blob_px", 0))
             min_valid_pct = float(getattr(self._obs_cfg, "min_valid_pct", 8.0))
             p50 = None
             valid_pct = None
@@ -2654,6 +2736,8 @@ class OakDepthReader:
                 depths_f = band.astype(np.float32)
                 in_corridor = (depths_f * x_offsets[np.newaxis, :]) <= threshold
                 valid_mask = (band > min_depth_mm) & in_corridor
+                valid_mask, speckle_px = _drop_small_near_blobs(
+                    band, valid_mask, slow_mm, min_blob_px)
                 valid_depths = band[valid_mask]
             else:
                 rw = self._obs_cfg.roi_width_pct
@@ -2661,6 +2745,8 @@ class OakDepthReader:
                 x1 = int(w * (0.5 + rw / 2))
                 roi = band[:, x0:x1]
                 valid_mask = roi > min_depth_mm
+                valid_mask, speckle_px = _drop_small_near_blobs(
+                    roi, valid_mask, slow_mm, min_blob_px)
                 valid_depths = roi[valid_mask]
 
             # Use device-side spatial calculator for median only.
@@ -2704,7 +2790,6 @@ class OakDepthReader:
                     corridor_valid_pct = (n_valid / corridor_pixel_count) * 100.0
                 # How many valid pixels claim to be inside the slow-down
                 # range: logged so the next phantom can be sized directly.
-                slow_mm = float(getattr(self._obs_cfg, "slow_distance_m", 1.5)) * 1000.0
                 corridor_near_px = int((valid_depths <= slow_mm).sum())
                 if corridor_valid_pct < min_valid_pct or n_valid < min_support_px:
                     corridor_rejected = True
@@ -2791,6 +2876,7 @@ class OakDepthReader:
                 corridor_support_px=int(corridor_support_px),
                 corridor_near_px=int(corridor_near_px),
                 timestamp=now,
+                corridor_speckle_px=int(speckle_px),
             )
             with self._lock:
                 self._depth_state.min_distance_m = effective_min_m
