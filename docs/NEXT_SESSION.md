@@ -73,14 +73,15 @@ Bench result (2026-09-24, 18:35 to 18:40, robot on the test stand with the wheel
 
 ## 4. Backlog, in priority order
 
-0. **INCIDENT 2026-09-25: follow-me drove on a frozen detection. Do not use follow-me until the fix (deploy 1 below) is live.**
+0. **INCIDENT 2026-09-25: follow-me drove on a frozen detection. Deploy 1 of the fix is LIVE (`2583757`, deployed 19:20, verified on the robot: `det_fresh_age_s` 0.2 s, sequence advancing, gate wired in the control loop). Follow-me can be used again.** Deploy 2 (automatic pipeline restart on a stalled colour stream) is not done.
    - At 17:43 the OAK colour camera (CAM_A: YOLO input and preview) stalled on the device after 23 h of uptime. The mono cameras and the depth path continued at 15 fps. Chip temperature was 77 C to 78 C before the stall; a thermal cause is not likely.
    - `get_person_detections()` returned the last list (one person, x -0.8, z 2.52 m, track 453) for 40 minutes. `get_health()` reported `detections_stale: True`, but no code read it.
    - At 18:23 Kevin selected FOLLOW_ME. The frozen list counted as a target, so the entry was accepted. Follow-me drove approximately 0.85 m/s with a constant left steer for 44 s (a circle), and again for 1.7 s and 2.2 s. Log: `arm_20260925_182305.log`.
    - The service restart at 18:30 recovered the camera (`det_fps` 14.5, detection age 0.05 s).
    - Also found: the robot stayed armed from 2026-09-24 18:46 to 2026-09-25 18:07 (arm switch on, transmitter on). The auto-deploy held all night for that reason.
    - Fix plan (Grok second opinion accepted): deploy 1 adds a capture-time freshness clock with sequence tracking in the reader, and a controller gate. The gate refuses FOLLOW_ME entry and leaves FOLLOW_ME on the same tick when the detections are older than 1.5 s. The reader return values do not change: an empty list means "detection gap" (coast), and a stale close person must keep forcing the stop tier. Deploy 2 (later, separate) restarts the OAK session when the colour stream is stale for 5 s with depth fresh, with a retry cap and a fault latch.
-   - Branch: `fix-vision-stale`.
+   - Deploy 1 is on `main` (`2583757`): full suite 1161 tests OK; Grok safety review: no must-fix. Two corrections were made in review: no slew bypass on the stale exit, and a per-session reset of the NN sequence.
+   - Open: deploy 2 (session restart with a retry cap and a fault latch); an auto-disarm after a long idle armed period (ask Kevin); the log-only pump detector on `fm-pump` must be rebased on this fix and should use `get_detection_freshness()`.
 
 1. **`fm-armsup` bench test.** PASSED 2026-09-24 on the test stand (section 2). Optional: one pulse on the ground to measure the real travel.
 2. **Back-up feature.** Both arms up while Kevin walks toward the robot: the robot reverses, keeps Kevin centred, and keeps its distance. Agreed: trigger is both arms raised (the camera cannot see palms or fingers beyond 0.5 m); reverse speed cap 0.4 m/s; the robot stops when the arms go down (approximately 0.3 s); a maximum distance for each reverse movement; the RC always overrides; there are no rear sensors and Kevin accepts that. Skid-steer yaw sign does not depend on the travel direction, thus the keep-centred steering law stays the same. Write a design first, then get a Grok second opinion and a Grok safety review.
