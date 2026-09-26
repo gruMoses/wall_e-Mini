@@ -5,8 +5,10 @@
 #   sudo bash bin/install_i2c_bus_guard.sh
 #
 # It copies bin/i2c-bus-guard.service to /etc/systemd/system, reloads the
-# systemd daemon, enables the service to start at boot, starts it now, and
-# prints its status. See docs/i2c_bus_guard.md.
+# systemd daemon, enables the service to start at boot, (re)starts it, and
+# prints its status. Safe to run again after pulling a newer guard version
+# -- `restart`, not just `enable --now`, is what makes a second run load
+# the new code. See docs/i2c_bus_guard.md.
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -25,5 +27,6 @@ fi
 
 cp "$UNIT_SRC" "$UNIT_DST"
 systemctl daemon-reload
-systemctl enable --now i2c-bus-guard.service
+systemctl enable i2c-bus-guard.service
+systemctl restart i2c-bus-guard.service
 systemctl status i2c-bus-guard.service --no-pager

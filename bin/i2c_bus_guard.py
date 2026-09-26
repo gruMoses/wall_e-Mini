@@ -16,42 +16,67 @@ controller.
 WHAT THIS SCRIPT DOES
 
 Every --interval seconds (default 5):
-  1. Reads the age of the UPS daemon's status file (its `ts` field). A
+  1. Self-heals first (cheap): if the i2c_designware driver is unbound, or
+     either pin has drifted off the I2C (a3) alt function, that is the
+     signature of a kill (SIGKILL, or a SIGTERM before this guard installed
+     its handler) that hit recover_bus mid-sequence and skipped its
+     `finally` block. Restore both pins to a3 pu, bind if needed, log
+     WARNING, and apply the UPS-restart rule below if it rebound the
+     driver. This runs at the start of every cycle, so it doubles as the
+     startup check -- the first cycle IS startup.
+  2. Reads the age of the UPS daemon's status file (its `ts` field). A
      missing or unreadable file counts as age UNKNOWN, not stale -- the UPS
      daemon might simply be stopped, and that alone must never trigger a
      bus recovery.
-  2. If (and only if) that age is stale, samples SDA (GPIO2) --low-samples
-     times, about 1 s apart, parsed from `pinctrl get 2`.
-  3. Calls the bus "stuck" only when BOTH the UPS status is stale AND every
-     sample in that burst reads low. A single non-low sample breaks the
-     streak -- ordinary I2C traffic never looks like this for 3+ seconds.
-  4. On stuck, runs the standard I2C bus-clear recovery (see recover_bus):
+  3. If (and only if) that age is stale, samples SDA and SCL TOGETHER --
+     one `pinctrl get 2,3` call per sample -- --sample-count times (default
+     10), about --sample-interval-s apart (default 0.1s).
+  4. Calls the bus "stuck" only when BOTH the UPS status is stale AND every
+     joint sample has SDA low AND SCL high. A wedged slave holds SDA low
+     with the clock idle high; a live transfer toggles SCL, and a released
+     bus reads SDA high -- either one breaks the streak immediately.
+     Ordinary I2C traffic never looks like this for a full second.
+  5. On stuck, runs the standard I2C bus-clear recovery (see recover_bus):
      unbind the i2c-designware driver, manually clock SCL to walk a wedged
      slave off SDA, emit a STOP, restore both pins to their I2C alt
      function, rebind. Pin restore and rebind always run, even if a step
      in between raises. Every pin drive is open-drain emulation -- a line
      is either driven LOW or released to input-with-pull-up, never driven
      HIGH push-pull, so this can never fight a slave that is still holding
-     a line low.
-  5. Recoveries are capped at --max-per-hour (default 6) in a rolling
+     a line low. Success is 3 SDA samples 200ms apart with at least 2 high
+     -- one sample can land inside a live transfer the instant a client
+     reopens its handle and starts talking again.
+  6. Recoveries are capped at --max-per-hour (default 6) in a rolling
      window, so a bus that will not stay fixed cannot be pulsed forever.
-  6. A successful recovery restarts upsplus-power.service (unless
-     --no-restart-ups): unbinding/rebinding the adapter invalidates the
-     smbus2.SMBus handle that daemon opened at startup, so without a
-     restart it stays blind even after the bus is clear. wall-e.service is
-     deliberately never restarted here -- see docs/i2c_bus_guard.md for why,
-     and for the one case that still needs a person.
-  7. Independently of whether the bus is stuck, a UPS status that is stale
-     for any reason (its daemon crashed, was stopped, anything) gets its
-     own throttled warning -- a stuck bus is only one way the UPS monitor
-     can go blind.
+  7. A SIGTERM or SIGINT only sets a flag; the loop notices it after the
+     current cycle finishes and exits cleanly, rather than the process
+     dying mid-recovery and skipping recover_bus's `finally` (that is what
+     step 1's self-heal repairs on a later cycle if it ever happens anyway
+     -- SIGKILL cannot be caught at all).
+  8. UPS daemon restart: unbinding the adapter invalidates the UPS
+     daemon's only I2C file handle, and it never reopens that handle on
+     its own. After ANY bus recovery attempt (success or failure), or any
+     self-heal that rebound the driver, once the driver is bound again,
+     this guard restarts upsplus-power.service (unless --no-restart-ups).
+     wall-e.service is deliberately never restarted here -- see
+     docs/i2c_bus_guard.md for why, and for the one case that still needs
+     a person.
+  9. UPS safety net: if the UPS status has been stale for more than 120s
+     while the bus itself looks healthy (SDA high, SCL high -- not
+     stuck), a wedged bus cannot be the cause, so this guard restarts the
+     UPS daemon anyway, on the chance that fixes it. Rate-limited to once
+     per 15 minutes. A missing status file never triggers this.
+  10. Independently of whether the bus is stuck, a UPS status that is
+      stale for any reason (its daemon crashed, was stopped, anything)
+      gets its own throttled warning -- a stuck bus is only one way the
+      UPS monitor can go blind.
 
 All hardware access -- pinctrl, the sysfs unbind/bind files, and the UPS
 service restart -- goes through the Hardware class below. Detection
-(detect_stuck) and recovery (recover_bus) are plain functions over that
-interface, so tests exercise them against a fake with no real GPIO/
-subprocess/sysfs involved. See pi_app/tests/test_i2c_bus_guard.py and
-docs/i2c_bus_guard.md.
+(detect_stuck), recovery (recover_bus), and self-heal (self_heal) are plain
+functions over that interface, so tests exercise them against a fake with
+no real GPIO/subprocess/sysfs involved. See pi_app/tests/test_i2c_bus_guard.py
+and docs/i2c_bus_guard.md.
 """
 
 from __future__ import annotations
@@ -62,6 +87,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -77,15 +103,24 @@ DEVICE_NAME = "1f00074000.i2c"
 _DRIVER_DIR = "/sys/bus/platform/drivers/i2c_designware"
 UNBIND_PATH = f"{_DRIVER_DIR}/unbind"
 BIND_PATH = f"{_DRIVER_DIR}/bind"
+DEVICE_LINK_PATH = f"{_DRIVER_DIR}/{DEVICE_NAME}"  # symlink present only while bound
 UPS_SERVICE_NAME = "upsplus-power.service"
 
 # --- Recovery shape ----------------------------------------------------------
 MAX_PULSES = 16
 PULSE_HALF_PERIOD_S = 0.01
 POST_REBIND_WAIT_S = 2.0
+SUCCESS_CHECK_SAMPLES = 3
+SUCCESS_CHECK_INTERVAL_S = 0.2
+SUCCESS_CHECK_MIN_HI = 2
 
 # --- Detection shape ---------------------------------------------------------
-SAMPLE_INTERVAL_S = 1.0
+DEFAULT_SAMPLE_COUNT = 10
+DEFAULT_SAMPLE_INTERVAL_S = 0.1
+
+# --- UPS safety net (rule B, stale-with-a-healthy-bus) -----------------------
+UPS_SAFETY_NET_STALE_S = 120.0
+UPS_SAFETY_NET_WINDOW_S = 900.0  # 15 minutes
 
 # --- Rate limiting / log hygiene ---------------------------------------------
 RATE_LIMIT_WINDOW_S = 3600.0
@@ -94,7 +129,6 @@ WARNING_REPEAT_S = 300.0
 # --- CLI defaults -------------------------------------------------------------
 DEFAULT_INTERVAL_S = 5.0
 DEFAULT_STALE_S = 30.0
-DEFAULT_LOW_SAMPLES = 3
 DEFAULT_MAX_PER_HOUR = 6
 DEFAULT_STATUS_FILE = "/tmp/i2c_guard_status.json"
 DEFAULT_UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
@@ -102,6 +136,14 @@ DEFAULT_UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.jso
 # `pinctrl get 2` prints a line shaped like:
 #      2: a3    pu | hi // GPIO2 = SDA1
 _PINCTRL_LEVEL_RE = re.compile(r"\|\s*(hi|lo)\b", re.IGNORECASE)
+
+# `pinctrl get 2,3` prints one such line per requested pin. This regex
+# additionally captures the pin number and its function (e.g. "a3"), for
+# the joint SDA+SCL reads self-heal and detection both need.
+_PINCTRL_LINE_RE = re.compile(
+    r"^\s*(?P<pin>\d+):\s*(?P<function>\S+)\s+\S*\s*\|\s*(?P<level>hi|lo)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def parse_pinctrl_level(output: str) -> str:
@@ -118,20 +160,41 @@ def parse_pinctrl_level(output: str) -> str:
     return match.group(1).lower()
 
 
+@dataclass(frozen=True)
+class PinReading:
+    function: str  # e.g. "a3" (I2C alt function), "ip", "op", or "unknown"
+    level: str      # "hi", "lo", or "unknown"
+
+
+def parse_pinctrl_pins(output: str, pins: tuple[int, ...]) -> dict[int, PinReading]:
+    """Parse `pinctrl get <pins...>` output (one line per pin) into
+    {pin_number: PinReading}.
+
+    A requested pin whose line is missing or does not parse cleanly still
+    gets an entry -- PinReading("unknown", "unknown") -- so callers never
+    need a second "was this pin even in the output" check.
+    """
+    found: dict[int, PinReading] = {}
+    for match in _PINCTRL_LINE_RE.finditer(output):
+        pin = int(match.group("pin"))
+        found[pin] = PinReading(
+            match.group("function").lower(), match.group("level").lower()
+        )
+    return {pin: found.get(pin, PinReading("unknown", "unknown")) for pin in pins}
+
+
 class Hardware:
     """The only place this script touches real hardware.
 
-    Five methods: read_sda() (pinctrl get, read-only), set_pin() (pinctrl
-    set), unbind()/bind() (sysfs driver bind control), and
-    restart_ups_service() (systemctl, so the UPS daemon reopens its I2C
-    handle after a recovery). Tests replace this whole class with a fake;
-    detect_stuck() and recover_bus() never touch subprocess or sysfs
+    read_sda() and read_pins() are read-only (`pinctrl get`) and always
+    real, even in dry-run -- a read is non-destructive, and seeing the
+    true pin state is what makes a dry run useful for manual testing on
+    the robot. is_bound() is a plain, always-real filesystem check for
+    the same reason. set_pin() / unbind() / bind() / restart_ups_service()
+    are the mutating actions, each dry-run aware (log the action, change
+    nothing). Tests replace this whole class with a fake; detect_stuck(),
+    recover_bus() and self_heal() never touch subprocess or sysfs
     directly.
-
-    dry_run logs every mutating action instead of performing it. Reads
-    (read_sda) are always real -- a `pinctrl get` is non-destructive, and
-    seeing the true pin state is what makes a dry run useful for manual
-    testing on the robot.
     """
 
     def __init__(self, dry_run: bool = False) -> None:
@@ -151,6 +214,30 @@ class Hardware:
             return "unknown"
         return parse_pinctrl_level(result.stdout)
 
+    def read_pins(self) -> dict[int, PinReading]:
+        """One `pinctrl get 2,3` call: function + level for SDA and SCL
+        together. Used by self-heal's pin-function check and by the joint
+        SDA+SCL stuck-detection sampling."""
+        pins = (SDA_PIN, SCL_PIN)
+        try:
+            result = subprocess.run(
+                ["pinctrl", "get", ",".join(str(p) for p in pins)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+        except Exception as error:
+            logger.debug("pinctrl get %s failed: %s", pins, error)
+            return {pin: PinReading("unknown", "unknown") for pin in pins}
+        return parse_pinctrl_pins(result.stdout, pins)
+
+    def is_bound(self) -> bool:
+        """True if the i2c_designware driver is currently bound to this
+        device. A plain filesystem check -- the driver directory holds a
+        symlink named after the device only while bound."""
+        return os.path.exists(DEVICE_LINK_PATH)
+
     def set_pin(self, pin: int, *mode: str) -> None:
         if self.dry_run:
             logger.info("DRY-RUN: pinctrl set %d %s", pin, " ".join(mode))
@@ -160,6 +247,12 @@ class Hardware:
         )
 
     def unbind(self) -> None:
+        """Unbind the driver. A no-op when the device is already unbound
+        -- e.g. self-heal running right after a kill left it that way --
+        so this is always safe to call unconditionally."""
+        if not self.is_bound():
+            logger.debug("unbind: %s already unbound; skipping.", DEVICE_NAME)
+            return
         if self.dry_run:
             logger.info("DRY-RUN: unbind %s", DEVICE_NAME)
             return
@@ -227,33 +320,43 @@ def is_ups_stale(ups_age_s: float | None, stale_s: float) -> bool:
     return ups_age_s is not None and ups_age_s > stale_s
 
 
-def sample_sda_levels(
+def sample_joint_levels(
     hw: Hardware,
     count: int,
-    interval_s: float = SAMPLE_INTERVAL_S,
+    interval_s: float,
     sleep_fn=time.sleep,
-) -> list[str]:
-    """Read SDA up to `count` times, ~interval_s apart.
+) -> list[tuple[str, str]]:
+    """Read (SDA, SCL) together, up to `count` times, ~interval_s apart.
 
     Stops early -- returning fewer than `count` samples -- the moment a
-    non-"lo" reading appears, since that already breaks the low streak the
-    caller is checking for. There is no point burning the rest of the
-    burst once one high sample has reset it.
+    sample does NOT have SDA low AND SCL high, since that already breaks
+    the stuck-bus streak the caller is checking for. A live transfer
+    toggles SCL; a released bus reads SDA high; either one ends the burst
+    immediately, so a healthy or busy bus is recognized fast.
     """
-    samples: list[str] = []
+    samples: list[tuple[str, str]] = []
     for i in range(count):
         if i > 0:
             sleep_fn(interval_s)
-        level = hw.read_sda()
-        samples.append(level)
-        if level != "lo":
+        pins = hw.read_pins()
+        sample = (pins[SDA_PIN].level, pins[SCL_PIN].level)
+        samples.append(sample)
+        if not (sample[0] == "lo" and sample[1] == "hi"):
             break
     return samples
 
 
-def is_low_streak(samples: list[str], count: int) -> bool:
-    """True only if `samples` is exactly `count` long and every one is "lo"."""
-    return len(samples) == count and all(s == "lo" for s in samples)
+def is_stuck_streak(samples: list[tuple[str, str]], count: int) -> bool:
+    """True only if `samples` is exactly `count` long and every sample has
+    SDA low AND SCL high -- a wedged slave holding SDA low with the clock
+    idle high. A single sample with SCL low (a live transfer) or SDA high
+    (a released bus) already broke the streak in sample_joint_levels,
+    which is why a short list here is never mistaken for "stuck".
+    """
+    return (
+        len(samples) == count
+        and all(sda == "lo" and scl == "hi" for sda, scl in samples)
+    )
 
 
 def detect_stuck(
@@ -261,23 +364,53 @@ def detect_stuck(
     *,
     ups_age_s: float | None,
     stale_s: float,
-    low_samples: int,
-    sample_interval_s: float = SAMPLE_INTERVAL_S,
+    sample_count: int = DEFAULT_SAMPLE_COUNT,
+    sample_interval_s: float = DEFAULT_SAMPLE_INTERVAL_S,
     sleep_fn=time.sleep,
-) -> tuple[bool, list[str]]:
-    """Evaluate this cycle's stuck-bus condition. Returns (stuck, sda_samples).
+) -> tuple[bool, list[tuple[str, str]]]:
+    """Evaluate this cycle's stuck-bus condition.
 
-    Both conditions are required: the UPS status must be stale (age >
-    stale_s) AND SDA must read low for `low_samples` consecutive ~1 s
-    samples. Either alone -- normal bus traffic holding SDA low briefly, or
-    a UPS daemon that is simply not running -- must never trigger a
-    recovery. SDA sampling is skipped once the UPS is not stale, since the
-    result cannot change the outcome; this keeps a healthy cycle fast.
+    Returns (stuck, joint_samples), where each sample is (sda_level,
+    scl_level). Both conditions are required: the UPS status must be
+    stale (age > stale_s) AND every one of `sample_count` joint SDA/SCL
+    reads, ~sample_interval_s apart, must show SDA low AND SCL high.
+    Either alone -- normal bus traffic, or a UPS daemon that is simply
+    not running -- must never trigger a recovery. Sampling is skipped
+    once the UPS is not stale, since the result cannot change the
+    outcome; this keeps a healthy cycle fast, at the cost of one single
+    joint read so the caller still has a current (sda, scl) reading for
+    the status file and the UPS safety net.
     """
     if not is_ups_stale(ups_age_s, stale_s):
-        return False, [hw.read_sda()]
-    samples = sample_sda_levels(hw, low_samples, sample_interval_s, sleep_fn=sleep_fn)
-    return is_low_streak(samples, low_samples), samples
+        pins = hw.read_pins()
+        return False, [(pins[SDA_PIN].level, pins[SCL_PIN].level)]
+    samples = sample_joint_levels(hw, sample_count, sample_interval_s, sleep_fn=sleep_fn)
+    return is_stuck_streak(samples, sample_count), samples
+
+
+def check_recovery_success(
+    hw: Hardware,
+    *,
+    samples: int = SUCCESS_CHECK_SAMPLES,
+    interval_s: float = SUCCESS_CHECK_INTERVAL_S,
+    min_hi: int = SUCCESS_CHECK_MIN_HI,
+    sleep_fn=time.sleep,
+) -> tuple[bool, list[str]]:
+    """SDA samples after rebind. Returns (ok, levels).
+
+    A single low reading right after rebind is not necessarily a failed
+    recovery -- it can land squarely inside a live transfer the instant a
+    client (the RTK GPS reader, say) reopens its handle and starts
+    talking again. A majority vote over a few samples absorbs that
+    without weakening the check into "any high reading passes".
+    """
+    levels: list[str] = []
+    for i in range(samples):
+        if i > 0:
+            sleep_fn(interval_s)
+        levels.append(hw.read_sda())
+    ok = sum(1 for level in levels if level == "hi") >= min_hi
+    return ok, levels
 
 
 def recover_bus(
@@ -309,9 +442,13 @@ def recover_bus(
     Pin restore and rebind run in a `finally` block, so they happen even
     if a step in between raises -- a half-finished recovery must never
     strand the pins in a non-I2C GPIO mode or leave the driver unbound.
-    Any exception anywhere is reported as a failure (ok=False); only when
-    nothing raised do we wait `post_rebind_wait_s` and check SDA one more
-    time to decide the final result.
+    (A kill signal that skips this `finally` entirely -- SIGKILL, or a
+    SIGTERM before this guard's handler is installed -- is repaired by
+    self_heal() on a later cycle instead; there is nothing recover_bus
+    itself can do about a signal Python never lets it react to.) Any
+    exception anywhere is reported as a failure (ok=False); only when
+    nothing raised do we wait `post_rebind_wait_s` and run
+    check_recovery_success() to decide the final result.
     """
     error: str | None = None
     try:
@@ -355,22 +492,67 @@ def recover_bus(
         return False, error
 
     sleep_fn(post_rebind_wait_s)
-    level = hw.read_sda()
-    if level == "hi":
+    ok, levels = check_recovery_success(hw, sleep_fn=sleep_fn)
+    if ok:
         return True, None
-    return False, f"SDA still {level} after recovery"
+    return False, f"SDA samples after recovery: {levels}"
 
 
-class RecoveryRateLimiter:
-    """At most `max_per_hour` recoveries in any trailing window.
+def is_driver_healthy(hw: Hardware) -> bool:
+    """True if the driver is bound AND both pins are on the I2C (a3) alt
+    function -- the state recover_bus's own finally block leaves things
+    in when it runs to completion. False is the signature of a kill that
+    hit recover_bus mid-sequence and skipped that finally block.
+    """
+    if not hw.is_bound():
+        return False
+    pins = hw.read_pins()
+    return pins[SDA_PIN].function == "a3" and pins[SCL_PIN].function == "a3"
+
+
+def self_heal(hw: Hardware) -> bool:
+    """Idempotent repair for a half-finished recovery left by a kill.
+
+    Restores both pins to a3 pu, then binds only if the driver was not
+    already bound -- exactly steps 5 and 6 of recover_bus, the ones a
+    kill can skip. Never unbinds: if the driver is already bound and only
+    a pin drifted off a3 for some unrelated reason, unbinding first would
+    needlessly interrupt live traffic to repair something that does not
+    need it.
+
+    Returns True only if this call actually transitioned the driver from
+    unbound to bound -- the signal the caller uses for the UPS-restart
+    rule (a pin drifting off a3 while the driver stayed bound never
+    touched the UPS daemon's I2C handle, so that alone does not warrant a
+    UPS restart).
+
+    Swallows its own exceptions and logs them: a failed self-heal attempt
+    must not crash the cycle, since the check that triggered this call
+    reruns -- and retries -- at the start of every future cycle too.
+    """
+    was_bound = hw.is_bound()
+    try:
+        for pin in (SCL_PIN, SDA_PIN):
+            hw.set_pin(pin, "a3", "pu")
+        if not was_bound:
+            hw.bind()
+    except Exception:
+        logger.exception("Self-heal step failed; will retry next cycle.")
+    return (not was_bound) and hw.is_bound()
+
+
+class RateLimiter:
+    """At most `max_count` events in any trailing window.
 
     Pure logic over a caller-supplied clock (pass time.monotonic() values)
     so it is unit-testable with no real waiting. Mirrors the hardware-free
-    design of AcPresenceTracker in scripts/upsPlus_power_daemon.py.
+    design of AcPresenceTracker in scripts/upsPlus_power_daemon.py. Used
+    for two independent limits: bus recoveries (--max-per-hour, an hour
+    window) and the UPS safety-net restart (once per 15 minutes).
     """
 
-    def __init__(self, max_per_hour: int, window_s: float = RATE_LIMIT_WINDOW_S) -> None:
-        self._max_per_hour = max_per_hour
+    def __init__(self, max_count: int, window_s: float = RATE_LIMIT_WINDOW_S) -> None:
+        self._max_count = max_count
         self._window_s = window_s
         self._events: collections.deque[float] = collections.deque()
 
@@ -383,8 +565,8 @@ class RecoveryRateLimiter:
         return len(self._events)
 
     def allow(self, now: float) -> bool:
-        """True if a recovery may run now without exceeding the cap."""
-        return self.count(now) < self._max_per_hour
+        """True if an event may run now without exceeding the cap."""
+        return self.count(now) < self._max_count
 
     def record(self, now: float) -> None:
         self._prune(now)
@@ -443,7 +625,8 @@ def write_status_file(path: str, status: dict) -> None:
 class GuardConfig:
     interval_s: float = DEFAULT_INTERVAL_S
     stale_s: float = DEFAULT_STALE_S
-    low_samples: int = DEFAULT_LOW_SAMPLES
+    sample_count: int = DEFAULT_SAMPLE_COUNT
+    sample_interval_s: float = DEFAULT_SAMPLE_INTERVAL_S
     max_per_hour: int = DEFAULT_MAX_PER_HOUR
     status_file: str = DEFAULT_STATUS_FILE
     ups_status_file: str = DEFAULT_UPS_STATUS_FILE
@@ -452,9 +635,10 @@ class GuardConfig:
 
 
 class I2cBusGuard:
-    """Ties detection, recovery, rate limiting, and status publishing
-    together for one cycle. `now_fn`/`monotonic_fn`/`sleep_fn` are
-    injectable so tests run every cycle instantly against a fake clock."""
+    """Ties self-heal, detection, recovery, rate limiting, the UPS safety
+    net, and status publishing together for one cycle. `now_fn`/
+    `monotonic_fn`/`sleep_fn` are injectable so tests run every cycle
+    instantly against a fake clock."""
 
     def __init__(
         self,
@@ -471,7 +655,8 @@ class I2cBusGuard:
         self._now = now_fn
         self._monotonic = monotonic_fn
         self._sleep = sleep_fn
-        self._limiter = RecoveryRateLimiter(cfg.max_per_hour)
+        self._limiter = RateLimiter(cfg.max_per_hour, RATE_LIMIT_WINDOW_S)
+        self._ups_safety_net_limiter = RateLimiter(1, UPS_SAFETY_NET_WINDOW_S)
         self._throttle = _Throttle(warning_repeat_s)
         self._rate_limit_warned = False
         self._ups_unknown_logged = False
@@ -485,6 +670,8 @@ class I2cBusGuard:
         now_wall = self._now()
         now_mono = self._monotonic()
 
+        self._maybe_self_heal(now_mono)
+
         ups_age = read_ups_age_s(self._cfg.ups_status_file, now_wall)
         ups_stale = is_ups_stale(ups_age, self._cfg.stale_s)
         self._warn_if_ups_blind(now_mono, ups_age, ups_stale)
@@ -493,19 +680,22 @@ class I2cBusGuard:
             self._hw,
             ups_age_s=ups_age,
             stale_s=self._cfg.stale_s,
-            low_samples=self._cfg.low_samples,
+            sample_count=self._cfg.sample_count,
+            sample_interval_s=self._cfg.sample_interval_s,
             sleep_fn=self._sleep,
         )
-        sda_level = samples[-1] if samples else "unknown"
+        sda_level, scl_level = samples[-1] if samples else ("unknown", "unknown")
 
         if stuck:
             self._handle_stuck(now_wall, now_mono, ups_age, samples)
         else:
             self._rate_limit_warned = False
+            self._maybe_ups_safety_net(now_mono, ups_age, ups_stale, sda_level, scl_level)
 
         status = {
             "ts": now_wall,
             "sda_level": sda_level,
+            "scl_level": scl_level,
             "ups_age_s": round(ups_age, 2) if ups_age is not None else None,
             "ups_stale": ups_stale,
             "stuck": stuck,
@@ -517,6 +707,62 @@ class I2cBusGuard:
         write_status_file(self._cfg.status_file, status)
         return status
 
+    def _maybe_self_heal(self, now_mono: float) -> bool:
+        """Runs first in every cycle -- this doubles as the startup check,
+        since the first cycle IS startup. Cheap when healthy: one sysfs
+        stat (is_bound), and only a `pinctrl get 2,3` on top of that if
+        the driver is in fact bound. Returns True if it repaired anything.
+        """
+        if is_driver_healthy(self._hw):
+            return False
+        rebound = self_heal(self._hw)
+        logger.warning(
+            "Self-heal: repaired pins/driver left by an interrupted recovery."
+        )
+        if rebound:
+            self._restart_ups("self-heal rebound the driver")
+        return True
+
+    def _restart_ups(self, reason: str) -> None:
+        """Shared by every UPS-restart trigger (a bus recovery, a
+        self-heal that rebound the driver, and the stale-with-healthy-bus
+        safety net). Respects --no-restart-ups for all three."""
+        if not self._cfg.restart_ups:
+            return
+        logger.warning(
+            "Restarting %s (%s) so it reopens its I2C handle.",
+            UPS_SERVICE_NAME, reason,
+        )
+        self._hw.restart_ups_service()
+
+    def _maybe_ups_safety_net(
+        self,
+        now_mono: float,
+        ups_age: float | None,
+        ups_stale: bool,
+        sda_level: str,
+        scl_level: str,
+    ) -> None:
+        """The bus itself looks fine (SDA high, SCL high -- not stuck) but
+        the UPS status has been stale for a long time anyway, so a wedged
+        bus cannot be the cause. Restarting the UPS daemon is the one
+        action that can plausibly fix whatever else is wrong with it.
+        Rate-limited separately from bus recoveries, at once per 15
+        minutes, since this is a cheaper and more speculative action. A
+        missing status file (ups_age is None) never triggers this.
+        """
+        if not ups_stale or ups_age is None:
+            return
+        if ups_age <= UPS_SAFETY_NET_STALE_S:
+            return
+        if not (sda_level == "hi" and scl_level == "hi"):
+            return
+        if not self._ups_safety_net_limiter.allow(now_mono):
+            logger.debug("UPS safety-net restart rate-limited; will retry later.")
+            return
+        self._ups_safety_net_limiter.record(now_mono)
+        self._restart_ups(f"UPS status stale {ups_age:.0f}s with a healthy bus")
+
     def _warn_if_ups_blind(
         self, now_mono: float, ups_age: float | None, ups_stale: bool
     ) -> None:
@@ -524,7 +770,7 @@ class I2cBusGuard:
         is stuck. A stuck bus is only one way the UPS daemon can go blind
         (it might also just be stopped or crashed); either way, a stale
         status means safe shutdown on real power loss is not active, and
-        that is worth a warning even when SDA looks fine.
+        that is worth a warning even when SDA/SCL look fine.
 
         Missing/unreadable status (age unknown) is logged once, at INFO,
         for the life of this guard -- it may simply mean no UPS hardware
@@ -549,12 +795,17 @@ class I2cBusGuard:
             )
 
     def _handle_stuck(
-        self, now_wall: float, now_mono: float, ups_age: float | None, samples: list[str]
+        self,
+        now_wall: float,
+        now_mono: float,
+        ups_age: float | None,
+        samples: list[tuple[str, str]],
     ) -> None:
         if self._throttle.ready("stuck", now_mono):
             logger.warning(
-                "I2C bus 1 stuck: SDA low x%d (%s), UPS status age %.1fs (> %.1fs)",
-                len(samples), ", ".join(samples), ups_age, self._cfg.stale_s,
+                "I2C bus 1 stuck: %d consecutive joint samples with SDA low "
+                "and SCL high; UPS status age %.1fs (> %.1fs)",
+                len(samples), ups_age, self._cfg.stale_s,
             )
             logger.warning(
                 "UPS safe-shutdown is blind while the bus is stuck -- the UPS "
@@ -590,15 +841,16 @@ class I2cBusGuard:
 
         if ok:
             logger.info("I2C bus recovery succeeded; SDA is high.")
-            if self._cfg.restart_ups:
-                logger.warning(
-                    "Restarting %s so it reopens its I2C handle after the "
-                    "bus recovery.",
-                    UPS_SERVICE_NAME,
-                )
-                self._hw.restart_ups_service()
         else:
             logger.error("I2C bus recovery failed: %s", error)
+
+        # Rule B: the unbind inside recover_bus killed the UPS daemon's
+        # only I2C fd regardless of outcome -- restart it once the driver
+        # is bound again. Checked fresh (not trusted from `ok`, which is
+        # about SDA, not about whether the finally block's bind() itself
+        # actually succeeded).
+        if self._hw.is_bound():
+            self._restart_ups("bus recovery")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -614,11 +866,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"UPS status age, in seconds, that counts as stale (default: {DEFAULT_STALE_S})",
     )
     parser.add_argument(
-        "--low-samples", type=int, default=DEFAULT_LOW_SAMPLES, dest="low_samples",
+        "--sample-count", type=int, default=DEFAULT_SAMPLE_COUNT, dest="sample_count",
         help=(
-            "consecutive low SDA samples, ~1s apart, required to call the "
-            f"bus stuck (default: {DEFAULT_LOW_SAMPLES})"
+            "consecutive joint SDA+SCL samples required to call the bus "
+            f"stuck (default: {DEFAULT_SAMPLE_COUNT})"
         ),
+    )
+    parser.add_argument(
+        "--sample-interval-s", type=float, default=DEFAULT_SAMPLE_INTERVAL_S,
+        dest="sample_interval_s",
+        help=f"seconds between joint samples (default: {DEFAULT_SAMPLE_INTERVAL_S})",
     )
     parser.add_argument(
         "--max-per-hour", type=int, default=DEFAULT_MAX_PER_HOUR, dest="max_per_hour",
@@ -638,9 +895,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-restart-ups", dest="restart_ups", action="store_false", default=True,
         help=(
-            "do not restart upsplus-power.service after a successful "
-            "recovery (default: restart it, since unbind/rebind invalidates "
-            "its I2C handle)"
+            "do not restart upsplus-power.service after a bus recovery, a "
+            "self-heal that rebinds the driver, or the stale-UPS safety net "
+            "(default: restart it)"
         ),
     )
     parser.add_argument(
@@ -652,6 +909,57 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="run a single cycle then exit, instead of looping forever",
     )
     return parser
+
+
+class ShutdownFlag:
+    """A flag a signal handler sets; the main loop polls it once per
+    cycle so an in-progress recovery's `finally` block always finishes.
+
+    Python's default SIGTERM action terminates the process immediately,
+    which would skip recover_bus's `finally` and strand the pins/driver
+    -- exactly the failure self_heal() exists to repair on a later cycle,
+    but it is much better to never need that repair. Installing a handler
+    that only sets this flag means a signal interrupts nothing: Python
+    runs the handler between bytecode steps, the handler returns normally
+    (it does not raise), and execution resumes exactly where it was -- so
+    a `finally` block already in progress always completes. (SIGKILL
+    cannot be caught by any process; only self_heal() can recover from
+    that one.)
+    """
+
+    def __init__(self) -> None:
+        self.requested = False
+
+    def handle(self, signum, frame) -> None:  # matches signal.signal's handler shape
+        self.requested = True
+
+
+def _run_loop(
+    guard: I2cBusGuard,
+    *,
+    once: bool,
+    shutdown: ShutdownFlag,
+    interval_s: float,
+    sleep_fn=time.sleep,
+) -> None:
+    """The guard's main loop, factored out of main() so tests can drive it
+    against a fake clock/guard without installing real signal handlers.
+
+    Exits as soon as `once` is set (after exactly one cycle) or `shutdown`
+    is set -- checked both right after a cycle and right after the
+    inter-cycle sleep, so a signal arriving during either is noticed
+    promptly rather than waiting for a cycle that will never come.
+    """
+    while True:
+        try:
+            guard.run_cycle()
+        except Exception:
+            logger.exception("i2c bus guard cycle failed unexpectedly")
+        if once or shutdown.requested:
+            break
+        sleep_fn(interval_s)
+        if shutdown.requested:
+            break
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -666,7 +974,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = GuardConfig(
         interval_s=args.interval,
         stale_s=args.stale_s,
-        low_samples=args.low_samples,
+        sample_count=args.sample_count,
+        sample_interval_s=args.sample_interval_s,
         max_per_hour=args.max_per_hour,
         status_file=args.status_file,
         ups_status_file=args.ups_status_file,
@@ -678,15 +987,22 @@ def main(argv: list[str] | None = None) -> int:
 
     hw = Hardware(dry_run=cfg.dry_run)
     guard = I2cBusGuard(hw, cfg)
+    shutdown = ShutdownFlag()
 
-    while True:
-        try:
-            guard.run_cycle()
-        except Exception:
-            logger.exception("i2c bus guard cycle failed unexpectedly")
-        if args.once:
-            break
-        time.sleep(cfg.interval_s)
+    # Only set a flag on SIGTERM/SIGINT -- see ShutdownFlag's docstring
+    # for why this is the whole point. Restored before returning so
+    # calling main() more than once in the same process (tests do) never
+    # leaks a changed signal disposition into the rest of that process.
+    old_sigterm = signal.signal(signal.SIGTERM, shutdown.handle)
+    old_sigint = signal.signal(signal.SIGINT, shutdown.handle)
+    try:
+        _run_loop(
+            guard, once=args.once, shutdown=shutdown,
+            interval_s=cfg.interval_s, sleep_fn=time.sleep,
+        )
+    finally:
+        signal.signal(signal.SIGTERM, old_sigterm)
+        signal.signal(signal.SIGINT, old_sigint)
 
     return 0
 
