@@ -384,6 +384,7 @@ class TestTrackingModeByteIdentical(unittest.TestCase):
             trail_follow_enabled=False,  # isolate the DIRECT PID tracking path
             follow_distance_m=1.5,
             max_follow_speed_byte=90,
+            max_speed_error_m=1.5,  # default until 2026-09-26 (now 1.75)
             # EXPECTED_BYTES was recorded with the pre-2026-09-19 tuning. This
             # test guards the CODE PATH, not the tuning, so pin the values that
             # were the production defaults when the table was captured.

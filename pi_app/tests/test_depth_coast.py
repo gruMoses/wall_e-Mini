@@ -223,7 +223,10 @@ class TestDetectionFilterDepthUnknown(unittest.TestCase):
 
     def test_known_range_beyond_max_rejected_as_depth_range(self):
         flt = self._filter()
-        out = flt.process([self._person(z_m=7.0)])
+        # One metre past the configured limit (7.0 was "beyond max" while
+        # max_distance_m was 6.0; it is 8.0 since 2026-09-26).
+        beyond = FollowMeConfig().max_distance_m + 1.0
+        out = flt.process([self._person(z_m=beyond)])
         self.assertEqual(len(out), 0)
         self.assertEqual(flt.last_reject_counts["depth_range"], 1)
 
