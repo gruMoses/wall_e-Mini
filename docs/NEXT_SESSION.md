@@ -4,6 +4,7 @@ Written 2026-09-20 (evening), at the end of the follow-me session.
 Updated 2026-09-22 (evening): `fm-armsup` hardened after three Grok safety reviews and merged (sections 2 and 6).
 Updated 2026-09-24 (evening): `fb9420e` deployed; the arms-up bench test PASSED on the test stand (section 2, "Bench result").
 Updated 2026-09-24 (night): the log-only pump detector is built on branch `fm-pump` and NOT deployed (section 4, item 2). Housekeeping done (item 8).
+Updated 2026-09-25 (night): three safety changes are live: the stale-detection gate for follow-me (`2583757`), auto-disarm after 10 minutes armed and idle in MANUAL (`5340028`), and the startup arm interlock (`3f8cdfa`). Refer to section 4, item 0.
 This document uses Simplified Technical English where practical.
 
 ## 1. State of the robot
@@ -81,7 +82,11 @@ Bench result (2026-09-24, 18:35 to 18:40, robot on the test stand with the wheel
    - Also found: the robot stayed armed from 2026-09-24 18:46 to 2026-09-25 18:07 (arm switch on, transmitter on). The auto-deploy held all night for that reason.
    - Fix plan (Grok second opinion accepted): deploy 1 adds a capture-time freshness clock with sequence tracking in the reader, and a controller gate. The gate refuses FOLLOW_ME entry and leaves FOLLOW_ME on the same tick when the detections are older than 1.5 s. The reader return values do not change: an empty list means "detection gap" (coast), and a stale close person must keep forcing the stop tier. Deploy 2 (later, separate) restarts the OAK session when the colour stream is stale for 5 s with depth fresh, with a retry cap and a fault latch.
    - Deploy 1 is on `main` (`2583757`): full suite 1161 tests OK; Grok safety review: no must-fix. Two corrections were made in review: no slew bypass on the stale exit, and a per-session reset of the NN sequence.
-   - Open: deploy 2 (session restart with a retry cap and a fault latch); an auto-disarm after a long idle armed period (ask Kevin); the log-only pump detector on `fm-pump` must be rebased on this fix and should use `get_detection_freshness()`.
+   - Also live 2026-09-25 (Kevin approved each push; Grok safety review before each; no must-fix):
+     - Auto-disarm (`5340028`): armed, MANUAL, sticks within 25 us of centre, no web teleop, not calibrating, and neutral output for 600 s (`SafetyConfig.auto_disarm_idle_s`) disarm the robot. The disarm latches: flip the arm switch off and on to re-arm. FOLLOW_ME and WAYPOINT_NAV never auto-disarm. The charger inhibit forces neutral output, so a charging robot left armed also disarms.
+     - Startup arm interlock (`3f8cdfa`): after any restart (boot, deploy, crash) the robot arms only after the arm switch has been seen OFF (`SafetyConfig.require_switch_off_at_startup`). Journal lines: `Arm interlock: ...` at startup and `Arm latch cleared: arm switch seen OFF`.
+   - Open: deploy 2 (session restart with a retry cap and a fault latch); the log-only pump detector on `fm-pump` must be rebased on these changes and should use `get_detection_freshness()`.
+   - Found 2026-09-25 20:20: the charger inhibit keys off charging current (`bms.charging`), not the plug. With a full pack (100 %, 0.0 A) on the charger, `charger_inhibit` is False and does not block motion. Candidate fix: detect the charger by voltage or a hardware input. Auto-disarm and the startup interlock cover the parked case meanwhile.
 
 1. **`fm-armsup` bench test.** PASSED 2026-09-24 on the test stand (section 2). Optional: one pulse on the ground to measure the real travel.
 2. **Back-up feature.** Both arms up while Kevin walks toward the robot: the robot reverses, keeps Kevin centred, and keeps its distance. Agreed: trigger is both arms raised (the camera cannot see palms or fingers beyond 0.5 m); reverse speed cap 0.4 m/s; the robot stops when the arms go down (approximately 0.3 s); a maximum distance for each reverse movement; the RC always overrides; there are no rear sensors and Kevin accepts that. Skid-steer yaw sign does not depend on the travel direction, thus the keep-centred steering law stays the same. Write a design first, then get a Grok second opinion and a Grok safety review.
