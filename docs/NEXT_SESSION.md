@@ -4,7 +4,7 @@ Written 2026-09-20 (evening), at the end of the follow-me session.
 Updated 2026-09-22 (evening): `fm-armsup` hardened after three Grok safety reviews and merged (sections 2 and 6).
 Updated 2026-09-24 (evening): `fb9420e` deployed; the arms-up bench test PASSED on the test stand (section 2, "Bench result").
 Updated 2026-09-24 (night): the log-only pump detector is built on branch `fm-pump` and NOT deployed (section 4, item 2). Housekeeping done (item 8).
-Updated 2026-09-25 (night): three safety changes are live: the stale-detection gate for follow-me (`2583757`), auto-disarm after 10 minutes armed and idle in MANUAL (`5340028`), and the startup arm interlock (`3f8cdfa`). Refer to section 4, item 0.
+Updated 2026-09-25 (night): four safety changes are live (the fourth: OAK auto-restart on a stalled colour stream, `b304609`), after these three: the stale-detection gate for follow-me (`2583757`), auto-disarm after 10 minutes armed and idle in MANUAL (`5340028`), and the startup arm interlock (`3f8cdfa`). Refer to section 4, item 0.
 This document uses Simplified Technical English where practical.
 
 ## 1. State of the robot
@@ -74,7 +74,7 @@ Bench result (2026-09-24, 18:35 to 18:40, robot on the test stand with the wheel
 
 ## 4. Backlog, in priority order
 
-0. **INCIDENT 2026-09-25: follow-me drove on a frozen detection. Deploy 1 of the fix is LIVE (`2583757`, deployed 19:20, verified on the robot: `det_fresh_age_s` 0.2 s, sequence advancing, gate wired in the control loop). Follow-me can be used again.** Deploy 2 (automatic pipeline restart on a stalled colour stream) is not done.
+0. **INCIDENT 2026-09-25: follow-me drove on a frozen detection. Deploy 1 of the fix is LIVE (`2583757`, deployed 19:20, verified on the robot: `det_fresh_age_s` 0.2 s, sequence advancing, gate wired in the control loop). Follow-me can be used again.** Deploy 2 is LIVE too (`b304609`, 2026-09-25 night): the OAK session restarts itself after 5 s without a fresh NN packet (10 s warm-up), with a cap of 3 restarts in 15 min, then a latched `color_stall_fault` (health) until a fresh packet or a service restart.
    - At 17:43 the OAK colour camera (CAM_A: YOLO input and preview) stalled on the device after 23 h of uptime. The mono cameras and the depth path continued at 15 fps. Chip temperature was 77 C to 78 C before the stall; a thermal cause is not likely.
    - `get_person_detections()` returned the last list (one person, x -0.8, z 2.52 m, track 453) for 40 minutes. `get_health()` reported `detections_stale: True`, but no code read it.
    - At 18:23 Kevin selected FOLLOW_ME. The frozen list counted as a target, so the entry was accepted. Follow-me drove approximately 0.85 m/s with a constant left steer for 44 s (a circle), and again for 1.7 s and 2.2 s. Log: `arm_20260925_182305.log`.
@@ -85,7 +85,7 @@ Bench result (2026-09-24, 18:35 to 18:40, robot on the test stand with the wheel
    - Also live 2026-09-25 (Kevin approved each push; Grok safety review before each; no must-fix):
      - Auto-disarm (`5340028`): armed, MANUAL, sticks within 25 us of centre, no web teleop, not calibrating, and neutral output for 600 s (`SafetyConfig.auto_disarm_idle_s`) disarm the robot. The disarm latches: flip the arm switch off and on to re-arm. FOLLOW_ME and WAYPOINT_NAV never auto-disarm. The charger inhibit forces neutral output, so a charging robot left armed also disarms.
      - Startup arm interlock (`3f8cdfa`): after any restart (boot, deploy, crash) the robot arms only after the arm switch has been seen OFF (`SafetyConfig.require_switch_off_at_startup`). Journal lines: `Arm interlock: ...` at startup and `Arm latch cleared: arm switch seen OFF`.
-   - Open: deploy 2 (session restart with a retry cap and a fault latch); the log-only pump detector on `fm-pump` must be rebased on these changes and should use `get_detection_freshness()`.
+   - Open: the log-only pump detector on `fm-pump` must be rebased on these changes and should use `get_detection_freshness()`. Not yet seen in the field: a real colour stall recovered by the watchdog (check the journal for `OAK colour stream stalled`).
    - Found 2026-09-25 20:20: the charger inhibit keys off charging current (`bms.charging`), not the plug. With a full pack (100 %, 0.0 A) on the charger, `charger_inhibit` is False and does not block motion. Candidate fix: detect the charger by voltage or a hardware input. Auto-disarm and the startup interlock cover the parked case meanwhile.
 
 1. **`fm-armsup` bench test.** PASSED 2026-09-24 on the test stand (section 2). Optional: one pulse on the ground to measure the real travel.
