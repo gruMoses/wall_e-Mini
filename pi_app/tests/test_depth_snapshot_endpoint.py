@@ -6,6 +6,7 @@ fake that exposes only the thread-safe getters the endpoint uses.
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +20,11 @@ try:
     import numpy as np
 except ImportError:
     np = None
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 if flask is not None and np is not None:
     from config import OakWebViewerConfig
@@ -58,7 +64,7 @@ class _FakeReader:
         return self.stats
 
     def get_latest_rgb_frame(self):
-        return None, 0.0
+        return getattr(self, "rgb", None), 0.0
 
 
 @unittest.skipUnless(flask is not None and np is not None,
@@ -128,6 +134,59 @@ class TestDepthSnapshotEndpoint(unittest.TestCase):
             resp = client.post("/api/debug/depth_snapshot", json=body)
             self.assertEqual(resp.status_code, 400, msg=str(body))
         self.assertFalse(self.out_dir.exists() and any(self.out_dir.iterdir()))
+
+    def test_huge_number_is_400_not_500(self):
+        resp = self._client(_FakeReader()).post(
+            "/api/debug/depth_snapshot", data='{"count": 1e309}',
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_file_cap_refuses_new_captures(self):
+        self.out_dir.mkdir(parents=True)
+        for i in range(3):
+            (self.out_dir / f"old_{i}.npz").write_bytes(b"x")
+        with patch.object(oak_viewer, "MAX_DEPTH_SNAPSHOT_FILES", 4):
+            client = self._client(_FakeReader())
+            resp = client.post("/api/debug/depth_snapshot", json={"count": 2})
+            self.assertEqual(resp.status_code, 409)
+            self.assertEqual(len(list(self.out_dir.glob("*.npz"))), 3)
+            resp = client.post("/api/debug/depth_snapshot", json={"count": 1})
+            self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(list(self.out_dir.glob("*.npz"))), 4)
+
+    def test_overlapping_capture_is_refused(self):
+        self.assertTrue(oak_viewer._DEPTH_SNAPSHOT_LOCK.acquire(blocking=False))
+        try:
+            resp = self._client(_FakeReader()).post(
+                "/api/debug/depth_snapshot", json={"count": 1})
+        finally:
+            oak_viewer._DEPTH_SNAPSHOT_LOCK.release()
+        self.assertEqual(resp.status_code, 409)
+        self.assertFalse(self.out_dir.exists() and any(self.out_dir.iterdir()))
+
+    def test_back_to_back_captures_do_not_share_names(self):
+        client = self._client(_FakeReader())
+        for _ in range(3):
+            self.assertEqual(client.post(
+                "/api/debug/depth_snapshot", json={"count": 1}).status_code, 200)
+            time.sleep(0.002)
+        self.assertEqual(len(list(self.out_dir.glob("*.npz"))), 3)
+
+    def test_rgb_frame_and_infinite_range_round_trip(self):
+        reader = _FakeReader()
+        reader.rgb = np.full((24, 32, 3), 90, dtype=np.uint8)
+        reader.stats = DepthStats(min_distance_m=float("inf"), p5_mm=float("inf"))
+        resp = self._client(reader).post(
+            "/api/debug/depth_snapshot", json={"count": 1})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.get_json()["saved"][0]["p5_mm"])
+        with np.load(next(self.out_dir.glob("*.npz"))) as data:
+            meta = json.loads(str(data["meta"]))
+            self.assertEqual(meta["depth_stats"]["min_distance_m"], float("inf"))
+            if cv2 is not None:
+                self.assertGreater(data["rgb_jpeg"].size, 0)
+                img = cv2.imdecode(data["rgb_jpeg"], cv2.IMREAD_COLOR)
+                self.assertEqual(img.shape, (24, 32, 3))
 
     def test_no_reader_or_no_frame_is_503(self):
         resp = self._client(None).post("/api/debug/depth_snapshot", json={})

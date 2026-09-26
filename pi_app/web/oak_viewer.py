@@ -1856,6 +1856,10 @@ def _depth_frame_to_jpeg(depth_frame) -> bytes | None:
 # Raw depth snapshots for offline study of the obstacle corridor (2026-09-26:
 # phantom 0.6-0.9 m obstacles in front of an iron gate and lap siding).
 DEPTH_SNAPSHOT_DIR = Path(__file__).resolve().parents[2] / "logs" / "depth_snapshots"
+# About 0.3-0.5 MB per file; refuse new captures past this many files.
+MAX_DEPTH_SNAPSHOT_FILES = 200
+# One capture at a time: overlapping POSTs would share filename stamps.
+_DEPTH_SNAPSHOT_LOCK = threading.Lock()
 
 
 def _capture_depth_snapshot(oak_reader) -> dict | None:
@@ -2470,6 +2474,8 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         intrinsics, person boxes, corridor stats).
 
         Body (optional): {"count": 1-10, "interval_s": 0.1-1.0}.
+        409 while another capture runs, or when MAX_DEPTH_SNAPSHOT_FILES
+        files are already on disk.
         """
         def _err(status, msg):
             return Response(json.dumps({"error": msg}), status=status,
@@ -2487,31 +2493,41 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         try:
             count = int(payload.get("count", 3))
             interval_s = float(payload.get("interval_s", 0.5))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return _err(400, "count must be an integer, interval_s a number")
         if not 1 <= count <= 10 or not 0.1 <= interval_s <= 1.0:
             return _err(400, "count 1-10, interval_s 0.1-1.0")
+        if not _DEPTH_SNAPSHOT_LOCK.acquire(blocking=False):
+            return _err(409, "capture in progress")
+        try:
+            import numpy as np
 
-        import numpy as np
-
-        out_dir = DEPTH_SNAPSHOT_DIR
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        saved = []
-        for i in range(count):
-            if i:
-                time.sleep(interval_s)
-            snap = _capture_depth_snapshot(oak_reader)
-            if snap is None:
-                continue
-            path = out_dir / f"{stamp}_{i}.npz"
-            np.savez_compressed(path, **snap)
-            stats = json.loads(str(snap["meta"]))["depth_stats"]
-            saved.append({
-                "path": str(path),
-                "corridor_near_px": stats.get("corridor_near_px"),
-                "p5_mm": stats.get("p5_mm"),
-            })
+            out_dir = DEPTH_SNAPSHOT_DIR
+            out_dir.mkdir(parents=True, exist_ok=True)
+            existing = sum(1 for _ in out_dir.glob("*.npz"))
+            if existing + count > MAX_DEPTH_SNAPSHOT_FILES:
+                return _err(409, f"{existing} snapshots on disk (cap "
+                                 f"{MAX_DEPTH_SNAPSHOT_FILES}); delete some first")
+            now = time.time()
+            stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
+            stamp += f"_{int(now * 1000) % 1000:03d}"
+            saved = []
+            for i in range(count):
+                if i:
+                    time.sleep(interval_s)
+                snap = _capture_depth_snapshot(oak_reader)
+                if snap is None:
+                    continue
+                path = out_dir / f"{stamp}_{i}.npz"
+                np.savez_compressed(path, **snap)
+                stats = json.loads(str(snap["meta"]))["depth_stats"]
+                saved.append({
+                    "path": str(path),
+                    "corridor_near_px": stats.get("corridor_near_px"),
+                    "p5_mm": _finite_or_none(stats.get("p5_mm"), 1),
+                })
+        finally:
+            _DEPTH_SNAPSHOT_LOCK.release()
         if not saved:
             return _err(503, "no depth frame")
         return Response(json.dumps({"ok": True, "saved": saved}),
