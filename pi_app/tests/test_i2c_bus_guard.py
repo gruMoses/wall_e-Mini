@@ -43,6 +43,22 @@ def _noop_sleep(_seconds: float) -> None:
     """Stands in for time.sleep in every test -- no real waiting."""
 
 
+def _count_pulses(calls: list[tuple]) -> int:
+    """Count pulse-loop iterations from a FakeHardware call log.
+
+    A loop pulse is the consecutive pair (SCL driven low, SCL released).
+    The STOP sequence's own SCL-low step is NOT a pulse -- it is followed
+    by driving SDA low, never by releasing SCL -- so this pair pattern
+    counts only real pulses even though the STOP sequence starts with the
+    exact same (SCL, "op", "dl") call a pulse does.
+    """
+    low = ("set_pin", guard.SCL_PIN, ("op", "dl"))
+    release = ("set_pin", guard.SCL_PIN, ("ip", "pu"))
+    return sum(
+        1 for i in range(len(calls) - 1) if calls[i] == low and calls[i + 1] == release
+    )
+
+
 class FakeHardware:
     """Records every call in order; read_sda() plays back a scripted list
     of levels (repeating the last entry once exhausted, so a test does not
@@ -82,6 +98,10 @@ class FakeHardware:
 
     def bind(self) -> None:
         self._record(("bind",))
+
+    def restart_ups_service(self) -> None:
+        # Mirrors the real Hardware's contract: best-effort, never raises.
+        self.calls.append(("restart_ups_service",))
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +170,7 @@ class HardwarePlumbingTests(unittest.TestCase):
     def test_dry_run_set_pin_does_not_touch_subprocess(self):
         hw = guard.Hardware(dry_run=True)
         with mock.patch("subprocess.run") as run:
-            hw.set_pin(3, "op", "dh")
+            hw.set_pin(3, "op", "dl")
         run.assert_not_called()
 
     def test_dry_run_unbind_and_bind_do_not_touch_sysfs(self):
@@ -169,6 +189,27 @@ class HardwarePlumbingTests(unittest.TestCase):
             level = hw.read_sda()
         self.assertEqual(level, "lo")
         run.assert_called_once()
+
+    def test_restart_ups_service_calls_systemctl_restart(self):
+        hw = guard.Hardware()
+        with mock.patch("subprocess.run") as run:
+            hw.restart_ups_service()
+        run.assert_called_once_with(
+            ["systemctl", "restart", guard.UPS_SERVICE_NAME], timeout=15, check=True,
+        )
+
+    def test_restart_ups_service_dry_run_does_not_touch_subprocess(self):
+        hw = guard.Hardware(dry_run=True)
+        with mock.patch("subprocess.run") as run:
+            hw.restart_ups_service()
+        run.assert_not_called()
+
+    def test_restart_ups_service_failure_is_logged_not_raised(self):
+        hw = guard.Hardware()
+        with mock.patch(
+            "subprocess.run", side_effect=OSError("systemctl not found")
+        ):
+            hw.restart_ups_service()  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +245,17 @@ class ReadUpsAgeTests(unittest.TestCase):
                 json.dump({"ts": 940.0}, f)
             age = guard.read_ups_age_s(path, now=1000.0)
         self.assertEqual(age, 60.0)
+
+
+class IsUpsStaleTests(unittest.TestCase):
+    def test_unknown_age_is_not_stale(self):
+        self.assertFalse(guard.is_ups_stale(None, 30.0))
+
+    def test_age_under_threshold_is_not_stale(self):
+        self.assertFalse(guard.is_ups_stale(29.9, 30.0))
+
+    def test_age_over_threshold_is_stale(self):
+        self.assertTrue(guard.is_ups_stale(30.1, 30.0))
 
 
 # ---------------------------------------------------------------------------
@@ -311,28 +363,39 @@ class RecoverBusTests(unittest.TestCase):
         ok, error = guard.recover_bus(hw, sleep_fn=_noop_sleep)
         self.assertTrue(ok)
         self.assertIsNone(error)
-        pulses = [c for c in hw.calls if c == ("set_pin", guard.SCL_PIN, ("op", "dl"))]
-        self.assertEqual(len(pulses), 3)
+        self.assertEqual(_count_pulses(hw.calls), 3)
 
     def test_sixteen_pulse_cap(self):
         hw = FakeHardware(sda_sequence=["lo"] * 20)  # SDA never frees
         ok, error = guard.recover_bus(hw, sleep_fn=_noop_sleep)
         self.assertFalse(ok)
         self.assertEqual(error, "SDA still lo after recovery")
-        pulses = [c for c in hw.calls if c == ("set_pin", guard.SCL_PIN, ("op", "dl"))]
-        self.assertEqual(len(pulses), guard.MAX_PULSES)
-        self.assertEqual(len(pulses), 16)
+        self.assertEqual(_count_pulses(hw.calls), guard.MAX_PULSES)
+        self.assertEqual(_count_pulses(hw.calls), 16)
 
-    def test_stop_condition_emitted_after_the_pulse_loop(self):
+    def test_stop_sequence_is_scl_low_sda_low_release_scl_release_sda(self):
+        # Textbook STOP, open-drain style: with SCL already released (high)
+        # at the end of the loop, drive SCL low first (so driving SDA low
+        # next cannot look like a START), then SDA low, then release SCL,
+        # then release SDA -- SDA goes low-to-high while SCL is high.
         hw = FakeHardware(sda_sequence=["lo", "lo", "hi", "hi"])
         guard.recover_bus(hw, sleep_fn=_noop_sleep)
-        idx = hw.calls.index(("set_pin", guard.SDA_PIN, ("op", "dl")))
+
+        scl_low = ("set_pin", guard.SCL_PIN, ("op", "dl"))
+        sda_low = ("set_pin", guard.SDA_PIN, ("op", "dl"))
+        idx = None
+        for i in range(len(hw.calls) - 1):
+            if hw.calls[i] == scl_low and hw.calls[i + 1] == sda_low:
+                idx = i
+                break
+        self.assertIsNotNone(idx, "STOP's SCL-low -> SDA-low pair not found")
         self.assertEqual(
-            hw.calls[idx : idx + 3],
+            hw.calls[idx : idx + 4],
             [
+                ("set_pin", guard.SCL_PIN, ("op", "dl")),
                 ("set_pin", guard.SDA_PIN, ("op", "dl")),
-                ("set_pin", guard.SCL_PIN, ("op", "dh")),
-                ("set_pin", guard.SDA_PIN, ("op", "dh")),
+                ("set_pin", guard.SCL_PIN, ("ip", "pu")),
+                ("set_pin", guard.SDA_PIN, ("ip", "pu")),
             ],
         )
 
@@ -343,6 +406,45 @@ class RecoverBusTests(unittest.TestCase):
         ok, error = guard.recover_bus(hw, sleep_fn=_noop_sleep)
         self.assertTrue(ok)
         self.assertIsNone(error)
+
+
+# ---------------------------------------------------------------------------
+# Open-drain emulation. I2C lines must never be driven high push-pull: if a
+# wedged slave is still holding a line low, a push-pull high output fights
+# it on the same wire. Every drive is "op","dl" (low); every release is
+# "ip","pu" (input + pull-up, which reads back high); "op","dh" must never
+# appear anywhere in the recovery sequence.
+# ---------------------------------------------------------------------------
+
+class OpenDrainEmulationTests(unittest.TestCase):
+    def test_no_pin_is_ever_driven_high_push_pull(self):
+        for sda_sequence in (
+            ["lo", "lo", "hi", "hi"],  # stops early, partway through
+            ["lo"] * 20,               # runs the full 16-pulse cap
+        ):
+            hw = FakeHardware(sda_sequence=sda_sequence)
+            guard.recover_bus(hw, sleep_fn=_noop_sleep)
+            offenders = [
+                c for c in hw.calls if c[0] == "set_pin" and c[2] == ("op", "dh")
+            ]
+            self.assertEqual(offenders, [], f"push-pull high drive found: {offenders}")
+
+    def test_initial_setup_releases_both_lines_instead_of_driving_scl_high(self):
+        hw = FakeHardware(sda_sequence=["lo", "lo", "hi", "hi"])
+        guard.recover_bus(hw, sleep_fn=_noop_sleep)
+        self.assertEqual(hw.calls[0], ("unbind",))
+        self.assertEqual(hw.calls[1], ("set_pin", guard.SCL_PIN, ("ip", "pu")))
+        self.assertEqual(hw.calls[2], ("set_pin", guard.SDA_PIN, ("ip", "pu")))
+
+    def test_pulse_high_half_is_a_release_not_a_drive(self):
+        # Every SCL set_pin call is one of: drive low, release, or the
+        # final restore to the I2C alt function -- never a push-pull high.
+        hw = FakeHardware(sda_sequence=["lo"] * 20)
+        guard.recover_bus(hw, sleep_fn=_noop_sleep)
+        scl_calls = [c for c in hw.calls if c[0] == "set_pin" and c[1] == guard.SCL_PIN]
+        allowed = {("op", "dl"), ("ip", "pu"), ("a3", "pu")}
+        for call in scl_calls:
+            self.assertIn(call[2], allowed)
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +551,9 @@ class GuardCycleTests(unittest.TestCase):
         self.assertEqual(result["last_result"], "ok")
         self.assertEqual(result["recoveries_total"], 1)
         self.assertEqual(on_disk, result)
+        # A successful recovery restarts the UPS daemon by default (its
+        # I2C handle is invalidated by the unbind/rebind).
+        self.assertIn(("restart_ups_service",), hw.calls)
 
     def test_rate_limited_stuck_logs_error_once_and_stops_attempting(self):
         with tempfile.TemporaryDirectory() as d:
@@ -506,6 +611,110 @@ class GuardCycleTests(unittest.TestCase):
         self.assertEqual(len(rate_limit_lines), 2)
         self.assertEqual(g.recoveries_total, 2)
 
+    def test_failed_recovery_does_not_restart_ups(self):
+        with tempfile.TemporaryDirectory() as d:
+            status_path = os.path.join(d, "status.json")
+            ups_path = os.path.join(d, "ups.json")
+            with open(ups_path, "w") as f:
+                json.dump({"ts": 0.0}, f)
+            hw = FakeHardware(sda_sequence=["lo"] * 200)  # SDA never frees
+            cfg = self._cfg(status_path, ups_path)
+            g = guard.I2cBusGuard(
+                hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
+                sleep_fn=_noop_sleep,
+            )
+            result = g.run_cycle()
+
+        self.assertEqual(result["last_result"], "failed")
+        self.assertNotIn(("restart_ups_service",), hw.calls)
+
+    def test_restart_ups_disabled_by_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            status_path = os.path.join(d, "status.json")
+            ups_path = os.path.join(d, "ups.json")
+            with open(ups_path, "w") as f:
+                json.dump({"ts": 0.0}, f)
+            hw = FakeHardware(sda_sequence=["lo", "lo", "lo", "hi", "hi"])
+            cfg = self._cfg(status_path, ups_path, restart_ups=False)
+            g = guard.I2cBusGuard(
+                hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
+                sleep_fn=_noop_sleep,
+            )
+            result = g.run_cycle()
+
+        self.assertEqual(result["last_result"], "ok")
+        self.assertNotIn(("restart_ups_service",), hw.calls)
+
+    def test_ups_stale_without_stuck_logs_warning_and_sets_status_field(self):
+        # SDA is fine (not a stuck bus) but the UPS status is stale for
+        # some other reason -- must still warn and flag the status field.
+        with tempfile.TemporaryDirectory() as d:
+            status_path = os.path.join(d, "status.json")
+            ups_path = os.path.join(d, "ups.json")
+            with open(ups_path, "w") as f:
+                json.dump({"ts": 0.0}, f)
+            hw = FakeHardware(sda_sequence=["hi"])
+            cfg = self._cfg(status_path, ups_path)
+            g = guard.I2cBusGuard(
+                hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
+                sleep_fn=_noop_sleep,
+            )
+            with self.assertLogs(level="WARNING") as captured:
+                result = g.run_cycle()
+
+        self.assertFalse(result["stuck"])
+        self.assertTrue(result["ups_stale"])
+        self.assertEqual(g.recoveries_total, 0)
+        self.assertNotIn("unbind", [c[0] for c in hw.calls])
+        stale_lines = [
+            m for m in captured.output
+            if "safe shutdown on power loss is NOT active" in m
+        ]
+        self.assertEqual(len(stale_lines), 1)
+
+    def test_ups_stale_warning_throttled_to_five_minutes(self):
+        with tempfile.TemporaryDirectory() as d:
+            status_path = os.path.join(d, "status.json")
+            ups_path = os.path.join(d, "ups.json")
+            with open(ups_path, "w") as f:
+                json.dump({"ts": 0.0}, f)
+            hw = FakeHardware(sda_sequence=["hi"] * 10)
+            cfg = self._cfg(status_path, ups_path)
+            clock = {"m": 0.0}
+            g = guard.I2cBusGuard(
+                hw, cfg,
+                now_fn=lambda: 100000.0 + clock["m"],
+                monotonic_fn=lambda: clock["m"],
+                sleep_fn=_noop_sleep,
+            )
+            with self.assertLogs(level="WARNING") as captured:
+                g.run_cycle()
+                clock["m"] += 60.0
+                g.run_cycle()  # inside the 5-minute window -> no repeat
+                clock["m"] += guard.WARNING_REPEAT_S
+                g.run_cycle()  # 5 minutes elapsed -> warns again
+
+        stale_lines = [
+            m for m in captured.output
+            if "safe shutdown on power loss is NOT active" in m
+        ]
+        self.assertEqual(len(stale_lines), 2)
+
+    def test_missing_ups_status_logs_info_once_not_every_cycle(self):
+        with tempfile.TemporaryDirectory() as d:
+            status_path = os.path.join(d, "status.json")
+            ups_path = os.path.join(d, "missing_ups.json")  # never created
+            hw = FakeHardware(sda_sequence=["hi"] * 10)
+            cfg = self._cfg(status_path, ups_path)
+            g = guard.I2cBusGuard(hw, cfg, sleep_fn=_noop_sleep)
+            with self.assertLogs(level="INFO") as captured:
+                g.run_cycle()
+                g.run_cycle()
+                g.run_cycle()
+
+        unknown_lines = [m for m in captured.output if "age unknown" in m]
+        self.assertEqual(len(unknown_lines), 1)
+
 
 # ---------------------------------------------------------------------------
 # CLI wiring.
@@ -521,6 +730,11 @@ class ArgParserDefaultsTests(unittest.TestCase):
         self.assertEqual(args.status_file, "/tmp/i2c_guard_status.json")
         self.assertFalse(args.dry_run)
         self.assertFalse(args.once)
+        self.assertTrue(args.restart_ups)
+
+    def test_no_restart_ups_flag_disables_it(self):
+        args = guard.build_arg_parser().parse_args(["--no-restart-ups"])
+        self.assertFalse(args.restart_ups)
 
 
 class MainSmokeTests(unittest.TestCase):
@@ -544,6 +758,7 @@ class MainSmokeTests(unittest.TestCase):
         self.assertIn(data["sda_level"], ("hi", "lo", "unknown"))
         self.assertFalse(data["stuck"])
         self.assertIsNone(data["ups_age_s"])
+        self.assertFalse(data["ups_stale"])
 
 
 if __name__ == "__main__":

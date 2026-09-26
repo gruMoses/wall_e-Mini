@@ -1,8 +1,9 @@
 # I2C bus 1 auto-unlock guard
 
 `bin/i2c_bus_guard.py` watches I2C bus 1 for a stuck bus. It runs the
-standard I2C bus-clear recovery when the bus is stuck. It runs on the Pi
-as the systemd service `i2c-bus-guard`.
+standard I2C bus-clear recovery when the bus is stuck, and it warns
+whenever the UPS daemon's status goes stale, for any reason. It runs on
+the Pi as the systemd service `i2c-bus-guard`.
 
 ## Background: the 2026-09-25 incident
 
@@ -43,17 +44,31 @@ moment, so it never produces 3 consecutive low samples. A stopped UPS
 daemon alone never triggers a recovery, because its status file's age
 does not by itself mean the bus is stuck.
 
+WARNING: a stuck bus is only one way the UPS daemon can go blind. The
+guard also checks the UPS status age by itself, every cycle, regardless
+of SDA. When that age is stale for any reason, it logs a warning: safe
+shutdown on power loss is not active. This warning repeats at most once
+every 5 minutes. A missing or unreadable status file is different from a
+stale one: the guard logs that once, at a lower level, and does not
+repeat it — the UPS hardware may simply not be fitted to this robot.
+
 ## What it does on a stuck bus
 
-The guard runs the standard I2C bus-clear procedure:
+The guard runs the standard I2C bus-clear procedure. Every step below
+drives a line low or releases it — never drives a line high. A wedged
+device can still be holding a line low. Driving that same line high
+would fight the wedged device on one wire. Releasing the line instead
+lets the pull-up resistor pull it high only when nothing else holds it
+down.
 
 1. It unbinds the `i2c_designware` driver from the bus.
-2. It sets SCL (GPIO3) as an output and SDA (GPIO2) as an input with a
-   pull-up resistor.
-3. It pulses SCL low then high, up to 16 times. It checks SDA after each
-   pulse. It stops as soon as SDA reads high.
-4. It sends a STOP condition: SDA goes from low to high while SCL is
-   high.
+2. It releases SCL (GPIO3) and SDA (GPIO2): both become inputs, both with
+   a pull-up resistor.
+3. It pulses SCL: drive low, then release, up to 16 times. It checks SDA
+   after each release. It stops as soon as SDA reads high.
+4. It sends a STOP condition, in this exact order: drive SCL low; drive
+   SDA low; release SCL; release SDA. SDA then goes from low to high
+   while SCL is high. That transition is the STOP condition.
 5. It restores SCL and SDA to their normal I2C function.
 6. It rebinds the `i2c_designware` driver.
 7. It waits 2 seconds, then checks SDA one more time. A high reading
@@ -66,6 +81,31 @@ leave the driver unbound.
 The guard runs at most 6 recoveries per rolling hour (`--max-per-hour`).
 Past that limit, it logs one error and keeps monitoring. It does not try
 again until the hour window frees up.
+
+## After a successful recovery
+
+Unbinding and rebinding the `i2c_designware` driver breaks any I2C
+connection a running program already had open on that bus.
+
+- **The UPS daemon** (`upsplus-power.service`) opens its connection once,
+  at startup. It never reopens that connection on its own. So a
+  successful recovery restarts this service, unless you pass
+  `--no-restart-ups`. The guard logs this restart as a warning, because
+  it is a real, visible action on the robot. A failed restart is logged
+  as an error. A failed restart does not count as a failed bus recovery
+  — the bus is already clear by that point.
+- **`wall-e.service` is never restarted by this guard.** Its RTK GPS
+  reader behaves in one of two ways:
+  - If `wall-e.service` was already running when the bus got stuck, its
+    GPS reader keeps retrying. It reopens its own connection on its own,
+    after 10 consecutive read errors. No action is needed.
+  - If `wall-e.service` started while the bus was still stuck, its GPS
+    reader fails once, at startup, and then gives up. It does not retry
+    again, ever, even after this guard clears the bus. GPS stays
+    disabled until a person restarts `wall-e.service` by hand:
+    `sudo systemctl restart wall-e.service`. Check `journalctl -u
+    wall-e -n 200 --no-pager` for "RTK GPS init failed" to confirm this
+    is what happened.
 
 ## Install
 
@@ -95,6 +135,7 @@ The status file holds one JSON object:
 | `ts` | Time of this status, in seconds since the epoch. |
 | `sda_level` | The last SDA reading this cycle: `hi`, `lo`, or `unknown`. |
 | `ups_age_s` | Age of the UPS status file, in seconds, or `null` if unknown. |
+| `ups_stale` | `true` if the UPS status age is over the stale threshold, for any reason. |
 | `stuck` | `true` if this cycle called the bus stuck. |
 | `recoveries_total` | Count of recovery attempts since the guard started. |
 | `last_recovery_ts` | Time of the last recovery attempt, or `null`. |
@@ -118,13 +159,17 @@ python3 bin/i2c_bus_guard.py --once --dry-run
 
 Drop `--dry-run` to let a single cycle act for real. Add `--status-file`
 or `--ups-status-file` to point at test paths instead of the real ones.
+Add `--no-restart-ups` to skip the UPS-daemon restart step, for example
+while you are also testing the UPS daemon itself.
 
 ## Appendix: Technical Names
 
 `i2c_bus_guard.py`, `i2c-bus-guard.service`, `install_i2c_bus_guard.sh`,
 `i2c-bus-guard`, I2C, SDA, SCL, GPIO2, GPIO3, `pinctrl`, `i2c_designware`,
-`1f00074000.i2c`, RTK GPS, UPSPlus, HAT, `upsplus-power.service`,
-`/tmp/ups_status.json`, `/tmp/i2c_guard_status.json`, `UPS_STATUS_FILE`,
-STOP condition, Raspberry Pi 5, Pi 5, systemd, `systemctl`, `journalctl`,
-JSON, sudo, `--interval`, `--stale-s`, `--low-samples`, `--max-per-hour`,
-`--status-file`, `--ups-status-file`, `--dry-run`, `--once`.
+`1f00074000.i2c`, RTK GPS, `RtkGpsReader`, UPSPlus, HAT,
+`upsplus-power.service`, `wall-e.service`, `/tmp/ups_status.json`,
+`/tmp/i2c_guard_status.json`, `UPS_STATUS_FILE`, open-drain, push-pull,
+pull-up, STOP condition, START condition, Raspberry Pi 5, Pi 5, systemd,
+`systemctl`, `journalctl`, JSON, sudo, `--interval`, `--stale-s`,
+`--low-samples`, `--max-per-hour`, `--status-file`, `--ups-status-file`,
+`--no-restart-ups`, `--dry-run`, `--once`.
