@@ -621,6 +621,9 @@ def write_status_file(path: str, status: dict) -> None:
             prefix=os.path.basename(path) + ".tmp.", dir=directory
         )
         try:
+            # mkstemp creates 0600; the guard runs as root, and the status
+            # must stay readable by `pi` (a plain `cat`, the robot's web UI).
+            os.fchmod(fd, 0o644)
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
             os.replace(tmp, path)

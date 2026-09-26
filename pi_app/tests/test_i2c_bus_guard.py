@@ -1343,5 +1343,18 @@ class MainSmokeTests(unittest.TestCase):
         self.assertEqual(signal.getsignal(signal.SIGINT), original_sigint)
 
 
+
+
+class StatusFileModeTests(unittest.TestCase):
+    def test_status_file_is_world_readable(self):
+        # The guard runs as root; `pi` and the web UI must be able to read it.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "status.json")
+            guard.write_status_file(path, {"ok": True})
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+            with open(path) as f:
+                self.assertEqual(json.load(f), {"ok": True})
+
+
 if __name__ == "__main__":
     unittest.main()
