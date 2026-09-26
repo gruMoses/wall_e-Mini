@@ -128,11 +128,23 @@ class Controller:
         waypoint_nav: Optional[WaypointNavController] = None,
         gesture_controller: Optional[GestureStateMachine] = None,
         gps_heading_aligner: Optional[GpsHeadingAligner] = None,
+        startup_interlock: bool = False,
     ) -> None:
         self._motor = motor_driver or NoopMotorDriver()
         self._relay = arm_relay or NoopArmRelay()
         self._shutdown = shutdown_scheduler or ThreadedShutdownScheduler()
-        self._safety_state = SafetyState(is_armed=False, last_transition_epoch_s=0.0)
+        # startup_interlock: start with the re-arm latch set, so the robot
+        # arms only after the arm switch has been seen OFF (main.py enables
+        # it from SafetyConfig.require_switch_off_at_startup).
+        self._safety_state = SafetyState(
+            is_armed=False,
+            last_transition_epoch_s=0.0,
+            rearm_requires_switch_cycle=bool(startup_interlock),
+        )
+        if startup_interlock:
+            _logger.warning(
+                "Arm interlock: the arm switch must be seen OFF before the robot can arm"
+            )
         self._safety_params = safety_params or SafetyParams()
         # Monotonic start of the current armed-idle stretch. None when this
         # tick is not idle. Compared against process()'s mono_now — do not
@@ -1588,6 +1600,7 @@ class Controller:
         # Update safety. This now runs on EVERY tick before the calibration
         # early-return below, so RC-stale disarm, ch3 disarm, and ch5 e-stop
         # take effect even while the calibration wizard is driving the motors.
+        latched_before = self._safety_state.rearm_requires_switch_cycle
         self._safety_state, events = update_safety(
             self._safety_state,
             ch3_us=rc.ch3_us,
@@ -1596,6 +1609,8 @@ class Controller:
             now_epoch_s=epoch_now,
             params=self._safety_params,
         )
+        if latched_before and not self._safety_state.rearm_requires_switch_cycle:
+            _logger.warning("Arm latch cleared: arm switch seen OFF")
         if auto_events:
             events = [*auto_events, *events]
         if was_armed and not self._safety_state.is_armed:

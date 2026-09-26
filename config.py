@@ -1044,6 +1044,11 @@ class SafetyConfig:
     # Matches pi_app.control.mapping.DEADBAND_US: a stick beyond this moves
     # the robot, so it must not count as idle.
     auto_disarm_stick_deadband_us: int = 25
+    # A fresh start (boot, deploy, crash restart) arms only after the arm
+    # switch has been seen OFF. Without it, a restart after an auto-disarm
+    # would re-arm on a switch that was left up. main.py passes this to the
+    # Controller; a Controller built directly (unit tests) defaults to off.
+    require_switch_off_at_startup: bool = True
 
 
 @dataclass(frozen=True)

@@ -416,6 +416,9 @@ def run() -> None:
         waypoint_nav=waypoint_nav_ctrl,
         gesture_controller=gesture_ctrl,
         gps_heading_aligner=gps_heading_aligner,
+        startup_interlock=bool(
+            getattr(getattr(config, "safety", None), "require_switch_off_at_startup", True)
+        ),
     )
     if oak_reader is not None:
         _fresh_fn = getattr(oak_reader, "get_detection_freshness", None)
