@@ -338,7 +338,14 @@ class FollowMeConfig:
     enabled: bool = True
     follow_distance_m: float = 1.5        # desired following distance in metres
     min_distance_m: float = 0.5
-    max_distance_m: float = 6.0
+    # 6.0 -> 8.0 on 2026-09-26 (arm_20260926_125554.log): the operator
+    # walked away at ~1.55 m/s, the robot was pinned at its 1.38 m/s cap,
+    # and at 6.1-6.6 m DetectionFilter dropped him on range alone (YOLO
+    # 0.83-0.89, depth_status "ok", same track id, width 0.058-0.077), so
+    # the robot stopped. The torso sampler already reads to 9.0 m
+    # (person_depth_sample_max_m). detect_min_bbox_width 0.05 now binds
+    # first, near 7-7.5 m for a front-facing adult.
+    max_distance_m: float = 8.0
     # Identity gates decide WHOM to follow; they must never hide a closer
     # range from the speed command (2026-09-20 15:49: tracker held 3.0 m
     # and rejected a true 1.2 m edge reading as an "occluder", then the
@@ -356,8 +363,21 @@ class FollowMeConfig:
     # with depth_status != "ok" forces the speed law to follow_distance_m
     # (zero forward). 0.0 disables.
     close_unknown_bbox_height: float = 0.85
-    max_speed_error_m: float = 1.5   # distance error at which max speed is reached — tighter = more aggressive closing
-    max_follow_speed_byte: int = 110
+    # Top speed 110 -> 128 bytes on 2026-09-26 (same log as max_distance_m):
+    # 110 capped follow-me at 1.38 m/s while the robot was 3-6 m behind a
+    # walking operator. 128 is byte 254 = max_erpm 20000 = 1.61 m/s, the
+    # same top speed as full RC stick. The VESC reached 17,200 eRPM at duty
+    # 0.71 on a full 53.5 V pack, so 20,000 eRPM needs ~0.82 there; below
+    # ~46 V it saturates at max duty (about 1.5 m/s), as full stick does.
+    # max_speed_error_m 1.5 -> 1.75 keeps the approach gain at
+    # 128 / 1.75 = 73.1 bytes per metre (was 110 / 1.5 = 73.3), so within
+    # 3.0 m of the operator each speed command is within 0.3 percent of the
+    # old one; only a larger gap drives faster. Speed pinned at the cap also leaves no L/R headroom
+    # above 254, so at top speed the mixer clips the outer track and a
+    # small steer correction gives about half the yaw of the same
+    # correction at 110 (turn_speed_scale still slows real turns).
+    max_speed_error_m: float = 1.75   # distance error at which max speed is reached — tighter = more aggressive closing
+    max_follow_speed_byte: int = 128
     # Legacy direct-pursuit PD gains (preserved; not used by new PID steering path)
     steering_gain: float = 0.50
     steering_derivative_gain: float = 0.06  # calibrated from Phase 2 plant model
@@ -378,7 +398,8 @@ class FollowMeConfig:
     # a 0.45 m wide person is 0.086 of the 70 deg frame at 4.4 m -- with YOLO
     # still at 0.86-0.90 confidence, and every loss stopped the robot. The
     # edge rule above already rejects the frame-edge slivers this was added
-    # for; 0.05 keeps a person to ~6 m (max_distance_m).
+    # for; 0.05 keeps a front-facing adult to ~7-7.5 m, inside
+    # max_distance_m 8.0 (measured 0.058-0.062 at 6.4-6.6 m on 2026-09-26).
     detect_min_bbox_width: float = 0.05   # reject normalized bbox width < this; 0 = disabled
     detect_min_person_height_m: float = 1.20  # reject implied physical height < this (m); 0 = disabled
     # MEASURED from the factory EEPROM 2026-07-26 (`pi_app.cli.oak_intrinsics`):
