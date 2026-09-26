@@ -1030,6 +1030,23 @@ class OakDetectionConfig:
 
 
 @dataclass(frozen=True)
+class SafetyConfig:
+    """Arming watchdog separate from the RC ch3/ch5 level checks.
+
+    2026-09-24 overnight-armed incident: the RC transmitter was left on
+    with the arm switch (ch3) up for 23 hours.
+    """
+
+    # Seconds armed and idle before auto-disarm. 0 disables.
+    auto_disarm_idle_s: float = 600.0
+    # ch1 and ch2 must each sit within this many microseconds of 1500 µs
+    # to count as idle.
+    # Matches pi_app.control.mapping.DEADBAND_US: a stick beyond this moves
+    # the robot, so it must not count as idle.
+    auto_disarm_stick_deadband_us: int = 25
+
+
+@dataclass(frozen=True)
 class Config:
     """Main configuration class."""
     
@@ -1037,6 +1054,8 @@ class Config:
     imu_steering: ImuSteeringConfig = ImuSteeringConfig()
     # RC mapping config
     rc_map: RcMapConfig = RcMapConfig()
+    # Armed-idle auto-disarm (2026-09-24 overnight-armed incident).
+    safety: SafetyConfig = SafetyConfig()
     # VESC config
     vesc: VescConfig = VescConfig()
 

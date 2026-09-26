@@ -174,6 +174,19 @@ class BuildLogObjTopLevelTests(unittest.TestCase):
         self.assertEqual(obj["motor"], {"L": 100, "R": 150})
         self.assertEqual(obj["safety"], {"armed": True, "emergency": True})
 
+    def test_auto_disarm_fields_from_telemetry(self):
+        obj = build_log_obj(**_base_kwargs(telem={
+            "armed_idle_s": 12.5,
+            "rearm_requires_switch_cycle": True,
+        }))
+        self.assertEqual(obj["armed_idle_s"], 12.5)
+        self.assertIs(obj["rearm_requires_switch_cycle"], True)
+
+    def test_auto_disarm_fields_none_when_telemetry_omits_them(self):
+        obj = build_log_obj(**_base_kwargs(telem={}))
+        self.assertIsNone(obj["armed_idle_s"])
+        self.assertIsNone(obj["rearm_requires_switch_cycle"])
+
 
 class SessionHeaderTests(unittest.TestCase):
     def test_shape_and_git_fields(self):

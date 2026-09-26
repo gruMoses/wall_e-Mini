@@ -14,9 +14,11 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from pi_app.control.mapping import (
     map_pulse_to_byte, map_pulse_to_byte_saturated,
-    CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT,
+    CENTER_OUTPUT_VALUE, CENTER_PULSE_WIDTH_US, MAX_OUTPUT, MIN_OUTPUT,
 )
-from pi_app.control.safety import update_safety, SafetyState, SafetyParams, SafetyEvent
+from pi_app.control.safety import (
+    update_safety, force_disarm, SafetyState, SafetyParams, SafetyEvent,
+)
 from pi_app.control.state import DriveCommand, AutonomyCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
 from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
@@ -132,6 +134,10 @@ class Controller:
         self._shutdown = shutdown_scheduler or ThreadedShutdownScheduler()
         self._safety_state = SafetyState(is_armed=False, last_transition_epoch_s=0.0)
         self._safety_params = safety_params or SafetyParams()
+        # Monotonic start of the current armed-idle stretch. None when this
+        # tick is not idle. Compared against process()'s mono_now — do not
+        # call time.monotonic() for it (controller tests pin that count).
+        self._armed_idle_since: Optional[float] = None
         
         # IMU steering compensation
         self._imu_compensator = imu_compensator
@@ -1258,6 +1264,95 @@ class Controller:
             "mp_pose_loaded": status.get("mp_pose_loaded"),
         }
 
+    def _auto_disarm_stick_deadband_us(self) -> int:
+        safety_cfg = getattr(config, "safety", None)
+        return int(getattr(safety_cfg, "auto_disarm_stick_deadband_us", 60))
+
+    def _sticks_within_auto_disarm_deadband(self, rc: RCInputs) -> bool:
+        deadband = self._auto_disarm_stick_deadband_us()
+        return (
+            abs(int(rc.ch1_us) - CENTER_PULSE_WIDTH_US) <= deadband
+            and abs(int(rc.ch2_us) - CENTER_PULSE_WIDTH_US) <= deadband
+        )
+
+    def _maybe_auto_disarm(
+        self,
+        mono_now: float,
+        epoch_now: float,
+        rc: RCInputs,
+        bt_override_bytes: tuple[int, int] | None,
+    ) -> List[SafetyEvent]:
+        """Latch-disarm when the armed-idle stretch has reached the limit.
+
+        Called at the start of process(), before update_safety, so this
+        tick's normal DISARMED handling still runs. A tick that is already
+        commanding motion does not fire: the end-of-tick idle update (or
+        an early return) clears the timer instead.
+        """
+        safety_cfg = getattr(config, "safety", None)
+        limit_s = float(getattr(safety_cfg, "auto_disarm_idle_s", 0.0) or 0.0)
+        since = self._armed_idle_since
+        if limit_s <= 0.0 or since is None or not self._safety_state.is_armed:
+            return []
+        idle_for = mono_now - since
+        if idle_for < limit_s:
+            return []
+        # Known at the start of the tick, before final bytes exist. FOLLOW_ME
+        # and WAYPOINT_NAV never auto-disarm, even when stationary.
+        if (
+            self._calibration_mode
+            or self._mode != "MANUAL"
+            or bt_override_bytes is not None
+            or not self._sticks_within_auto_disarm_deadband(rc)
+        ):
+            return []
+        self._safety_state, events = force_disarm(self._safety_state, epoch_now)
+        self._armed_idle_since = None
+        _logger.warning(
+            "AUTO-DISARM: armed and idle for %.0f s; flip the arm switch off and on to re-arm",
+            idle_for,
+        )
+        return events
+
+    def _update_armed_idle(
+        self,
+        mono_now: float,
+        rc: RCInputs,
+        bt_override_bytes: tuple[int, int] | None,
+        left: int,
+        right: int,
+    ) -> None:
+        """Start, hold, or clear the armed-idle timer from this tick's final bytes."""
+        outputs_neutral = (
+            int(left) == CENTER_OUTPUT_VALUE and int(right) == CENTER_OUTPUT_VALUE
+        )
+        idle = (
+            self._safety_state.is_armed
+            and self._mode == "MANUAL"
+            and not self._calibration_mode
+            and bt_override_bytes is None
+            and self._sticks_within_auto_disarm_deadband(rc)
+            and outputs_neutral
+        )
+        if idle:
+            if self._armed_idle_since is None:
+                self._armed_idle_since = mono_now
+        else:
+            self._armed_idle_since = None
+
+    def _stamp_auto_disarm_telemetry(self, telemetry: dict, mono_now: float) -> None:
+        since = self._armed_idle_since
+        if since is None:
+            idle_s = 0.0
+        else:
+            idle_s = mono_now - since
+            if idle_s < 0.0:
+                idle_s = 0.0
+        telemetry["armed_idle_s"] = idle_s
+        telemetry["rearm_requires_switch_cycle"] = bool(
+            self._safety_state.rearm_requires_switch_cycle
+        )
+
     def process(
         self,
         rc: RCInputs,
@@ -1457,12 +1552,17 @@ class Controller:
             self._motor.stop()
             self._reset_slew_state(mono_now)
             self._relay.set_armed(False)
+            # Keep the auto-disarm latch. A stale link must not turn a
+            # latched disarm back into "ch3 still high, so arm".
+            held_rearm_latch = self._safety_state.rearm_requires_switch_cycle
             self._safety_state = SafetyState(
                 is_armed=False,
                 last_transition_epoch_s=epoch_now,
                 emergency_active=self._safety_state.emergency_active,
+                rearm_requires_switch_cycle=held_rearm_latch,
             )
             self._mode = "MANUAL"
+            self._armed_idle_since = None
             if was_armed:
                 self._on_armed_session_ended()
             cmd = DriveCommand(
@@ -1475,9 +1575,16 @@ class Controller:
             self._twitch_early_exit(mono_now, "rc_stale")
             rc_telem = {"mode": "MANUAL", "rc_stale": True, "rc_age_s": rc_age}
             self._merge_vision_telemetry(rc_telem)
+            self._stamp_auto_disarm_telemetry(rc_telem, mono_now)
             self._end_vision_tick()
             return cmd, [SafetyEvent.RC_STALE], rc_telem
 
+        # Auto-disarm before update_safety so this tick's DISARMED handling
+        # (motor stop, relay off, slew reset, follow-me exit) still runs.
+        # 2026-09-24 overnight-armed incident.
+        auto_events = self._maybe_auto_disarm(
+            mono_now, epoch_now, rc, bt_override_bytes
+        )
         # Update safety. This now runs on EVERY tick before the calibration
         # early-return below, so RC-stale disarm, ch3 disarm, and ch5 e-stop
         # take effect even while the calibration wizard is driving the motors.
@@ -1489,6 +1596,8 @@ class Controller:
             now_epoch_s=epoch_now,
             params=self._safety_params,
         )
+        if auto_events:
+            events = [*auto_events, *events]
         if was_armed and not self._safety_state.is_armed:
             self._on_armed_session_ended()
 
@@ -1534,7 +1643,9 @@ class Controller:
                 "is_armed": self._safety_state.is_armed,
                 "emergency_active": self._safety_state.emergency_active,
             }
+            self._armed_idle_since = None
             self._merge_vision_telemetry(cal_telem)
+            self._stamp_auto_disarm_telemetry(cal_telem, mono_now)
             self._end_vision_tick()
             return cmd, events, cal_telem
 
@@ -2124,6 +2235,8 @@ class Controller:
         telemetry["corrected_heading_deg"] = heading_align["corrected_heading_deg"]
         self._note_twitch_still(mono_now, left, right)
         telemetry["arms_up"] = self._arms_up_telemetry(mono_now)
+        self._update_armed_idle(mono_now, rc, bt_override_bytes, left, right)
+        self._stamp_auto_disarm_telemetry(telemetry, mono_now)
         self._end_vision_tick()
         return cmd, events, telemetry
 

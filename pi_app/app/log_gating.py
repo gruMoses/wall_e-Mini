@@ -380,6 +380,9 @@ def build_log_obj(
         "follow_me_exit_reason": telem.get("follow_me_exit_reason"),
         "charger_inhibit": telem.get("charger_inhibit", False),
         "vesc_pack_low_latched": telem.get("vesc_pack_low_latched", False),
+        # Armed-idle watchdog (2026-09-24 overnight-armed incident).
+        "armed_idle_s": telem.get("armed_idle_s"),
+        "rearm_requires_switch_cycle": telem.get("rearm_requires_switch_cycle"),
         "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
         "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
         "imu": round_floats(_filter_imu_status_for_log(imu_status), 3) if imu_status else None,

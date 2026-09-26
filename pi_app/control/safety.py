@@ -30,6 +30,9 @@ class SafetyState:
     emergency_active: bool = False
     follow_me_active: bool = False
     last_ch4_high: bool = False
+    # Software disarm (auto-disarm) holds this until ch3 is seen at or below
+    # arm_low_threshold_us. While set, ch3 held high must not arm.
+    rearm_requires_switch_cycle: bool = False
 
     def set_follow_me_active(self, active: bool) -> None:
         """Allow external callers (e.g. web UI) to sync follow-me state."""
@@ -53,6 +56,9 @@ def update_safety(
       When emergency triggers, the system is forced DISARMED and emits EMERGENCY_TRIGGERED.
     - Follow Me activation: ch4 rising edge to >= follow_me_high_threshold_us while armed.
     - Follow Me deactivation: ch4 drops below follow_me_low_threshold_us, or disarm, or emergency.
+    - rearm_requires_switch_cycle: ch3 must be seen <= arm_low_threshold_us before a later
+      high can arm. Any other ch3 value forces disarmed and leaves the latch set.
+      The emergency early return keeps the latch.
     """
     events: List[SafetyEvent] = []
 
@@ -66,6 +72,7 @@ def update_safety(
         emergency_active=state.emergency_active,
         follow_me_active=state.follow_me_active,
         last_ch4_high=ch4_high,
+        rearm_requires_switch_cycle=state.rearm_requires_switch_cycle,
     )
 
     # --- Emergency detection (rising edge) ---
@@ -85,10 +92,21 @@ def update_safety(
         return new_state, events
 
     # --- Arm/disarm from ch3 ---
+    # Latch first. The level check below would otherwise re-arm on a switch
+    # that never went low (2026-09-24 overnight-armed incident).
     desired_armed = state.is_armed
+    if state.rearm_requires_switch_cycle:
+        if ch3_us <= params.arm_low_threshold_us:
+            new_state.rearm_requires_switch_cycle = False
+        else:
+            desired_armed = False
+
     if ch3_us <= params.arm_low_threshold_us:
         desired_armed = False
-    elif ch3_us >= params.arm_high_threshold_us:
+    elif (
+        ch3_us >= params.arm_high_threshold_us
+        and not new_state.rearm_requires_switch_cycle
+    ):
         desired_armed = True
 
     if desired_armed != state.is_armed:
@@ -113,4 +131,31 @@ def update_safety(
             new_state.follow_me_active = False
             events.append(SafetyEvent.FOLLOW_ME_EXITED)
 
+    return new_state, events
+
+
+def force_disarm(
+    state: SafetyState,
+    now_epoch_s: float,
+) -> Tuple[SafetyState, List[SafetyEvent]]:
+    """Disarm and latch until the arm switch is cycled.
+
+    Does not modify ``state``. Does not touch the emergency latch.
+    Emits DISARMED only when ``state`` was armed, and FOLLOW_ME_EXITED
+    when follow-me was active.
+    """
+    events: List[SafetyEvent] = []
+    if state.follow_me_active:
+        events.append(SafetyEvent.FOLLOW_ME_EXITED)
+    if state.is_armed:
+        events.append(SafetyEvent.DISARMED)
+    new_state = SafetyState(
+        is_armed=False,
+        last_transition_epoch_s=now_epoch_s,
+        last_ch5_high=state.last_ch5_high,
+        emergency_active=state.emergency_active,
+        follow_me_active=False,
+        last_ch4_high=state.last_ch4_high,
+        rearm_requires_switch_cycle=True,
+    )
     return new_state, events
