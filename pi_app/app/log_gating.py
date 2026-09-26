@@ -372,6 +372,12 @@ def build_log_obj(
         "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
         "src": src,
         "mode": telem.get("mode", "MANUAL"),
+        # Detection-stream gate (2026-09-25). None when this tick's
+        # telemetry has no sample (gate inactive). vision_stale here is
+        # the controller's per-tick sample; oak.vision_stale is the health copy.
+        "vision_age_s": telem.get("vision_age_s"),
+        "vision_stale": telem.get("vision_stale"),
+        "follow_me_exit_reason": telem.get("follow_me_exit_reason"),
         "charger_inhibit": telem.get("charger_inhibit", False),
         "vesc_pack_low_latched": telem.get("vesc_pack_low_latched", False),
         "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
@@ -565,6 +571,10 @@ def build_log_obj(
             "hand_poll_ms": _oak.get("hand_poll_ms") if _oak else None,
             "nn_input_queue_size": _oak.get("nn_input_queue_size") if _oak else None,
             "hand_poll_enabled": _oak.get("hand_poll_enabled") if _oak else None,
+            "det_fresh_age_s": _oak.get("det_fresh_age_s") if _oak else None,
+            "det_seq": _oak.get("det_seq") if _oak else None,
+            "det_seq_stuck_packets": _oak.get("det_seq_stuck_packets") if _oak else None,
+            "vision_stale": _oak.get("vision_stale") if _oak else None,
         },
         "gesture": {
             "hand_detected": _g.get("hand_detected"),
@@ -647,6 +657,10 @@ def build_slow_obj(
             "hand_poll_ms": _oak.get("hand_poll_ms"),
             "nn_input_queue_size": _oak.get("nn_input_queue_size"),
             "hand_poll_enabled": _oak.get("hand_poll_enabled"),
+            "det_fresh_age_s": _oak.get("det_fresh_age_s"),
+            "det_seq": _oak.get("det_seq"),
+            "det_seq_stuck_packets": _oak.get("det_seq_stuck_packets"),
+            "vision_stale": _oak.get("vision_stale"),
         },
         "gesture": {
             "hand_poll_enabled": _oak.get("hand_poll_enabled"),

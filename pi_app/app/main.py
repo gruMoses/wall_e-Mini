@@ -417,6 +417,17 @@ def run() -> None:
         gesture_controller=gesture_ctrl,
         gps_heading_aligner=gps_heading_aligner,
     )
+    if oak_reader is not None:
+        _fresh_fn = getattr(oak_reader, "get_detection_freshness", None)
+        if callable(_fresh_fn):
+            controller.set_vision_freshness_getter(_fresh_fn)
+        else:
+            print(
+                "WARNING: OAK-D reader has no get_detection_freshness(); "
+                "follow-me will NOT stop on a stalled detection stream "
+                "(2026-09-25 vision-stale incident). A frozen person list "
+                "can drive the robot."
+            )
     bt_server = None  # Set to None to indicate external SPP service is used
 
     # Start web viewer (only needs OAK-D camera; recorder is optional)

@@ -2491,6 +2491,22 @@ class FollowMeController:
         self._last_steer_src = "lost"
         self._last_emitted_flag = False
 
+    def reset_tracking(self) -> None:
+        """Drop follow-me tracking so the next entry starts clean.
+
+        Called when the controller leaves FOLLOW_ME because the detection
+        stream is stale (2026-09-25). ``_reset_tracking_state`` already
+        resets the target tracker; reset it again so a later edit to the
+        private helper cannot leave the lock armed. The output hold is
+        cleared too, or the next ``compute()`` would replay the neutral
+        cache for up to one output period and ignore the new target.
+        """
+        self._reset_tracking_state()
+        self._tracker.reset()
+        self._last_output_time = 0.0
+        self._prev_target_present = False
+        self._last_compute_time = 0.0
+
     # ── Status / telemetry ───────────────────────────────────────────────────
 
     def _tunable(self, name: str) -> float:

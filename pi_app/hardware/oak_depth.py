@@ -5,6 +5,7 @@ Runs a DepthAI pipeline on a background daemon thread. Exposes thread-safe
 APIs consumed by the main control loop:
   - get_min_distance()      -> (distance_m, age_s)  for obstacle avoidance
   - get_person_detections() -> list[PersonDetection]  for Follow Me
+  - get_detection_freshness() -> dict                  age of that stream
   - get_depth_stats()       -> DepthStats              for enriched telemetry
   - get_hand_data()         -> HandData | None          for gesture control
   - get_latest_rgb_frame()  -> (frame, ts)              640x480 BGR preview copy
@@ -228,6 +229,53 @@ def _nn_msg_latency_s(msg) -> float | None:
     if age < 0.0 or age > 5.0:
         return None
     return age
+
+
+def _nn_msg_capture_ts(msg) -> float | None:
+    """Host-synced capture time in seconds, or None if unusable.
+
+    Same ``getTimestamp()`` conversion as ``_nn_msg_latency_s`` (timedelta
+    ``total_seconds()``, otherwise ``float``). No 5 s plausibility cap: a
+    frozen NN input frame must keep its old capture time so the age grows
+    (2026-09-25, CAM_A stalled and the last person list was re-served for
+    40 min). A value more than 0.5 s in the future is rejected — that is
+    the wrong time base, not a real capture.
+    """
+    getter = getattr(msg, "getTimestamp", None)
+    if not callable(getter):
+        return None
+    try:
+        ts = getter()
+    except Exception:
+        return None
+    if ts is None:
+        return None
+    try:
+        ts_s = float(ts.total_seconds()) if hasattr(ts, "total_seconds") else float(ts)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ts_s):
+        return None
+    if time.monotonic() - ts_s < -0.5:
+        return None
+    return ts_s
+
+
+def _nn_msg_sequence_num(msg) -> int | None:
+    """``msg.getSequenceNum()`` as an int, or None if the message has none."""
+    getter = getattr(msg, "getSequenceNum", None)
+    if not callable(getter):
+        return None
+    try:
+        seq = getter()
+    except Exception:
+        return None
+    if seq is None:
+        return None
+    try:
+        return int(seq)
+    except (TypeError, ValueError):
+        return None
 
 
 def sample_person_depth(
@@ -894,6 +942,12 @@ class OakDepthReader:
         self._rec_cfg = recording_config
         self._gesture_cfg = gesture_config
         self._det_cfg = detection_config
+        # Follow-me refuses a detection stream older than this. Default
+        # matches OakDetectionConfig even when no detection config is passed
+        # (unit tests, MobileNet-only callers).
+        self._vision_stale_s = 1.5
+        if detection_config is not None:
+            self._vision_stale_s = float(getattr(detection_config, "vision_stale_s", 1.5))
 
         self._depth_state = _DepthState()
         self._corridor_persistence = _CorridorPersistence(
@@ -1008,6 +1062,13 @@ class OakDepthReader:
         # H5: sampler exception log-once-per-episode (reset on the next success).
         self._person_sample_exc_logged = False
         self._last_detection_poll_ts = 0.0
+        # Detection-stream freshness for the follow-me gate (2026-09-25).
+        # None until the first packet whose sequence is missing or newer
+        # than the last one seen. A repeated sequence does not move it:
+        # the host can keep re-publishing one frozen NN frame.
+        self._det_fresh_ts: float | None = None
+        self._det_last_seq: int | None = None
+        self._det_seq_stuck_packets: int = 0
         self._last_rgb_poll_ts = 0.0
         self._last_pipeline_error_msg = ""
         self._last_depth_error_msg = ""
@@ -1068,6 +1129,32 @@ class OakDepthReader:
         """
         with self._lock:
             return float(self._det_state.timestamp)
+
+    def get_detection_freshness(self) -> dict:
+        """Age of the detection stream the follow-me gate consumes.
+
+        Keys: ``age_s`` (``inf`` before the first refreshing packet),
+        ``stale`` (``age_s > vision_stale_s``), ``seq`` (last sequence that
+        refreshed the clock; None if that packet had none), and
+        ``seq_stuck_packets`` (packets since then whose sequence did not
+        advance). Does not change ``get_person_detections()``. Thread-safe.
+        """
+        now = time.monotonic()
+        with self._lock:
+            fresh_ts = self._det_fresh_ts
+            seq = self._det_last_seq
+            stuck = self._det_seq_stuck_packets
+            limit = self._vision_stale_s
+        if fresh_ts is None:
+            age = float("inf")
+        else:
+            age = now - fresh_ts
+        return {
+            "age_s": age,
+            "stale": age > limit,
+            "seq": seq,
+            "seq_stuck_packets": stuck,
+        }
 
     def get_depth_stats(self) -> DepthStats:
         """Return rich depth ROI statistics. Thread-safe."""
@@ -1387,6 +1474,10 @@ class OakDepthReader:
             det_event_ts = list(self._det_event_ts)
             depth_event_ts = list(self._depth_event_ts)
             det_latency_s = self._det_latency_s
+            det_fresh_ts = self._det_fresh_ts
+            det_seq = self._det_last_seq
+            det_seq_stuck_packets = self._det_seq_stuck_packets
+            vision_stale_s = self._vision_stale_s
             vision_iter_samples = list(self._vision_iter_samples)
             hand_detect_samples = list(self._hand_detect_samples)
             nn_input_queue_size = self._nn_input_queue_size
@@ -1397,6 +1488,11 @@ class OakDepthReader:
         depth_age_s = (now - depth_ts) if depth_ts > 0.0 else float("inf")
         depth_recv_age_s = (now - depth_recv_ts) if depth_recv_ts > 0.0 else float("inf")
         det_age_s = (now - det_ts) if det_ts > 0.0 else float("inf")
+        if det_fresh_ts is None:
+            det_fresh_age_s = float("inf")
+        else:
+            det_fresh_age_s = now - det_fresh_ts
+        vision_stale = det_fresh_age_s > vision_stale_s
         rgb_age_s = (now - rgb_ts) if rgb_ts > 0.0 else float("inf")
         depth_frame_age_s = (now - depth_state_ts) if depth_state_ts > 0.0 else float("inf")
         rgb_frame_age_s = (now - rgb_state_ts) if rgb_state_ts > 0.0 else float("inf")
@@ -1465,6 +1561,12 @@ class OakDepthReader:
             "hand_poll_enabled": hand_poll_enabled,
             "mp_loaded": mp_loaded,
             "hand_detect_rate": round(hand_detect_rate, 3),
+            "det_fresh_age_s": (
+                round(det_fresh_age_s, 3) if det_fresh_age_s != float("inf") else None
+            ),
+            "det_seq": det_seq,
+            "det_seq_stuck_packets": det_seq_stuck_packets,
+            "vision_stale": vision_stale,
         }
 
     @property
@@ -1980,6 +2082,7 @@ class OakDepthReader:
                 self._connected = True
                 self._last_pipeline_loop_ts = time.monotonic()
                 self._last_pipeline_error_msg = ""
+                self._reset_det_sequence_locked()
                 # Device clock restarts with a new session — reseed yaw clocks
                 # without jumping cumulative free-yaw.
                 self._imu_yaw_producer.note_pipeline_restart()
@@ -2794,6 +2897,42 @@ class OakDepthReader:
         )
         return [replace(p, track_id=tid) for p, tid in zip(persons, track_ids)]
 
+    def _reset_det_sequence_locked(self) -> None:
+        """New device session: forget the last NN sequence. Caller holds the lock.
+
+        A reconnect restarts the device sequence counter. Without this the
+        new session's packets (lower sequence numbers) would never refresh
+        the clock. ``_det_fresh_ts`` is kept, so the age keeps growing from
+        the old session's last packet: an outage longer than
+        ``vision_stale_s`` reads stale until the new session's first packet.
+        """
+        self._det_last_seq = None
+        self._det_seq_stuck_packets = 0
+
+    def _note_det_packet_freshness(self, msg, publish_ts: float) -> None:
+        """Update detection-stream freshness. Caller holds ``self._lock``.
+
+        A packet refreshes ``_det_fresh_ts`` when its sequence number is
+        missing or greater than the last one seen. The stored time is the
+        host-synced capture time, or ``publish_ts`` when the capture time
+        is missing. A sequence that did not advance (equal or lower) leaves
+        the clock where it is and increments ``_det_seq_stuck_packets``.
+        The count resets only when the sequence advances. A lower sequence
+        inside one session does not refresh. Each new device session clears
+        the last sequence (see the session start in _run_pipeline_once),
+        because a reconnect restarts the device counter.
+        """
+        seq = _nn_msg_sequence_num(msg)
+        prev = self._det_last_seq
+        if seq is None or prev is None or seq > prev:
+            capture = _nn_msg_capture_ts(msg)
+            self._det_fresh_ts = publish_ts if capture is None else capture
+            self._det_last_seq = seq
+            if seq is not None and (prev is None or seq > prev):
+                self._det_seq_stuck_packets = 0
+        else:
+            self._det_seq_stuck_packets += 1
+
     def _poll_detections(self, det_q) -> None:
         """Extract person detections with spatial coordinates.
 
@@ -2871,11 +3010,13 @@ class OakDepthReader:
 
                 persons = self._assign_track_ids(persons)
                 with self._lock:
+                    publish_ts = time.monotonic()
                     self._det_state.persons = persons
-                    self._det_state.timestamp = time.monotonic()
+                    self._det_state.timestamp = publish_ts
                     self._all_dets_state.detections = all_dets
-                    self._all_dets_state.timestamp = self._det_state.timestamp
-                    self._last_detection_poll_ts = self._det_state.timestamp
+                    self._all_dets_state.timestamp = publish_ts
+                    self._last_detection_poll_ts = publish_ts
+                    self._note_det_packet_freshness(in_det, publish_ts)
                     self._last_detection_error_msg = ""
                 return
 
@@ -2974,11 +3115,13 @@ class OakDepthReader:
                 persons = self._assign_track_ids(persons)
 
             with self._lock:
+                publish_ts = time.monotonic()
                 self._det_state.persons = persons
-                self._det_state.timestamp = time.monotonic()
+                self._det_state.timestamp = publish_ts
                 self._all_dets_state.detections = all_dets
-                self._all_dets_state.timestamp = self._det_state.timestamp
-                self._last_detection_poll_ts = self._det_state.timestamp
+                self._all_dets_state.timestamp = publish_ts
+                self._last_detection_poll_ts = publish_ts
+                self._note_det_packet_freshness(in_det, publish_ts)
                 self._last_detection_error_msg = ""
         except Exception as e:
             with self._lock:

@@ -484,5 +484,76 @@ class BuildLogObjArmsUpBlockTests(unittest.TestCase):
         self.assertIsNone(au["pose_ms"])
 
 
+class VisionStaleLogFieldsTests(unittest.TestCase):
+    """2026-09-25 detection-stream freshness on the per-tick and slow lines."""
+
+    def test_per_tick_copies_controller_and_oak_freshness(self):
+        telem = {
+            "vision_age_s": 0.25,
+            "vision_stale": False,
+            "follow_me_exit_reason": None,
+        }
+        oak = {
+            "det_fresh_age_s": 0.25,
+            "det_seq": 453,
+            "det_seq_stuck_packets": 0,
+            "vision_stale": False,
+        }
+        obj = build_log_obj(**_base_kwargs(telem=telem, oak_camera_health=oak))
+        self.assertEqual(obj["vision_age_s"], 0.25)
+        self.assertIs(obj["vision_stale"], False)
+        self.assertIsNone(obj["follow_me_exit_reason"])
+        self.assertEqual(obj["oak"]["det_fresh_age_s"], 0.25)
+        self.assertEqual(obj["oak"]["det_seq"], 453)
+        self.assertEqual(obj["oak"]["det_seq_stuck_packets"], 0)
+        self.assertIs(obj["oak"]["vision_stale"], False)
+
+    def test_per_tick_missing_keys_are_none(self):
+        obj = build_log_obj(**_base_kwargs())
+        self.assertIsNone(obj["vision_age_s"])
+        self.assertIsNone(obj["vision_stale"])
+        self.assertIsNone(obj["follow_me_exit_reason"])
+        for key in (
+            "det_fresh_age_s", "det_seq", "det_seq_stuck_packets", "vision_stale",
+        ):
+            self.assertIsNone(obj["oak"][key], key)
+
+    def test_exit_reason_copied(self):
+        obj = build_log_obj(**_base_kwargs(telem={
+            "follow_me_exit_reason": "vision_stale",
+            "vision_stale": True,
+            "vision_age_s": None,
+        }))
+        self.assertEqual(obj["follow_me_exit_reason"], "vision_stale")
+        self.assertIs(obj["vision_stale"], True)
+        self.assertIsNone(obj["vision_age_s"])
+
+    def test_slow_oak_copies_freshness_fields(self):
+        oak = {
+            "det_fresh_age_s": 1.8,
+            "det_seq": 12,
+            "det_seq_stuck_packets": 4,
+            "vision_stale": True,
+        }
+        obj = build_slow_obj(
+            now_ts=1.0, imu_pipeline=None, oak_camera_health=oak, chip_temp_c=None,
+        )
+        self.assertEqual(obj["oak"]["det_fresh_age_s"], 1.8)
+        self.assertEqual(obj["oak"]["det_seq"], 12)
+        self.assertEqual(obj["oak"]["det_seq_stuck_packets"], 4)
+        self.assertIs(obj["oak"]["vision_stale"], True)
+        # The full health dict is still passed through unchanged.
+        self.assertIs(obj["oak_camera_health"]["vision_stale"], True)
+
+    def test_slow_missing_oak_fields_are_none(self):
+        obj = build_slow_obj(
+            now_ts=1.0, imu_pipeline=None, oak_camera_health=None, chip_temp_c=None,
+        )
+        for key in (
+            "det_fresh_age_s", "det_seq", "det_seq_stuck_packets", "vision_stale",
+        ):
+            self.assertIsNone(obj["oak"][key], key)
+
+
 if __name__ == "__main__":
     unittest.main()

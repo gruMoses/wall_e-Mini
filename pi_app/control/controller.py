@@ -39,6 +39,16 @@ from config import config
 RC_STALE_TIMEOUT_S = 1.0
 
 
+def _vision_fail_closed() -> dict:
+    """Freshness dict used when the getter fails. Stale, age unknown."""
+    return {
+        "age_s": float("inf"),
+        "stale": True,
+        "seq": None,
+        "seq_stuck_packets": 0,
+    }
+
+
 @dataclass(frozen=True)
 class RCInputs:
     ch1_us: int
@@ -160,6 +170,15 @@ class Controller:
         self._obstacle_age_s: float | None = None
         self._gps_reading: GpsReading | None = None
         self._person_detections: list[PersonDetection] = []
+        # Detection-stream freshness gate. None = inactive (unit tests, no
+        # OAK): follow-me behaves exactly as before. process() samples the
+        # getter once per tick. 2026-09-25: a stalled CAM_A kept serving one
+        # frozen person and follow-me drove on it.
+        self._vision_freshness_getter = None
+        self._vision_tick_sampled = False
+        self._vision_fresh_cache: dict | None = None
+        self._vision_getter_fail_logged = False
+        self._vision_stale_episode_logged = False
         self._hand_data: HandData | None = None
         self._pose_sample: PoseSample | None = None
         self._pose_status: dict = {}
@@ -269,6 +288,15 @@ class Controller:
     def set_person_detections(self, detections: list[PersonDetection]) -> None:
         """Feed latest person detections from OakDepthReader."""
         self._person_detections = detections
+
+    def set_vision_freshness_getter(self, fn) -> None:
+        """Register ``OakDepthReader.get_detection_freshness`` (or a double).
+
+        ``fn()`` returns that dict. When unset, the follow-me freshness
+        gate is inactive and behaviour is unchanged. A non-callable is
+        stored but ignored, same as unset.
+        """
+        self._vision_freshness_getter = fn
 
     def set_hand_data(self, data: HandData | None) -> None:
         """Feed latest hand landmark data from OakDepthReader."""
@@ -408,8 +436,133 @@ class Controller:
             )
         self._charger_inhibit = inhibit
 
+    def _invoke_vision_getter(self, getter) -> dict:
+        """Call the freshness getter. A failure is stale (fail closed)."""
+        try:
+            fresh = getter()
+        except Exception:
+            self._log_vision_getter_failure()
+            return _vision_fail_closed()
+        if not isinstance(fresh, dict):
+            self._log_vision_getter_failure()
+            return _vision_fail_closed()
+        self._vision_getter_fail_logged = False
+        if "stale" not in fresh:
+            fresh = dict(fresh)
+            fresh["stale"] = True
+        # A fresh read ends the stale episode, so the next dropout logs again.
+        if not bool(fresh.get("stale", True)):
+            self._vision_stale_episode_logged = False
+        return fresh
+
+    def _log_vision_getter_failure(self) -> None:
+        """Log a getter failure once per failure episode."""
+        if self._vision_getter_fail_logged:
+            return
+        self._vision_getter_fail_logged = True
+        _logger.warning(
+            "vision freshness getter failed; treating vision as stale"
+        )
+
+    def _sample_vision_freshness(self) -> None:
+        """Call the freshness getter at most once per process() tick."""
+        self._vision_tick_sampled = False
+        self._vision_fresh_cache = None
+        getter = self._vision_freshness_getter
+        if not callable(getter):
+            return
+        self._vision_fresh_cache = self._invoke_vision_getter(getter)
+        self._vision_tick_sampled = True
+
+    def _end_vision_tick(self) -> None:
+        """Drop the per-tick cache so a later web call reads live freshness."""
+        self._vision_tick_sampled = False
+
+    def _vision_freshness_now(self) -> dict | None:
+        """Current freshness, or None when the gate is inactive.
+
+        Inside ``process()`` this is the once-per-tick cache. Outside
+        (``activate_follow_me``) it calls the getter directly.
+        """
+        getter = self._vision_freshness_getter
+        if not callable(getter):
+            return None
+        if self._vision_tick_sampled:
+            if isinstance(self._vision_fresh_cache, dict):
+                return self._vision_fresh_cache
+            return _vision_fail_closed()
+        return self._invoke_vision_getter(getter)
+
+    def _vision_is_stale(self) -> bool:
+        """True only when the gate is active and the stream is stale."""
+        fresh = self._vision_freshness_now()
+        if fresh is None:
+            return False
+        return bool(fresh.get("stale", True))
+
+    def _merge_vision_telemetry(self, telemetry: dict) -> None:
+        """Stamp vision age/stale when the gate is active. No-op otherwise."""
+        if not callable(self._vision_freshness_getter):
+            return
+        fresh = self._vision_fresh_cache if isinstance(self._vision_fresh_cache, dict) else {}
+        age = fresh.get("age_s", float("inf"))
+        try:
+            age_f = float(age)
+        except (TypeError, ValueError):
+            age_f = float("inf")
+        telemetry["vision_age_s"] = age_f if math.isfinite(age_f) else None
+        telemetry["vision_stale"] = bool(fresh.get("stale", True))
+
+    def _leave_follow_me_if_vision_stale(self, telemetry: dict, mono_now: float) -> None:
+        """Drop FOLLOW_ME on this tick when the detection stream is stale.
+
+        Same exit as FOLLOW_ME_EXITED (MANUAL, follow-me inactive, recorder
+        stopped, gesture told), plus a tracking reset so the next entry
+        does not resume the frozen person. This tick's target is the
+        sticks, and the slew limiter ramps to it at the MANUAL rates like
+        any other follow-me exit (about 0.2 s from cruise to neutral).
+        The slew is NOT bypassed: a held stick would otherwise jump the
+        robot straight from the follow-me command to the stick command.
+        """
+        if self._mode != "FOLLOW_ME" or not self._vision_is_stale():
+            return
+        self._mode = "MANUAL"
+        self._safety_state.set_follow_me_active(False)
+        if self._follow_me is not None:
+            self._follow_me.stop_recorder()
+            self._follow_me.reset_tracking()
+        if self._gesture is not None:
+            self._gesture.notify_external_deactivation()
+        telemetry["follow_me_exit_reason"] = "vision_stale"
+        if self._vision_stale_episode_logged:
+            return
+        fresh = self._vision_fresh_cache if isinstance(self._vision_fresh_cache, dict) else {}
+        age = fresh.get("age_s", float("inf"))
+        try:
+            age_f = float(age)
+        except (TypeError, ValueError):
+            age_f = float("inf")
+        stuck = fresh.get("seq_stuck_packets", 0)
+        try:
+            stuck_i = int(stuck)
+        except (TypeError, ValueError):
+            stuck_i = 0
+        _logger.warning(
+            "FOLLOW_ME stopped: vision stale (age %.1f s, seq stuck %d)",
+            age_f,
+            stuck_i,
+        )
+        self._vision_stale_episode_logged = True
+
     def _follow_me_target_present(self) -> bool:
-        """True when a Follow Me target candidate is currently visible."""
+        """True when a Follow Me target candidate is currently visible.
+
+        A stale detection stream is not a target: the stored list can be
+        a frozen person (2026-09-25). The gate is inactive when no
+        freshness getter is set.
+        """
+        if self._vision_is_stale():
+            return False
         return bool(self._person_detections)
 
     def activate_follow_me(self) -> bool:
@@ -1113,6 +1266,7 @@ class Controller:
     ) -> Tuple[DriveCommand, List[SafetyEvent], dict]:
         epoch_now = now_epoch_s if now_epoch_s is not None else time.time()
         mono_now = time.monotonic()
+        self._sample_vision_freshness()
         was_armed = self._safety_state.is_armed
 
         # ── Poll VESC telemetry every 50 ms ──────────────────────────────────
@@ -1319,7 +1473,10 @@ class Controller:
             )
             self._last_follow_me_emitted_forward_byte = None
             self._twitch_early_exit(mono_now, "rc_stale")
-            return cmd, [SafetyEvent.RC_STALE], {"mode": "MANUAL", "rc_stale": True, "rc_age_s": rc_age}
+            rc_telem = {"mode": "MANUAL", "rc_stale": True, "rc_age_s": rc_age}
+            self._merge_vision_telemetry(rc_telem)
+            self._end_vision_tick()
+            return cmd, [SafetyEvent.RC_STALE], rc_telem
 
         # Update safety. This now runs on EVERY tick before the calibration
         # early-return below, so RC-stale disarm, ch3 disarm, and ch5 e-stop
@@ -1343,6 +1500,7 @@ class Controller:
         # previously it only appeared in the dict while inhibiting, so nothing
         # downstream could ever log/see the transition (2026-06-13 field bug).
         telemetry: dict = {"charger_inhibit": self._charger_inhibit}
+        self._merge_vision_telemetry(telemetry)
 
         # Calibration early-return — now AFTER update_safety so safety is
         # always enforced. The wizard issues drive commands directly, so
@@ -1370,12 +1528,15 @@ class Controller:
                     self._twitch_calib_neutral_pending = False
             if write_neutral:
                 self._motor.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
-            return cmd, events, {
+            cal_telem = {
                 "mode": "CALIBRATING",
                 "calibration": True,
                 "is_armed": self._safety_state.is_armed,
                 "emergency_active": self._safety_state.emergency_active,
             }
+            self._merge_vision_telemetry(cal_telem)
+            self._end_vision_tick()
+            return cmd, events, cal_telem
 
         # React to mode transitions from safety events
         for ev in events:
@@ -1386,10 +1547,14 @@ class Controller:
                         self._follow_me.start_recorder()
                 else:
                     # New engagement rule: don't enter Follow Me unless a
-                    # target is already present.
+                    # target is already present. A stale stream is not a
+                    # target even when the frozen list is non-empty.
                     self._mode = "MANUAL"
                     self._safety_state.set_follow_me_active(False)
-                    telemetry["follow_me_activation_blocked"] = "no_target"
+                    if self._vision_is_stale():
+                        telemetry["follow_me_activation_blocked"] = "vision_stale"
+                    else:
+                        telemetry["follow_me_activation_blocked"] = "no_target"
             elif ev in (SafetyEvent.FOLLOW_ME_EXITED, SafetyEvent.EMERGENCY_TRIGGERED):
                 if self._follow_me is not None:
                     self._follow_me.stop_recorder()
@@ -1434,6 +1599,10 @@ class Controller:
             self._motor.stop()
             self._relay.set_armed(False)
             self._shutdown.schedule_shutdown(delay_seconds=5.0)
+
+        # Stale vision leaves FOLLOW_ME before any command is computed, so
+        # this tick takes the MANUAL (stick) path.
+        self._leave_follow_me_if_vision_stale(telemetry, mono_now)
 
         # Command computation
         telemetry["mode"] = self._mode
@@ -1955,6 +2124,7 @@ class Controller:
         telemetry["corrected_heading_deg"] = heading_align["corrected_heading_deg"]
         self._note_twitch_still(mono_now, left, right)
         telemetry["arms_up"] = self._arms_up_telemetry(mono_now)
+        self._end_vision_tick()
         return cmd, events, telemetry
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:

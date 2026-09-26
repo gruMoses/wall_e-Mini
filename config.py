@@ -1018,6 +1018,15 @@ class OakDetectionConfig:
     nn_inference_threads: int = 2
     # Today's NeuralNetwork.setNumShavesPerInferenceThread value.
     nn_shaves_per_thread: int = 4
+    # 2026-09-25 17:43: CAM_A (the YOLO input and the preview) stalled after
+    # 23 h. Mono and depth kept running at 15 fps. get_person_detections()
+    # kept returning one frozen person (x -0.8 m, z 2.52 m, track 453) for
+    # 40 min while get_health() already reported detections_stale. At 18:23
+    # FOLLOW_ME treated that list as live and drove ~0.85 m/s in a left
+    # circle for 44 s. Follow-me must not drive when the detection stream
+    # is older than this. The stored list is left unchanged, so a stale
+    # close person still forces the person/animal stop.
+    vision_stale_s: float = 1.5
 
 
 @dataclass(frozen=True)
