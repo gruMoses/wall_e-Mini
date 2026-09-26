@@ -336,7 +336,13 @@ class ObstacleAvoidanceConfig:
 class FollowMeConfig:
     """Configuration for autonomous person-following mode."""
     enabled: bool = True
-    follow_distance_m: float = 1.5        # desired following distance in metres
+    # 1.5 -> 1.2 on 2026-09-26: Kevin asked for a 4 ft stop (the 1.5 m
+    # setting came to rest at 1.6 m, "a good 5 ft"). Forward speed is zero
+    # inside follow_distance_m + speed_dead_zone_m (1.4 m); the robot coasts
+    # to about 1.3 m. The top-clipped-box exemption in DetectionFilter keeps
+    # the operator in the filter at this range (a standing adult overflows
+    # the 42 deg frame inside ~2.3 m); the person stop tier is at 0.8 m.
+    follow_distance_m: float = 1.2        # desired following distance in metres
     min_distance_m: float = 0.5
     # 6.0 -> 8.0 on 2026-09-26 (arm_20260926_125554.log): the operator
     # walked away at ~1.55 m/s, the robot was pinned at its 1.38 m/s cap,
@@ -370,9 +376,10 @@ class FollowMeConfig:
     # 0.71 on a full 53.5 V pack, so 20,000 eRPM needs ~0.82 there; below
     # ~46 V it saturates at max duty (about 1.5 m/s), as full stick does.
     # max_speed_error_m 1.5 -> 1.75 keeps the approach gain at
-    # 128 / 1.75 = 73.1 bytes per metre (was 110 / 1.5 = 73.3), so within
-    # 3.0 m of the operator each speed command is within 0.3 percent of the
-    # old one; only a larger gap drives faster. Speed pinned at the cap also leaves no L/R headroom
+    # 128 / 1.75 = 73.1 bytes per metre (was 110 / 1.5 = 73.3), so the
+    # speed law has the validated slope; follow_distance_m 1.2 only shifts
+    # it 0.3 m closer (each command equals the old law's command 0.3 m
+    # farther out, within 0.3 percent). Speed pinned at the cap also leaves no L/R headroom
     # above 254, so at top speed the mixer clips the outer track and a
     # small steer correction gives about half the yaw of the same
     # correction at 110 (turn_speed_scale still slows real turns).

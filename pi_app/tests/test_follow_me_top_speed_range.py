@@ -4,13 +4,14 @@ arm_20260926_125554.log: the operator walked away at ~1.55 m/s while
 follow-me sat at its 1.38 m/s cap (max_follow_speed_byte 110). At 6.1-6.6 m
 DetectionFilter dropped him on range alone (YOLO 0.83-0.89, stereo and
 bbox-height ranges agreeing) and the robot stopped. These tests pin the fix:
-the cap is the full max_erpm byte, the approach inside a 3.0 m gap keeps the
-old speed law, and a cleanly detected operator at 6-8 m is still followed.
+the cap is the full max_erpm byte, the approach keeps the validated slope
+(shifted 0.3 m closer for Kevin's 4 ft stop), and a cleanly detected
+operator at 6-8 m is still followed.
 """
 
 import unittest
 
-from config import FollowMeConfig, VescConfig
+from config import FollowMeConfig, ObstacleAvoidanceConfig, VescConfig
 from pi_app.control.follow_me import FollowMeController, PersonDetection
 from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT
 from pi_app.hardware.vesc import VescCanDriver
@@ -41,21 +42,36 @@ class TestTopSpeed(unittest.TestCase):
         self.assertEqual(fm._speed.compute(6.0), 128.0)
 
 
-class TestApproachUnchanged(unittest.TestCase):
-    def test_open_loop_inside_3m_matches_old_law(self):
-        # speed_dead_zone_m is 0.2, so the law starts above 1.7 m.
-        for d in (1.75, 1.9, 2.0, 2.3, 2.6, 2.9, 3.0):
+class TestApproachLaw(unittest.TestCase):
+    """Same validated slope; follow_distance_m 1.2 shifts it 0.3 m closer."""
+
+    SHIFT_M = 1.5 - 1.2
+
+    def test_approach_gain_is_unchanged(self):
+        fm = FollowMeController(FollowMeConfig())
+        slope = (fm._speed.compute(2.6) - fm._speed.compute(1.8)) / 0.8
+        self.assertAlmostEqual(slope, 110.0 / 1.5, delta=0.003 * 110.0 / 1.5)
+
+    def test_each_command_is_the_old_law_0_3_m_farther_out(self):
+        # speed_dead_zone_m is 0.2, so the new law starts above 1.4 m.
+        for d in (1.45, 1.6, 1.9, 2.2, 2.5, 2.7):
             fm = FollowMeController(FollowMeConfig())
             new = fm._speed.compute(d)
-            old = _old_open_loop(d)
+            old = _old_open_loop(d + self.SHIFT_M)
             self.assertAlmostEqual(new, old, delta=max(0.003 * old, 1e-6),
                                    msg=f"distance {d} m")
             self.assertLessEqual(new, old + 1e-9, msg=f"distance {d} m")
 
-    def test_old_cap_is_reached_at_the_same_gap(self):
-        fm = FollowMeController(FollowMeConfig())
-        self.assertLess(fm._speed.compute(3.0), 110.0)
-        self.assertGreater(fm._speed.compute(3.0), 109.0)
+    def test_forward_stops_inside_1_4_m(self):
+        cfg = FollowMeConfig()
+        self.assertAlmostEqual(cfg.follow_distance_m, 1.2)
+        fm = FollowMeController(cfg)
+        self.assertEqual(fm._speed.compute(1.4), 0.0)
+        self.assertEqual(fm._speed.compute(1.2), 0.0)
+        self.assertGreater(fm._speed.compute(1.45), 0.0)
+        # The robot rests outside the person stop tier even after coasting.
+        self.assertLess(ObstacleAvoidanceConfig().safety_stop_radius_m,
+                        cfg.follow_distance_m)
 
 
 class TestFollowRange(unittest.TestCase):
