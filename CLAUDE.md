@@ -161,9 +161,12 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
   `max_speed_error_m` 1.75 (keeps the 73 bytes/m approach slope),
   `max_distance_m` 8.0 (the 0.05 width floor binds first near 7-7.5 m),
   `follow_distance_m` 1.2 (Kevin's 4 ft stop; zero forward inside 1.4 m).
-  Open: false near matches on repeated structures (iron gate bars, lap
-  siding) put 0.56-0.9 m phantoms in the depth corridor and make the
-  approach slow and jerky. The recorder's colourized depth cannot tell a
+  False near matches on the iron gate put 0.7-0.8 m phantoms in the depth
+  corridor (slow, jerky approach). Fix: `corridor_min_blob_px` 80 drops
+  near pixels in tiny 8-connected blobs; `person_mask_depth_margin_m` 0.5
+  masks only the person's own pixels (the old whole-box mask hid anything
+  between robot and person). Tuned on 45 raw frames incl. woven wire
+  fence (200 px lost it). The recorder's colourized depth cannot tell a
   false match from a hole; capture raw frames with the local-only
   `POST /api/debug/depth_snapshot` (`logs/depth_snapshots/*.npz`). See
   `docs/NEXT_SESSION.md` section 4, item 5.
