@@ -153,6 +153,20 @@ recorded walk replayed through `tools/replay_follow_me_log.py`.
   (was 0.80 s at 8 fps). Motor→yaw lag 0.47 → 0.12 s was heading latency
   from a blocked vision thread, not the drivetrain. Steer gains left at
   kp 0.5 / cap 32.
+- **Sixth follow-me round (2026-09-26, `arm_20260926_125554.log`,
+  `arm_20260926_130713.log`)**: the robot sat at the old 110-byte cap
+  (1.38 m/s) behind a 1.55 m/s walk and lost the operator on range alone
+  at 6.1 m. Now `max_follow_speed_byte` 128 (byte 254 = `max_erpm` =
+  1.61 m/s, the drivetrain limit; ~1.5 m/s on a half pack),
+  `max_speed_error_m` 1.75 (keeps the 73 bytes/m approach slope),
+  `max_distance_m` 8.0 (the 0.05 width floor binds first near 7-7.5 m),
+  `follow_distance_m` 1.2 (Kevin's 4 ft stop; zero forward inside 1.4 m).
+  Open: false near matches on repeated structures (iron gate bars, lap
+  siding) put 0.56-0.9 m phantoms in the depth corridor and make the
+  approach slow and jerky. The recorder's colourized depth cannot tell a
+  false match from a hole; capture raw frames with the local-only
+  `POST /api/debug/depth_snapshot` (`logs/depth_snapshots/*.npz`). See
+  `docs/NEXT_SESSION.md` section 4, item 5.
 - **Arms-up bench twitch (2026-09-22, `docs/NEXT_SESSION.md` section 2)**:
   MediaPipe Pose on the person crop (`pi_app/hardware/pose_worker.py`,
   `pi_app/control/arms_up.py`) gives one 22-byte, 0.25 s reverse pulse.
