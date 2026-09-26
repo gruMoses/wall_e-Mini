@@ -140,8 +140,12 @@ _PINCTRL_LEVEL_RE = re.compile(r"\|\s*(hi|lo)\b", re.IGNORECASE)
 # `pinctrl get 2,3` prints one such line per requested pin. This regex
 # additionally captures the pin number and its function (e.g. "a3"), for
 # the joint SDA+SCL reads self-heal and detection both need.
+# Real Pi 5 formats (2026-09-26): " 2: a3    pu | hi // GPIO2 = SDA1",
+# " 0: ip    pu | hi // ...", " 7: op dh pu | hi // GPIO7 = output". The
+# function is the first token after "N:"; anything else before "|" (drive,
+# pull) is skipped.
 _PINCTRL_LINE_RE = re.compile(
-    r"^\s*(?P<pin>\d+):\s*(?P<function>\S+)\s+\S*\s*\|\s*(?P<level>hi|lo)\b",
+    r"^\s*(?P<pin>\d+):\s*(?P<function>\S+)[^|\n]*\|\s*(?P<level>hi|lo)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -507,7 +511,14 @@ def is_driver_healthy(hw: Hardware) -> bool:
     if not hw.is_bound():
         return False
     pins = hw.read_pins()
-    return pins[SDA_PIN].function == "a3" and pins[SCL_PIN].function == "a3"
+    # Only a pin POSITIVELY read in another function counts as drift. An
+    # unreadable pinctrl line ("unknown") must not trigger a repair every
+    # cycle on a healthy, busy bus.
+    for pin in (SDA_PIN, SCL_PIN):
+        function = pins[pin].function
+        if function not in ("a3", "unknown"):
+            return False
+    return True
 
 
 def self_heal(hw: Hardware) -> bool:

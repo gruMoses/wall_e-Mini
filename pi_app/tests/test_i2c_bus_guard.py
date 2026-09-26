@@ -212,6 +212,18 @@ class ParsePinctrlPinsTests(unittest.TestCase):
         self.assertEqual(pins[2], guard.PinReading("unknown", "unknown"))
         self.assertEqual(pins[3], guard.PinReading("unknown", "unknown"))
 
+    def test_real_output_mode_line_parses(self):
+        # Verbatim Pi 5 format for an output pin (2026-09-26, `pinctrl get 0-27`):
+        # the drive token sits between function and pull. A pin left in
+        # output mode by an interrupted recovery must read as "op".
+        output = (
+            " 2: ip    pu | hi // GPIO2 = input\n"
+            " 3: op dl pu | lo // GPIO3 = output\n"
+        )
+        pins = guard.parse_pinctrl_pins(output, (2, 3))
+        self.assertEqual(pins[2], guard.PinReading("ip", "hi"))
+        self.assertEqual(pins[3], guard.PinReading("op", "lo"))
+
 
 # ---------------------------------------------------------------------------
 # The real Hardware class: subprocess/sysfs/filesystem plumbing only.
@@ -671,6 +683,13 @@ class SelfHealTests(unittest.TestCase):
     def test_bound_but_scl_off_a3_is_unhealthy(self):
         hw = FakeHardware(bound=True, pin_functions={guard.SDA_PIN: "a3", guard.SCL_PIN: "op"})
         self.assertFalse(guard.is_driver_healthy(hw))
+
+    def test_unreadable_pinctrl_on_a_bound_driver_is_not_drift(self):
+        # A pinctrl failure ("unknown") must not trigger a repair every
+        # cycle on a healthy, busy bus; only a positively read non-a3
+        # function or an unbound driver does.
+        hw = FakeHardware(bound=True, pin_functions={guard.SDA_PIN: "unknown", guard.SCL_PIN: "unknown"})
+        self.assertTrue(guard.is_driver_healthy(hw))
 
     def test_unbound_state_is_repaired_and_reports_rebound(self):
         hw = FakeHardware(bound=False, pin_functions={guard.SDA_PIN: "ip", guard.SCL_PIN: "op"})
