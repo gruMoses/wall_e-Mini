@@ -466,6 +466,130 @@ class AcPresenceTracker:
         return self._state
 
 
+# --- Battery-discharge loss detection (2026-09-27) --------------------------
+#
+# FIELD FAILURE (2026-09-26 17:25 -> 18:31): the owner switched main power off.
+# The UPS MCU's charger-voltage register (typec_mv) read 5057 mV the whole
+# time. It has read exactly 5057 at every observation since 2026-09-26 15:06
+# (it read 5040 before the 2026-09-25 21:36 I2C lock-up), and the other MCU
+# registers are frozen too (its battery reading 4034 mV while the INA219 read
+# 4.19 V): the MCU answers I2C but has stopped sampling. So "AC lost" was
+# never declared -- no USB shed, no clean shutdown -- and the 18650 carried the
+# whole 5 V load (4-7 A, with the OAK hub's devices back on the Pi's ports) for
+# 66 minutes until it was flat (2.456 V at the next boot) and the Pi lost power
+# hard. A 3-minute controlled power-off on 2026-09-27 reproduced it: typec_mv
+# stayed 5057 while the INA219 read -4.0 to -6.9 A throughout.
+#
+# The INA219 battery gauge is a separate chip and read correctly the whole
+# time, so a SUSTAINED discharge now also declares input loss, independent of
+# the MCU registers: every fresh INA219 reading below DISCHARGE_LOSS_MA for at
+# least DISCHARGE_LOSS_S. Charger taper dips (the current-sign bug in the
+# module docstring) last ~8-9 s, and the 10 s supplemental read cadence
+# catches at most one reading of each, so an all-negative streak of 60 s
+# cannot come from taper; the outage currents were 2-3x the threshold. No new
+# I2C traffic: this uses the INA219 readings the status publisher already
+# takes every SUPPLEMENTAL_READ_PERIOD_S.
+DISCHARGE_LOSS_MA = -2500.0
+DISCHARGE_LOSS_S = 60.0
+DISCHARGE_LOSS_MIN_SAMPLES = 4
+# A reading older than this is no evidence of anything (the gauge stopped).
+DISCHARGE_SAMPLE_MAX_AGE_S = 30.0
+# Warn when the charger-voltage register has not changed for this long; a live
+# ADC reading wobbles by a few mV between samples.
+FROZEN_REGISTER_WARN_S = 1800.0
+FROZEN_REGISTER_REPEAT_S = 3600.0
+
+
+class DischargeLossTracker:
+    """Declares input loss from a sustained INA219 battery discharge. Pure.
+
+    Feed it every poll with the cached INA219 current and that reading's
+    wall-clock sample time; only a NEW sample (a different ``sample_ts``)
+    changes state. Loss = consecutive new samples below ``threshold_ma``
+    spanning at least ``min_duration_s`` (and at least ``min_samples`` of
+    them). Any sample at or above the threshold resets the streak. When the
+    newest sample is older than ``max_age_s`` nothing is declared lost.
+    See pi_app/tests/test_ups_discharge_loss.py.
+    """
+
+    def __init__(
+        self,
+        threshold_ma: float = DISCHARGE_LOSS_MA,
+        min_duration_s: float = DISCHARGE_LOSS_S,
+        min_samples: int = DISCHARGE_LOSS_MIN_SAMPLES,
+        max_age_s: float = DISCHARGE_SAMPLE_MAX_AGE_S,
+    ):
+        self._threshold_ma = float(threshold_ma)
+        self._min_duration_s = float(min_duration_s)
+        self._min_samples = int(min_samples)
+        self._max_age_s = float(max_age_s)
+        self._streak_start_ts: float | None = None
+        self._streak_samples = 0
+        self._last_sample_ts: float | None = None
+        self._last_ma: float | None = None
+
+    @property
+    def last_ma(self) -> float | None:
+        return self._last_ma
+
+    @property
+    def streak_s(self) -> float:
+        if self._streak_start_ts is None or self._last_sample_ts is None:
+            return 0.0
+        return self._last_sample_ts - self._streak_start_ts
+
+    def update(self, batt_ma, sample_ts, now_wall: float) -> bool:
+        """Feed the latest cached reading; returns the current loss verdict."""
+        if (
+            isinstance(batt_ma, (int, float))
+            and isinstance(sample_ts, (int, float))
+            and sample_ts != self._last_sample_ts
+        ):
+            self._last_sample_ts = float(sample_ts)
+            self._last_ma = float(batt_ma)
+            if batt_ma < self._threshold_ma:
+                if self._streak_start_ts is None:
+                    self._streak_start_ts = float(sample_ts)
+                    self._streak_samples = 0
+                self._streak_samples += 1
+            else:
+                self._streak_start_ts = None
+                self._streak_samples = 0
+        return self.lost(now_wall)
+
+    def lost(self, now_wall: float) -> bool:
+        if self._streak_start_ts is None or self._last_sample_ts is None:
+            return False
+        if now_wall - self._last_sample_ts > self._max_age_s:
+            return False
+        return (
+            self.streak_s >= self._min_duration_s
+            and self._streak_samples >= self._min_samples
+        )
+
+
+class FrozenRegisterWatch:
+    """Seconds a register value has stayed exactly unchanged. Pure."""
+
+    def __init__(self, repeat_s: float = FROZEN_REGISTER_REPEAT_S):
+        self._value = None
+        self._since: float | None = None
+        self._last_warn: float | None = None
+        self._repeat_s = float(repeat_s)
+
+    def update(self, value, now: float) -> float:
+        if value != self._value or self._since is None:
+            self._value = value
+            self._since = now
+        return now - self._since
+
+    def should_warn(self, now: float) -> bool:
+        if self._last_warn is None or now - self._last_warn >= self._repeat_s:
+            self._last_warn = now
+            return True
+        return False
+
+
 def read_ups_snapshot(
     bus: smbus2.SMBus, device_addr: int, ina_batt: INA219 | None = None
 ) -> dict[str, float | int | None]:
@@ -1197,6 +1321,11 @@ def main(detect_only: bool | None = None) -> None:
     boot_elapsed = 0
     last_ac_present = None
     tracker = AcPresenceTracker(AC_LOSS_DEBOUNCE_S)
+    # Second, independent loss signal from the INA219 (see the 2026-09-27
+    # block above DischargeLossTracker) and a frozen-register warning.
+    discharge = DischargeLossTracker()
+    typec_watch = FrozenRegisterWatch()
+    discharge_loss_logged = False
     consecutive_i2c_errors = 0
     # I2C-politeness state (all monotonic clock). batt_cache holds the last-known
     # supplemental values so we can keep publishing them (marked stale) while the
@@ -1226,6 +1355,34 @@ def main(detect_only: bool | None = None) -> None:
 
         now = time.monotonic()
         ac_present = tracker.update(typec_mv, microusb_mv, now)
+
+        # The MCU's charger-voltage register can freeze (2026-09-26): a
+        # sustained INA219 discharge overrides a "present" verdict so the
+        # grace/shutdown path below still runs. batt_cache holds the INA219
+        # reading the status publisher took on an earlier poll.
+        discharge_lost = discharge.update(
+            batt_cache.get("batt_ma"), batt_cache.get("ts_batt"), time.time()
+        )
+        if discharge_lost and ac_present:
+            if not discharge_loss_logged:
+                logging.warning(
+                    "Battery discharging at %.0f mA for %.0f s while the "
+                    "charger-voltage register reads %s mV: treating input "
+                    "power as LOST (register not trusted).",
+                    discharge.last_ma or 0.0, discharge.streak_s, typec_mv,
+                )
+                discharge_loss_logged = True
+            ac_present = False
+        elif not discharge_lost:
+            discharge_loss_logged = False
+        frozen_s = typec_watch.update(typec_mv, now)
+        if frozen_s >= FROZEN_REGISTER_WARN_S and typec_watch.should_warn(now):
+            logging.warning(
+                "UPS charger-voltage register unchanged at %s mV for %.0f min: "
+                "the UPS MCU may have stopped sampling. Power-loss detection "
+                "now relies on the INA219 battery discharge.",
+                typec_mv, frozen_s / 60.0,
+            )
 
         if boot_elapsed < BOOT_GRACE_SECONDS:
             boot_elapsed += 1
