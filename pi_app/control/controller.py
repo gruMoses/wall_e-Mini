@@ -173,7 +173,6 @@ class Controller:
         self._imu_frame_check_ts: float = 0.0
         self._imu_frame_marker: Optional[tuple[int, int]] = None
         self._straight_disengage_deadline = 0.0
-        self._straight_target_true_heading: Optional[float] = None
 
         # Obstacle avoidance, Follow Me, Waypoint Nav, and Gesture control
         self._obstacle_avoidance = obstacle_avoidance
@@ -720,7 +719,6 @@ class Controller:
         self._slew_last_update = now_s
         self._slew_initialized = False
         self._slew_seen_non_neutral = False
-        self._straight_target_true_heading = None
 
     def _on_armed_session_ended(self) -> None:
         """An armed session ended (disarm, RC stale, e-stop).
@@ -734,7 +732,6 @@ class Controller:
         dropped on an IMU frame discontinuity (see _check_imu_frame_continuity).
         Before this change every disarm forced another straight run.
         """
-        self._straight_target_true_heading = None
 
     def _check_imu_frame_continuity(self, mono_now: float) -> None:
         """Drop the GPS heading lock if the IMU heading frame was reseeded.
@@ -1880,35 +1877,33 @@ class Controller:
             self._imu_compensator is not None
             and is_moving_straight
             and self._mode == "MANUAL"
+            and not self._was_moving_straight
         ):
+            # MANUAL heading hold works in the raw IMU frame, with or without
+            # a GPS heading lock. Lock the target at straight-drive entry;
+            # after that the compensator re-captures it each time the
+            # steering returns to neutral, so the target is always the
+            # heading the operator last chose.
+            #
+            # 2026-09-27: with the GPS offset locked, this block re-applied a
+            # true-frame target, captured at straight entry, on EVERY tick.
+            # The straight latch survives stick pulses (0.8 s hysteresis,
+            # 35 % relative tolerance, |steering| <= 0.18), so that target
+            # never moved while the operator turned, and it overwrote the
+            # compensator's neutral re-capture. Each time the sticks evened
+            # out, the hold drove back toward the old heading at up to the
+            # 35-byte cap (17:32: 52 s of right stick, 27 deg to the left).
+            # A relocked offset would also have turned the robot by the
+            # change. Waypoint nav sets its own true-frame target elsewhere.
             try:
-                imu_state = self._imu_compensator.get_status()
-                raw_heading = float(imu_state.heading_deg)
-                if self._gps_heading_aligner is not None and self._gps_heading_aligner.locked:
-                    # Keep a true-frame target while driving straight, mapped
-                    # through the frozen GPS-derived offset.
-                    # In MANUAL BT/web teleop, prioritize operator intent and
-                    # lock heading directly in the raw IMU frame.
-                    allow_true_frame_retarget = not (
-                        self._mode == "MANUAL" and bt_override_bytes is not None
-                    )
-                    if allow_true_frame_retarget:
-                        if (not self._was_moving_straight) or self._straight_target_true_heading is None:
-                            self._straight_target_true_heading = self._gps_heading_aligner.correct(raw_heading)
-                        raw_target = self._gps_heading_aligner.imu_target_heading(self._straight_target_true_heading)
-                        self._imu_compensator.set_target_heading(raw_target, reset_integral_jump_deg=180.0)
-                    elif not self._was_moving_straight:
-                        # Lock heading in raw IMU frame at straight-drive entry.
-                        self._straight_target_true_heading = None
-                        self._imu_compensator.set_target_heading(raw_heading, reset_integral_jump_deg=180.0)
-                elif not self._was_moving_straight:
-                    self._straight_target_true_heading = None
-                    self._imu_compensator.reset_target_heading()
+                self._imu_compensator.reset_target_heading()
             except Exception:
                 pass
-        elif not is_moving_straight or self._mode != "MANUAL":
-            self._straight_target_true_heading = None
-        self._was_moving_straight = is_moving_straight
+        # Only a MANUAL tick counts as "already straight". The straight latch
+        # carries across a mode switch, and a waypoint target (or any other
+        # mode's target) must not survive into MANUAL: the first MANUAL
+        # straight tick always re-locks the current heading.
+        self._was_moving_straight = is_moving_straight and self._mode == "MANUAL"
 
         self._check_imu_frame_continuity(mono_now)
         if (
