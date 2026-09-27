@@ -557,6 +557,12 @@ class DischargeLossTracker:
                 self._streak_samples = 0
         return self.lost(now_wall)
 
+    def reset(self) -> None:
+        """Clear the streak (a fresh read showed no discharge). The last
+        sample timestamp is kept so the cached reading is not recounted."""
+        self._streak_start_ts = None
+        self._streak_samples = 0
+
     def lost(self, now_wall: float) -> bool:
         if self._streak_start_ts is None or self._last_sample_ts is None:
             return False
@@ -566,6 +572,24 @@ class DischargeLossTracker:
             self.streak_s >= self._min_duration_s
             and self._streak_samples >= self._min_samples
         )
+
+
+def discharge_still_confirmed(ina_batt) -> bool:
+    """One fresh INA219 read before a discharge-only shutdown.
+
+    The discharge verdict rests on readings up to SUPPLEMENTAL_READ_PERIOD_S
+    old, longer than the NO_CHARGE_GRACE_SECONDS grace, so power returning
+    near the end of the streak would otherwise still halt the Pi. Returns
+    False only when the fresh read clearly shows no discharge (at or above
+    DISCHARGE_LOSS_MA); no gauge or a failed read keeps the shutdown
+    (fail-safe).
+    """
+    if ina_batt is None:
+        return True
+    try:
+        return float(ina_batt.current()) < DISCHARGE_LOSS_MA
+    except Exception:
+        return True
 
 
 class FrozenRegisterWatch:
@@ -1326,6 +1350,7 @@ def main(detect_only: bool | None = None) -> None:
     discharge = DischargeLossTracker()
     typec_watch = FrozenRegisterWatch()
     discharge_loss_logged = False
+    last_discharge_loss_monotonic: float | None = None
     consecutive_i2c_errors = 0
     # I2C-politeness state (all monotonic clock). batt_cache holds the last-known
     # supplemental values so we can keep publishing them (marked stale) while the
@@ -1363,6 +1388,11 @@ def main(detect_only: bool | None = None) -> None:
         discharge_lost = discharge.update(
             batt_cache.get("batt_ma"), batt_cache.get("ts_batt"), time.time()
         )
+        # True only when the discharge verdict is what says "lost" (the
+        # charger-voltage verdict still says present).
+        loss_from_discharge = discharge_lost and ac_present
+        if loss_from_discharge:
+            last_discharge_loss_monotonic = now
         if discharge_lost and ac_present:
             if not discharge_loss_logged:
                 logging.warning(
@@ -1423,7 +1453,19 @@ def main(detect_only: bool | None = None) -> None:
                     AC_LOSS_DEBOUNCE_S,
                     NO_CHARGE_GRACE_SECONDS,
                 )
-            if seconds_without_charge == NO_CHARGE_GRACE_SECONDS:
+            if (
+                seconds_without_charge == NO_CHARGE_GRACE_SECONDS
+                and loss_from_discharge
+                and not discharge_still_confirmed(ina_batt)
+            ):
+                logging.warning(
+                    "A fresh INA219 read no longer shows a discharge: input "
+                    "power is back. Cancelling the discharge-loss shutdown."
+                )
+                discharge.reset()
+                discharge_loss_logged = False
+                seconds_without_charge = 0
+            elif seconds_without_charge == NO_CHARGE_GRACE_SECONDS:
                 # Grace expired with the charger still gone. In normal mode
                 # this halts the Pi and never returns; in detect-only mode
                 # every action is suppressed at its own call site and this
@@ -1458,7 +1500,11 @@ def main(detect_only: bool | None = None) -> None:
         if usb_unclean:
             last_unclean_monotonic = now
 
-        if not instant_present and not usb_shed_active:
+        # A discharge-only loss sheds too: the frozen-register case never
+        # sees instant_present go False. It is NOT fed into
+        # last_unclean_monotonic, because that clock also gates the
+        # supplemental INA219 reads the discharge verdict depends on.
+        if (not instant_present or loss_from_discharge) and not usb_shed_active:
             # First poll of an input-loss episode — shed once (idempotent via
             # the flag). ACTION SITE: suppressed in detect-only.
             if detect_only:
@@ -1475,8 +1521,19 @@ def main(detect_only: bool | None = None) -> None:
             usb_shed_active = True
         elif (
             usb_shed_active
-            and last_unclean_monotonic is not None
-            and (now - last_unclean_monotonic) >= USB_RESTORE_DELAY_S
+            and not loss_from_discharge
+            and (
+                last_discharge_loss_monotonic is None
+                or (now - last_discharge_loss_monotonic) >= USB_RESTORE_DELAY_S
+            )
+            and (
+                last_unclean_monotonic is None
+                or (now - last_unclean_monotonic) >= USB_RESTORE_DELAY_S
+            )
+            and (
+                last_unclean_monotonic is not None
+                or last_discharge_loss_monotonic is not None
+            )
         ):
             # AC has been continuously clean for USB_RESTORE_DELAY_S measured
             # from the last unclean poll — restore. ACTION SITE: suppressed in

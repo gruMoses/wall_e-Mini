@@ -137,6 +137,45 @@ class TestDischargeLossTracker(unittest.TestCase):
         self.assertLessEqual(t_first, 70)
 
 
+    def test_reset_clears_the_streak_without_recounting_the_cached_sample(self):
+        tracker = Tracker()
+        samples = [(t, -5000) for t in range(0, 80, 10)]
+        self.assertTrue(_feed(tracker, samples)[-1])
+        tracker.reset()
+        # The same cached sample, polled again, must not restart the streak.
+        self.assertFalse(tracker.update(-5000, 1000 + 70, 1000 + 71))
+        self.assertEqual(tracker.streak_s, 0.0)
+        # A genuinely new discharge needs a fresh 60 s.
+        verdicts = _feed(tracker, [(t, -5000) for t in range(80, 150, 10)])
+        self.assertFalse(verdicts[5])
+        self.assertTrue(verdicts[6])
+
+
+class _Gauge:
+    def __init__(self, value=None, error=None):
+        self.value = value
+        self.error = error
+
+    def current(self):
+        if self.error:
+            raise self.error
+        return self.value
+
+
+class TestDischargeStillConfirmed(unittest.TestCase):
+    def test_fresh_discharge_confirms(self):
+        self.assertTrue(daemon.discharge_still_confirmed(_Gauge(-4200.0)))
+
+    def test_power_back_cancels(self):
+        self.assertFalse(daemon.discharge_still_confirmed(_Gauge(-300.0)))
+        self.assertFalse(daemon.discharge_still_confirmed(_Gauge(2100.0)))
+        self.assertFalse(daemon.discharge_still_confirmed(_Gauge(-2500.0)))
+
+    def test_no_gauge_or_failed_read_keeps_the_shutdown(self):
+        self.assertTrue(daemon.discharge_still_confirmed(None))
+        self.assertTrue(daemon.discharge_still_confirmed(_Gauge(error=OSError(5, "EIO"))))
+
+
 class TestFrozenRegisterWatch(unittest.TestCase):
     def test_unchanged_value_accumulates_and_change_resets(self):
         watch = daemon.FrozenRegisterWatch()
