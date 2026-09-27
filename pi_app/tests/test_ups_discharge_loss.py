@@ -105,11 +105,28 @@ class TestDischargeLossTracker(unittest.TestCase):
         tracker.update(-4000, 1000.0, 1000.0)
         self.assertFalse(tracker.update(-4000, 1060.0, 1060.0))
 
-    def test_stale_reading_is_not_evidence(self):
+    def test_stale_reading_cannot_start_a_loss(self):
         tracker = Tracker()
-        samples = [(t, -5000) for t in range(0, 80, 10)]
-        self.assertTrue(_feed(tracker, samples)[-1])
-        self.assertFalse(tracker.lost(1000 + 70 + 31))   # gauge went silent
+        for t in range(0, 60, 10):
+            self.assertFalse(tracker.update(-5000, 1000 + t, 1000 + t))
+        # The sample that would complete the 60 s streak is already 31 s old.
+        self.assertFalse(tracker.update(-5000, 1060.0, 1060.0 + 31))
+
+    def test_latched_loss_survives_a_silent_gauge(self):
+        tracker = Tracker()
+        self.assertTrue(_feed(tracker, [(t, -5000) for t in range(0, 80, 10)])[-1])
+        self.assertTrue(tracker.lost(1000 + 70 + 300))
+
+    def test_shed_load_keeps_the_loss_until_the_charger_is_back(self):
+        # After the USB shed only the Pi draws from the cell (~-1 A): that is
+        # still a lost input. Only a reading at or above -300 mA clears it.
+        tracker = Tracker()
+        self.assertTrue(_feed(tracker, [(t, -5000) for t in range(0, 80, 10)])[-1])
+        for t in range(80, 200, 10):
+            self.assertTrue(tracker.update(-1050, 1000 + t, 1000 + t))
+        self.assertTrue(tracker.update(-2400, 1000 + 200, 1000 + 200))
+        self.assertFalse(tracker.update(1800, 1000 + 210, 1000 + 210))
+        self.assertEqual(tracker.streak_s, 0.0)
 
     def test_threshold_is_strict(self):
         samples = [(t, -2500.0) for t in range(0, 80, 10)]
@@ -168,8 +185,14 @@ class TestDischargeStillConfirmed(unittest.TestCase):
 
     def test_power_back_cancels(self):
         self.assertFalse(daemon.discharge_still_confirmed(_Gauge(-300.0)))
+        self.assertFalse(daemon.discharge_still_confirmed(_Gauge(-50.0)))
         self.assertFalse(daemon.discharge_still_confirmed(_Gauge(2100.0)))
-        self.assertFalse(daemon.discharge_still_confirmed(_Gauge(-2500.0)))
+
+    def test_reduced_discharge_after_the_shed_still_confirms(self):
+        # Grok 2026-09-27: the shed drops the drain below -2500 mA while input
+        # is still gone; that must not cancel the shutdown.
+        self.assertTrue(daemon.discharge_still_confirmed(_Gauge(-1050.0)))
+        self.assertTrue(daemon.discharge_still_confirmed(_Gauge(-2500.0)))
 
     def test_no_gauge_or_failed_read_keeps_the_shutdown(self):
         self.assertTrue(daemon.discharge_still_confirmed(None))

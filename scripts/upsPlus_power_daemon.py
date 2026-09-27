@@ -490,6 +490,12 @@ class AcPresenceTracker:
 # I2C traffic: this uses the INA219 readings the status publisher already
 # takes every SUPPLEMENTAL_READ_PERIOD_S.
 DISCHARGE_LOSS_MA = -2500.0
+# Once declared, the loss holds until a fresh reading shows the charger is
+# carrying the load again (at or above this). Shedding the OAK hub drops the
+# drain to the Pi alone (~-1 A) while input power is still gone, so the entry
+# threshold must not also be the exit threshold (Grok, 2026-09-27: that made
+# the shed cancel its own shutdown and cycle forever).
+DISCHARGE_POWER_BACK_MA = -300.0
 DISCHARGE_LOSS_S = 60.0
 DISCHARGE_LOSS_MIN_SAMPLES = 4
 # A reading older than this is no evidence of anything (the gauge stopped).
@@ -505,10 +511,13 @@ class DischargeLossTracker:
 
     Feed it every poll with the cached INA219 current and that reading's
     wall-clock sample time; only a NEW sample (a different ``sample_ts``)
-    changes state. Loss = consecutive new samples below ``threshold_ma``
-    spanning at least ``min_duration_s`` (and at least ``min_samples`` of
-    them). Any sample at or above the threshold resets the streak. When the
-    newest sample is older than ``max_age_s`` nothing is declared lost.
+    changes state. Loss is declared (latched) when consecutive new samples
+    below ``threshold_ma`` span at least ``min_duration_s`` (and number at
+    least ``min_samples``), and the newest is no older than ``max_age_s``.
+    Before that, any sample at or above ``threshold_ma`` resets the streak.
+    Once latched, the loss holds until a new sample reads at or above
+    ``power_back_ma`` (the charger carrying the load again); a smaller
+    discharge, such as the Pi alone after the USB shed, keeps it latched.
     See pi_app/tests/test_ups_discharge_loss.py.
     """
 
@@ -518,15 +527,18 @@ class DischargeLossTracker:
         min_duration_s: float = DISCHARGE_LOSS_S,
         min_samples: int = DISCHARGE_LOSS_MIN_SAMPLES,
         max_age_s: float = DISCHARGE_SAMPLE_MAX_AGE_S,
+        power_back_ma: float = DISCHARGE_POWER_BACK_MA,
     ):
         self._threshold_ma = float(threshold_ma)
         self._min_duration_s = float(min_duration_s)
         self._min_samples = int(min_samples)
         self._max_age_s = float(max_age_s)
+        self._power_back_ma = float(power_back_ma)
         self._streak_start_ts: float | None = None
         self._streak_samples = 0
         self._last_sample_ts: float | None = None
         self._last_ma: float | None = None
+        self._latched = False
 
     @property
     def last_ma(self) -> float | None:
@@ -547,31 +559,34 @@ class DischargeLossTracker:
         ):
             self._last_sample_ts = float(sample_ts)
             self._last_ma = float(batt_ma)
-            if batt_ma < self._threshold_ma:
+            if self._latched:
+                if batt_ma >= self._power_back_ma:
+                    self.reset()
+            elif batt_ma < self._threshold_ma:
                 if self._streak_start_ts is None:
                     self._streak_start_ts = float(sample_ts)
                     self._streak_samples = 0
                 self._streak_samples += 1
+                if (
+                    self.streak_s >= self._min_duration_s
+                    and self._streak_samples >= self._min_samples
+                    and now_wall - self._last_sample_ts <= self._max_age_s
+                ):
+                    self._latched = True
             else:
                 self._streak_start_ts = None
                 self._streak_samples = 0
-        return self.lost(now_wall)
+        return self._latched
 
     def reset(self) -> None:
-        """Clear the streak (a fresh read showed no discharge). The last
-        sample timestamp is kept so the cached reading is not recounted."""
+        """Clear the loss and the streak. The last sample timestamp is kept
+        so the cached reading is not recounted."""
+        self._latched = False
         self._streak_start_ts = None
         self._streak_samples = 0
 
-    def lost(self, now_wall: float) -> bool:
-        if self._streak_start_ts is None or self._last_sample_ts is None:
-            return False
-        if now_wall - self._last_sample_ts > self._max_age_s:
-            return False
-        return (
-            self.streak_s >= self._min_duration_s
-            and self._streak_samples >= self._min_samples
-        )
+    def lost(self, now_wall: float) -> bool:  # noqa: ARG002 - kept for callers
+        return self._latched
 
 
 def discharge_still_confirmed(ina_batt) -> bool:
@@ -580,14 +595,15 @@ def discharge_still_confirmed(ina_batt) -> bool:
     The discharge verdict rests on readings up to SUPPLEMENTAL_READ_PERIOD_S
     old, longer than the NO_CHARGE_GRACE_SECONDS grace, so power returning
     near the end of the streak would otherwise still halt the Pi. Returns
-    False only when the fresh read clearly shows no discharge (at or above
-    DISCHARGE_LOSS_MA); no gauge or a failed read keeps the shutdown
-    (fail-safe).
+    False only when the fresh read shows the charger carrying the load (at
+    or above DISCHARGE_POWER_BACK_MA). A reduced discharge -- the Pi alone
+    after the USB shed -- still confirms. No gauge or a failed read keeps
+    the shutdown (fail-safe).
     """
     if ina_batt is None:
         return True
     try:
-        return float(ina_batt.current()) < DISCHARGE_LOSS_MA
+        return float(ina_batt.current()) < DISCHARGE_POWER_BACK_MA
     except Exception:
         return True
 
