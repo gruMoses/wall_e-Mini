@@ -1,5 +1,13 @@
 # WALL-E Mini — Codebase Guide
 
+## Safety principle (Kevin, 2026-09-27) — apply to every motion change
+
+- Human input can carry a little extra risk. Autonomous input must not cause human harm.
+- Reason: in MANUAL (RC sticks or phone) the operator stops the robot by letting go of the stick. In FOLLOW_ME and WAYPOINT_NAV the operator must take the remote out of a pocket and disarm, which takes much longer.
+- Result: a MANUAL relaxation is acceptable (the creep floor, the MANUAL obstacle curve for netting over the lens). FOLLOW_ME and WAYPOINT_NAV keep every protection.
+- The person/animal hard stop (0.8 m) stays absolute in every mode.
+- Open decision: the person/animal cap on the MANUAL obstacle curve (`OakDepthReader._manual_person_limit_mm`) is more cautious than this principle requires. Remove it only on Kevin's explicit word.
+
 ## Architecture Overview
 
 Python control stack running on a Raspberry Pi 5. Entry point is `pi_app/app/main.py` (a tight control loop at ~30 Hz; vision is 15 fps via `OakDetectionConfig.camera_fps`, not 30). All subsystem state is threaded and shared via lightweight dataclasses; the main loop reads latest snapshots and publishes commands.
