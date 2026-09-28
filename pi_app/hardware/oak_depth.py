@@ -665,10 +665,6 @@ class _CorridorPersistence:
 @dataclass
 class _DepthState:
     min_distance_m: float = float("inf")
-    # MANUAL cap from people and animals (inf when none): the old linear
-    # throttle law at this distance caps the relaxed MANUAL curve. See
-    # OakDepthReader._manual_person_limit_mm.
-    manual_person_limit_m: float = float("inf")
     timestamp: float = 0.0
     stats: DepthStats = field(default_factory=DepthStats)
     raw_frame: object = None  # numpy uint16 array or None
@@ -1276,19 +1272,6 @@ class OakDepthReader:
         with self._lock:
             age = time.monotonic() - self._depth_state.timestamp
             return self._depth_state.min_distance_m, age
-
-    def get_min_distance_detail(self) -> tuple[float, float, float]:
-        """Return (min_distance_m, age_s, manual_person_limit_m) from one poll. Thread-safe.
-
-        manual_person_limit_m (inf when none) is where the old linear
-        throttle law caps the relaxed MANUAL curve, so that curve (meant for
-        things like netting over the lens) never lets the robot approach a
-        person or an animal faster than before (2026-09-27 review).
-        """
-        with self._lock:
-            age = time.monotonic() - self._depth_state.timestamp
-            return (self._depth_state.min_distance_m, age,
-                    float(self._depth_state.manual_person_limit_m))
 
     def get_person_detections(self) -> list[PersonDetection]:
         """Return latest person detections. Thread-safe."""
@@ -2899,11 +2882,6 @@ class OakDepthReader:
                     "Safety STOP: %s at %.2fm (< %.1fm radius)",
                     _stop_det.label_name, _stop_det.z_m, safety_stop_radius,
                 )
-            person_limit_mm = self._manual_person_limit_mm(
-                all_dets, effective_min_mm,
-                float(getattr(self._obs_cfg, "slow_distance_m", 1.5)),
-                float(getattr(self._obs_cfg, "person_mask_depth_margin_m", 0.0)),
-            )
 
             if effective_min_mm == float("inf"):
                 # Fresh frame, corridor genuinely empty, no safety-tier trigger.
@@ -2915,7 +2893,6 @@ class OakDepthReader:
                 with self._lock:
                     self._depth_quality_reject_count += 1
                     self._depth_state.min_distance_m = float("inf")
-                    self._depth_state.manual_person_limit_m = float("inf")
                     self._depth_state.timestamp = now_clear
                     self._last_depth_poll_ts = now_clear
                     self._last_depth_error_msg = ""
@@ -2964,7 +2941,6 @@ class OakDepthReader:
             )
             with self._lock:
                 self._depth_state.min_distance_m = effective_min_m
-                self._depth_state.manual_person_limit_m = person_limit_mm / 1000.0
                 self._depth_state.timestamp = now
                 self._depth_state.stats = stats
                 self._last_depth_poll_ts = now
@@ -2998,43 +2974,6 @@ class OakDepthReader:
         if label in det_cfg.slow_class_ids:
             return "slow"
         return "log"
-
-    @staticmethod
-    def _manual_person_limit_mm(detections, effective_min_mm: float,
-                                slow_m: float, margin_m: float) -> float:
-        """Distance (mm) where the old throttle law caps MANUAL, or inf.
-
-        The relaxed MANUAL curve (0.5 at 0.50 m, 2026-09-27) is for things
-        like netting over the lens, never for a person or an animal. For
-        each stop-tier detection nearer than ``slow_m``:
-          * ranged, and the reading is more than ``margin_m`` in front of
-            it: something else is nearer (the person mask keeps pixels that
-            far in front), so the cap sits at the detection's own range;
-          * ranged, otherwise: the reading may be the person or the animal
-            itself (animals and unranged persons are never masked), so the
-            cap sits at min(reading, range);
-          * unranged (z_m <= 0): the cap sits at the reading.
-        The smallest cap wins. A detection inside the stop radius already
-        forced the reading to 0 (absolute stop), so it caps at 0 too.
-        """
-        limit = float("inf")
-        slow_mm = float(slow_m) * 1000.0
-        margin_mm = max(0.0, float(margin_m)) * 1000.0
-        for det in detections:
-            if getattr(det, "safety_tier", "") != "stop":
-                continue
-            z_mm = float(getattr(det, "z_m", 0.0) or 0.0) * 1000.0
-            if z_mm > 0.0:
-                if z_mm >= slow_mm:
-                    continue
-                if effective_min_mm < z_mm - margin_mm:
-                    cand = z_mm
-                else:
-                    cand = min(effective_min_mm, z_mm)
-            else:
-                cand = effective_min_mm
-            limit = min(limit, cand)
-        return limit
 
     @staticmethod
     def _apply_safety_tier_override(detections, corridor_p5_mm: float,

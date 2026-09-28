@@ -560,8 +560,8 @@ def run() -> None:
                 # poll (oak_depth._apply_safety_tier_override): a stop-tier
                 # detection within safety_stop_radius_m forces min_distance to 0,
                 # which flows through here into compute_throttle_scale().
-                dist_m, dist_age, person_limit_m = oak_reader.get_min_distance_detail()
-                controller.set_obstacle_data(dist_m, dist_age, person_limit_m=person_limit_m)
+                dist_m, dist_age = oak_reader.get_min_distance()
+                controller.set_obstacle_data(dist_m, dist_age)
                 oak_depth_stats = oak_reader.get_depth_stats()
                 if follow_me_ctrl is not None:
                     oak_persons = oak_reader.get_person_detections()

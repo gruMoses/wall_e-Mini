@@ -417,9 +417,6 @@ def build_log_obj(
             "corridor_near_px": getattr(oak_depth_stats, "corridor_near_px", None) if oak_depth_stats else None,
             "corridor_speckle_px": getattr(oak_depth_stats, "corridor_speckle_px", None) if oak_depth_stats else None,
             "corridor_speckle_fallback": getattr(oak_depth_stats, "corridor_speckle_fallback", None) if oak_depth_stats else None,
-            # Where the old throttle law caps MANUAL for a person or an animal
-            # (None when nobody is nearer than slow_distance_m; 2026-09-27).
-            "person_limit_m": telem.get("obstacle_person_limit_m"),
         }),
         "follow_me": round1({
             "tracking": telem.get("follow_me_tracking"),

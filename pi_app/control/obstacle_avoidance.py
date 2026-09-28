@@ -29,17 +29,8 @@ class ObstacleAvoidanceController:
         self._last_distance_m: float | None = None
         self._last_scale: float = 1.0
 
-    def compute_throttle_scale(
-        self, distance_m: float, age_s: float, is_manual: bool = False,
-        manual_person_limit_m: float = float("inf"),
-    ) -> float:
+    def compute_throttle_scale(self, distance_m: float, age_s: float, is_manual: bool = False) -> float:
         """Return a throttle multiplier between 0.0 (full stop) and 1.0 (no limit).
-
-        manual_person_limit_m caps the relaxed MANUAL curve at the old linear
-        law for that distance (OakDepthReader.get_min_distance_detail). The
-        relaxed curve is for things like netting over the lens; without the
-        cap it let full stick reach the 0.8 m person stop at ~1.05 m/s
-        instead of ~0.60 m/s (2026-09-27 review). inf means no cap.
 
         When depth data is stale (age > stale_timeout_s), behaviour depends on
         ``stale_policy``: "stop" returns 0.0, "clear" returns 1.0.
@@ -61,13 +52,13 @@ class ObstacleAvoidanceController:
         manual_curve = self._manual_curve_points() if is_manual and distance_m > 0.0 else None
         if manual_curve is not None:
             scale = self._manual_curve_scale(distance_m, *manual_curve)
-            if manual_person_limit_m < self._cfg.slow_distance_m:
-                # A person or an animal: never faster than the old law gives
-                # at their range (NaN compares False and leaves no cap; the
-                # reader only reports finite values or inf).
-                scale = min(scale, self._linear_scale(manual_person_limit_m))
+        elif distance_m >= self._cfg.slow_distance_m:
+            scale = 1.0
+        elif distance_m <= self._cfg.stop_distance_m:
+            scale = 0.0
         else:
-            scale = self._linear_scale(distance_m)
+            rng = self._cfg.slow_distance_m - self._cfg.stop_distance_m
+            scale = (distance_m - self._cfg.stop_distance_m) / rng
 
         scale = max(0.0, min(1.0, scale))
         # MANUAL: the corridor stop is a floor, not a wall. The operator can
@@ -83,15 +74,6 @@ class ObstacleAvoidanceController:
                 scale = max(scale, min(1.0, floor))
         self._last_scale = scale
         return self._last_scale
-
-    def _linear_scale(self, distance_m: float) -> float:
-        """The old law: 1.0 at slow_distance_m, linear to 0.0 at stop_distance_m."""
-        if distance_m >= self._cfg.slow_distance_m:
-            return 1.0
-        if distance_m <= self._cfg.stop_distance_m:
-            return 0.0
-        rng = self._cfg.slow_distance_m - self._cfg.stop_distance_m
-        return (distance_m - self._cfg.stop_distance_m) / rng
 
     def _manual_curve_points(self) -> tuple[float, float, float, float] | None:
         """(slow, half, floor distance, floor scale) for MANUAL, or None.
@@ -120,8 +102,7 @@ class ObstacleAvoidanceController:
             return 0.5 + 0.5 * (distance_m - half) / (slow - half)
         if distance_m > low:
             return floor_scale + (0.5 - floor_scale) * (distance_m - low) / (half - low)
-        # At or inside the floor distance: the creep floor. (A NaN distance
-        # never gets here: compute_throttle_scale needs distance_m > 0.0.)
+        # At or inside the floor distance, and NaN: the creep floor.
         return floor_scale
 
     def get_status(self) -> dict:
