@@ -67,8 +67,6 @@ class TestObstacleAvoidanceController(unittest.TestCase):
         self.assertAlmostEqual(status["obstacle_distance_m"], 1.0)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestManualCreepFloor(unittest.TestCase):
@@ -184,3 +182,6 @@ class TestManualThrottleCurve(unittest.TestCase):
         c = ObstacleAvoidanceController(ObstacleAvoidanceConfig(manual_obstacle_min_scale=0.0))
         self.assertEqual(c.compute_throttle_scale(0.40, 0.0, is_manual=True), 0.0)
         self.assertAlmostEqual(c.compute_throttle_scale(0.50, 0.0, is_manual=True), (0.50 - 0.4) / 1.1)
+
+if __name__ == "__main__":
+    unittest.main()

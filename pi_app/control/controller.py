@@ -185,6 +185,7 @@ class Controller:
         self._mode = "MANUAL"  # "MANUAL", "FOLLOW_ME", or "WAYPOINT_NAV"
         self._obstacle_distance_m: float | None = None
         self._obstacle_age_s: float | None = None
+        self._obstacle_from_detection: bool = False
         self._gps_reading: GpsReading | None = None
         self._person_detections: list[PersonDetection] = []
         # Detection-stream freshness gate. None = inactive (unit tests, no
@@ -297,10 +298,16 @@ class Controller:
         """
         self._last_imu_update = now
 
-    def set_obstacle_data(self, distance_m: float, age_s: float) -> None:
-        """Feed latest depth reading from OakDepthReader."""
+    def set_obstacle_data(self, distance_m: float, age_s: float, from_detection: bool = False) -> None:
+        """Feed latest depth reading from OakDepthReader.
+
+        from_detection: a person/animal detection set the distance (see
+        OakDepthReader.get_min_distance_detail). Such a distance keeps the
+        old, more cautious throttle law in MANUAL.
+        """
         self._obstacle_distance_m = distance_m
         self._obstacle_age_s = age_s
+        self._obstacle_from_detection = bool(from_detection)
 
     def set_person_detections(self, detections: list[PersonDetection]) -> None:
         """Feed latest person detections from OakDepthReader."""
@@ -2022,6 +2029,8 @@ class Controller:
                 self._obstacle_distance_m,
                 self._obstacle_age_s if self._obstacle_age_s is not None else 999.0,
                 is_manual=(self._mode == "MANUAL"),
+                # A person/animal range keeps the old, more cautious MANUAL law.
+                use_manual_curve=not self._obstacle_from_detection,
             )
             if is_forward_motion:
                 # Scale only the common-mode (forward) component; preserve the
@@ -2035,6 +2044,7 @@ class Controller:
             telemetry.update(oa_status)
         telemetry["obstacle_throttle_scale"] = obstacle_scale
         telemetry["obstacle_distance_m"] = self._obstacle_distance_m
+        telemetry["obstacle_from_detection"] = self._obstacle_from_detection
         telemetry["slew_mode"] = self._mode
         telemetry["slew_enabled"] = bool(getattr(getattr(config, "slew_limiter", None), "enabled", False))
         telemetry["slew_bypassed"] = False

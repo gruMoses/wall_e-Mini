@@ -417,6 +417,9 @@ def build_log_obj(
             "corridor_near_px": getattr(oak_depth_stats, "corridor_near_px", None) if oak_depth_stats else None,
             "corridor_speckle_px": getattr(oak_depth_stats, "corridor_speckle_px", None) if oak_depth_stats else None,
             "corridor_speckle_fallback": getattr(oak_depth_stats, "corridor_speckle_fallback", None) if oak_depth_stats else None,
+            # True when a person/animal detection set distance_m; MANUAL then
+            # keeps the old throttle law (2026-09-27).
+            "from_detection": telem.get("obstacle_from_detection"),
         }),
         "follow_me": round1({
             "tracking": telem.get("follow_me_tracking"),

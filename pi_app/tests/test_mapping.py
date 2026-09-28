@@ -44,8 +44,6 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(map_pulse_to_byte(MAX_PULSE_WIDTH_US + 500), MAX_OUTPUT)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestStickExpo(unittest.TestCase):
@@ -85,3 +83,6 @@ class TestStickExpo(unittest.TestCase):
     def test_expo_is_clamped(self):
         self.assertEqual(self.expo(190, -1.0), 190)
         self.assertEqual(self.expo(190, 5.0), self.expo(190, 1.0))
+
+if __name__ == "__main__":
+    unittest.main()

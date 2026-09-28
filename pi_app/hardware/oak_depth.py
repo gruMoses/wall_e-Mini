@@ -665,6 +665,9 @@ class _CorridorPersistence:
 @dataclass
 class _DepthState:
     min_distance_m: float = float("inf")
+    # True when a person/animal stop-tier detection set min_distance_m (the
+    # hard stop, or a detection nearer than the corridor), not the corridor.
+    min_from_detection: bool = False
     timestamp: float = 0.0
     stats: DepthStats = field(default_factory=DepthStats)
     raw_frame: object = None  # numpy uint16 array or None
@@ -1272,6 +1275,18 @@ class OakDepthReader:
         with self._lock:
             age = time.monotonic() - self._depth_state.timestamp
             return self._depth_state.min_distance_m, age
+
+    def get_min_distance_detail(self) -> tuple[float, float, bool]:
+        """Return (min_distance_m, age_s, from_detection) from one poll. Thread-safe.
+
+        from_detection is True when a person/animal stop-tier detection set
+        the distance. The MANUAL throttle curve for things like netting over
+        the lens must not apply to a person (2026-09-27 review).
+        """
+        with self._lock:
+            age = time.monotonic() - self._depth_state.timestamp
+            return (self._depth_state.min_distance_m, age,
+                    bool(self._depth_state.min_from_detection))
 
     def get_person_detections(self) -> list[PersonDetection]:
         """Return latest person detections. Thread-safe."""
@@ -2893,6 +2908,7 @@ class OakDepthReader:
                 with self._lock:
                     self._depth_quality_reject_count += 1
                     self._depth_state.min_distance_m = float("inf")
+                    self._depth_state.min_from_detection = False
                     self._depth_state.timestamp = now_clear
                     self._last_depth_poll_ts = now_clear
                     self._last_depth_error_msg = ""
@@ -2941,6 +2957,9 @@ class OakDepthReader:
             )
             with self._lock:
                 self._depth_state.min_distance_m = effective_min_m
+                self._depth_state.min_from_detection = bool(
+                    _stop_det is not None or effective_min_mm < corridor_p5_mm
+                )
                 self._depth_state.timestamp = now
                 self._depth_state.stats = stats
                 self._last_depth_poll_ts = now

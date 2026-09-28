@@ -29,8 +29,17 @@ class ObstacleAvoidanceController:
         self._last_distance_m: float | None = None
         self._last_scale: float = 1.0
 
-    def compute_throttle_scale(self, distance_m: float, age_s: float, is_manual: bool = False) -> float:
+    def compute_throttle_scale(
+        self, distance_m: float, age_s: float, is_manual: bool = False,
+        use_manual_curve: bool = True,
+    ) -> float:
         """Return a throttle multiplier between 0.0 (full stop) and 1.0 (no limit).
+
+        use_manual_curve=False keeps the old linear law (with the MANUAL creep
+        floor) for a MANUAL reading that a person/animal detection set: the
+        relaxed MANUAL curve is for things like netting over the lens, and it
+        would let the robot reach the 0.8 m person stop at ~1.05 m/s instead
+        of ~0.60 m/s at full stick (2026-09-27 review).
 
         When depth data is stale (age > stale_timeout_s), behaviour depends on
         ``stale_policy``: "stop" returns 0.0, "clear" returns 1.0.
@@ -49,7 +58,10 @@ class ObstacleAvoidanceController:
 
         self._last_distance_m = distance_m
 
-        manual_curve = self._manual_curve_points() if is_manual and distance_m > 0.0 else None
+        manual_curve = (
+            self._manual_curve_points()
+            if is_manual and use_manual_curve and distance_m > 0.0 else None
+        )
         if manual_curve is not None:
             scale = self._manual_curve_scale(distance_m, *manual_curve)
         elif distance_m >= self._cfg.slow_distance_m:
@@ -102,7 +114,8 @@ class ObstacleAvoidanceController:
             return 0.5 + 0.5 * (distance_m - half) / (slow - half)
         if distance_m > low:
             return floor_scale + (0.5 - floor_scale) * (distance_m - low) / (half - low)
-        # At or inside the floor distance, and NaN: the creep floor.
+        # At or inside the floor distance: the creep floor. (A NaN distance
+        # never gets here: compute_throttle_scale needs distance_m > 0.0.)
         return floor_scale
 
     def get_status(self) -> dict:
