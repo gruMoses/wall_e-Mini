@@ -41,7 +41,7 @@ try:
     from pi_app.app.log_gating import (
         should_log_tick, cleanup_old_logs as _cleanup_old_logs,
         should_print_console_line, _session_header, build_log_obj,
-        build_slow_obj, should_write_slow_line,
+        build_slow_obj, should_write_slow_line, animal_log_entries,
     )
     from config import config
 except ModuleNotFoundError:
@@ -71,7 +71,7 @@ except ModuleNotFoundError:
     from pi_app.app.log_gating import (  # type: ignore
         should_log_tick, cleanup_old_logs as _cleanup_old_logs,
         should_print_console_line, _session_header, build_log_obj,
-        build_slow_obj, should_write_slow_line,
+        build_slow_obj, should_write_slow_line, animal_log_entries,
     )
     from config import config  # type: ignore
 
@@ -1003,6 +1003,16 @@ def run() -> None:
                     last_log_ts = now_ts
                     _bms_state_for_log = bms_service.get_state() if bms_service is not None else None
                     _bms_charging_for_log = bms_service.is_charging() if bms_service is not None else None
+                    _oak_animals_for_log = None
+                    if oak_reader is not None:
+                        try:
+                            _det_cfg = getattr(config, "oak_detection", None)
+                            _oak_animals_for_log = animal_log_entries(
+                                oak_reader.get_all_detections(),
+                                getattr(_det_cfg, "log_animal_class_ids", ()),
+                            )
+                        except Exception:
+                            _oak_animals_for_log = None
                     log_obj = build_log_obj(
                         now_ts=now_ts,
                         src=src,
@@ -1023,6 +1033,7 @@ def run() -> None:
                         imu_motion_witness_still=imu_motion_witness_still,
                         events=events,
                         oak_camera_health=oak_camera_health,
+                        oak_animals=_oak_animals_for_log,
                     )
                     line = json.dumps(log_obj)
                     # Do not print structured JSON to console; keep file logging only

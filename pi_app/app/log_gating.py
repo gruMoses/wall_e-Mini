@@ -324,6 +324,31 @@ def _session_header(config, path) -> dict:
 # Per-tick structured log object
 # ---------------------------------------------------------------------------
 
+def animal_log_entries(detections, class_ids) -> list | None:
+    """Compact per-tick entries for animal detections (log only, 2026-09-28).
+
+    ``detections`` are ObjectDetection-like (label, label_name, confidence,
+    x_m, z_m, bbox, safety_tier, depth_status); only labels in ``class_ids``
+    are kept. Returns None when nothing matches, so the field stays small.
+    """
+    wanted = set(class_ids or ())
+    out = []
+    for d in detections or ():
+        if getattr(d, "label", None) not in wanted:
+            continue
+        bbox = getattr(d, "bbox", None) or ()
+        out.append({
+            "label": getattr(d, "label_name", None),
+            "conf": round(float(getattr(d, "confidence", 0.0) or 0.0), 2),
+            "z_m": round(float(getattr(d, "z_m", 0.0) or 0.0), 2),
+            "x_m": round(float(getattr(d, "x_m", 0.0) or 0.0), 2),
+            "bbox": [round(float(b), 3) for b in bbox],
+            "tier": getattr(d, "safety_tier", None),
+            "depth_status": getattr(d, "depth_status", None),
+        })
+    return out or None
+
+
 def build_log_obj(
     *,
     now_ts: float,
@@ -345,6 +370,7 @@ def build_log_obj(
     imu_motion_witness_still,
     events,
     oak_camera_health=None,
+    oak_animals=None,
 ) -> dict:
     """Build the per-tick structured JSON log object.
 
@@ -475,6 +501,9 @@ def build_log_obj(
              "z_spread_m": round(getattr(d, "z_spread_m", 0.0), 2)}
             for d in oak_persons
         ] if oak_persons else None,
+        # Animal detections, log only (2026-09-28): see
+        # OakDetectionConfig.log_animal_class_ids. None when none were seen.
+        "animals": oak_animals,
         "gps": {
             "lat": round(gps_reading.latitude, 8) if gps_reading else None,
             "lon": round(gps_reading.longitude, 8) if gps_reading else None,

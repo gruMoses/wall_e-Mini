@@ -568,5 +568,45 @@ class VisionStaleLogFieldsTests(unittest.TestCase):
             self.assertIsNone(obj["oak"][key], key)
 
 
+
+
+class AnimalLogTests(unittest.TestCase):
+    """Animal detections, log only (2026-09-28): data for the planned slow zone."""
+
+    class _Det:
+        def __init__(self, label, name, conf=0.61, z=1.83, x=-0.214, tier="log", depth="ok",
+                     bbox=(0.1234, 0.5, 0.2, 0.6)):
+            self.label, self.label_name, self.confidence = label, name, conf
+            self.z_m, self.x_m, self.bbox = z, x, bbox
+            self.safety_tier, self.depth_status = tier, depth
+
+    def test_keeps_only_the_listed_classes_and_rounds(self):
+        from pi_app.app.log_gating import animal_log_entries
+        dets = [self._Det(14, "bird"), self._Det(0, "person"), self._Det(16, "dog", tier="stop"),
+                self._Det(56, "chair")]
+        got = animal_log_entries(dets, (14, 15, 16, 17, 18, 19))
+        self.assertEqual([e["label"] for e in got], ["bird", "dog"])
+        self.assertEqual(got[0], {"label": "bird", "conf": 0.61, "z_m": 1.83, "x_m": -0.21,
+                                  "bbox": [0.123, 0.5, 0.2, 0.6], "tier": "log", "depth_status": "ok"})
+        self.assertEqual(got[1]["tier"], "stop")
+
+    def test_nothing_matching_is_none(self):
+        from pi_app.app.log_gating import animal_log_entries
+        self.assertIsNone(animal_log_entries([self._Det(0, "person")], (14,)))
+        self.assertIsNone(animal_log_entries([], (14,)))
+        self.assertIsNone(animal_log_entries([self._Det(14, "bird")], ()))
+
+    def test_per_tick_object_carries_the_field(self):
+        entries = [{"label": "bird", "conf": 0.5, "z_m": 2.0, "x_m": 0.1, "bbox": [0, 0, 1, 1],
+                    "tier": "log", "depth_status": "ok"}]
+        self.assertEqual(build_log_obj(**_base_kwargs(oak_animals=entries))["animals"], entries)
+        self.assertIsNone(build_log_obj(**_base_kwargs())["animals"])
+        import json
+        json.dumps(build_log_obj(**_base_kwargs(oak_animals=entries)))
+
+    def test_default_classes(self):
+        from config import OakDetectionConfig
+        self.assertEqual(OakDetectionConfig().log_animal_class_ids, (14, 15, 16, 17, 18, 19))
+
 if __name__ == "__main__":
     unittest.main()

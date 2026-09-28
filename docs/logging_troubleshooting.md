@@ -76,6 +76,11 @@ always-log-on-event while disarmed (`should_log_tick`,
 
 - `rc`, `bt`, `motor`, `safety`, `pid`, `obstacle`, `waypoint_nav`,
   `detections`, `heading_align`, `recording_state`, `bms`, `events`.
+- `animals` (2026-09-28, log only): every YOLO detection whose class is in
+  `OakDetectionConfig.log_animal_class_ids` (bird, cat, dog, horse, sheep,
+  cow): `label`, `conf`, `z_m`, `x_m`, `bbox`, `tier` (`stop`/`slow`/`log`;
+  birds are `log`), `depth_status`. `null` when none. Data for the planned
+  animal slow zone; it changes no behaviour.
 - `imu`: `controller.get_imu_status()`, rounded to 3 decimals. Its nested
   `oak_imu` sub-block drops the counters that duplicate `imu_pipeline`
   (`producer_*`, `queue_*`, `drain_batch_*`, `cadence_*`, `host_queue_*`,

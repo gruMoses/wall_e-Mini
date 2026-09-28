@@ -1079,6 +1079,14 @@ class OakDetectionConfig:
     stop_class_ids: tuple = (0, 15, 16, 17, 18, 19)   # person, cat, dog, horse, sheep, cow
     # SLOW: smaller moving objects — reduce speed
     slow_class_ids: tuple = (29, 32, 36, 37)           # frisbee, sports ball, skateboard, surfboard
+    # LOG ONLY (2026-09-28): every detection of these classes goes into the
+    # per-tick log as "animals" -- label, confidence, range, box, tier and
+    # depth status -- with no behaviour change. Kevin has ducks, chickens,
+    # geese (YOLO "bird", class 14, not in any tier yet), dogs and cats. The
+    # data sizes the planned animal slow zone for FOLLOW_ME/WAYPOINT_NAV
+    # (docs/NEXT_SESSION.md): how often and how far YOLO sees the flock, and
+    # its false "bird" hits. () turns the field off.
+    log_animal_class_ids: tuple = (14, 15, 16, 17, 18, 19)  # bird, cat, dog, horse, sheep, cow
     # 2026-09-20 field runs: person dets reach steering ~0.6 s old
     # (det_latency_s p50 0.80 s at det_fps 8 in follow-me, 0.61-0.66 s at
     # det_fps 11 idle; IMU yaw vs bbox-centre cross-correlation 0.60-0.65 s
