@@ -90,15 +90,16 @@ def _signed(a: float) -> float:
 
 class TestManualHeadingHoldRetarget(unittest.TestCase):
 
-    def _run(self, aligner):
+    def _run(self, aligner, expo=0.0):
         clock = {"t": 5_000.0}
         imu = ScriptedImu(284.0)
         comp = ImuSteeringCompensator(ImuSteeringConfig(calibration_timeout_s=0.1), imu)
-        # Linear sticks, as on the field run (stick expo came later that day):
-        # the pulse values below reproduce the logged steering inputs.
-        linear = replace(default_config, rc_map=replace(default_config.rc_map, stick_expo=0.0))
+        # expo 0.0 is the field run (stick expo came later that day). The
+        # steering intent reads the linear stick bytes, so the pulse values
+        # below reproduce the logged steering inputs at any expo.
+        cfg = replace(default_config, rc_map=replace(default_config.rc_map, stick_expo=expo))
         with unittest.mock.patch("pi_app.control.controller.time.monotonic", lambda: clock["t"]), \
-                unittest.mock.patch("pi_app.control.controller.config", linear):
+                unittest.mock.patch("pi_app.control.controller.config", cfg):
             ctrl = Controller(
                 motor_driver=FakeMotor(),
                 arm_relay=FakeRelay(),
@@ -154,6 +155,14 @@ class TestManualHeadingHoldRetarget(unittest.TestCase):
                         "target reverted to the heading at straight entry")
         self.assertLess(max(abs(c) for c in corrections), 3.0,
                         "the hold dragged the robot back toward the old heading")
+
+    def test_locked_offset_holds_the_new_heading_at_the_shipped_expo(self):
+        aligner = GpsHeadingAligner(GpsHeadingAlignConfig(enabled=True))
+        aligner._locked = True
+        aligner._offset_deg = 22.5
+        target, corrections = self._run(aligner, expo=default_config.rc_map.stick_expo)
+        self.assertLess(abs(_signed(target - 314.0)), 1.0)
+        self.assertLess(max(abs(c) for c in corrections), 3.0)
 
     def test_without_aligner_holds_the_new_heading(self):
         target, corrections = self._run(None)

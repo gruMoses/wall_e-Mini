@@ -46,43 +46,59 @@ class TestMapping(unittest.TestCase):
 
 
 
-class TestStickExpo(unittest.TestCase):
-    """Per-track stick expo (2026-09-27): gentle near the centre, full at the edge."""
+class TestStickExpoPair(unittest.TestCase):
+    """Ratio-preserving stick expo (2026-09-27): gentle near the centre,
+    full at the edge, turn radius unchanged, never more difference than linear."""
 
     def setUp(self):
-        from pi_app.control.mapping import apply_stick_expo
-        self.expo = apply_stick_expo
+        from pi_app.control.mapping import apply_stick_expo_pair
+        self.expo = apply_stick_expo_pair
+
+    @staticmethod
+    def _dev(b):
+        return (b - 126) / 128.0 if b >= 126 else (b - 126) / 126.0
 
     def test_zero_expo_is_identity(self):
-        for b in range(MIN_OUTPUT, MAX_OUTPUT + 1):
-            self.assertEqual(self.expo(b, 0.0), b)
+        for l in range(MIN_OUTPUT, MAX_OUTPUT + 1, 7):
+            for r in range(MIN_OUTPUT, MAX_OUTPUT + 1, 11):
+                self.assertEqual(self.expo(l, r, 0.0), (l, r))
 
     def test_neutral_and_full_scale_do_not_move(self):
         for e in (0.3, 0.6, 1.0):
-            self.assertEqual(self.expo(CENTER_OUTPUT_VALUE, e), CENTER_OUTPUT_VALUE)
-            self.assertEqual(self.expo(MAX_OUTPUT, e), MAX_OUTPUT)
-            self.assertEqual(self.expo(MIN_OUTPUT, e), MIN_OUTPUT)
+            self.assertEqual(self.expo(126, 126, e), (126, 126))
+            self.assertEqual(self.expo(MAX_OUTPUT, MAX_OUTPUT, e), (MAX_OUTPUT, MAX_OUTPUT))
+            self.assertEqual(self.expo(MIN_OUTPUT, MIN_OUTPUT, e), (MIN_OUTPUT, MIN_OUTPUT))
+            # One stick full, the other centred: a full-speed arc, unchanged.
+            self.assertEqual(self.expo(MAX_OUTPUT, 126, e), (MAX_OUTPUT, 126))
 
-    def test_half_stick_at_the_default(self):
-        # x = 0.5: y = 0.4 * 0.5 + 0.6 * 0.125 = 0.275
-        self.assertEqual(self.expo(126 + 64, 0.6), 126 + round(0.275 * 128))
-        self.assertEqual(self.expo(126 - 63, 0.6), 126 - round(0.275 * 126))
+    def test_equal_sticks_follow_the_expo_curve(self):
+        # x = 0.5: f = 0.4 * 0.5 + 0.6 * 0.125 = 0.275
+        self.assertEqual(self.expo(126 + 64, 126 + 64, 0.6), (126 + 35, 126 + 35))
+        self.assertEqual(self.expo(126 - 63, 126 - 63, 0.6), (126 - 35, 126 - 35))
 
-    def test_monotonic_keeps_sign_and_never_exceeds_linear(self):
-        prev = -1
-        for b in range(MIN_OUTPUT, MAX_OUTPUT + 1):
-            y = self.expo(b, 0.6)
-            self.assertGreaterEqual(y, prev)
-            prev = y
-            self.assertLessEqual(abs(y - CENTER_OUTPUT_VALUE), abs(b - CENTER_OUTPUT_VALUE))
-            if b > CENTER_OUTPUT_VALUE:
-                self.assertGreaterEqual(y, CENTER_OUTPUT_VALUE)
-            elif b < CENTER_OUTPUT_VALUE:
-                self.assertLessEqual(y, CENTER_OUTPUT_VALUE)
+    def test_turn_ratio_is_preserved(self):
+        l, r = self.expo(126 + 100, 126 + 50, 0.6)
+        self.assertAlmostEqual(self._dev(l) / self._dev(r), 2.0, delta=0.1)
+        l, r = self.expo(126 + 40, 126 - 40, 0.6)  # pivot
+        self.assertEqual(l - 126, 126 - r)
+
+    def test_never_more_difference_than_linear_and_keeps_signs(self):
+        for l in range(MIN_OUTPUT, MAX_OUTPUT + 1, 5):
+            for r in range(MIN_OUTPUT, MAX_OUTPUT + 1, 5):
+                el, er = self.expo(l, r, 0.6)
+                self.assertLessEqual(abs(el - er), abs(l - r) + 1)
+                self.assertLessEqual(abs(el - 126), abs(l - 126))
+                self.assertLessEqual(abs(er - 126), abs(r - 126))
+                for raw, out in ((l, el), (r, er)):
+                    if raw > 126:
+                        self.assertGreaterEqual(out, 126)
+                    elif raw < 126:
+                        self.assertLessEqual(out, 126)
 
     def test_expo_is_clamped(self):
-        self.assertEqual(self.expo(190, -1.0), 190)
-        self.assertEqual(self.expo(190, 5.0), self.expo(190, 1.0))
+        self.assertEqual(self.expo(190, 160, -1.0), (190, 160))
+        self.assertEqual(self.expo(190, 160, 5.0), self.expo(190, 160, 1.0))
+
 
 if __name__ == "__main__":
     unittest.main()

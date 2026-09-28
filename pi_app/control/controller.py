@@ -13,7 +13,7 @@ _logger = logging.getLogger(__name__)
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from pi_app.control.mapping import (
-    map_pulse_to_byte, map_pulse_to_byte_saturated, apply_stick_expo,
+    map_pulse_to_byte, map_pulse_to_byte_saturated, apply_stick_expo_pair,
     CENTER_OUTPUT_VALUE, CENTER_PULSE_WIDTH_US, MAX_OUTPUT, MIN_OUTPUT,
 )
 from pi_app.control.safety import (
@@ -1171,15 +1171,21 @@ class Controller:
         left: int,
         right: int,
         bt: tuple[int, int] | None,
+        stick: tuple[int, int] | None = None,
     ) -> tuple[int, int]:
         """Start or continue the reverse pulse, after the per-mode command
         and the IMU correction. A blocked edge is consumed here.
+
+        stick: the linear RC stick bytes (before expo) for the stick-neutral
+        band; expo would otherwise widen that band to about +-50 us.
+        Defaults to (left, right).
         """
         cfg = getattr(config, "arms_up", None)
+        stick_left, stick_right = stick if stick is not None else (left, right)
         with self._twitch_lock:
             if self._twitch_edge_pending:
                 self._twitch_edge_pending = False
-                reason = self._twitch_start_block_locked(now, left, right, bt, cfg)
+                reason = self._twitch_start_block_locked(now, stick_left, stick_right, bt, cfg)
                 if reason is None:
                     n, dur = self._clamped_twitch_params(cfg)
                     cooldown = float(
@@ -1200,7 +1206,7 @@ class Controller:
                     self._twitch_blocked_reason = reason
             pulse = now < self._twitch_until
             if pulse:
-                reason = self._twitch_continue_block_locked(left, right, bt, cfg)
+                reason = self._twitch_continue_block_locked(stick_left, stick_right, bt, cfg)
                 if reason is not None:
                     self._twitch_until = 0.0
                     self._twitch_active = False
@@ -1752,6 +1758,8 @@ class Controller:
         wp_pivot_active = False
         wp_in_align = False
         autonomy_cmd: AutonomyCommand | None = None
+        # Linear RC stick bytes (before expo); None outside RC tank drive.
+        rc_stick_linear: tuple[int, int] | None = None
         if self._mode == "WAYPOINT_NAV" and self._waypoint_nav is not None:
             autonomy_cmd, wp_pivot_active, wp_in_align = self._compute_waypoint_autonomy_command(telemetry)
             left = autonomy_cmd.left_byte
@@ -1774,10 +1782,18 @@ class Controller:
             except Exception:
                 f_full, r_full, expo = 1950, 1050, 0.0
 
-            # Expo per track: gentle near the centre, full scale at the edge.
-            left = apply_stick_expo(map_pulse_to_byte_saturated(rc.ch1_us, f_full, r_full), expo)
-            right = apply_stick_expo(map_pulse_to_byte_saturated(rc.ch2_us, f_full, r_full), expo)
-            steering_input = self._bytes_to_steering_input(left, right)
+            left_lin = map_pulse_to_byte_saturated(rc.ch1_us, f_full, r_full)
+            right_lin = map_pulse_to_byte_saturated(rc.ch2_us, f_full, r_full)
+            # Steering intent (heading-hold neutral test, straight latch, IMU
+            # blend) and the twitch stick band read the LINEAR bytes: their
+            # thresholds are tuned for linear sticks. With expo-shaped bytes
+            # the hold read gentle turns as "straight" and fought them (sim,
+            # 2026-09-27 review: 64-120 deg turns became 4-8 deg).
+            steering_input = self._bytes_to_steering_input(left_lin, right_lin)
+            rc_stick_linear = (left_lin, right_lin)
+            # Expo: gentle near the centre, full scale at the edge, turn
+            # radius unchanged (mapping.apply_stick_expo_pair).
+            left, right = apply_stick_expo_pair(left_lin, right_lin, expo)
 
         telemetry["autonomy_source"] = autonomy_cmd.source if autonomy_cmd is not None else "MANUAL_OR_BT"
 
@@ -2013,7 +2029,7 @@ class Controller:
         # the forward obstacle layer (is_forward_motion requires net forward).
         # MANUAL only. A blocked rising edge is consumed on this tick.
         left, right = self._service_twitch_injection(
-            mono_now, left, right, bt_override_bytes
+            mono_now, left, right, bt_override_bytes, stick=rc_stick_linear
         )
 
         # Obstacle avoidance throttle scaling — front camera only gates forward motion.

@@ -56,27 +56,49 @@ def map_pulse_to_byte(pulse_us: int) -> int:
     return clamp(val, MIN_OUTPUT, MAX_OUTPUT)
 
 
-def apply_stick_expo(byte_val: int, expo: float) -> int:
-    """
-    RC-style expo on one track byte: y = (1 - e) * x + e * x**3.
+def _deflection(byte_val: int) -> float:
+    """Track byte -> deflection from neutral in [-1, 1] (forward span 128, reverse 126)."""
+    b = clamp(int(byte_val), MIN_OUTPUT, MAX_OUTPUT)
+    if b >= CENTER_OUTPUT_VALUE:
+        return (b - CENTER_OUTPUT_VALUE) / (MAX_OUTPUT - CENTER_OUTPUT_VALUE)
+    return (b - CENTER_OUTPUT_VALUE) / (CENTER_OUTPUT_VALUE - MIN_OUTPUT)
 
-    x is the track's deflection from neutral in [-1, 1] (forward span
-    MAX_OUTPUT - 126, reverse span 126 - MIN_OUTPUT). Neutral, both
-    full-scale ends and the sign do not change; small deflections shrink,
-    so the stick is gentle near the centre and still reaches full scale.
-    e = 0 is linear, e = 1 is a pure cube; e is clamped to [0, 1].
+
+def _from_deflection(x: float) -> int:
+    if x >= 0.0:
+        val = CENTER_OUTPUT_VALUE + int(round(x * (MAX_OUTPUT - CENTER_OUTPUT_VALUE)))
+    else:
+        val = CENTER_OUTPUT_VALUE + int(round(x * (CENTER_OUTPUT_VALUE - MIN_OUTPUT)))
+    return clamp(val, MIN_OUTPUT, MAX_OUTPUT)
+
+
+def apply_stick_expo_pair(left: int, right: int, expo: float) -> tuple[int, int]:
+    """
+    Ratio-preserving stick expo for a tank-drive pair of track bytes.
+
+    With m = the larger track deflection, both tracks are multiplied by
+    k = f(m) / m = (1 - e) + e * m**2, where f(m) = (1 - e) m + e m**3 is
+    RC-style expo. The larger track follows the expo curve; the L:R ratio,
+    and so the turn radius, does not change; only the speed along the path
+    is shaped. k <= 1, so a track difference is never larger than linear,
+    and at full stick (m = 1) nothing changes. Neutral and the sign of each
+    track do not change. e = 0 is linear; e is clamped to [0, 1].
+
+    Per-track expo was tried first and rejected in review (2026-09-27):
+    near full stick it amplified a small stick difference about 2x (1.5x
+    the turn at 1900/1800 us, at up to 1.6 m/s).
     """
     e = min(1.0, max(0.0, float(expo)))
-    byte_val = clamp(int(byte_val), MIN_OUTPUT, MAX_OUTPUT)
-    if e <= 0.0 or byte_val == CENTER_OUTPUT_VALUE:
-        return byte_val
-    if byte_val > CENTER_OUTPUT_VALUE:
-        span = MAX_OUTPUT - CENTER_OUTPUT_VALUE
-    else:
-        span = CENTER_OUTPUT_VALUE - MIN_OUTPUT
-    x = (byte_val - CENTER_OUTPUT_VALUE) / span
-    y = (1.0 - e) * x + e * x * x * x
-    return clamp(CENTER_OUTPUT_VALUE + int(round(y * span)), MIN_OUTPUT, MAX_OUTPUT)
+    left = clamp(int(left), MIN_OUTPUT, MAX_OUTPUT)
+    right = clamp(int(right), MIN_OUTPUT, MAX_OUTPUT)
+    if e <= 0.0:
+        return left, right
+    xl, xr = _deflection(left), _deflection(right)
+    m = max(abs(xl), abs(xr))
+    if m <= 0.0:
+        return left, right
+    k = (1.0 - e) + e * m * m
+    return _from_deflection(xl * k), _from_deflection(xr * k)
 
 
 def map_pulse_to_byte_saturated(
