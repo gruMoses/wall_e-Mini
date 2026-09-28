@@ -13,7 +13,7 @@ _logger = logging.getLogger(__name__)
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from pi_app.control.mapping import (
-    map_pulse_to_byte, map_pulse_to_byte_saturated,
+    map_pulse_to_byte, map_pulse_to_byte_saturated, apply_stick_expo,
     CENTER_OUTPUT_VALUE, CENTER_PULSE_WIDTH_US, MAX_OUTPUT, MIN_OUTPUT,
 )
 from pi_app.control.safety import (
@@ -1763,11 +1763,13 @@ class Controller:
             try:
                 f_full = int(getattr(config.rc_map, 'forward_full_us', 1950))
                 r_full = int(getattr(config.rc_map, 'reverse_full_us', 1050))
+                expo = float(getattr(config.rc_map, 'stick_expo', 0.0))
             except Exception:
-                f_full, r_full = 1950, 1050
+                f_full, r_full, expo = 1950, 1050, 0.0
 
-            left = map_pulse_to_byte_saturated(rc.ch1_us, f_full, r_full)
-            right = map_pulse_to_byte_saturated(rc.ch2_us, f_full, r_full)
+            # Expo per track: gentle near the centre, full scale at the edge.
+            left = apply_stick_expo(map_pulse_to_byte_saturated(rc.ch1_us, f_full, r_full), expo)
+            right = apply_stick_expo(map_pulse_to_byte_saturated(rc.ch2_us, f_full, r_full), expo)
             steering_input = self._bytes_to_steering_input(left, right)
 
         telemetry["autonomy_source"] = autonomy_cmd.source if autonomy_cmd is not None else "MANUAL_OR_BT"

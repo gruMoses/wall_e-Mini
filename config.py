@@ -196,6 +196,14 @@ class RcMapConfig:
     """
     forward_full_us: int = 1950  # >= maps to 255
     reverse_full_us: int = 1050  # <= maps to 0
+    # Stick expo (2026-09-27, Kevin: small movements near the centre really
+    # slow, the edge "just go"): y = (1 - e) x + e x^3 on each track's
+    # deflection after the pulse-to-byte map. RC MANUAL only; the phone
+    # teleop and the autonomous modes do not use it. At 0.6: quarter stick
+    # gives 0.11 of full (linear 0.25), half stick 0.28 (0.50), three
+    # quarters 0.55 (0.75), full stick unchanged. The straight-intent and
+    # arming checks still read the raw pulses. 0.0 = linear.
+    stick_expo: float = 0.6
 
 
 @dataclass(frozen=True)

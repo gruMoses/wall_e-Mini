@@ -10,7 +10,7 @@ from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 from pi_app.control.controller import RCInputs, Controller
-from pi_app.control.mapping import map_pulse_to_byte_saturated
+from pi_app.control.mapping import apply_stick_expo, map_pulse_to_byte_saturated
 from pi_app.control.safety import SafetyEvent, SafetyParams
 from config import SafetyConfig
 from config import config as default_config
@@ -280,16 +280,18 @@ class TestAutoDisarmController(unittest.TestCase):
         # Sticks move every tick, so the idle timer never reaches the limit.
         # dt is 1 s; manual slew (250 byte/s accel, 350 byte/s decel) finishes
         # any full-range step in that interval, including the first snap.
-        # The emitted bytes are the mapped stick command.
+        # The emitted bytes are the mapped stick command, including the
+        # per-track stick expo (2026-09-27).
         self._arm_idle()
         f_full = default_config.rc_map.forward_full_us
         r_full = default_config.rc_map.reverse_full_us
+        expo = default_config.rc_map.stick_expo
         pairs = [(1800, 1700), (1200, 1300), (2100, 900), (1600, 1900)]
         for i, (ch1, ch2) in enumerate(pairs, start=1):
             cmd, _, telem = self._tick(float(i), ch1=ch1, ch2=ch2)
             expected = (
-                map_pulse_to_byte_saturated(ch1, f_full, r_full),
-                map_pulse_to_byte_saturated(ch2, f_full, r_full),
+                apply_stick_expo(map_pulse_to_byte_saturated(ch1, f_full, r_full), expo),
+                apply_stick_expo(map_pulse_to_byte_saturated(ch2, f_full, r_full), expo),
             )
             self.assertEqual((cmd.left_byte, cmd.right_byte), expected)
             self.assertEqual(self.motor.commands[-1], expected)

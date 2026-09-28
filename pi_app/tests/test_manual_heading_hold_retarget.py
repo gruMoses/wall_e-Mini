@@ -21,6 +21,7 @@ import unittest.mock
 from dataclasses import replace
 
 from config import GpsHeadingAlignConfig, ImuSteeringConfig
+from config import config as default_config
 from pi_app.control.controller import Controller, RCInputs
 from pi_app.control.gps_heading_align import GpsHeadingAligner
 from pi_app.control.imu_steering import ImuSteeringCompensator
@@ -93,7 +94,11 @@ class TestManualHeadingHoldRetarget(unittest.TestCase):
         clock = {"t": 5_000.0}
         imu = ScriptedImu(284.0)
         comp = ImuSteeringCompensator(ImuSteeringConfig(calibration_timeout_s=0.1), imu)
-        with unittest.mock.patch("pi_app.control.controller.time.monotonic", lambda: clock["t"]):
+        # Linear sticks, as on the field run (stick expo came later that day):
+        # the pulse values below reproduce the logged steering inputs.
+        linear = replace(default_config, rc_map=replace(default_config.rc_map, stick_expo=0.0))
+        with unittest.mock.patch("pi_app.control.controller.time.monotonic", lambda: clock["t"]), \
+                unittest.mock.patch("pi_app.control.controller.config", linear):
             ctrl = Controller(
                 motor_driver=FakeMotor(),
                 arm_relay=FakeRelay(),

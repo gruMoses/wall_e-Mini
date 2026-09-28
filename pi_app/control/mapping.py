@@ -56,6 +56,29 @@ def map_pulse_to_byte(pulse_us: int) -> int:
     return clamp(val, MIN_OUTPUT, MAX_OUTPUT)
 
 
+def apply_stick_expo(byte_val: int, expo: float) -> int:
+    """
+    RC-style expo on one track byte: y = (1 - e) * x + e * x**3.
+
+    x is the track's deflection from neutral in [-1, 1] (forward span
+    MAX_OUTPUT - 126, reverse span 126 - MIN_OUTPUT). Neutral, both
+    full-scale ends and the sign do not change; small deflections shrink,
+    so the stick is gentle near the centre and still reaches full scale.
+    e = 0 is linear, e = 1 is a pure cube; e is clamped to [0, 1].
+    """
+    e = min(1.0, max(0.0, float(expo)))
+    byte_val = clamp(int(byte_val), MIN_OUTPUT, MAX_OUTPUT)
+    if e <= 0.0 or byte_val == CENTER_OUTPUT_VALUE:
+        return byte_val
+    if byte_val > CENTER_OUTPUT_VALUE:
+        span = MAX_OUTPUT - CENTER_OUTPUT_VALUE
+    else:
+        span = CENTER_OUTPUT_VALUE - MIN_OUTPUT
+    x = (byte_val - CENTER_OUTPUT_VALUE) / span
+    y = (1.0 - e) * x + e * x * x * x
+    return clamp(CENTER_OUTPUT_VALUE + int(round(y * span)), MIN_OUTPUT, MAX_OUTPUT)
+
+
 def map_pulse_to_byte_saturated(
     pulse_us: int,
     forward_full_us: int,
