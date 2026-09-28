@@ -354,6 +354,21 @@ class ObstacleAvoidanceConfig:
     # in). The YOLO person/animal stop tier (distance forced to 0.0) stays
     # absolute. 0.0 restores the hard stop.
     manual_obstacle_min_scale: float = 0.15
+    # MANUAL throttle curve (2026-09-27 17:18-17:26, loading electric mesh
+    # fencing): netting draped over the lens read as a solid 0.50 m obstacle
+    # for 8 minutes, and the old MANUAL law (1.0 at slow_distance_m, linear
+    # to 0 at stop_distance_m, then the 0.15 floor) held full stick to a
+    # 15 percent crawl. Kevin's numbers: half throttle at the netting's
+    # 0.50 m, the floor only from 6 in closer. MANUAL is now piecewise
+    # linear through 1.0 at slow_distance_m, 0.5 at
+    # manual_half_throttle_distance_m, and manual_obstacle_min_scale at
+    # manual_floor_distance_m (0.35 m is also the camera's closest valid
+    # depth, min_depth_mm). FOLLOW_ME and WAYPOINT_NAV keep the old law, and
+    # the person/animal stop tier (distance 0.0) stays absolute.
+    # manual_half_throttle_distance_m = 0.0 restores the old MANUAL law;
+    # manual_obstacle_min_scale = 0.0 also does (with its hard stop).
+    manual_half_throttle_distance_m: float = 0.50
+    manual_floor_distance_m: float = 0.35
     update_rate_hz: float = 15.0
     stale_timeout_s: float = 0.5
     stale_policy: str = "stop"   # fail-safe: stop when depth data is stale

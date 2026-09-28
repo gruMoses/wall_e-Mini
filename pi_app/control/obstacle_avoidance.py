@@ -49,7 +49,10 @@ class ObstacleAvoidanceController:
 
         self._last_distance_m = distance_m
 
-        if distance_m >= self._cfg.slow_distance_m:
+        manual_curve = self._manual_curve_points() if is_manual and distance_m > 0.0 else None
+        if manual_curve is not None:
+            scale = self._manual_curve_scale(distance_m, *manual_curve)
+        elif distance_m >= self._cfg.slow_distance_m:
             scale = 1.0
         elif distance_m <= self._cfg.stop_distance_m:
             scale = 0.0
@@ -71,6 +74,36 @@ class ObstacleAvoidanceController:
                 scale = max(scale, min(1.0, floor))
         self._last_scale = scale
         return self._last_scale
+
+    def _manual_curve_points(self) -> tuple[float, float, float, float] | None:
+        """(slow, half, floor distance, floor scale) for MANUAL, or None.
+
+        None (use the old linear law) when manual_half_throttle_distance_m is
+        0.0, when the points are not strictly ordered floor < half < slow, or
+        when manual_obstacle_min_scale is 0.0 ("restore the hard stop" keeps
+        its meaning: the MANUAL stop stays at stop_distance_m).
+        """
+        slow = float(self._cfg.slow_distance_m)
+        half = float(getattr(self._cfg, "manual_half_throttle_distance_m", 0.0))
+        low = float(getattr(self._cfg, "manual_floor_distance_m", 0.0))
+        floor_scale = float(getattr(self._cfg, "manual_obstacle_min_scale", 0.0))
+        if not (0.0 < low < half < slow) or not (0.0 < floor_scale < 0.5):
+            return None
+        return slow, half, low, floor_scale
+
+    @staticmethod
+    def _manual_curve_scale(
+        distance_m: float, slow: float, half: float, low: float, floor_scale: float
+    ) -> float:
+        """Piecewise linear: 1.0 at slow, 0.5 at half, floor_scale at low."""
+        if distance_m >= slow:
+            return 1.0
+        if distance_m >= half:
+            return 0.5 + 0.5 * (distance_m - half) / (slow - half)
+        if distance_m > low:
+            return floor_scale + (0.5 - floor_scale) * (distance_m - low) / (half - low)
+        # At or inside the floor distance, and NaN: the creep floor.
+        return floor_scale
 
     def get_status(self) -> dict:
         # An empty-but-fresh corridor reports distance inf ("clear"); emit None

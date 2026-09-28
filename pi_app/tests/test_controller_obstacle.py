@@ -142,15 +142,19 @@ class TestControllerObstacleAvoidance(unittest.TestCase):
     def test_manual_creep_floor_lets_the_operator_inch_past_a_corridor_stop(self):
         """2026-09-19 19:53: max-disparity noise read 0.37 m after sunset and
         the robot could not be driven into the garage. In MANUAL the corridor
-        stop is a floor (manual_obstacle_min_scale), not a wall."""
+        stop is a floor (manual_obstacle_min_scale), not a wall.
+
+        2026-09-27: the default MANUAL curve (0.5 at 0.50 m, the 0.15 floor
+        at 0.35 m) gives 0.15 + 0.35 * 0.02 / 0.15 at that 0.37 m reading."""
         cfg = ObstacleAvoidanceConfig(stop_distance_m=0.4, slow_distance_m=1.5,
                                       manual_obstacle_min_scale=0.15)
         ctrl, motor = self._make_controller(oa_config=cfg)
         ctrl.process(ARMED_RC, now_epoch_s=0.5)
         ctrl.set_obstacle_data(distance_m=0.37, age_s=0.0)
         cmd, events, telem = ctrl.process(FWD_RC, now_epoch_s=1.0)
-        self.assertAlmostEqual(telem["obstacle_throttle_scale"], 0.15)
-        expected = round(126 + (254 - 126) * 0.15)
+        creep = 0.15 + 0.35 * (0.37 - 0.35) / (0.50 - 0.35)
+        self.assertAlmostEqual(telem["obstacle_throttle_scale"], creep)
+        expected = round(126 + (254 - 126) * creep)
         self.assertEqual(cmd.left_byte, expected)
         self.assertEqual(cmd.right_byte, expected)
 
