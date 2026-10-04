@@ -31,8 +31,9 @@ The watchdog runs each 15 s:
 5. A profile that failed in the last 600 s goes behind the other candidates. Two profiles that both fail are tried in turn.
 6. Tries are at least 60 s apart, from the end of the last try. A failed try can take 150 s.
 7. When `wlan0` is connected, the watchdog checks the default gateway each 30 s: one ping, then the neighbour (ARP) entry. A gateway with a valid link-layer address counts as "answers", so a router that drops ICMP never counts as down.
-8. If the gateway has not answered for 180 s, and it has never answered since this connection came up, the active profile counts as failed, and step 3 runs. An example is a profile on the wrong subnet.
-9. If the gateway answered at least once on this connection and then stops (for example, the router restarts), the watchdog writes one log line and does nothing. A new Wi-Fi connection cannot correct a router.
+8. The watchdog stores each profile whose gateway has answered, in `/var/lib/wifi-watchdog/state.json`. The store survives a Wi-Fi blip and a reboot. A failed `nmcli` read skips that tick and changes nothing.
+9. If the gateway has not answered for 180 s, and the active profile is not in that store, the profile counts as failed, and step 3 runs. An example is a profile on the wrong subnet.
+10. If the active profile is in that store and the gateway then stops (for example, the router restarts), the watchdog writes one log line and does nothing. A new Wi-Fi connection cannot correct a router.
 
 NOTE: The watchdog never stops an NM activation before the 600 s limit. It never takes down a link whose gateway has answered. It uses only the secrets that NM already has. It never reads, enters, or prints a password.
 
@@ -63,9 +64,11 @@ Set these on each Wi-Fi profile:
 | Setting | Value | Reason |
 |---|---|---|
 | `connection.autoconnect-retries` | `0` (forever) | NM never stops its own retries. |
-| `connection.auth-retries` | `-1` (default, 3) | NM ends a failed activation, goes to state 30, and can try the other profile. With `0`, NM can loop on an access point that it sees but cannot join, and the watchdog waits for the 600 s limit. |
+| `connection.auth-retries` | `0` while this is the only profile. `-1` after a fallback passes section 6. | `0` stops the no-secrets block after association timeouts. `-1` lets NM end a failed activation and try the other profile. |
 
-NOTE: On 2026-09-27 at 18:50, `preconfigured` got `auth-retries 0` as a temporary fix, before the watchdog existed. After you install the watchdog, set it back:
+NOTE: `preconfigured` is the only profile today. It keeps `connection.auth-retries 0` (set 2026-09-27 at 18:50). Leave that value while it is the only profile. With `0`, NM can loop on an access point that it sees but cannot join, and the watchdog waits for the 600 s limit. That wait is acceptable until a fallback exists. A drop during the WPA 4-way handshake can still end in a no-secrets block.
+
+Set `preconfigured` to `-1` only after `wwr outdoor` returns `GATEWAY_OK`:
 
 ```bash
 sudo nmcli connection modify preconfigured connection.auth-retries -1
@@ -91,7 +94,7 @@ Kevin types the password. The agent does not.
    ssh pi@192.168.86.54 "sudo systemd-run --unit=wifi-profile-test --collect bash /home/pi/wall_e-Mini/bin/test_wifi_profile.sh 'wwr outdoor'"
    ```
 
-3. After 4 minutes, read the result:
+3. After 6 minutes, read the result. The return to `preconfigured` can take three tries:
 
    ```bash
    ssh pi@192.168.86.54 cat /tmp/wifi_profile_test.txt

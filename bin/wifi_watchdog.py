@@ -35,11 +35,14 @@ WHAT THIS SCRIPT DOES, every --interval seconds (default 15):
   4. Tries are at least --retry-s seconds apart (default 60), counted from
      the END of the previous try (a failed `up` can take 150 s).
   5. Connected, but the default gateway has not answered ping or ARP for
-     --gateway-dark-s seconds (default 180) AND has never answered since
-     this connection came up -- a profile on the wrong subnet. The active
-     profile counts as failed and step 2 runs. A gateway that answered at
-     least once on this connection and then stops (a router restart) is
-     logged and left alone: bouncing a working link cannot fix a router.
+     --gateway-dark-s seconds (default 180) on a profile whose gateway has
+     NEVER answered -- a profile on the wrong subnet. The active profile
+     counts as failed and step 2 runs. The profiles whose gateway has
+     answered are remembered on disk (--state-file), so a router outage,
+     a Wi-Fi blip during one, or a boot during one never bounces a link:
+     a new Wi-Fi connection cannot fix a router.
+  A failed nmcli read (no state, no active profile) skips the tick and
+  changes nothing.
 
 It never takes down a link whose gateway has answered, only acts on saved
 autoconnect Wi-Fi profiles, and never reads, enters or prints a password.
@@ -49,7 +52,9 @@ See docs/wifi_watchdog.md.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import re
 import signal
 import subprocess
@@ -209,16 +214,42 @@ class WatchdogConfig:
     gateway_dark_s: float = 180.0
 
 
+def load_answered(path: Optional[str]) -> set[str]:
+    """UUIDs of profiles whose gateway has answered, from the state file."""
+    if not path:
+        return set()
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        return {str(u).lower() for u in data.get("answered_uuids", [])}
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def save_answered(path: Optional[str], uuids: set[str]) -> None:
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"answered_uuids": sorted(uuids)}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        LOG.warning("Wi-Fi watchdog could not write %s", path)
+
+
 @dataclass
 class Watchdog:
     nm: Nm
     cfg: WatchdogConfig = field(default_factory=WatchdogConfig)
     clock: Callable[[], float] = time.monotonic
+    state_path: Optional[str] = None
+    answered: set = field(default_factory=set)
     offline_since: Optional[float] = None
     idle_since: Optional[float] = None
     last_attempt_end: Optional[float] = None
     link_uuid: Optional[str] = None
-    gateway_answered: bool = False
     last_gateway_check: Optional[float] = None
     gateway_dark_since: Optional[float] = None
     outage_logged: bool = False
@@ -227,12 +258,13 @@ class Watchdog:
 
     def tick(self, now: float) -> None:
         state = self.nm.device_state()
+        if state is None:
+            return  # a failed nmcli read changes nothing
         if state == CONNECTED:
             self._connected(now)
             return
         # Not connected: forget the link, track idle and offline time.
         self.link_uuid = None
-        self.gateway_answered = False
         self.last_gateway_check = None
         self.gateway_dark_since = None
         self.outage_logged = False
@@ -256,10 +288,11 @@ class Watchdog:
             self.no_candidate_logged = False
         self.idle_since = None
         uuid = self.nm.active_uuid()
+        if uuid is None:
+            return  # a failed nmcli read changes nothing
         if uuid != self.link_uuid:
-            # A new connection: its gateway has not answered yet.
+            # A new connection: start its gateway checks from scratch.
             self.link_uuid = uuid
-            self.gateway_answered = False
             self.last_gateway_check = None
             self.gateway_dark_since = None
             self.outage_logged = False
@@ -268,17 +301,18 @@ class Watchdog:
         self.last_gateway_check = now
         gw = self.nm.gateway()
         if gw is None or self.nm.gateway_answers(gw):
-            if gw is not None:
-                self.gateway_answered = True
+            if gw is not None and uuid not in self.answered:
+                self.answered.add(uuid)
+                save_answered(self.state_path, self.answered)
             self.gateway_dark_since = None
             self.outage_logged = False
             return
         if self.gateway_dark_since is None:
             self.gateway_dark_since = now
-        if self.gateway_answered:
+        if uuid in self.answered:
             if not self.outage_logged:
-                LOG.warning("Wi-Fi gateway %s stopped answering; it answered earlier on this "
-                            "connection, so this is not a Wi-Fi fault; leaving the link up", gw)
+                LOG.warning("Wi-Fi gateway %s stopped answering; this profile's gateway has "
+                            "answered before, so this is not a Wi-Fi fault; leaving the link up", gw)
                 self.outage_logged = True
             return
         if now - self.gateway_dark_since >= self.cfg.gateway_dark_s:
@@ -344,6 +378,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--fail-backoff-s", type=float, default=600.0)
     p.add_argument("--gateway-interval", type=float, default=30.0)
     p.add_argument("--gateway-dark-s", type=float, default=180.0)
+    p.add_argument("--state-file", default="/var/lib/wifi-watchdog/state.json",
+                   help="remembers the profiles whose gateway has answered ('' = none)")
     return p
 
 
@@ -354,7 +390,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                          fail_backoff_s=args.fail_backoff_s,
                          gateway_interval_s=args.gateway_interval,
                          gateway_dark_s=args.gateway_dark_s)
-    dog = Watchdog(nm=Nm(iface=args.iface), cfg=cfg)
+    dog = Watchdog(nm=Nm(iface=args.iface), cfg=cfg, state_path=args.state_file or None,
+                   answered=load_answered(args.state_file or None))
     shutdown = _Shutdown()
     signal.signal(signal.SIGTERM, shutdown.handle)
     signal.signal(signal.SIGINT, shutdown.handle)

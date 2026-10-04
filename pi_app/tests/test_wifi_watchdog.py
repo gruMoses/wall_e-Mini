@@ -10,11 +10,17 @@ bounce a working link; NM's own activation must not be superseded before
 the stuck net; candidates come from NM's band-aware available list; retry
 spacing counts from the end of a try; the fail backoff expires; the dark
 path re-activates a lone profile.
+
+The 2026-10-04 review of that flag found it was forgotten on a failed
+nmcli read, on a Wi-Fi blip, and on a reboot. Those three, plus the
+state-file write, have tests in TestAnsweredMemory.
 """
 
 import importlib.util
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -71,9 +77,17 @@ class FakeNm:
         self.active = active
 
     def device_state(self):
+        n = getattr(self, "fail_state_reads", 0)
+        if n:
+            self.fail_state_reads = n - 1
+            return None
         return self.state
 
     def active_uuid(self):
+        n = getattr(self, "fail_uuid_reads", 0)
+        if n:
+            self.fail_uuid_reads = n - 1
+            return None
         return self.active
 
     def available_uuids(self):
@@ -307,6 +321,148 @@ class TestDarkGateway(unittest.TestCase):
         c = Clock(); nm = FakeNm(c, state=100, gateway=None, gateway_answers=False)
         _run(nm, c, 900)
         self.assertEqual(nm.ups, [])
+
+
+class TestAnsweredMemory(unittest.TestCase):
+    """The profile set in the state file, not a flag on the current link."""
+
+    def _dog(self, nm, clock, path=None, answered=None):
+        return ww.Watchdog(nm=nm, cfg=ww.WatchdogConfig(), clock=clock,
+                           state_path=path, answered=set() if answered is None else answered)
+
+    def test_failed_device_read_does_not_move_the_idle_clock(self):
+        c = Clock(); nm = FakeNm(c, state=30)
+        dog = self._dog(nm, c)
+        for t in range(0, 106, TICK):
+            c.t = t
+            dog.tick(t)
+        self.assertEqual(nm.ups, [])
+        self.assertEqual(dog.idle_since, 0)
+        nm.fail_state_reads = 1
+        c.t = 112
+        dog.tick(112)
+        self.assertEqual(nm.ups, [])
+        self.assertEqual(dog.idle_since, 0)
+        self.assertEqual(dog.offline_since, 0)
+        c.t = 120
+        dog.tick(120)
+        self.assertEqual(_uuids(nm), ["u-primary"])
+
+    def test_failed_uuid_read_does_not_forget_a_link_that_answered(self):
+        # Gateway answered, then went dark. One failed CON-UUID read must
+        # not look like a new connection that has never answered.
+        c = Clock(); nm = FakeNm(c, state=100, gateway_answers=lambda t: t < 30)
+        dog = self._dog(nm, c)
+        _run(nm, c, 210, dog=dog)
+        self.assertIn("u-primary", dog.answered)
+        self.assertEqual(nm.ups, [])
+        nm.fail_uuid_reads = 1
+        dog.tick(c.t)
+        self.assertEqual(nm.ups, [])
+        self.assertEqual(dog.link_uuid, "u-primary")
+        self.assertIn("u-primary", dog.answered)
+        _run(nm, c, c.t + 400, dog=dog)
+        self.assertEqual(nm.ups, [])
+
+    def test_wifi_blip_during_a_router_outage_does_not_bounce(self):
+        c = Clock(); nm = FakeNm(c, state=100, gateway_answers=lambda t: t < 60)
+        dog = self._dog(nm, c)
+        _run(nm, c, 90, dog=dog)
+        self.assertIn("u-primary", dog.answered)
+        nm.state = 30  # a short drop; NM brings the link back itself
+        _run(nm, c, 120, dog=dog)
+        self.assertEqual(nm.ups, [])
+        nm.state = 100
+        _run(nm, c, 600, dog=dog)
+        self.assertEqual(nm.ups, [])
+        self.assertIn("u-primary", dog.answered)
+
+    def test_uuid_change_does_not_forget_a_profile_that_answered(self):
+        c = Clock(); nm = FakeNm(c, state=100, gateway_answers=lambda t: t < 30)
+        dog = self._dog(nm, c)
+        _run(nm, c, 45, dog=dog)
+        nm.active = "u-fallback"  # CON-UUID change while the gateway is dark
+        _run(nm, c, 90, dog=dog)
+        self.assertIn("u-primary", dog.answered)
+        nm.active = "u-primary"
+        _run(nm, c, 400, dog=dog)
+        self.assertEqual(nm.ups, [])
+
+    def test_boot_during_an_outage_with_the_state_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "state.json")
+            with open(path, "w") as fh:
+                json.dump({"answered_uuids": ["u-primary"]}, fh)
+            c = Clock(); nm = FakeNm(c, state=100, gateway_answers=False)
+            # Same wiring as main(): load the file, then tick.
+            dog = self._dog(nm, c, path=path, answered=ww.load_answered(path))
+            _run(nm, c, 400, dog=dog)
+            self.assertEqual(nm.ups, [])
+            self.assertIn("u-primary", dog.answered)
+
+    def test_main_loads_the_state_file_before_the_first_tick(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "state.json")
+            with open(path, "w") as fh:
+                json.dump({"answered_uuids": ["U-PRIMARY"]}, fh)
+            seen = {}
+
+            def boom(self, now):
+                seen["answered"] = set(self.answered)
+                seen["path"] = self.state_path
+                raise KeyboardInterrupt
+
+            orig = ww.Watchdog.tick
+            ww.Watchdog.tick = boom
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    ww.main(["--state-file", path, "--interval", "999"])
+            finally:
+                ww.Watchdog.tick = orig
+            self.assertEqual(seen["answered"], {"u-primary"})
+            self.assertEqual(seen["path"], path)
+
+    def test_first_answer_writes_the_state_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "subdir", "state.json")
+            c = Clock(); nm = FakeNm(c, state=100)
+            dog = self._dog(nm, c, path=path, answered=ww.load_answered(path))
+            dog.tick(0)
+            with open(path) as fh:
+                self.assertEqual(json.load(fh)["answered_uuids"], ["u-primary"])
+            self.assertFalse(os.path.exists(path + ".tmp"))
+            nm.active = "u-fallback"
+            dog.tick(0)  # a new link: the interval does not apply
+            with open(path) as fh:
+                self.assertEqual(json.load(fh)["answered_uuids"], ["u-fallback", "u-primary"])
+
+    def test_a_dark_profile_is_not_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "state.json")
+            c = Clock(); nm = FakeNm(c, state=100, gateway_answers=False)
+            dog = self._dog(nm, c, path=path, answered=set())
+            _run(nm, c, 60, dog=dog)
+            self.assertFalse(os.path.exists(path))
+
+    def test_load_missing_corrupt_and_case(self):
+        self.assertEqual(ww.load_answered(None), set())
+        self.assertEqual(ww.load_answered("/no/such/wifi-watchdog-state.json"), set())
+        with tempfile.TemporaryDirectory() as d:
+            bad = os.path.join(d, "bad.json")
+            with open(bad, "w") as fh:
+                fh.write("not json")
+            self.assertEqual(ww.load_answered(bad), set())
+            good = os.path.join(d, "good.json")
+            with open(good, "w") as fh:
+                json.dump({"answered_uuids": ["AbC"]}, fh)
+            self.assertEqual(ww.load_answered(good), {"abc"})
+
+    def test_save_failure_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as d:
+            blocker = os.path.join(d, "not-a-directory")
+            with open(blocker, "w") as fh:
+                fh.write("x")
+            ww.save_answered(os.path.join(blocker, "state.json"), {"u-primary"})
 
 
 if __name__ == "__main__":
