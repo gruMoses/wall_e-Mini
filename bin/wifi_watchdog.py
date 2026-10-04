@@ -282,14 +282,14 @@ class Watchdog:
             self._try_reconnect(now, reason="NM idle" if idle else "stuck")
 
     def _connected(self, now: float) -> None:
+        uuid = self.nm.active_uuid()
+        if uuid is None:
+            return  # a failed nmcli read changes nothing, including the offline clocks
         if self.offline_since is not None:
             LOG.warning("Wi-Fi back after %.0f s offline", now - self.offline_since)
             self.offline_since = None
             self.no_candidate_logged = False
         self.idle_since = None
-        uuid = self.nm.active_uuid()
-        if uuid is None:
-            return  # a failed nmcli read changes nothing
         if uuid != self.link_uuid:
             # A new connection: start its gateway checks from scratch.
             self.link_uuid = uuid

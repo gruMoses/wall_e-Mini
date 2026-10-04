@@ -348,6 +348,27 @@ class TestAnsweredMemory(unittest.TestCase):
         dog.tick(120)
         self.assertEqual(_uuids(nm), ["u-primary"])
 
+    def test_failed_uuid_read_does_not_restart_the_offline_clocks(self):
+        # State 100 with no CON-UUID is a failed read, not "back online".
+        c = Clock(); nm = FakeNm(c, state=30)
+        dog = self._dog(nm, c)
+        for t in range(0, 106, TICK):
+            c.t = t
+            dog.tick(t)
+        self.assertEqual(dog.offline_since, 0)
+        self.assertEqual(dog.idle_since, 0)
+        nm.state = 100
+        nm.fail_uuid_reads = 1
+        c.t = 110
+        dog.tick(110)
+        self.assertEqual(nm.ups, [])
+        self.assertEqual(dog.offline_since, 0)
+        self.assertEqual(dog.idle_since, 0)
+        nm.state = 30
+        c.t = 120
+        dog.tick(120)
+        self.assertEqual(_uuids(nm), ["u-primary"])
+
     def test_failed_uuid_read_does_not_forget_a_link_that_answered(self):
         # Gateway answered, then went dark. One failed CON-UUID read must
         # not look like a new connection that has never answered.
