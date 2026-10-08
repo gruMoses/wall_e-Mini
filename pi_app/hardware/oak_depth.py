@@ -1227,6 +1227,11 @@ class OakDepthReader:
         self._color_stall_restart_times: list[float] = []
         self._color_stall_restart_count: int = 0
         self._color_stall_fault: bool = False
+        # Supervisor heartbeat (2026-10-08): stamped by _run_pipeline around
+        # each session attempt and backoff, so get_health() can tell a
+        # device-absent wait (supervisor ticking) from a worker thread that
+        # is stuck inside depthai (nothing ticking, pipeline_running stale).
+        self._last_supervisor_ts = 0.0
         self._last_rgb_poll_ts = 0.0
         self._last_pipeline_error_msg = ""
         self._last_depth_error_msg = ""
@@ -1249,19 +1254,27 @@ class OakDepthReader:
             return False
 
     def start(self) -> None:
-        if self._thread is not None:
-            return
+        with self._lock:
+            if self._thread is not None:
+                return
         self._stop_event.clear()
-        self._thread = threading.Thread(
+        thread = threading.Thread(
             target=self._run_pipeline, name="OakDepthReader", daemon=True
         )
-        self._thread.start()
+        # Publish the handle only once the thread is alive, so get_health()
+        # never samples a started-but-not-yet-running thread as "dead".
+        thread.start()
+        with self._lock:
+            self._thread = thread
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=3.0)
-            self._thread = None
+        with self._lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout=3.0)
+            with self._lock:
+                self._thread = None
 
     def is_stopped(self) -> bool:
         """True after stop() has been requested. PoseWorker polls this."""
@@ -1638,6 +1651,8 @@ class OakDepthReader:
             vision_stale_s = self._vision_stale_s
             color_stall_restarts = self._color_stall_restart_count
             color_stall_fault = bool(self._color_stall_fault)
+            supervisor_ts = self._last_supervisor_ts
+            thread = self._thread
             vision_iter_samples = list(self._vision_iter_samples)
             hand_detect_samples = list(self._hand_detect_samples)
             nn_input_queue_size = self._nn_input_queue_size
@@ -1659,6 +1674,27 @@ class OakDepthReader:
         last_disconnect_age_s = (now - last_disconnect_ts) if last_disconnect_ts > 0.0 else None
 
         loop_stale = (not running) or (loop_age_s > loop_stale_s)
+        # Worker hang (2026-10-08): neither the session loop nor the
+        # supervisor has ticked for vision_hang_s, or the worker thread has
+        # died, while nobody asked it to stop. A thread stuck inside depthai
+        # (teardown deadlock) looks exactly like this: pipeline_running
+        # frozen True, loop_age_s growing for days. The main loop acts on
+        # this (journal reminder, and a service restart while disarmed).
+        worker_ts = max(loop_ts, supervisor_ts)
+        worker_age_s = (now - worker_ts) if worker_ts > 0.0 else float("inf")
+        hang_s = float(getattr(self._det_cfg, "vision_hang_s", 30.0) or 0.0)
+        thread_started = thread is not None
+        thread_alive = bool(thread_started and thread.is_alive())
+        stop_requested = self._stop_event.is_set()
+        vision_hung = bool(
+            hang_s > 0.0
+            and thread_started
+            and not stop_requested
+            and (
+                (not thread_alive)
+                or (worker_ts > 0.0 and worker_age_s > hang_s)
+            )
+        )
         depth_stale = depth_recv_age_s > depth_stale_s
         det_stale = det_age_s > det_stale_s
         rgb_stale = rgb_expected and (rgb_age_s > rgb_stale_s)
@@ -1729,6 +1765,11 @@ class OakDepthReader:
             "vision_stale": vision_stale,
             "color_stall_restarts": color_stall_restarts,
             "color_stall_fault": color_stall_fault,
+            "vision_worker_age_s": (
+                round(worker_age_s, 3) if worker_age_s != float("inf") else None
+            ),
+            "vision_thread_alive": thread_alive,
+            "vision_hung": vision_hung,
         }
 
     @property
@@ -1816,6 +1857,10 @@ class OakDepthReader:
         disconnected, backs off (interruptibly), optionally waits for the device
         to re-enumerate, and rebuilds — repeating until ``stop()`` is called.
         """
+        # Heartbeat before the import too: a live thread stuck before the
+        # supervisor loop (a wedged import) would otherwise be invisible.
+        with self._lock:
+            self._last_supervisor_ts = time.monotonic()
         try:
             import depthai as dai
             import numpy as np
@@ -1826,6 +1871,8 @@ class OakDepthReader:
         attempt = 0  # consecutive failed/ended sessions since last clean run
         while not self._stop_event.is_set():
             session_connected = False
+            with self._lock:
+                self._last_supervisor_ts = time.monotonic()
             try:
                 # Returns True if the device session actually opened (ran the
                 # poll loop) before ending; False if the build/open failed.
@@ -1843,6 +1890,7 @@ class OakDepthReader:
             # compute_throttle_scale() stops autonomous motion.
             now = time.monotonic()
             with self._lock:
+                self._last_supervisor_ts = now
                 self._pipeline_dead = True
                 self._pipeline_running = False
                 self._connected = False
@@ -2039,6 +2087,10 @@ class OakDepthReader:
         build/open failed before the device was ever live. The supervisor uses
         this to decide whether an ended session counts as a reconnect.
         """
+        # Phase heartbeat: the build/open below can take seconds (device boot,
+        # blob load); stamp so a legitimately slow start ages from here.
+        with self._lock:
+            self._last_supervisor_ts = time.monotonic()
 
         try:
             pipeline = dai.Pipeline()
@@ -2300,6 +2352,8 @@ class OakDepthReader:
             with self._lock:
                 self._recording_queues = rec_queues if rec_queues else None
 
+            with self._lock:
+                self._last_supervisor_ts = time.monotonic()
             pipeline.start()
             logger.info("OAK-D pipeline started (depthai v3)")
             with self._lock:

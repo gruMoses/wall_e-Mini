@@ -1134,6 +1134,43 @@ class OakDetectionConfig:
     # refusing the stale stream. Restart the service to try again.
     color_stall_max_restarts: int = 3
     color_stall_window_s: float = 900.0
+    # Vision worker hang (2026-10-04 13:41 -> 2026-10-08 17:36). After a USB
+    # hub glitch the colour-stall watchdog's third restart called
+    # pipeline.stop() and depthai's teardown never returned. The worker
+    # thread sat inside C++ for 4 days with pipeline_running still True, so
+    # no supervisor ran, depth was 4 days stale, and MANUAL drove at
+    # manual_stale_throttle_scale ("extremely slow") with nothing in the
+    # journal but the status line. A thread stuck in depthai cannot be
+    # interrupted from Python; the only recovery is a process restart
+    # (the wall-e unit is Restart=on-failure). The worker heartbeat is the
+    # newer of the session loop tick and the supervisor loop tick, so a
+    # device-absent backoff (supervisor ticking every 10 s) is not a hang.
+    # vision_hang_s: heartbeat older than this => hung (0 disables both).
+    vision_hang_s: float = 30.0
+    # Exit the process for a systemd restart after this long hung, and
+    # only while DISARMED: an operator never loses MANUAL mid-drive, and
+    # FOLLOW_ME / WAYPOINT_NAV are already halted by the stale depth.
+    # 0 = log only, never exit.
+    vision_hang_restart_s: float = 60.0
+    # Journal reminder cadence while hung (the health transition line
+    # prints once; this keeps shouting).
+    vision_hang_log_interval_s: float = 60.0
+    # Restart gate (Grok review 2026-10-08): cmd.is_armed also goes False on
+    # a 1 s RC dropout with the switch still up, so the gate reads the RAW
+    # ch3 level with a fresh RC link, blocks on a short dropout (the switch
+    # may still be up), and allows after this long without RC (transmitter
+    # off: RC-stale forces disarm and phone teleop needs RC armed, so nobody
+    # can drive). The permitted state must also hold continuously for
+    # vision_hang_restart_settle_s before the exit, so a switch flipped high
+    # in the last second always wins.
+    vision_hang_rc_off_s: float = 30.0
+    vision_hang_restart_settle_s: float = 10.0
+    # Self-restart budget: at most this many exits per window, remembered in
+    # logs/vision_hang_restarts.json across restarts, so a hang that recurs
+    # on every boot (hub flapping) ends in "log only, restart by hand"
+    # instead of an endless 95 s restart loop. 0 = no cap.
+    vision_hang_restart_budget: int = 3
+    vision_hang_restart_window_s: float = 3600.0
 
 
 @dataclass(frozen=True)

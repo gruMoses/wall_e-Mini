@@ -15,6 +15,11 @@ def _sigterm_handler(signum, frame):
 
 signal.signal(signal.SIGTERM, _sigterm_handler)
 
+# Set when the control loop ends itself for a systemd restart (OAK vision
+# worker hung inside depthai). Module-level so __main__ still reaches
+# os._exit when a SIGTERM lands in the cleanup and run() raises.
+_self_restart_exit_code = 0
+
 try:
     from pi_app.hardware.vesc import VescCanDriver
     from pi_app.hardware.arduino_modelx import ArduinoModelXDriver
@@ -26,7 +31,7 @@ try:
     from pi_app.hardware.rtk_gps import RtkGpsReader
     from pi_app.hardware.bms import BmsService
     from pi_app.web.oak_viewer import OakWebViewer
-    from pi_app.control.controller import Controller, RCInputs
+    from pi_app.control.controller import Controller, RCInputs, RC_STALE_TIMEOUT_S
     from pi_app.control.safety import SafetyEvent
     from pi_app.control.imu_steering import ImuSteeringCompensator
     from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
@@ -43,6 +48,7 @@ try:
         should_print_console_line, _session_header, build_log_obj,
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
+    from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted
     from config import config
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -56,7 +62,7 @@ except ModuleNotFoundError:
     from pi_app.hardware.rtk_gps import RtkGpsReader  # type: ignore
     from pi_app.hardware.bms import BmsService  # type: ignore
     from pi_app.web.oak_viewer import OakWebViewer  # type: ignore
-    from pi_app.control.controller import Controller, RCInputs  # type: ignore
+    from pi_app.control.controller import Controller, RCInputs, RC_STALE_TIMEOUT_S  # type: ignore
     from pi_app.control.safety import SafetyEvent  # type: ignore
     from pi_app.control.imu_steering import ImuSteeringCompensator  # type: ignore
     from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController  # type: ignore
@@ -73,6 +79,7 @@ except ModuleNotFoundError:
         should_print_console_line, _session_header, build_log_obj,
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
+    from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted  # type: ignore
     from config import config  # type: ignore
 
 
@@ -131,7 +138,12 @@ def _open_pid_csv(logs_dir: Path):
     return fh, path
 
 
-def run() -> None:
+def run() -> int:
+    """Run the control loop. Returns 0 on a normal stop, or a non-zero exit
+    code when the loop ends itself for a systemd restart (OAK vision worker
+    hung inside depthai; see pi_app/app/vision_hang.py)."""
+    global _self_restart_exit_code
+    restart_exit_code = 0
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--pid-debug",
@@ -504,6 +516,28 @@ def run() -> None:
         oak_imu_metrics_getter = None
         oak_health_getter = None
         oak_prev_stale = None
+        # OAK vision worker hang monitor (2026-10-08 incident): a worker
+        # stuck inside depthai is only curable by a process restart; the
+        # monitor logs every minute and exits (disarmed only) so systemd
+        # restarts the service. See pi_app/app/vision_hang.py.
+        _det_cfg_for_hang = getattr(config, "oak_detection", None)
+        vision_hang_mon = VisionHangMonitor(
+            hang_restart_s=float(getattr(_det_cfg_for_hang, "vision_hang_restart_s", 60.0) or 0.0),
+            log_interval_s=float(getattr(_det_cfg_for_hang, "vision_hang_log_interval_s", 60.0) or 60.0),
+            settle_s=float(getattr(_det_cfg_for_hang, "vision_hang_restart_settle_s", 10.0) or 0.0),
+        )
+        vision_hang_rc_off_s = float(getattr(_det_cfg_for_hang, "vision_hang_rc_off_s", 30.0) or 0.0)
+        vision_hang_budget = RestartBudget(
+            logs_dir / "vision_hang_restarts.json",
+            max_restarts=int(getattr(_det_cfg_for_hang, "vision_hang_restart_budget", 3) or 0),
+            window_s=float(getattr(_det_cfg_for_hang, "vision_hang_restart_window_s", 3600.0) or 0.0),
+        )
+        # RC age for the restart gate on the MONOTONIC clock: the RC reader
+        # stamps frames with time.time(), and an NTP step during a short
+        # dropout could make an epoch age jump past the "transmitter off"
+        # threshold. Track when the frame stamp last changed instead.
+        _rc_seen_epoch = 0.0
+        _rc_seen_mono: float | None = None
         last_imu_heading_deg = None
         last_imu_yaw_rate_dps = None
         if oak_reader is not None:
@@ -591,6 +625,122 @@ def run() -> None:
                     charge_fet_on=_bms_st_for_inhibit.charge_fet_on if _bms_st_for_inhibit else None,
                 )
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
+            # OAK vision worker hang (2026-10-08): the reader's health flag
+            # says neither its session loop nor its supervisor has ticked for
+            # vision_hang_s (or the thread died). Shout in the journal every
+            # minute, mirror it into the JSON log, and while DISARMED end the
+            # loop with a non-zero exit so systemd restarts the service. An
+            # armed robot keeps running: MANUAL stays at the stale-depth
+            # floor and the autonomous modes are already halted by the stale
+            # depth, so the restart waits for the disarm.
+            if rc.last_update_epoch_s > 0.0 and rc.last_update_epoch_s != _rc_seen_epoch:
+                _rc_seen_epoch = rc.last_update_epoch_s
+                _rc_seen_mono = time.monotonic()
+            if isinstance(oak_camera_health, dict):
+                _rc_age_s = (
+                    (time.monotonic() - _rc_seen_mono) if _rc_seen_mono is not None else None
+                )
+                _may_restart, _restart_gate = restart_permitted(
+                    is_armed=bool(cmd.is_armed),
+                    rc_age_s=_rc_age_s,
+                    ch3_us=rc.ch3_us,
+                    arm_low_threshold_us=controller.arm_low_threshold_us,
+                    rc_fresh_s=RC_STALE_TIMEOUT_S,
+                    rc_off_s=vision_hang_rc_off_s,
+                )
+                _hang_act = vision_hang_mon.update(
+                    time.monotonic(),
+                    bool(oak_camera_health.get("vision_hung", False)),
+                    _may_restart,
+                )
+                if _hang_act.onset or _hang_act.log_now or _hang_act.recovered or _hang_act.restart:
+                    _worker_age = oak_camera_health.get("vision_worker_age_s")
+                    _age_str = (
+                        f"{_worker_age:.0f} s" if isinstance(_worker_age, (int, float)) else "?"
+                    )
+                    if _hang_act.recovered:
+                        print(
+                            f"\nOAK vision worker recovered after {_hang_act.hung_for_s:.0f} s hung"
+                        )
+                    elif _hang_act.restart:
+                        print(
+                            f"\nOAK vision worker hung for {_hang_act.hung_for_s:.0f} s and the "
+                            "robot is disarmed: exiting for a service restart "
+                            "(systemd Restart=on-failure)"
+                        )
+                    else:
+                        if _hang_act.restart_in_s is None:
+                            _plan = f"service restart deferred ({_restart_gate})"
+                        else:
+                            _plan = (
+                                f"service restart in {_hang_act.restart_in_s:.0f} s "
+                                f"({_restart_gate})"
+                            )
+                        print(
+                            f"\nOAK vision worker HUNG (no heartbeat for {_age_str}; "
+                            f"pipeline_running={oak_camera_health.get('pipeline_running')}, "
+                            f"thread_alive={oak_camera_health.get('vision_thread_alive')}): "
+                            "depth and detections are stale and MANUAL is at the stale "
+                            f"floor; {_plan}"
+                        )
+                    if log_fh is not None and (
+                        _hang_act.onset or _hang_act.recovered or _hang_act.restart
+                    ):
+                        try:
+                            log_fh.write(json.dumps({
+                                "type": "event",
+                                "event": (
+                                    "oak_vision_hung_restart" if _hang_act.restart
+                                    else "oak_vision_recovered" if _hang_act.recovered
+                                    else "oak_vision_hung"
+                                ),
+                                "worker_age_s": _worker_age,
+                                "hung_for_s": round(_hang_act.hung_for_s, 1),
+                                "is_armed": bool(cmd.is_armed),
+                                "ts": round(time.time(), 3),
+                            }) + "\n")
+                            log_fh.flush()
+                        except Exception:
+                            pass
+                    if _hang_act.restart:
+                        # From here the exit may be ours. Ignore SIGTERM first
+                        # (an auto-deploy restart landing during the budget
+                        # write or the print below would otherwise raise
+                        # KeyboardInterrupt before the flag is set, and the
+                        # process would end with exit 0 through the depthai
+                        # teardown this change exists to avoid). Restored if
+                        # the budget denies.
+                        try:
+                            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                        except Exception:
+                            pass
+                        _allowed, _n_restarts = vision_hang_budget.allow(time.monotonic())
+                        if not _allowed:
+                            try:
+                                signal.signal(signal.SIGTERM, _sigterm_handler)
+                            except Exception:
+                                pass
+                            print(
+                                f"\nOAK vision worker self-restart budget exhausted or "
+                                f"not recordable ({_n_restarts} in the last "
+                                f"{vision_hang_budget.window_s / 60.0:.0f} min this boot): "
+                                "log only from here; restart the service by hand"
+                            )
+                            if log_fh is not None:
+                                try:
+                                    log_fh.write(json.dumps({
+                                        "type": "event",
+                                        "event": "oak_vision_hung_restart_denied",
+                                        "restarts_in_window": _n_restarts,
+                                        "ts": round(time.time(), 3),
+                                    }) + "\n")
+                                    log_fh.flush()
+                                except Exception:
+                                    pass
+                        else:
+                            _self_restart_exit_code = 3
+                            restart_exit_code = 3
+                            break
             # Wheels-stopped witness for the IMU stationary-bias / ZUPT gate: an
             # IMU cannot vouch for its own stillness (a slow steady turn looks
             # exactly like quiet gyro/accel noise), so push an independent
@@ -1215,6 +1365,7 @@ def run() -> None:
         except Exception:
             # Never let analysis interfere with shutdown
             pass
+    return restart_exit_code
 
 
 if __name__ == "__main__":
@@ -1237,8 +1388,14 @@ if __name__ == "__main__":
         # If locking fails for unexpected reasons, proceed without blocking to avoid false negatives
         _lock_fh = None
 
+    _exit_code = 0
     try:
-        run()
+        _exit_code = int(run() or 0)
+    except BaseException:
+        # A SIGTERM/KeyboardInterrupt in the cleanup must not cancel a
+        # self-restart already decided; anything else propagates as before.
+        if not _self_restart_exit_code:
+            raise
     finally:
         try:
             if _lock_fh is not None:
@@ -1246,3 +1403,16 @@ if __name__ == "__main__":
                 _lock_fh.close()
         except Exception:
             pass
+    _exit_code = _exit_code or _self_restart_exit_code
+    if _exit_code:
+        # Self-restart (OAK vision worker hung inside depthai). The stuck
+        # thread cannot be joined, and depthai's C++ teardown at interpreter
+        # exit could block on the same deadlock, so leave without it: flush
+        # what we can and _exit so systemd (Restart=on-failure) starts a
+        # fresh process.
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(_exit_code)

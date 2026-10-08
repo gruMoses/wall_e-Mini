@@ -1368,6 +1368,16 @@ class Controller:
             self._safety_state.rearm_requires_switch_cycle
         )
 
+    @property
+    def arm_low_threshold_us(self) -> int:
+        """ch3 level at or below which the arm switch reads OFF.
+
+        Read by the vision-hang self-restart gate in pi_app/app/main.py:
+        the raw switch level with a fresh RC link, not cmd.is_armed, which
+        also goes False on a 1 s RC dropout with the switch still up.
+        """
+        return int(self._safety_params.arm_low_threshold_us)
+
     def process(
         self,
         rc: RCInputs,

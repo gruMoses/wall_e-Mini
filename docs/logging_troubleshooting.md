@@ -49,6 +49,15 @@ paths, journalctl commands).
 
 ## Quick checks during/after a bad run
 
+- **Is the vision worker hung (robot "extremely slow" in MANUAL, 2026-10-08)?**
+  `curl -s -N -m 25 http://192.168.86.54:8080/api/telemetry | grep '^data:' | tail -1`
+  and read `camera_health`: `vision_hung: true`, `vision_worker_age_s` large,
+  `pipeline_running: true` with `depth_fps: 0` is a thread stuck inside depthai;
+  `throttle_scale` 0.1 with a sane `obstacle_distance_m` is the MANUAL stale
+  floor, not an obstacle. The journal has `OAK vision worker HUNG ...` every
+  minute and the JSON log an `oak_vision_hung` event; the service restarts
+  itself after 60 s hung while disarmed (`oak_vision_hung_restart` event,
+  then `Started wall-e.service`).
 - **When did health go stale?**  
   `grep '"is_stale": true' logs/latest.log | head -1` and check `ts_iso` / `ts`.
 - **What did the pipeline report?**  
