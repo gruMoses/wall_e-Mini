@@ -22,6 +22,7 @@ from pi_app.control.safety import (
 from pi_app.control.state import DriveCommand, AutonomyCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
 from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
+from pi_app.control.netting_mute import NettingMute
 from pi_app.control.follow_me import FollowMeController, PersonDetection
 from pi_app.control.gesture_control import (
     GestureStateMachine, GestureEvent, HandData,
@@ -129,6 +130,7 @@ class Controller:
         gesture_controller: Optional[GestureStateMachine] = None,
         gps_heading_aligner: Optional[GpsHeadingAligner] = None,
         startup_interlock: bool = False,
+        netting_mute: Optional[NettingMute] = None,
     ) -> None:
         self._motor = motor_driver or NoopMotorDriver()
         self._relay = arm_relay or NoopArmRelay()
@@ -185,6 +187,21 @@ class Controller:
         self._mode = "MANUAL"  # "MANUAL", "FOLLOW_ME", or "WAYPOINT_NAV"
         self._obstacle_distance_m: float | None = None
         self._obstacle_age_s: float | None = None
+        # Netting mute (2026-10-08, pi_app/control/netting_mute.py): the
+        # operator's explicit MANUAL-only corridor mute for mesh netting
+        # loaded over the lens. Fed by set_obstacle_data(near_field_present)
+        # and set_detection_present(); ticked in process() every tick.
+        _oa_cfg = getattr(config, "obstacle_avoidance", None)
+        self._netting_mute = netting_mute or NettingMute(
+            enabled=bool(getattr(_oa_cfg, "netting_mute_enabled", True)),
+            timeout_s=float(getattr(_oa_cfg, "netting_mute_timeout_s", 900.0)),
+            absent_release_s=float(getattr(_oa_cfg, "netting_mute_absent_release_s", 0.5)),
+            max_distance_m=float(getattr(_oa_cfg, "netting_mute_max_distance_m", 0.55)),
+            min_near_share=float(getattr(_oa_cfg, "netting_mute_min_near_share", 0.85)),
+            hold_near_share=float(getattr(_oa_cfg, "netting_mute_hold_near_share", 0.70)),
+        )
+        self._obstacle_near_share: float | None = None
+        self._detection_present = False
         self._gps_reading: GpsReading | None = None
         self._person_detections: list[PersonDetection] = []
         # Detection-stream freshness gate. None = inactive (unit tests, no
@@ -297,10 +314,49 @@ class Controller:
         """
         self._last_imu_update = now
 
-    def set_obstacle_data(self, distance_m: float, age_s: float) -> None:
-        """Feed latest depth reading from OakDepthReader."""
+    def set_obstacle_data(
+        self, distance_m: float, age_s: float, near_share: float | None = None
+    ) -> None:
+        """Feed latest depth reading from OakDepthReader.
+
+        ``near_share``: the corridor's valid pixels inside slow_distance_m
+        over its valid pixels in total (None when unknown). With the
+        distance it decides whether the dense near field of mesh netting
+        is in view (pi_app/control/netting_mute.py).
+        """
         self._obstacle_distance_m = distance_m
         self._obstacle_age_s = age_s
+        self._obstacle_near_share = near_share
+
+    def set_detection_present(self, present: bool) -> None:
+        """Any person or stop/slow-tier animal in view this tick (drops the netting mute)."""
+        self._detection_present = bool(present)
+
+    def _netting_mute_inputs(self) -> tuple[float | None, float | None]:
+        """(distance_m, share) for the mute: None distance when the depth is stale."""
+        dist = self._obstacle_distance_m
+        age = self._obstacle_age_s
+        stale_s = float(getattr(getattr(config, "obstacle_avoidance", None), "stale_timeout_s", 0.5))
+        if dist is None or age is None or age > stale_s:
+            return None, self._obstacle_near_share
+        return dist, self._obstacle_near_share
+
+    def request_netting_mute(self, on: bool) -> tuple[bool, str]:
+        """Operator request from the web thread: queued, applied by process().
+
+        The answer is provisional (the control thread re-checks the same
+        preconditions when it applies the request).
+        """
+        if on:
+            dist, share = self._netting_mute_inputs()
+            return self._netting_mute.request_on(
+                self._safety_state.is_armed, self._mode == "MANUAL", dist, share
+            )
+        return self._netting_mute.request_off()
+
+    @property
+    def netting_mute_active(self) -> bool:
+        return self._netting_mute.active
 
     def set_person_detections(self, detections: list[PersonDetection]) -> None:
         """Feed latest person detections from OakDepthReader."""
@@ -2043,11 +2099,24 @@ class Controller:
         # a forward-biased curve (the "left-hand circles" bug).
         obstacle_scale = 1.0
         is_forward_motion = (left + right) > 2 * CENTER_OUTPUT_VALUE
+        # Netting mute ticks every tick so it drops on disarm / mode change
+        # even when there is no depth reading.
+        _nm_dist, _nm_share = self._netting_mute_inputs()
+        netting = self._netting_mute.update(
+            mono_now,
+            self._safety_state.is_armed,
+            self._mode == "MANUAL",
+            _nm_dist,
+            _nm_share,
+            self._detection_present,
+        )
+        telemetry["netting_mute"] = netting.as_dict()
         if self._obstacle_avoidance is not None and self._obstacle_distance_m is not None:
             obstacle_scale = self._obstacle_avoidance.compute_throttle_scale(
                 self._obstacle_distance_m,
                 self._obstacle_age_s if self._obstacle_age_s is not None else 999.0,
                 is_manual=(self._mode == "MANUAL"),
+                corridor_muted=netting.active,
             )
             if is_forward_motion:
                 # Scale only the common-mode (forward) component; preserve the

@@ -29,7 +29,13 @@ class ObstacleAvoidanceController:
         self._last_distance_m: float | None = None
         self._last_scale: float = 1.0
 
-    def compute_throttle_scale(self, distance_m: float, age_s: float, is_manual: bool = False) -> float:
+    def compute_throttle_scale(
+        self,
+        distance_m: float,
+        age_s: float,
+        is_manual: bool = False,
+        corridor_muted: bool = False,
+    ) -> float:
         """Return a throttle multiplier between 0.0 (full stop) and 1.0 (no limit).
 
         When depth data is stale (age > stale_timeout_s), behaviour depends on
@@ -38,6 +44,11 @@ class ObstacleAvoidanceController:
         A person/animal within ``safety_stop_radius_m`` arrives here as
         ``distance_m`` <= ``stop_distance_m`` (forced upstream in the depth
         poll), so it naturally yields scale 0.0.
+
+        ``corridor_muted`` (the operator's netting mute, 2026-10-08) ignores
+        the depth corridor in MANUAL only: scale 1.0 for any corridor
+        reading. It never applies to a stale depth (blind is blind), to the
+        autonomous modes, or to the YOLO stop channel (distance 0.0 exactly).
         """
         if age_s > self._cfg.stale_timeout_s:
             if self._cfg.stale_policy == "stop":
@@ -48,6 +59,10 @@ class ObstacleAvoidanceController:
             return self._last_scale
 
         self._last_distance_m = distance_m
+
+        if corridor_muted and is_manual and distance_m > 0.0:
+            self._last_scale = 1.0
+            return self._last_scale
 
         manual_curve = self._manual_curve_points() if is_manual and distance_m > 0.0 else None
         if manual_curve is not None:

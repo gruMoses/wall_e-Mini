@@ -49,6 +49,7 @@ try:
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
     from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted
+    from pi_app.control.netting_mute import near_share, detection_drops_mute
     from config import config
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -80,6 +81,7 @@ except ModuleNotFoundError:
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
     from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted  # type: ignore
+    from pi_app.control.netting_mute import near_share, detection_drops_mute  # type: ignore
     from config import config  # type: ignore
 
 
@@ -595,8 +597,23 @@ def run() -> int:
                 # detection within safety_stop_radius_m forces min_distance to 0,
                 # which flows through here into compute_throttle_scale().
                 dist_m, dist_age = oak_reader.get_min_distance()
-                controller.set_obstacle_data(dist_m, dist_age)
                 oak_depth_stats = oak_reader.get_depth_stats()
+                # Netting mute inputs (pi_app/control/netting_mute.py): the
+                # corridor's near share decides whether mesh netting is in
+                # view; persons and stop/slow-tier animals drop the mute. A
+                # failed detection read counts as PRESENT (fail safe).
+                _share = near_share(
+                    getattr(oak_depth_stats, "corridor_near_px", 0) if oak_depth_stats else 0,
+                    getattr(oak_depth_stats, "corridor_support_px", 0) if oak_depth_stats else 0,
+                )
+                controller.set_obstacle_data(dist_m, dist_age, near_share=_share)
+                try:
+                    _det_present = detection_drops_mute(
+                        oak_reader.get_all_detections(), oak_reader.get_person_detections()
+                    )
+                except Exception:
+                    _det_present = True
+                controller.set_detection_present(_det_present)
                 if follow_me_ctrl is not None:
                     oak_persons = oak_reader.get_person_detections()
                     controller.set_person_detections(oak_persons)
@@ -625,6 +642,14 @@ def run() -> int:
                     charge_fet_on=_bms_st_for_inhibit.charge_fet_on if _bms_st_for_inhibit else None,
                 )
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
+            _nm = telem.get("netting_mute")
+            if isinstance(_nm, dict) and _nm.get("event"):
+                if _nm["event"] == "dropped":
+                    print(f"\nNetting mute dropped: {_nm.get('drop_reason')}")
+                elif _nm["event"] == "active":
+                    print("\nNetting mute ACTIVE: MANUAL ignores the depth corridor while the netting stays on the lens")
+                elif _nm["event"] == "refused":
+                    print(f"\nNetting mute refused: {_nm.get('refusal')}")
             # OAK vision worker hang (2026-10-08): the reader's health flag
             # says neither its session loop nor its supervisor has ticked for
             # vision_hang_s (or the thread died). Shout in the journal every
@@ -856,6 +881,7 @@ def run() -> int:
                     bms_charging = bms_service.is_charging() if bms_service is not None else None
                     rec_telem = RecordingTelemetry(
                         timestamp=time.time(),
+                        netting_mute=telem.get("netting_mute"),
                         mode=telem.get("mode", "MANUAL"),
                         throttle_scale=telem.get("obstacle_throttle_scale", 1.0),
                         obstacle_distance_m=telem.get("obstacle_distance_m"),

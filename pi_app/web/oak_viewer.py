@@ -408,6 +408,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="rtk-note" id="t-rtk-note">Looking for stable corrections...</div>
   </div>
+  <div id="netting-panel" class="fm-panel">
+    <h2>Netting Mute <span id="netting-badge" class="fm-badge">off</span></h2>
+    <button id="netting-btn" class="follow-btn activate" onclick="toggleNetting()">NETTING LOADED: MUTE CORRIDOR</button>
+    <div id="netting-hint" class="fm-target-info">Tap with the netting already over the lens, armed, in MANUAL. Ignores the depth corridor while the mesh stays on the lens (reading under 0.55 m). Drops by itself the moment the corridor sees past it, on a person, dog, cat or livestock (not birds), on disarm, on leaving MANUAL, or after 15 min; tap again after any drop. The 0.8 m person/animal stop stays on.</div>
+  </div>
   <div id="fm-panel" class="fm-panel">
     <h2>Follow-Me Status <span id="fm-mode-badge" class="fm-badge">&mdash;</span></h2>
     <div class="fm-section">
@@ -467,6 +472,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 <script>
 const sse = new EventSource('/api/telemetry');
+sse.addEventListener('message', (e) => {
+  try { updateNettingBadge(JSON.parse(e.data)); } catch (err) {}
+});
 const radarCanvas = document.getElementById('radar');
 const radarCtx = radarCanvas.getContext('2d');
 let rtkModeName = null;
@@ -763,6 +771,39 @@ sse.onmessage = function(e) {
     hint.textContent = 'System must be armed (ch3 high)';
   }
 };
+var nettingEngaged = false;
+function toggleNetting() {
+  const btn = document.getElementById('netting-btn');
+  const hint = document.getElementById('netting-hint');
+  btn.disabled = true;
+  fetch('/api/manual/netting_mute', {method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({on: !nettingEngaged})})
+    .then(r => r.json())
+    .then(d => { hint.textContent = (d.ok ? 'OK: ' : 'Refused: ') + (d.reason || ''); })
+    .catch(e => { hint.textContent = 'Error: ' + e; })
+    .finally(() => { setTimeout(() => { btn.disabled = false; }, 500); });
+}
+function updateNettingBadge(d) {
+  const nm = d.netting_mute;
+  const badge = document.getElementById('netting-badge');
+  const btn = document.getElementById('netting-btn');
+  if (!badge || !btn) { return; }
+  if (!nm || !(nm.engaged || nm.active)) {
+    nettingEngaged = false;
+    var off = 'off';
+    if (nm && nm.refusal) { off = 'refused: ' + nm.refusal; }
+    else if (nm && nm.drop_reason) { off = 'off (' + nm.drop_reason + ')'; }
+    badge.textContent = off;
+    badge.style.background = '';
+    btn.textContent = 'NETTING LOADED: MUTE CORRIDOR';
+    return;
+  }
+  nettingEngaged = true;
+  badge.textContent = 'ACTIVE ' + Math.round(nm.since_s || 0) + ' s';
+  badge.style.background = '#c0392b';
+  btn.textContent = 'NETTING OFF: RESTORE CORRIDOR';
+}
 function toggleFollowMe() {
   const btn = document.getElementById('follow-btn');
   btn.disabled = true;
@@ -2290,6 +2331,7 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                 obj["odom_theta_deg"] = _finite_or_none(getattr(t, "odom_theta_deg", None), 1)
                 obj["speed_offset"] = _finite_or_none(getattr(t, "speed_offset", None), 1)
                 obj["steer_offset"] = _finite_or_none(getattr(t, "steer_offset", None), 1)
+                obj["netting_mute"] = getattr(t, "netting_mute", None)
                 if oak_reader is not None:
                     try:
                         get_health = getattr(oak_reader, "get_health", None)
@@ -2347,6 +2389,30 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                                 content_type="application/json")
             return Response(json.dumps({"error": "must be armed with target present", "mode": mode}),
                             status=400, content_type="application/json")
+
+    @app.route("/api/manual/netting_mute", methods=["POST"])
+    def api_netting_mute():
+        """Operator netting mute (2026-10-08): JSON {"on": true|false}.
+
+        MANUAL and armed only; the controller refuses otherwise. The mute
+        ignores the depth corridor in MANUAL only while a dense near field
+        is present and drops itself (see pi_app/control/netting_mute.py).
+        """
+        if controller is None:
+            return Response(json.dumps({"error": "no controller"}), status=503,
+                            content_type="application/json")
+        req = getattr(controller, "request_netting_mute", None)
+        if not callable(req):
+            return Response(json.dumps({"error": "netting mute unavailable"}), status=503,
+                            content_type="application/json")
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or not isinstance(payload.get("on"), bool):
+            return Response(json.dumps({"error": 'JSON body {"on": true|false} required'}),
+                            status=400, content_type="application/json")
+        ok, reason = req(bool(payload["on"]))
+        body = {"ok": bool(ok), "reason": reason, "on": bool(payload["on"])}
+        return Response(json.dumps(body), status=200 if ok else 409,
+                        content_type="application/json")
 
     @app.route("/api/follow_me/reset_counter", methods=["POST"])
     def api_follow_me_reset_counter():

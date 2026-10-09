@@ -599,6 +599,7 @@ def build_log_obj(
         "imu_dt_ms": imu_dt_ms,
         "imu_motion_witness_still": imu_motion_witness_still,
         "events": [e.name for e in events] if events else [],
+        "netting_mute": telem.get("netting_mute"),
         "oak": {
             "det_fps": _oak.get("det_fps") if _oak else None,
             "depth_fps": _oak.get("depth_fps") if _oak else None,

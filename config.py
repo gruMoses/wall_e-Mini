@@ -377,6 +377,42 @@ class ObstacleAvoidanceConfig:
     # manual_obstacle_min_scale = 0.0 also does (with its hard stop).
     manual_half_throttle_distance_m: float = 0.50
     manual_floor_distance_m: float = 0.35
+    # Netting mute (2026-10-08). Electric-fence mesh loaded on the robot
+    # hangs over the lens and reads as a solid wall at 0.40-0.50 m (60 raw
+    # frames: 97-98 percent of valid corridor pixels at 0.35-0.65 m), so
+    # the MANUAL curve held Kevin at 0.3-0.4 throttle for 81 m. Depth alone
+    # cannot tell the mesh from a wall, and an automatic "it moves with us"
+    # latch was rejected in review (a close person YOLO misses, wheel slip
+    # in front of a real wall, or anything being pushed satisfies the same
+    # test). So the mute is EXPLICIT: the operator taps the phone with the
+    # netting already over the lens (POST /api/manual/netting_mute), armed
+    # and MANUAL, with the dense near field in view, or the tap is refused
+    # (no waiting state: it cannot arm itself on the next close surface).
+    # While engaged, MANUAL ignores the depth corridor only as long as the
+    # field holds; a finite reading beyond netting_mute_max_distance_m
+    # ends the mute on that tick (a fence that appears when the netting
+    # lifts is never ignored), and only a dropout gets a hold of
+    # netting_mute_absent_release_s. It also drops on any person or
+    # stop/slow-tier animal detection, on disarm, on leaving MANUAL, after
+    # netting_mute_timeout_s, or on a second tap; a new tap is required
+    # after any drop. The YOLO 0.8 m stop (distance 0.0, its own channel)
+    # and a stale depth are never muted. FOLLOW_ME and WAYPOINT_NAV never
+    # use it. Review (Grok 2026-10-08): the cap sits ON the data, not above
+    # it, because a real wall inside the cap is indistinguishable.
+    netting_mute_enabled: bool = True
+    netting_mute_timeout_s: float = 900.0          # Kevin's hauls run ~10 min
+    netting_mute_absent_release_s: float = 0.5     # dropout hold only (~7 depth frames)
+    # The netting band from the data: the 2026-10-08 drive read 0.40-0.50 m
+    # for 2,229 of 2,235 ticks, the 2026-09-27 netting 0.50 m. Sunlit
+    # siding reads 0.71-0.75 m, a wire fence 0.86 m.
+    netting_mute_max_distance_m: float = 0.55
+    # Share of the valid corridor pixels inside slow_distance_m: >= this at
+    # the tap (the drive's median was 0.95) ...
+    netting_mute_min_near_share: float = 0.85
+    # ... and >= this to stay engaged (the share sat below 0.85 for 36
+    # percent of the drive, in runs up to 69 s; below 0.70 for 0.1 percent,
+    # 0.33 s at most).
+    netting_mute_hold_near_share: float = 0.70
     update_rate_hz: float = 15.0
     stale_timeout_s: float = 0.5
     stale_policy: str = "stop"   # fail-safe: stop when depth data is stale

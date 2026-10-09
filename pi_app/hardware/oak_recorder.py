@@ -185,6 +185,9 @@ class RecordingTelemetry:
     # Lets the rc_state_provider fail-safe when telemetry stops updating: a
     # frozen object older than the staleness bound forces teleop disarm.
     ts_mono: float = 0.0
+    # Netting mute state dict from the controller (2026-10-08), for the SSE
+    # badge: engaged / active / since_s / drop_reason / event.
+    netting_mute: dict | None = None
 
 
 # ---------------------------------------------------------------------------
