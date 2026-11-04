@@ -177,6 +177,21 @@ at rest, about 1.1 Ω) carried the Pi above the idle supply at 7.59 to
 7.70 V and −0.46 to −0.56 A. That is the reason for the rules in 4.1 and
 4.2.
 
+Real pull with the new rules, 2026-11-04 (7.5 V supply, cells about
+1.1 Ω, the pack a little above the supply before the pull):
+
+| Time | Event |
+|---|---|
+| 13:23:10 | Supply pulled. The cells carry the Pi: 7.44 V, −600 mA, `discharge` (hold) |
+| 13:33-13:40 | The pack hovers at the 7.20 V line; the loss count starts and resets |
+| 13:40:06 | `MAINS LOST (hard)` at 7.18 V, −720 mA; alarm +90 s; clean halt |
+| 13:41:51-14:03:07 | 18 alarm wakes: the wake check reads 7.30-7.35 V at −0.57 A (`discharge`) inside the hard chain and powers off, +60 s each |
+| 14:04:22 | After the replug: the wake check reads 7.67 V, −166 mA (the supply shares the load) and continues the boot |
+| 14:04:26 | ssh answers |
+
+The band rule inside a chain did its job: under the light early-boot load
+the pack read above the 7.20 V line on every wake.
+
 ## 5. Energy while mains is off
 
 Each wake costs about 16 s of boot at 0.5 to 0.9 A. One poll cycle is about
@@ -241,6 +256,12 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 
 ## 9. Open items
 
+- Done 2026-11-04 13:23-14:04: a real pull on the 7.5 V supply with the new
+  rules (table in section 4.3).
+- The loss count dithered for about 6 min while the pack hovered at the
+  7.20 V line (13:33-13:40): the 10 s gap reset kept restarting it. It is
+  harmless (the pack still held most of its charge) but it delays the
+  halt. A small hysteresis on the hard line would remove it.
 - Done 2026-11-04 13:13: the hold check. The Pi booted on the HAT with the
   7.5 V supply and cells resting at 8.32 V. The cells carried it at 7.66
   to 7.71 V and −0.37 to −0.64 A for 3 min, read as `above_supply`, with
