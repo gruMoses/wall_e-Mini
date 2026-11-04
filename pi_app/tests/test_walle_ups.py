@@ -10,8 +10,9 @@ these run anywhere. They pin the safety contract from the module doc
     present sample;
   * 5 s of counted absent samples halt, in the order kill -> alarm -> sync ->
     poweroff; a 10 s gap without a counted sample resets the count;
-  * low battery halts: 7.0 V for 10 s, 6.4 V on one sample; only a
-    critical halt gets the 600 s alarm; a unit still stopping after the kill
+  * low battery halts: 7.0 V for 10 s, 6.4 V on one sample; every halt
+    arms the 90 s first alarm (the wake check picks a slower poll); a unit
+    still stopping after the kill
     stretches the alarm to 300 s; a poweroff that did not happen is retried,
     then forced; every power-off writes the alarm seconds for the shutdown
     hook, which re-arms in the last second;
@@ -494,8 +495,10 @@ class WatcherTests(unittest.TestCase):
         try:
             self.assertEqual(h.run(1), ["shutdown"])
             self.assertEqual(h.state.read_loss()["kind"], ups.KIND_CRIT)
-            self.assertEqual(h.rtc.armed, [600])
-            self.assertEqual(h.armed_file(), 600)
+            # A reading under the run load says little about the charge left
+            # (field 2026-11-04: 6.34 V at -1.65 A with the cells near 7.5 V).
+            self.assertEqual(h.rtc.armed, [90])
+            self.assertEqual(h.armed_file(), 90)
         finally:
             h.close()
 

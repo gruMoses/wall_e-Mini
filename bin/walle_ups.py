@@ -81,9 +81,10 @@ run mode  (walle-ups.service, root, after boot)
     2. SIGKILL + stop wall-e.service. Its camera teardown can take the
        full 90 s TimeoutStopSec, and the RTC alarm must not fire while the
        shutdown is still running or it is consumed and lost;
-    3. arm the RTC alarm, clear-write-read-back: +FIRST_ALARM_S (90 s),
-       +SLOW_WAKE_S (600 s) after a critical halt, and at least +300 s when
-       a killed unit is still stopping (stuck in the kernel). It also writes
+    3. arm the RTC alarm, clear-write-read-back: +FIRST_ALARM_S (90 s) for
+       every kind of halt, and at least +300 s when a killed unit is still
+       stopping (stuck in the kernel). The wake check, under the light boot
+       load, decides whether later polls slow down to +SLOW_WAKE_S. It also writes
        the seconds to /run/walle-ups/arm, and the shutdown hook
        bin/walle-ups-shutdown-alarm arms the alarm again in the last second
        before power-off, so no shutdown length can use it up early (a hung
@@ -1042,7 +1043,13 @@ class Watcher:
         # A low pack polls slowly so the polls do not finish it. A unit that
         # survived the kill (stuck in the kernel) can stretch the shutdown past
         # the first alarm, which would then fire early and be lost.
-        alarm_s = self.slow_wake_s if kind == KIND_CRIT else self.first_alarm_s
+        # Always the normal first alarm: a reading taken under the full run
+        # load says little about the charge left. On 2026-11-04 a main-switch
+        # pull read 6.34 V at -1.65 A (the hub back-powered through the Pi)
+        # with the cells resting near 7.5 V, and a 600 s alarm kept the Pi
+        # off for 10 minutes. The wake check measures again under the light
+        # boot load and picks the slow interval only if the pack is low there.
+        alarm_s = self.first_alarm_s
         stuck = [n for n in self.kill_services if self.actions.is_active(n)]
         if stuck:
             alarm_s = max(alarm_s, self.STUCK_ALARM_S)
