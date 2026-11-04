@@ -165,6 +165,7 @@ potted, surge-rated, isolated, and known.
 | Cheaper alternative | Flex PKB4313DPI | Eighth brick, 36 V to 75 V, 12 V 25 A, 300 W, 96.2 percent, active. 56.78 USD, but none in stock and a 39-week lead time on 2026-11-04. VERIFY trim range. |
 | Wide-input alternative | Cincon CHB150W-48S12 | Half brick, 18 V to 75 V, 12 V 12.5 A, 150 W, 91 percent, trim about ±10 percent. 180 to 260 USD. Use it only if the HPQ undervoltage shutdown is a hard 36 V (risk R-16). |
 | Rejected | TRACO TEP 150-4815WI | 18 V to 75 V, 15 V 10 A, 150 W, 87 percent. The first draft priced it at 160 USD from memory. DigiKey lists it at about 268 USD with a 19-week lead time. It also makes 22 W of heat at full load, and a 15 V part may not trim down to 13.2 V. |
+| Rejected | Murata MPQ1500-12V125-L48 | Checked 2026-11-04 from the datasheet (rev A01.D18). Quarter brick, 1500 W, 125 A, 97.2 percent peak, PMBus. Semi-regulated: below about 51 V input the output follows the input (9.6 V at 40 V, no load; 9.10 V to 12.10 V over 40 V to 52 V). The 13S pack is below 51 V for most of its discharge, so the rail would run about 9.5 V to 12 V. MFR_VOUT_MAX is 13.00 V, so 13.2 V is not possible. Operating input 40 V to 60 V, absolute maximum 65 V, input OVP 64 V: the pack's 37.7 V to 40 V tail is outside it, and the surge clamp must come down below 60 V. Current limit 137.5 to 162.5 percent of 125 A, that is 172 A to 203 A, on a 175 W design. Needs 270 uF of input capacitance. |
 | Alternative brick | Mean Well SD-150C-12 | 36 V to 72 V input, 12 V 12.5 A, 77 percent. Rejected: 36 V minimum sits at the 37.7 V BMS cut, a fixed 12 V output, 77 percent and 35 W of heat. https://www.meanwell.com/productDetail.aspx?i=361 |
 | Converter, spin 2 | TI LM5146-Q1 controller | 5.5 V to 100 V input, 0.8 V to 60 V output, synchronous buck. https://www.ti.com/product/LM5146-Q1 |
 | FETs, spin 2 | Infineon BSC098N10NS5 (low side), BSC160N10NS3 or similar (high side) | 100 V. Low side 9.8 mOhm. High side smaller: duty is 0.26, so switching loss dominates there (Grok). VERIFY high-side part. |
@@ -978,7 +979,8 @@ XT90, Molex Micro-Fit 3.0, JST-PH, Keystone 1043, D2PAK, SuperSO8,
 SOIC, MSOP, HTSSOP, VQFN-HR, SOT-23-6, LQFP, TVS, SMCJ58A, SMCJ70A,
 SMBJ18A, LT4363, LM5069, LTC4359, LM74700-Q1, IPB072N15N3,
 BSC160N15NS5, BSC098N10NS5, BSC160N10NS3, BSC0902NS, LM5146-Q1, LM5145,
-TEP 150-4815WI, TEP 150WI, TRACO, Murata, HPQ-12/25-D48NB-C, Flex,
+TEP 150-4815WI, TEP 150WI, TRACO, Murata, HPQ-12/25-D48NB-C, MPQ1500-12V125-L48,
+PMBus, MFR_VOUT_MAX, Flex,
 PKB4313DPI, Cincon, CHB150W-48S12, eighth brick, half brick, baseplate,
 OVP, UVLO, Mean Well SD-150C-12, TPS1HB08-Q1,
 BTS7008-2EPA, PROFET, TE T9AS1D12-12, Omron G8P, LM61495, LM61495-Q1,
