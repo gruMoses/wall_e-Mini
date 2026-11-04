@@ -241,9 +241,13 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 
 ## 9. Open items
 
-- 2026-11-04: the `nohalt` flag is set on the bench Pi (while it ran on
-  USB-C with the HAT off). Remove it before the robot relies on the UPS:
-  `sudo rm /var/lib/walle-ups/nohalt`.
+- Done 2026-11-04 13:13: the hold check. The Pi booted on the HAT with the
+  7.5 V supply and cells resting at 8.32 V. The cells carried it at 7.66
+  to 7.71 V and −0.37 to −0.64 A for 3 min, read as `above_supply`, with
+  no loss count. The `nohalt` flag was then removed; the watcher is armed.
+- Never power the Pi from USB-C and the HAT at the same time: the HAT has
+  no back-feed protection on its 5 V output. Swap sources with the Pi
+  shut down.
 - Before turning on `--edge-s` with new cells, measure the supply's droop
   from idle to full Pi load. It must stay well under 0.30 V.
 - Done 2026-11-04: the real unplug test at the 10 mΩ scale (section 4.3).
