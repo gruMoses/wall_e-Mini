@@ -522,9 +522,9 @@ def build_log_obj(
             # next to five None siblings would be misleading.
             "age_s": telem.get("gps_age_s") if gps_reading else None,
             # Commit D (2026-09-19): UTC/COG/SOG/mode/geoid separation, now
-            # read from the receiver. cog_deg also feeds
-            # GpsHeadingAligner.update_cog() (the COG heading lock, see
-            # docs/gps_heading_alignment.md); sog_mps is logging only.
+            # read from the receiver. cog_deg and sog_mps feed
+            # GpsHeadingAligner.update_cog() (the COG heading lock; sog_mps
+            # gates it by speed, see docs/gps_heading_alignment.md).
             "utc": gps_reading.utc_iso if gps_reading else None,
             "cog_deg": gps_reading.cog_deg if gps_reading else None,
             "sog_mps": gps_reading.sog_mps if gps_reading else None,
