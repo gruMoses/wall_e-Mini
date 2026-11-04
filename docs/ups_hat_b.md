@@ -216,6 +216,16 @@ halted the Pi (7.18 V, −652 mA, hard). The first alarm wake read 7.50 V at
 held, flickering between `unknown` and `discharge` at 7.47 to 7.50 V,
 −176 to −303 mA, while the cells rode down to the buck.
 
+Pull on the robot buck, 2026-11-04 (cells about 0.25 V above the buck):
+
+| Time | Event |
+|---|---|
+| 16:04:22 | Buck pulled |
+| 16:04:27 | `MAINS LOST (hard)` at 7.07 V, −589 mA; alarm +90 s; clean halt |
+| 16:06:12, 16:07:27 | Alarm wakes: 7.10 V at −0.6 A, `absent`; power off, +60 s |
+| 16:08:42 | First wake after the replug: 7.50 V, −164 mA; the boot continues |
+| 16:09:00 | ssh answers |
+
 ## 5. Energy while mains is off
 
 Each wake costs about 16 s of boot at 0.5 to 0.9 A. One poll cycle is about
