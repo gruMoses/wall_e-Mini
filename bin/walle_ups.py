@@ -10,11 +10,15 @@ Hardware facts (schematic UPS_HAT_B_Schematic.pdf, read 2026-11-03):
     protection MOSFETs. Whatever voltage the jack supplies is the voltage
     the pack floats at, so the robot's buck setpoint IS the charge limit
     (7.6 V = 3.80 V/cell, about 50 %, Kevin's choice).
-  * The only sensor is an INA219 at I2C 0x42 across a 0.1 ohm shunt in the
-    BATTERY leg. Positive current = into the pack. With mains on the jack
-    the supply carries the Pi and the pack sees a small positive trickle
-    (+4..+15 mA floating at 8.35 V on the bench brick, noise +/-4 mA). With
-    mains gone the pack carries the Pi: the shunt reads -300 mA or worse.
+  * The only sensor is an INA219 at I2C 0x42 across a shunt in the BATTERY
+    leg. The schematic labels it 0.1R; the readings say 10 mOhm: on the
+    bench (2026-11-03, brick unplugged) the shunt showed 5-9 mV while the
+    Pi's PMIC rails alone summed to ~2.2 W plus NVMe and USB, which is
+    0.5-0.9 A at 7.5 V, not 50-90 mA. Positive current = into the pack.
+    With mains on the jack the supply carries the Pi and the pack sees a
+    small positive trickle (+40..+150 mA floating at 8.35 V on the bench
+    brick, noise +/-40 mA). With mains gone the pack carries the Pi: the
+    shunt reads -500 mA or worse (-520..-910 mA measured).
   * The SY8286 buck keeps the 5 V output on until the HY2120 low-voltage
     cutoff. Nothing on the board can switch the output off or signal
     "mains is back". The Pi 5 wakes only from its power button, the RTC
@@ -24,7 +28,7 @@ Design (Grok-reviewed 2026-11-03, Grok session 01a1a410-deab-79f3-a336-30eea7088
 
   run mode  (walle-ups.service, root, after boot)
     Poll the INA219 at 2 Hz and classify every sample:
-      present       batt_ma >= PRESENT_MA (-40)                  -> loss timer := 0
+      present       batt_ma >= PRESENT_MA (-80)                  -> loss timer := 0
       absent        batt_ma <= ABSENT_MA (-250) and
                     batt_v  <= supply_v + GATE_MARGIN_V (0.15)   -> loss timer += poll
       above_supply  batt_ma <= ABSENT_MA but the pack is above the supply
@@ -101,10 +105,10 @@ UNKNOWN = "unknown"
 # --- defaults (every one is a CLI knob) -----------------------------------
 DEFAULT_BUS = 1
 DEFAULT_ADDR = 0x42
-DEFAULT_SHUNT_OHM = 0.1
+DEFAULT_SHUNT_OHM = 0.01        # 10 mOhm by measurement; the schematic's "0.1R" label is wrong
 DEFAULT_SUPPLY_V = 8.4          # bench brick today; 7.6 once the robot buck is in
 DEFAULT_GATE_MARGIN_V = 0.15
-DEFAULT_PRESENT_MA = -40.0
+DEFAULT_PRESENT_MA = -80.0      # floating noise is +/-40 mA at this scale
 DEFAULT_ABSENT_MA = -250.0
 DEFAULT_LOSS_S = 5.0
 DEFAULT_POLL_S = 0.5
@@ -527,7 +531,7 @@ class Watcher:
         return state_name
 
     # -- the loss -----------------------------------------------------------
-    def _on_loss(self, now: float) -> str:
+    def _on_loss(self, now: float, *, simulated: bool = False) -> str:
         s = self.last_sample
         record = {
             "ts": now,
@@ -536,8 +540,10 @@ class Watcher:
             "supply_v": self.th.supply_v,
             "halt_enabled": self.halt_enabled(),
             "mode": self.mode(),
+            "simulated": simulated,
         }
-        LOG.warning("MAINS LOST: %.1f s of absent samples (batt %s V %s mA). %s",
+        LOG.warning("%sMAINS LOST: %.1f s of absent samples (batt %s V %s mA). %s",
+                    "SIMULATED " if simulated else "",
                     self.timer.absent_s, record["batt_v"], record["batt_ma"],
                     "Shutting down." if self.halt_enabled() else
                     f"HALT DISABLED ({self.mode()}), staying up.")
@@ -689,9 +695,13 @@ def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: 
 # --- CLI -------------------------------------------------------------------
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="WALL-E UPS watcher for the Waveshare UPS HAT (B)")
-    p.add_argument("mode", choices=("run", "boot-check", "once"),
+    p.add_argument("mode", choices=("run", "boot-check", "once", "simulate-loss"),
                    help="run = the daemon; boot-check = the early-boot re-check; "
-                        "once = print one reading and exit")
+                        "once = print one reading and exit; simulate-loss = run the "
+                        "real halt sequence now (kill, alarm, poweroff) as a bench test "
+                        "of the wake chain with mains still connected; needs --yes")
+    p.add_argument("--yes", action="store_true",
+                   help="confirm simulate-loss (it powers the Pi off)")
     p.add_argument("--bus", type=int, default=DEFAULT_BUS)
     p.add_argument("--addr", type=lambda s: int(s, 0), default=DEFAULT_ADDR)
     p.add_argument("--shunt-ohm", type=float, default=DEFAULT_SHUNT_OHM, dest="shunt_ohm")
@@ -749,6 +759,25 @@ def main(argv: list[str] | None = None) -> int:
     w = Watcher(sensor, th, actions, rtc, state, status_file=args.status_file,
                 poll_s=args.poll_s, first_alarm_s=args.first_alarm_s,
                 kill_services=kill, detect_only=args.detect_only)
+
+    if args.mode == "simulate-loss":
+        if not args.yes:
+            print("simulate-loss powers the Pi off; add --yes to confirm", file=sys.stderr)
+            return 2
+        # Same code path as a real loss, with a real reading in the record.
+        # The running walle-ups.service keeps publishing; this process just
+        # fires the sequence once. With mains connected the wake check will
+        # see "present" and the Pi boots back fully after the first alarm.
+        try:
+            w.last_sample = sensor.read()
+            w.last_state = classify(w.last_sample.batt_ma, w.last_sample.batt_v, th)
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("simulate-loss: sensor read failed (%s); continuing", error)
+        w.timer.absent_s = th.loss_s
+        w._on_loss(time.time(), simulated=True)
+        time.sleep(30)
+        return 0
+
     run_loop(w)
     return 0
 

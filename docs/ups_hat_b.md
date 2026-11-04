@@ -20,8 +20,11 @@ Source: `UPS_HAT_B_Schematic.pdf` (Waveshare wiki), read 2026-11-03.
 - The HAT has no microcontroller and no charger IC. The 8.4 V barrel jack
   connects to the pack node through the protection MOSFETs. The pack floats
   at the voltage the jack supplies.
-- The only sensor is an INA219 at I2C address 0x42, across a 0.1 Ω shunt in
-  the battery leg. Positive current flows into the pack.
+- The only sensor is an INA219 at I2C address 0x42, across a shunt in the
+  battery leg. The schematic labels the shunt 0.1R. The readings say 10 mΩ:
+  with the brick unplugged the shunt showed 5 to 9 mV while the Pi's own
+  PMIC rails summed to more than 2 W, which is 0.5 to 0.9 A, not 50 to
+  90 mA. The watcher uses 10 mΩ. Positive current flows into the pack.
 - An SY8286 buck makes the 5 V output. The output stays on until the HY2120
   low-voltage cutoff. The HAT cannot switch its output off, and it cannot
   signal "mains is back".
@@ -29,9 +32,14 @@ Source: `UPS_HAT_B_Schematic.pdf` (Waveshare wiki), read 2026-11-03.
   5 V is removed and applied again. GPIO3 does not wake a Pi 5.
 
 Bench readings (2026-11-03, 8.4 V brick, Pi idle): pack 8.30 to 8.38 V,
-battery current +4 to +15 mA, noise ±4 mA. The pack never discharged while
-the brick was connected. A running Pi draws at least 300 mA from the pack
-once mains is gone.
+battery current +40 to +150 mA, noise ±40 mA. The pack never discharged
+while the brick was connected. With the brick unplugged the pack carried the
+Pi at −520 to −910 mA and its voltage fell from 8.35 V to 7.4 to 7.6 V
+within 90 s; it returned to 8.35 V at once when the brick came back, at
++130 to +210 mA. That swing means the cells have about 1 Ω of internal
+resistance (a healthy 18650 has 0.03 to 0.08 Ω). The pack's usable
+ride-through for a running Pi is minutes, not hours. The watcher does not
+need more than 15 s.
 
 ## 3. Charge limit
 
@@ -59,7 +67,7 @@ Every 0.5 s it reads the INA219 and classifies the sample:
 
 | State | Rule | Effect on the loss timer |
 |---|---|---|
-| `present` | current ≥ −40 mA | reset to 0 |
+| `present` | current ≥ −80 mA | reset to 0 |
 | `absent` | current ≤ −250 mA and pack ≤ setpoint + 0.15 V | add 0.5 s |
 | `above_supply` | current ≤ −250 mA and pack above setpoint + 0.15 V | hold |
 | `unknown` | the middle band, or an I2C error | hold |
@@ -97,9 +105,12 @@ to ssh 108 s after the poweroff command (about 18 s from the alarm to ssh).
 
 ## 5. Energy while mains is off
 
-Each wake costs about 16 s of boot. At 60 s polls a 50 percent pack lasts
-roughly one day. Then the HY2120 cutoff removes the 5 V, and the Pi boots on
-power-up when mains returns. For long storage, switch the HAT off.
+Each wake costs about 16 s of boot at 0.5 to 0.9 A. At 60 s polls that is a
+quarter of the time on. With the cells measured on 2026-11-03 (about 1 Ω,
+see section 2) the pack reaches the HY2120 cutoff within the hour. Then the
+HAT removes the 5 V, the Pi is fully off, and it boots on power-up when mains
+returns. Healthy cells would last roughly a day. For long storage, switch the
+HAT off.
 
 ## 6. Install and update
 
@@ -127,6 +138,10 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 - `walle_ups.py once`: one reading, as JSON.
 - `walle_ups.py run --detect-only`: the watcher logs what it would do and
   does nothing.
+- `sudo walle_ups.py simulate-loss --yes`: runs the real halt sequence once
+  (kill `wall-e`, arm the alarm, sync, poweroff) with mains connected. The
+  wake check then sees `present` and the Pi boots back after the first
+  alarm. This tests the whole chain without pulling a plug.
 
 ## 8. Bench procedure
 
@@ -142,8 +157,13 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 
 ## 9. Open items
 
+- Repeat the unplug test with the 10 mΩ scale (the first one, 2026-11-03
+  20:51, ran with the 0.1R scale, read −52 mA, and held in the middle band
+  on purpose). Expected: `MAINS LOST` within 5 s, the Pi dark within 15 s.
+- The cells: about 1 Ω internal resistance. Decide whether to replace them.
+  With them, the pack runs down to the cutoff within the hour at 60 s polls.
 - Measure the battery current under the worst robot load (camera, boot) with
-  the robot buck connected. It must stay above −40 mA. If the buck folds back
+  the robot buck connected. It must stay above −80 mA. If the buck folds back
   and the pack shares the load, raise the buck's current limit; the watcher
   cannot tell that case from a loss.
 - Run the pack to the HY2120 cutoff once and confirm that the 5 V drops to

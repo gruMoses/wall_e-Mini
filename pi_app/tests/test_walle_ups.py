@@ -488,5 +488,47 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(sample.overflow)
 
 
+class RealTraceTests(unittest.TestCase):
+    """Raw INA219 register values logged on the bench 2026-11-03 (bus reg,
+    shunt reg), classified with the module DEFAULTS. The shunt is 10 mOhm,
+    not the schematic's 0.1R: with 0.1 the unplug read as -52 mA and sat
+    in the hold band, so the Pi never halted."""
+
+    def _ma_v(self, bus_reg, shunt_reg):
+        class Bus:
+            def read_word_data(self_, addr, reg):
+                raw = {ups.REG_SHUNT: shunt_reg & 0xFFFF, ups.REG_BUS: bus_reg}[reg]
+                return ((raw & 0xFF) << 8) | (raw >> 8)  # little-endian as the chip sends it
+
+        s = ups.Ina219()
+        s._bus = Bus()
+        sample = s.read(now=0.0)
+        return sample.batt_ma, sample.batt_v
+
+    def test_default_shunt_is_ten_milliohm(self):
+        self.assertEqual(ups.DEFAULT_SHUNT_OHM, 0.01)
+
+    def test_unplugged_bench_pi_is_absent(self):
+        th = ups.Thresholds()
+        # 20:51-20:52 with the brick out: bus 7.6 V, shunt -5.2..-7.3 mV.
+        for bus_mv, shunt_uv in ((7684, -5240), (7620, -5930), (7564, -7290), (7556, -6940)):
+            ma, v = self._ma_v(bus_mv // 4 << 3, shunt_uv // 10)
+            self.assertLess(ma, -500.0)
+            self.assertEqual(ups.classify(ma, v, th), ups.ABSENT, (bus_mv, shunt_uv, ma))
+
+    def test_brick_connected_is_present(self):
+        th = ups.Thresholds()
+        # Floating all afternoon (+0.2..+1.6 mV) and charging after the replug (+2.0 mV).
+        for bus_mv, shunt_uv in ((8348, 230), (8364, 1570), (8300, -390), (8348, 2040)):
+            ma, v = self._ma_v(bus_mv // 4 << 3, shunt_uv // 10)
+            self.assertEqual(ups.classify(ma, v, th), ups.PRESENT, (bus_mv, shunt_uv, ma))
+
+    def test_boot_transient_holds_not_halts(self):
+        th = ups.Thresholds()
+        # 20:00:31, first daemon sample after a reboot on the brick: -1.7 mV.
+        ma, v = self._ma_v(8236 // 4 << 3, -170)
+        self.assertEqual(ups.classify(ma, v, th), ups.UNKNOWN)
+
+
 if __name__ == "__main__":
     unittest.main()
