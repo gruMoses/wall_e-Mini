@@ -1022,14 +1022,15 @@ def run_loop(w: Watcher) -> None:
     except OSError as error:
         LOG.warning("could not clear a stale RTC alarm: %s", error)
     th = w.th
+    edge = (f"edge rule {th.edge_s:.0f} s" if th.edge_s > 0 else "edge rule off")
     LOG.warning("walle-ups watching INA219 0x%02x on bus %d: supply %.2f V, present >= %.0f mA, "
-                "discharging <= %.0f mA, absent below %.2f V or within %.0f s of present, "
-                "above_supply over %.2f V, loss after %.1f s, floor %.2f V/%.0f s, "
-                "critical %.2f V/%.0f s, first alarm +%d s, mode %s",
+                "discharging <= %.0f mA, absent below %.2f V (%s), above_supply over %.2f V, "
+                "loss after %.1f s, floor %.2f V for %.1f s, critical %.2f V for %.1f s, "
+                "first alarm +%d s (low battery +%d s), mode %s",
                 w.sensor.addr, w.sensor.bus_num, th.supply_v, th.present_ma, th.absent_ma,
-                th.supply_v - th.hard_margin_v, th.edge_s, th.supply_v + th.gate_margin_v,
+                th.supply_v - th.hard_margin_v, edge, th.supply_v + th.gate_margin_v,
                 th.loss_s, th.floor_v, th.floor_s, th.crit_v, th.crit_s, w.first_alarm_s,
-                w.mode())
+                w.slow_wake_s, w.mode())
     if w.in_grace(w._mono):
         LOG.warning("GRACE: mains-loss halts are off for %.0f s more (a capped loss chain let "
                     "this boot through); the low-battery halts stay on", w.grace_until - w._mono)
