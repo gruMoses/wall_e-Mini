@@ -102,9 +102,17 @@ boot-check mode  (walle-ups-wakecheck.service, early boot, before basic.target)
                                    holds the pack at S, so this cannot lock
                                    a live supply out.
     absent                         power off, +WAKE_S (60 s); opens a chain
-    discharge, inside any chain    power off, +WAKE_S: under the light
-      except a simulated one       early-boot load the pack rebounds into
-                                   the band while the outage goes on
+    discharge at CHAIN_BAND_MA     power off, +WAKE_S: under the light
+      (-400 mA) or more and NOT    early-boot load the pack rebounds into
+      pinned within PINNED_V       the band while the outage goes on. A
+      (0.03 V) of S, inside any    supply that came back below the pack
+      chain except a simulated     pins V at its setpoint and shares the
+      one                          load (field 2026-11-04: the buck held
+                                   7.496-7.512 V on 23 wakes at -270..-305
+                                   mA; a real outage read 7.30-7.35 V at
+                                   -567..-600 mA), so it does not count.
+                                   Booting on doubt is the safe side: run
+                                   mode's hard line and floor still halt
     above_supply                   boot, close the chain
   Every power-off in a chain, from either mode, counts. After
   CHAIN_MAX_WAKES (24, about 30 min) the 60 s power-offs stop and the boot
@@ -189,6 +197,8 @@ DEFAULT_HARD_MARGIN_V = 0.30    # below S - this: no CC/CV supply is holding the
 DEFAULT_HARD_HYST_V = 0.10      # while a loss count runs, the hard line moves up by this
 DEFAULT_PRESENT_MA = -80.0      # floating noise is +/-40 mA at this scale
 DEFAULT_ABSENT_MA = -250.0
+DEFAULT_CHAIN_BAND_MA = -400.0  # in a chain, a band sample counts only at this discharge or more
+DEFAULT_PINNED_V = 0.03         # ... and only if V is not pinned within this of S (a supply holds it)
 DEFAULT_LOSS_S = 5.0
 DEFAULT_EDGE_S = 0.0            # OFF: see the module doc. 10 counts band samples for 10 s after present
 DEFAULT_GAP_S = 10.0            # the loss count resets after this long without a counted sample
@@ -249,6 +259,8 @@ class Thresholds:
     hard_hyst_v: float = DEFAULT_HARD_HYST_V
     present_ma: float = DEFAULT_PRESENT_MA
     absent_ma: float = DEFAULT_ABSENT_MA
+    chain_band_ma: float = DEFAULT_CHAIN_BAND_MA
+    pinned_v: float = DEFAULT_PINNED_V
     loss_s: float = DEFAULT_LOSS_S
     edge_s: float = DEFAULT_EDGE_S
     gap_s: float = DEFAULT_GAP_S
@@ -1121,11 +1133,15 @@ def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: 
     chain = state.read_chain()
     n = len(valid)
     low_n = sum(1 for s, c in zip(valid, classes) if c != PRESENT and s.batt_v <= th.floor_v)
+    # Band samples where the cells carry most of the boot load, not a share.
+    strong_band_n = sum(1 for s, c in zip(valid, classes)
+                        if c == DISCHARGE and s.batt_ma <= th.chain_band_ma
+                        and abs(s.batt_v - th.supply_v) > th.pinned_v + 1e-9)
     summary = {
         "n": n, "errors": errors, "implausible": implausible,
         "present": classes.count(PRESENT), "absent": classes.count(ABSENT),
         "discharge": classes.count(DISCHARGE), "above": classes.count(ABOVE_SUPPLY),
-        "unknown": classes.count(UNKNOWN), "low": low_n,
+        "unknown": classes.count(UNKNOWN), "low": low_n, "strong_band": strong_band_n,
         "chain": chain["kind"] if chain else None,
         "chain_wakes": chain["wakes"] if chain else None,
         "batt_v": round(valid[-1].batt_v, 3) if valid else None,
@@ -1163,7 +1179,7 @@ def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: 
     elif summary["absent"] >= need:
         kind, seconds, capped = (chain_kind or KIND_HARD), wake_s, True
     elif (chain_kind and chain_kind != KIND_SIM
-          and summary["absent"] + summary["discharge"] >= need):
+          and summary["absent"] + strong_band_n >= need):
         # A real halt opened this chain. Under the light early-boot load the
         # pack rebounds into the band, so the band is the outage still going.
         # The cap bounds the case where a supply below the pack came back.
@@ -1220,6 +1236,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--hard-hyst-v", type=float, default=DEFAULT_HARD_HYST_V, dest="hard_hyst_v")
     p.add_argument("--present-ma", type=float, default=DEFAULT_PRESENT_MA, dest="present_ma")
     p.add_argument("--absent-ma", type=float, default=DEFAULT_ABSENT_MA, dest="absent_ma")
+    p.add_argument("--chain-band-ma", type=float, default=DEFAULT_CHAIN_BAND_MA, dest="chain_band_ma")
+    p.add_argument("--pinned-v", type=float, default=DEFAULT_PINNED_V, dest="pinned_v")
     p.add_argument("--loss-s", type=float, default=DEFAULT_LOSS_S, dest="loss_s")
     p.add_argument("--edge-s", type=float, default=DEFAULT_EDGE_S, dest="edge_s")
     p.add_argument("--gap-s", type=float, default=DEFAULT_GAP_S, dest="gap_s")
@@ -1250,7 +1268,9 @@ def thresholds_from_args(args) -> Thresholds:
     return Thresholds(
         supply_v=args.supply_v, gate_margin_v=args.gate_margin_v,
         hard_margin_v=args.hard_margin_v, hard_hyst_v=args.hard_hyst_v, present_ma=args.present_ma,
-        absent_ma=args.absent_ma, loss_s=args.loss_s, edge_s=args.edge_s, gap_s=args.gap_s,
+        absent_ma=args.absent_ma, chain_band_ma=args.chain_band_ma, pinned_v=args.pinned_v,
+        loss_s=args.loss_s,
+        edge_s=args.edge_s, gap_s=args.gap_s,
         floor_v=args.floor_v, floor_s=args.floor_s, crit_v=args.crit_v, crit_s=args.crit_s)
 
 

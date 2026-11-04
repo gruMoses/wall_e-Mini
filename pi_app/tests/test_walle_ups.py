@@ -822,6 +822,57 @@ class BootCheckTests(unittest.TestCase):
         finally:
             h.close()
 
+    # Field 2026-11-04, 7.5 V supply. A real outage in a hard chain read
+    # 7.30-7.35 V at -567..-600 mA; the robot buck back at 7.50 V, with the
+    # cells resting above it, read 7.50 V at -270..-305 mA.
+    S75 = ups.Thresholds(supply_v=7.5)
+
+    def test_field_real_outage_wakes_in_a_hard_chain_power_off(self):
+        for trace in ([(7.33, -580.0)] * 11,
+                      [(7.18, -583.0)] * 3 + [(7.24, -578.0)] * 8):
+            h = BootCheckHarness(trace, th=self.S75, chain={"kind": ups.KIND_HARD, "wakes": 3})
+            try:
+                self.assertEqual(h.run(), "poweroff", trace[0])
+            finally:
+                h.close()
+
+    def test_field_supply_sharing_below_the_pack_boots(self):
+        h = BootCheckHarness([(7.50, -290.0), (7.504, -305.0), (7.508, -270.0)] * 4,
+                             th=self.S75, chain={"kind": ups.KIND_HARD, "wakes": 3})
+        try:
+            self.assertEqual(h.run(), "inconclusive")
+            self.assertEqual(h.actions.calls, [])
+        finally:
+            h.close()
+
+    def test_chain_band_current_boundary(self):
+        for ma, want in ((-400.0, "poweroff"), (-399.0, "inconclusive")):
+            h = BootCheckHarness([(7.33, ma)] * 11, th=self.S75,
+                                 chain={"kind": ups.KIND_HARD, "wakes": 3})
+            try:
+                self.assertEqual(h.run(), want, ma)
+            finally:
+                h.close()
+
+    def test_absent_counts_whatever_the_current_above_the_band_cut(self):
+        # V < S - 0.30 needs no current gate beyond the -250 mA discharge line.
+        h = BootCheckHarness([(7.15, -260.0)] * 11, th=self.S75)
+        try:
+            self.assertEqual(h.run(), "poweroff")
+        finally:
+            h.close()
+
+    def test_a_pack_pinned_at_the_setpoint_boots_even_at_a_high_current(self):
+        # Grok review 01a1a857: a fuller pack on a 7.5 V supply can push over
+        # 400 mA, but the supply pins the node at its setpoint.
+        for v, want in ((7.50, "inconclusive"), (7.47, "inconclusive"), (7.54, "poweroff")):
+            h = BootCheckHarness([(v, -450.0)] * 11, th=self.S75,
+                                 chain={"kind": ups.KIND_HARD, "wakes": 3})
+            try:
+                self.assertEqual(h.run(), want, v)
+            finally:
+                h.close()
+
     def test_band_in_a_simulated_chain_fails_open(self):
         # simulate-loss on a pack above the supply must boot back.
         h = BootCheckHarness([BAND] * 30, chain={"kind": ups.KIND_SIM, "wakes": 2})

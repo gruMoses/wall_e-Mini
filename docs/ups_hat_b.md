@@ -130,9 +130,14 @@ for 2.5 s. It has no history, so it cannot see an edge.
     (a low pack polls less), never capped. A present supply holds the
     pack at S, so this cannot lock a live supply out;
   - `absent`: power off, alarm `+60 s`;
-  - `discharge`, inside any chain except a simulated one: power off,
-    `+60 s` (under the light early-boot load the pack rebounds into the
-    band, and the outage is still going);
+  - `discharge` at −400 mA or more, and not within 0.03 V of the setpoint,
+    inside any chain except a simulated one: power off, `+60 s` (under the
+    light early-boot load the pack rebounds into the band, and the outage is
+    still going). A supply that came back below the pack pins the voltage at
+    its setpoint and shares the load, so it does not count. On 2026-11-04 the
+    robot buck held 7.496 to 7.512 V at −270 to −305 mA on 23 wakes, while a
+    real outage read 7.30 to 7.35 V at −567 to −600 mA. On doubt the boot
+    continues, and run mode's hard line and floor still halt;
   - `above_supply`: the boot continues and the chain closes.
 - Anything else: the boot continues. A Pi that powers itself off because
   a sensor is missing cannot be repaired from the bench.
@@ -195,6 +200,15 @@ Real pull with the new rules, 2026-11-04 (7.5 V supply, cells about
 
 The band rule inside a chain did its job: under the light early-boot load
 the pack read above the 7.20 V line on every wake.
+
+The robot buck, 2026-11-04 14:21-14:51: a supply swap that took over 5 s
+halted the Pi and opened a hard chain. The buck then held the pack at
+7.50 V, but the cells rested near 7.8 V after floating on the wall wart
+(which sits near 7.67 V, not 7.5 V) and still pushed −270 to −305 mA. The
+old band rule read that as the outage going on, and the Pi polled until
+the 24-wake cap (30 min). The current and pinned-voltage conditions in 4.2
+now let that boot. Swap supplies with the Pi shut down (a button shutdown
+opens no loss chain).
 
 ## 5. Energy while mains is off
 
