@@ -1,6 +1,7 @@
 # Pi 5 power module: hardware design specification
 
-Status: research draft, 2026-11-04. Nothing is ordered. No part is
+Status: research draft, 2026-11-04. Revised the same day for Kevin's
+answers: a 13.2 V rail, peak ratings, smart FET outputs. Nothing is ordered. No part is
 sampled. Each part number below was checked on the manufacturer's page
 or a distributor page on 2026-11-04 unless the text says VERIFY. A VERIFY
 mark means the number or the status comes from memory or from a
@@ -15,7 +16,8 @@ The appendix lists the Technical Names.
 The module takes the robot's 13S traction pack (37.7 V to 54.6 V) at one
 XT60 input and makes four things from it:
 
-1. A 14.0 V rail, 150 W, with two switched outputs that the Pi controls.
+1. A 13.2 V rail (12 V class), 150 W continuous from a 300 W brick,
+   with two switched outputs that the Pi controls.
 2. A 5.1 V rail for the Raspberry Pi 5 through the GPIO header, 6 A.
 3. A 5.0 V rail for the USB devices, with four current-limited ports.
    The Pi's own USB ports do not carry the device power.
@@ -29,8 +31,9 @@ the Pi over UART0 (GPIO 14 and 15) and two GPIO lines. It is not on the
 Pi's I2C bus 1.
 
 Section 11 (the Grok appendix) records the three second opinions and
-what changed because of them. The first spin uses a bought 150 W DC-DC
-brick for the 14 V rail. A discrete 100 V buck is the second spin.
+what changed because of them, plus a fourth on the 13.2 V brick. The
+first spin uses a bought 300 W quarter brick (Murata HPQ-12/25-D48)
+trimmed to 13.2 V. A discrete 100 V buck is the second spin.
 
 ## 1. Requirements
 
@@ -40,7 +43,7 @@ Assumptions are marked (A). Kevin's words are quoted.
 |---|---|---|
 | R1 | Input: 13S Li-ion pack, 37.7 V (BMS cut) to 54.6 V (full). Design working input 60 V. | Kevin: "up to 60 V straight from the battery". `config.py` lines 225-242. |
 | R2 | Input survives a hot-plug ring above the pack voltage, VESC regen and load transients, and reverse polarity. | (A) from the two VESCs on the pack and the XT connector. |
-| R3 | 14.0 V rail, 150 W. Two switched outputs, each 10 A peak. 8 A combined continuous while the Pi runs. | Kevin: "a tap for 10 A at 14 V", "a relay to control the 12V output, or better yet, two". (A) the 14 V tap and the 12 V output are the same rail. See open question 1 and 2. |
+| R3 | 13.2 V rail, 150 W continuous. Two switched outputs, each 10 A peak. 8 A combined continuous while the Pi runs. | Kevin: "a tap for 10 A at 14 V", "a relay to control the 12V output, or better yet, two". Kevin chose 13.2 V and "peaks are fine" on 2026-11-04 (open questions 1 and 2). |
 | R4 | 5.1 V rail for the Pi 5, 6 A continuous, through the header. | (A) Pi 5 needs 5 V 5 A to lift its USB limit. |
 | R5 | 5.0 V rail for USB devices, 4 ports, each current-limited, no backfeed into the Pi. | Kevin: "power everything we need to power over USB". `docs/NEXT_SESSION.md`: 167 USB over-current trips from hub backfeed. |
 | R6 | 2S 18650 buffer with a charger that floats at 7.60 V, a protector, balancing that works, and a pack monitor. | Kevin: "whatever we need for a custom BMS with two 18650s", 3.80 V per cell. |
@@ -54,8 +57,9 @@ Assumptions are marked (A). Kevin's words are quoted.
 | R14 | Outdoor enclosure, ambient -10 C to +45 C, no forced air. | (A) WALL-E lives outside in Texas. |
 | R15 | One person hand-assembles the first boards. Four-layer PCB, stencil, hot plate or oven. | Kevin builds it himself. |
 
-Not requirements: galvanic isolation of the 14 V rail (the pack
-negative is the common ground), ride-through of the robot's loads,
+Not requirements: galvanic isolation of the 13.2 V rail (the brick is
+isolated, but its output negative is bonded to pack negative at one
+point, section 3.2), ride-through of the robot's loads,
 USB Power Delivery to the Pi.
 
 ## 2. Block diagram
@@ -68,11 +72,11 @@ USB Power Delivery to the Pi.
                                   +---------+   |
                                                 v
                                      +-------------------+
-                                     | 14 V converter    |
-                                     | TEP 150-4815WI    |
-                                     | trim 14.0 V, 150 W|
+                                     | 13.2 V converter  |
+                                     | Murata HPQ-12/25  |
+                                     | trim 13.2 V, 300 W|
                                      +---------+---------+
-                                               | 14 V rail
+                                               | 13.2 V rail
             +------------------+---------------+-------------+
             |                  |                             |
    +--------v-------+  +-------v--------+          +---------v--------+
@@ -145,20 +149,23 @@ Grok asked for one scope capture of a hot-plug and one of a hard brake
 at this input before the clamp values are final. That is bench test
 T-1 in section 9.
 
-### 3.2 14 V converter
+### 3.2 13.2 V converter
 
 Two paths. The first spin buys the converter. The second spin builds it.
 
 Why a brick first (Grok, section 11.1): the 100 V margin of a discrete
 buck does not help when the front end is the real limit; a shorted
-high-side FET puts the pack on the 14 V rail; a first hand-built buck
+high-side FET puts the pack on the 13.2 V rail; a first hand-built buck
 runs 90 to 93 percent, not 95; layout is the product. A brick is
 potted, surge-rated, isolated, and known.
 
 | Item | Part | Key ratings |
 |---|---|---|
-| Converter, spin 1 | TRACO TEP 150-4815WI | 18 V to 75 V input, 15 V 10 A, 150 W, isolated 1.5 kV. Efficiency 86 to 87 percent (listing). Operating -40 C to +75 C, case maximum 95 to 100 C. Metal case with flanges. EN 61000-4-5 surge 1 kV. https://www.tracopower.com/products/tep150wi . VERIFY: trim range reaches 14.0 V (needs -6.7 percent; the series is "adjustable", the exact range is in the datasheet), derating curve, case-to-flange thermal resistance. |
-| Alternative brick | Mean Well SD-150C-12 | 36 V to 72 V input, 12 V 12.5 A, 77 percent. Rejected: 36 V minimum sits at the 37.7 V BMS cut, 12 V is the wrong rail, 35 W of heat. https://www.meanwell.com/productDetail.aspx?i=361 |
+| Converter, spin 1 | Murata HPQ-12/25-D48NB-C | Quarter brick, 36 V to 75 V input, 12 V 25 A, 300 W, isolated 2.25 kV, 94.5 percent, -40 C to +85 C. Active, in stock at DigiKey on 2026-11-04 (76.59 GBP at quantity 1). Trim +10 percent gives 13.2 V; 25 A at 13.2 V is 330 W, so the brick is power-limited near 22 A, which is far above this design. Input undervoltage lockout, output OVP, hiccup overcurrent, over-temperature (series data). VERIFY in the current datasheet: undervoltage shutdown (falling) and start-up threshold (a sibling HPQ model lists 32 V and 33 V), the trim range across 36 V to 75 V and temperature, the OVP threshold and whether it latches or hiccups, the input surge rating, the short-circuit mode, minimum load, baseplate temperature limit and whether the baseplate is isolated, and the external input and output capacitors. |
+| Cheaper alternative | Flex PKB4313DPI | Eighth brick, 36 V to 75 V, 12 V 25 A, 300 W, 96.2 percent, active. 56.78 USD, but none in stock and a 39-week lead time on 2026-11-04. VERIFY trim range. |
+| Wide-input alternative | Cincon CHB150W-48S12 | Half brick, 18 V to 75 V, 12 V 12.5 A, 150 W, 91 percent, trim about ±10 percent. 180 to 260 USD. Use it only if the HPQ undervoltage shutdown is a hard 36 V (risk R-16). |
+| Rejected | TRACO TEP 150-4815WI | 18 V to 75 V, 15 V 10 A, 150 W, 87 percent. The first draft priced it at 160 USD from memory. DigiKey lists it at about 268 USD with a 19-week lead time. It also makes 22 W of heat at full load, and a 15 V part may not trim down to 13.2 V. |
+| Alternative brick | Mean Well SD-150C-12 | 36 V to 72 V input, 12 V 12.5 A, 77 percent. Rejected: 36 V minimum sits at the 37.7 V BMS cut, a fixed 12 V output, 77 percent and 35 W of heat. https://www.meanwell.com/productDetail.aspx?i=361 |
 | Converter, spin 2 | TI LM5146-Q1 controller | 5.5 V to 100 V input, 0.8 V to 60 V output, synchronous buck. https://www.ti.com/product/LM5146-Q1 |
 | FETs, spin 2 | Infineon BSC098N10NS5 (low side), BSC160N10NS3 or similar (high side) | 100 V. Low side 9.8 mOhm. High side smaller: duty is 0.26, so switching loss dominates there (Grok). VERIFY high-side part. |
 | Alternative controller | TI LM5145 | 6 V to 75 V. Less margin. |
@@ -167,15 +174,36 @@ Rules for spin 2, from the review: sense-resistor current limit, not
 RDS(on); bias (VCC) back-fed from the output through a small LDO so
 the controller does not burn 2 W from 54 V; copy the evaluation
 module layout; an output overvoltage disconnect (a second LM5069 with
-OVLO at 16.5 V) between the buck and the rail; fixed 14.0 V, not a
+OVLO at 15.0 V) between the buck and the rail; fixed 13.2 V, not a
 range.
 
-14 V rail protection on spin 1: SMBJ18A TVS on the rail, 16.5 V
-comparator that opens the LTC4359 (3.5) and OUT1/OUT2.
+13.2 V rail protection on spin 1: SMBJ18A TVS on the rail, and a
+15.0 V comparator that opens the LTC4359 (3.5) and OUT1/OUT2. VERIFY
+that the brick's own OVP sits between 13.2 V and 15.0 V, or move the
+comparator just above it.
+
+Rules for the brick, from the 2026-11-04 review (section 11.4):
+
+- Sense the output at the brick's pins. Never sense after the
+  switched outputs: the brick then winds the rail up when a switch
+  opens, and it can trip its own OVP.
+- Fit the input and output capacitors and the damper that the
+  datasheet gives. A surge stopper in front of an undamped brick input
+  can oscillate.
+- The brick's current limit is near 27 A, not 10 A. Size the output
+  copper, the connector and any fuse for that limit.
+- Bond the brick's output negative to pack negative at one point, near
+  the brick. Do not let USB or signal cables become the bond.
+- Fit a fuse or a second clamp on the brick side of the stopper FET.
+  If that FET fails short, the TVS clamp (about 113 V) is above the
+  brick's surge rating.
+- Bolt the baseplate to bare metal with the pad the datasheet allows.
+  The screws carry the brick, not the pins. Hand-solder the brick after
+  the hot-plate reflow. Do not reflow it.
 
 Thermal case, section 4.
 
-### 3.3 Switched 14 V outputs (OUT1, OUT2)
+### 3.3 Switched 13.2 V outputs (OUT1, OUT2)
 
 Kevin said "relay". Comparison:
 
@@ -197,7 +225,7 @@ also catches a shorted light bar before it resets the computer.
 |---|---|---|
 | Switch, 2 pieces | TI TPS1HB08-Q1 | 6 V to 18 V operating, 40 V load dump, 8 mOhm, 10 A nominal, limit 6.4 A to 70 A, analog current sense, open-load and short detection, reverse battery. HTSSOP-16. Active. https://www.ti.com/product/TPS1HB08-Q1 |
 | Alternative | Infineon BTS7008-2EPA | Dual channel, 8 mOhm, 7.5 A nominal per channel, PROFET+2. One package for both outputs. https://www.infineon.com/cms/en/product/power/smart-power-switches/high-side-switches/profet-plus-2-12v-automotive-smart-high-side-switch/bts7008-2epa/ |
-| Relay, if isolation is required | TE T9AS1D12-12 or Omron G8P-1A4P 12 V | 30 A contacts. Coil at 14 V is inside the 130 percent limit (VERIFY coil rating). |
+| Relay, if isolation is required | TE T9AS1D12-12 or Omron G8P-1A4P 12 V | 30 A contacts. Coil at 13.2 V is inside the 130 percent limit (VERIFY coil rating). |
 
 Each output: 2-pin Molex Micro-Fit 3.0 (8.5 A per pin, VERIFY) or
 5.08 mm screw terminal for 10 A. Current limit set to 12 A. Default
@@ -251,18 +279,18 @@ module is installed.
 
 ### 3.5 Power path (SYS bus)
 
-The SYS bus feeds both 5 V bucks. It is the OR of the 14 V rail and
+The SYS bus feeds both 5 V bucks. It is the OR of the 13.2 V rail and
 the buffer pack.
 
 | Item | Part | Key ratings |
 |---|---|---|
-| 14 V to SYS ideal diode | ADI LTC4359 | 4 V to 80 V, 9 uA shutdown, SHDN pin with internal pull-up (floats on). https://www.analog.com/en/products/ltc4359.html |
+| 13.2 V to SYS ideal diode | ADI LTC4359 | 4 V to 80 V, 9 uA shutdown, SHDN pin with internal pull-up (floats on). https://www.analog.com/en/products/ltc4359.html |
 | Pack to SYS ideal diode | TI LM74700-Q1 | 3.2 V to 65 V, 20 mV forward drop, 80 uA. https://www.ti.com/product/LM74700-Q1 |
 | Both FETs | Infineon BSC0902NS or similar 30 V, 2 mOhm | VERIFY. |
-| SYS holdup | 2 x 220 uF 25 V polymer | Covers the 14 V to 7.6 V hand-over. |
+| SYS holdup | 2 x 220 uF 25 V polymer | Covers the 13.2 V to 7.6 V hand-over. |
 
-Behaviour. Input present: SYS = 14 V, the pack diode is reverse
-biased, the pack only sees the charger. Input lost: the 14 V rail
+Behaviour. Input present: SYS = 13.2 V, the pack diode is reverse
+biased, the pack only sees the charger. Input lost: the 13.2 V rail
 falls, the pack diode conducts at about 7.5 V, SYS follows. The bucks
 accept 3 V to 36 V, so the 5 V rails do not see the step. There is no
 NVDC charger and no gap.
@@ -271,7 +299,7 @@ Drain mode. The MCU pulls LTC4359 SHDN low. SYS falls to the pack.
 The Pi runs from the pack with the charger disabled. The module uses
 this to bring the pack from 8.40 V back down to 7.60 V after a top-up
 (3.6), without a bleed resistor. If the MCU dies, SHDN floats high and
-the 14 V path returns.
+the 13.2 V path returns.
 
 ### 3.6 Charger, protector, balancing, monitor (the "custom BMS")
 
@@ -331,8 +359,9 @@ fit LiFePO4 cells.
 
 A resistor divider on the 60 V input (1 MOhm and 43 kOhm, 80 V reads
 3.3 V) feeds the MCU ADC and a comparator with hysteresis (TI
-TLV7031, 335 nA). Thresholds: present at 36.0 V rising, lost at
-32.0 V falling. The divider draws from the input only. With no input it
+TLV7031, 335 nA). Thresholds: present at 38.0 V rising, lost at
+34.0 V falling. Present sits just above the 37.7 V BMS cut. Lost sits
+at or above the brick's undervoltage shutdown (VERIFY, section 3.2). The divider draws from the input only. With no input it
 draws nothing from the pack. The comparator edge wakes the MCU from
 Stop mode. The LT4363 UV lockout (30 V) sits below the "lost" line so
 that the module declares the loss before the stopper opens.
@@ -422,7 +451,7 @@ section 5.4.
 | Cells | 2 x 18650 holder, Keystone 1043 or spring holder | VERIFY contact resistance under 10 mOhm. Alternative: solder tabs on protected cells. |
 | Fan (optional) | 2 pin JST-PH, 5 V | For the enclosure. |
 
-Fusing: F1 on the input (3.1). The 14 V outputs are protected by the
+Fusing: F1 on the input (3.1). The 13.2 V outputs are protected by the
 high-side switches. The 5 V rails are protected by the eFuse and the
 port switches. The pack path is protected by the protector FETs and a
 5 A polyfuse in the cell lead as a second layer.
@@ -438,41 +467,42 @@ port switches. The pack path is protected by the protector FETs and a
 | Hub, RC receiver, Arduino | 2 W | 3 W |
 | Spare USB port | 0 | 7.5 W |
 | 5 V side total | 12 W | 29 W |
-| At 14 V after 92 percent bucks | 13 W | 32 W |
+| At 13.2 V after 92 percent bucks | 13 W | 32 W |
 | Charger at 1 A into 8.4 V, 90 percent | 0 (float) | 9.5 W |
-| OUT1 + OUT2 (future lidar, lights) | 0 today | 84 W (6 A) |
+| OUT1 + OUT2 (future lidar, lights) | 0 today | 79 W (6 A) |
 | Module housekeeping | 1 W | 1 W |
-| 14 V rail total | 14 W (1.0 A) | 127 W (9.1 A) |
-| Input at 87 percent, 37.7 V | 16 W (0.43 A) | 146 W (3.9 A) |
+| 13.2 V rail total | 14 W (1.1 A) | 122 W (9.2 A) |
+| Input at 94 percent, 37.7 V | 15 W (0.40 A) | 130 W (3.4 A) |
 
-The 10 A tap peak (140 W on the outputs alone) exceeds 150 W when
-the Pi and the charger run at the same time. The module meets it like
-this: the charger pauses when the rail current passes 9 A, and the
-outputs may draw 10 A combined for 60 s, 8 A continuous. Open question
-2 asks whether Kevin wants a 200 W converter instead.
+The 10 A tap peak (132 W on the outputs alone) plus the Pi and the
+charger is about 175 W. The 300 W brick carries it. The limit is heat,
+not the brick rating. Kevin chose "peaks are fine" (2026-11-04), so
+the outputs may draw 10 A combined for 60 s and 8 A continuous, and
+the charger pauses when the rail current passes 9 A.
 
 ### 4.2 Heat
 
 | Source | Typical | Worst |
 |---|---|---|
-| TEP 150 at 87 percent | 2 W | 22 W |
+| Brick at about 94 percent | 1 W | 10 W |
 | Two 5 V bucks at 92 percent | 1 W | 2.5 W |
 | Charger | 0 | 1 W |
 | OUT1 + OUT2, 8 mOhm each | 0 | 0.4 W |
 | Surge stopper FET + sense | 0.05 W | 0.3 W |
-| Total | 3 W | 26 W |
+| Total | 2 W | 14 W |
 
-Typical WALL-E operation is near the 3 W column. The 26 W column is
-the future-loads case.
+Typical WALL-E operation is near the 2 W column. The 14 W column is
+the future-loads case at 150 W. Grok puts the brick at 9 to 13 W at
+150 W, away from its 48 V headline point, and near 20 W at 300 W.
 
-Thermal path. The TEP 150 case has flanges. Bolt it to an aluminium
-plate that is part of the robot chassis, with a thermal pad. At 45 C
-ambient and 22 W, the case stays under 95 C only if the path from case
-to ambient is 2.2 K/W or better. A 3 mm aluminium plate of 150 x 150
-mm in still air is roughly 3 K/W (VERIFY on the bench, T-3). Therefore:
-either derate the rail to 100 W above 40 C ambient (firmware reads a
-case thermistor and trims the output limits), or give the plate a path
-to the chassis skin. The 5 V bucks dissipate 1 to 2.5 W on the PCB
+Thermal path. The brick has a baseplate. Bolt it to bare aluminium
+that is part of the robot chassis, with the pad that the datasheet
+allows. Anodize or powder coat under the baseplate is an insulator. A
+3 mm aluminium plate of 150 x 150 mm in still air is roughly 3 K/W
+(VERIFY on the bench, T-3). At 10 W that is a 30 K rise, so the
+baseplate sits near 75 C at 45 C ambient. A closed box in the Texas sun
+runs hotter than 45 C. Firmware reads a baseplate thermistor and trims
+the output limits above the datasheet's derating point (VERIFY). The 5 V bucks dissipate 1 to 2.5 W on the PCB
 copper; a 4-layer board with 2 oz outer copper and thermal vias is
 enough.
 
@@ -516,6 +546,7 @@ about 600 days. Requirement R11 is met with margin.
 | APPLYING | PI_5V_SENSE rose within 100 ms | RUNNING |
 | APPLYING | no rise, 5 tries | FAULT (apply) |
 | RUNNING | VIN lost for 2 s | SHUTDOWN_REQ |
+| RUNNING | 13.2 V rail under 11.0 V for 10 s, VIN present | SHUTDOWN_REQ |
 | RUNNING | 3V3 fell with input present | HALTED_INPUT_PRESENT |
 | RUNNING | UART `HALT_NOW` from the Pi (operator poweroff, ch5 e-stop) | HALT_REQUESTED |
 | HALT_REQUESTED | 3V3 fell, input present | HALTED_INPUT_PRESENT (no cut, no re-apply) |
@@ -532,7 +563,7 @@ about 600 days. Requirement R11 is met with margin.
 | COLLAPSE_CHECK | rail did not fall in 5 s | FAULT (sneak feed), keep checking |
 | HALTED_INPUT_PRESENT | button, J2 request, or auto-wake | pulse J2, then RUNNING |
 | HALTED_INPUT_PRESENT | VIN lost for 2 s | COLLAPSE_CHECK (open eFuse first) |
-| any | 14 V rail over 16.5 V | FAULT (OV): open LTC4359, OUT1/2 |
+| any | 13.2 V rail over 15.0 V | FAULT (OV): open LTC4359, OUT1/2 |
 
 ### 5.3 Flapping input, brown-out, a Pi that never halts
 
@@ -544,9 +575,17 @@ of stable input. The boot window (first 30 s after APPLYING) requires
 10 s of loss instead of 2 s, so that boot inrush sag cannot start a
 shutdown.
 
-Brown-out. Between 32 V and 36 V the module logs `degraded` and does
-nothing else. The converter runs to 18 V. The VESC pack-low logic in
-`config.py` (39 V for 30 s) cuts the motors long before this.
+Brown-out. Between 34 V and 38 V the module logs `degraded` and does
+nothing else. The brick runs to its undervoltage shutdown (about
+32 V, VERIFY). The VESC pack-low logic in `config.py` (39 V for 30 s)
+cuts the motors long before this.
+
+Rail lost with the input present. Motor sag on a low pack, or a failed
+brick, can stop the 13.2 V rail while VIN still reads present. The Pi
+does not notice: SYS falls to the buffer pack. If the rail stays below
+11.0 V for 10 s with VIN present, the module treats it as an input loss
+and runs the shutdown. A shorter dropout only switches OUT1 and OUT2
+off; the Pi turns them on again.
 
 A Pi that never halts. 120 s after SHUTDOWN_REQ the eFuse opens. The
 NVMe root may be dirty. Section 6.3 sets the systemd timeouts so that
@@ -578,7 +617,7 @@ and the Pi boots.
 | USB port enables | pull-down, off | USB off until the MCU runs |
 | Charger CE | pull-up, on | charger runs at 7.60 V |
 | CV bump FET | pull-down | 7.60 V, not 8.40 V |
-| LTC4359 SHDN | floats high | 14 V path on |
+| LTC4359 SHDN | floats high | 13.2 V path on |
 | J2 pulse FET | pull-down | no pulse |
 
 The USB default "off" means that a dead MCU with a running Pi has no
@@ -690,12 +729,14 @@ was requested and goes to HALTED_INPUT_PRESENT with no auto-wake.
 ## 7. Rough bill of materials (research only)
 
 Single-unit prices, estimated from 2026 distributor listings. Not
-quotes. The TEP 150 price is from memory and needs a check.
+quotes. The converter prices were checked on DigiKey on 2026-11-04.
+The first draft carried the TRACO TEP 150 at 160 USD from memory; its
+real price is about 268 USD.
 
 | Block | Parts | Estimate USD |
 |---|---|---|
 | Input: LT4363, FET, TVS, fuse, holder, caps | | 22 |
-| 14 V: TEP 150-4815WI | | 160 |
+| 13.2 V: Murata HPQ-12/25-D48NB-C | | 100 |
 | OUT1/2: 2 x TPS1HB08-Q1, terminals | | 10 |
 | 5 V: 2 x LM61495, inductors, caps, TPS25982 | | 16 |
 | USB: 4 x TPS25221, 2 USB 3 receptacles, 2 cables, 2 USB-A | | 22 |
@@ -708,12 +749,13 @@ quotes. The TEP 150 price is from memory and needs a check.
 | Passives, TVS on rails | | 12 |
 | 4-layer PCB, 5 pieces, 100 x 120 mm | per board | 15 |
 | Cells, 2 x INR18650-35E, holders | | 14 |
-| Total, spin 1 | | about 325 |
-| Spin 2 delta: LM5146 + FETs + inductor replaces the brick | | -135 |
+| Total, spin 1 | | about 265 |
+| Spin 2 delta: LM5146 + FETs + inductor replaces the brick | | -75 |
 | Total, spin 2 | | about 190 |
 
 A product at 100 pieces lands near 120 to 140 USD in parts with the
-discrete buck. The brick alone is more than that.
+discrete buck. A product cannot carry a 100 USD brick, so the product
+is spin 2.
 
 ## 8. Build or buy
 
@@ -721,7 +763,7 @@ Products checked on 2026-11-04 (vendor pages or retailer listings):
 
 | Product | Input | Battery | Pi 5 | Gap |
 |---|---|---|---|---|
-| UUGear Witty Pi 5 HAT+ | 6 to 30 V DC or 5 V USB-C, 5 A out | none | yes | No battery, 30 V maximum, no 14 V tap. Has voltage-triggered safe power-off and RP2350. Closest "wide input + safe shutdown" board. |
+| UUGear Witty Pi 5 HAT+ | 6 to 30 V DC or 5 V USB-C, 5 A out | none | yes | No battery, 30 V maximum, no 12 V-class tap. Has voltage-triggered safe power-off and RP2350. Closest "wide input + safe shutdown" board. |
 | Joy-IT StromPi 3 | 6 to 61 V, 3 A out | 1000 mAh LiFePO4 option | not listed | 61 V input is right. 3 A cannot run a Pi 5. Pi 5 not in the compatibility list. |
 | Geekworm X1202 / DFRobot FIT0992 | 6 to 18 V | 4 or 2 x 18650 | yes | 18 V maximum. 5 A. Cuts power after halt. No wide input. |
 | Waveshare UPS HAT (E) | USB-C PD 5 to 20 V | 21700 | yes | PD input only. |
@@ -745,7 +787,7 @@ Market note. 24 V and 48 V packs are standard on ROS robots, mowers
 and AGVs, and the Pi 5 is the common computer. The gap is real but
 narrow: the buyers are robot builders, not makers with a bench supply.
 A board at 150 to 250 USD with a documented UART protocol and a Pi
-daemon would sell in the hundreds, not the thousands. The 14 V tap and
+daemon would sell in the hundreds, not the thousands. The 12 V-class tap and
 the switched outputs are what the competitors lack most.
 
 ## 9. Risks and bench test plan
@@ -756,8 +798,8 @@ the switched outputs are what the competitors lack most.
 |---|---|---|
 | R-1 | Hot-plug ring exceeds the clamp design. | T-1 measures it before the clamp values are final. 150 V FET and 70 V TVS give room. |
 | R-2 | Regen pushes the bus above the clamp during a brake. | The stopper clamps and holds the rail up; it does not open. T-2. |
-| R-3 | TEP 150 trim does not reach 14.0 V. | VERIFY the datasheet. Fallback: 13.5 V, or open question 1 (12 V). |
-| R-4 | 22 W of brick heat in a closed box at 45 C. | T-3 thermal soak. Firmware derate from the case thermistor. |
+| R-3 | +10 percent trim is the brick's limit, not a set point. Tolerance and temperature put the rail near 13.2 V, not on it, and the brick's OVP may sit within a volt. | VERIFY the trim range, the OVP threshold and its mode. Sense at the brick pins. Fallback: trim to +8 percent (13.0 V). |
+| R-4 | 10 W of brick heat at 150 W, near 20 W at 300 W, in a closed box in the sun. | T-3 thermal soak. Firmware derate from the baseplate thermistor. |
 | R-5 | The Pi rail does not collapse (sneak feed) and a re-apply does not boot the Pi. | Discharge FET, collapse check, apply check, 5 retries. T-6. |
 | R-6 | SHUTDOWN_REQ asserted during boot loops the Pi. | Deassert before apply; assert only after the heartbeat. T-7. |
 | R-7 | Hard cut corrupts the NVMe root. | systemd timeouts; consider a read-only root (open question 9). T-8. |
@@ -768,7 +810,11 @@ the switched outputs are what the competitors lack most.
 | R-12 | Cell holder contact resistance adds to cell resistance. | T-14 measures the whole string. |
 | R-13 | J2 pulse width wrong: ignored, or a forced power-off. | T-9. |
 | R-14 | Condensation on 54 V tracks. | Conformal coat except thermal pads and connectors. Creepage 2 mm minimum on the input side. |
-| R-15 | EMI from a 150 W converter next to the OAK and the GPS. | Brick is filtered (-F variant is an option). T-15 sniff. |
+| R-15 | EMI from a 300 W converter next to the OAK and the GPS. | The datasheet input filter. T-15 sniff. |
+| R-16 | The HPQ is specified from 36 V. Motor sag on a low pack can take its input below that, and the 13.2 V rail drops out mid-throttle. | The Pi rides on the buffer (rail-lost rule, 5.3). The VESCs stop at 39 V. If the undervoltage shutdown is a hard 36 V, change to an 18 V to 75 V brick (Cincon CHB150W-48S12 class) before changing the topology. |
+| R-17 | A shorted stopper FET passes the TVS clamp (about 113 V) to the brick. | Fuse or second clamp on the brick side (3.2). VERIFY the brick's surge rating. |
+| R-18 | The brick's 27 A current limit into a partial short cooks copper or a joint, if the limit is constant-current. | VERIFY hiccup mode. Copper and fuse sized for the limit. T-4. |
+| R-19 | No load on the brick (both outputs off) makes some bricks unstable or trip OVP. | VERIFY "no minimum load" at the trimmed voltage. The charger and the SYS bus are a small load. |
 
 ### 9.2 Bench test plan, before the board goes on the robot
 
@@ -776,8 +822,8 @@ the switched outputs are what the competitors lack most.
 |---|---|---|
 | T-1 | Hot-plug the module into the real pack through the real XT60 harness, 10 times. Scope at the input. | Peak under the clamp set point plus margin; no part above 80 percent of its rating. |
 | T-2 | Robot on stands, both VESCs, full-speed brake 10 times. Scope at the input. | Rail stays up; no stopper open; log shows no `INPUT_LOST`. |
-| T-3 | 150 W resistive load on the 14 V rail in a closed box at 45 C for 2 h. | Case under 95 C; 5 V rails in tolerance; derate logic trips as designed. |
-| T-4 | 14 V rail: load step 0 to 8 A, short on OUT1 with OUT2 loaded. | Pi rail unaffected; OUT1 limits and retries; OUT2 stays on. |
+| T-3 | 150 W resistive load on the 13.2 V rail in a closed box at 45 C for 2 h, then 300 W for 60 s. | Baseplate under the datasheet derating point; 5 V rails in tolerance; derate logic trips as designed. |
+| T-4 | 13.2 V rail: load step 0 to 8 A, short on OUT1 with OUT2 loaded. | Pi rail unaffected; OUT1 limits and retries; OUT2 stays on. |
 | T-5 | Pi 5 + NVMe boot through the eFuse, 50 cycles, with the OAK on P1. | 50 boots; no `throttled` flag; rail dip under 250 mV. |
 | T-6 | Pull the input 50 times at random points. | 50 clean halts (journal shows `Journal stopped`); 50 cold boots; collapse under 1 V each time. |
 | T-7 | Input pulse train: 1 s, 3 s, 10 s, 60 s, 150 s outages, 5 each. | 1 s ignored; others one halt and one boot; no boot loop; backoff timing as in 5.3. |
@@ -793,22 +839,17 @@ the switched outputs are what the competitors lack most.
 
 ## 10. Open questions for Kevin
 
-1. 12 V or 14 V. A strict 12 V load (some lidars) can be out of
-   specification at 14.4 V. If 13.2 V is acceptable, a 48 V to 12 V
-   quarter brick (commodity, 92 percent, 25 A, trim +10 percent) is
-   cheaper and cooler than the TEP 150. If 14.0 V is required, the
-   TEP 150-4815WI trimmed down, pending the trim check.
-2. Is the 10 A tap simultaneous with the Pi and the charger? If yes,
-   the rail is 200 W, the brick changes (TEP 200 class or spin 2 at
-   15 A), and the price rises about 40 USD.
+1. Answered 2026-11-04: 13.2 V. Check each future load's maximum: a
+   12 V part rated ±10 percent is at its limit at 13.2 V.
+2. Answered 2026-11-04: peaks are fine. The 300 W brick has room for
+   more if that changes.
 3. Which loads go on OUT1 and OUT2 in the next year? Lidar (6 to
    13 W), lights, a heater, a horn? Their inrush sets the current
    limit.
 4. Pack connector on the robot harness: XT60 or XT90? Does the module
    hang behind the Daly discharge FET (so a BMS cut also cuts the
    module) or straight on the cells?
-5. Mechanical relay with isolation, or the smart FET recommended in
-   3.3?
+5. Answered 2026-11-04: smart FET (TPS1HB08-Q1).
 6. Cells: buy Samsung 35E or Molicel P28A now, and scrap the 1 ohm
    cells?
 7. RTC: fit a rechargeable cell on J5 with `rtc_bbat_vchg` and
@@ -827,10 +868,11 @@ the switched outputs are what the competitors lack most.
 12. The I2C bus guard uses the UPS status file as its witness. Move
     the witness to the GPS reader, or let the new daemon write a
     heartbeat file?
-13. Spin 1 with the brick (about 325 USD, lower risk) or straight to
-    spin 2 with the discrete buck (about 190 USD, more design work)?
-14. Where does the module mount, and is there a metal path from that
-    spot to the enclosure skin for the 22 W case?
+13. Spin 1 with the Murata brick (about 265 USD, lower risk) or
+    straight to spin 2 with the discrete buck (about 190 USD, more
+    design work)?
+14. Where does the module mount, and is there bare metal under the
+    brick with a path to the enclosure skin?
 
 ## 11. Appendix: Grok second opinions
 
@@ -839,6 +881,9 @@ no repository access. Sessions `01a1a72a`, `01a1a730`, `01a1a737`.
 Cost 0.51 USD total.
 
 ### 11.1 The 14 V converter
+
+History: this review was for the 14 V rail of the first draft. The
+13.2 V brick review is 11.4.
 
 Proposed: LM5146-Q1 discrete buck with 100 V FETs first, brick second.
 
@@ -894,6 +939,27 @@ and listed the holes.
 | The module should go fully dark after the cut; the 60 V comparator wakes it. | Accepted. 3.7 and 4.3. |
 | Treat the UART daemon as a head start, not the thing the cut depends on. | Accepted. 6.1. |
 
+### 11.4 The 13.2 V brick (2026-11-04)
+
+One `grok_second_opinion` call, Grok 4.7, medium effort, session
+`01a1a752`, 0.14 USD. Proposed: the Murata HPQ-12/25-D48 trimmed to
+13.2 V. Against: the TRACO TEP 150, the discrete LM5146, and a cheap
+potted 30 V to 60 V module. Grok agreed with the Murata and listed the
+holes.
+
+| Objection | Response |
+|---|---|
+| The 36 V input floor clips the rail under motor sag on a low pack; the TRACO's 18 V floor was the feature given up. | Accepted as risk R-16. Thresholds moved to 38 V present and 34 V lost, a rail-lost rule added (5.3), the Cincon 18 V to 75 V brick kept as the fallback. |
+| +10 percent trim is the stop, not a set point; the brick's OVP may be referenced to 12 V and sit within a volt. | Accepted. R-3, the 15.0 V comparator note and the sense rule in 3.2. |
+| A 12 V load rated ±10 percent is at its ceiling at 13.2 V. | Accepted. Open question 1 note. |
+| 8 W is an average; 10 A on both outputs reaches 300 W and about 20 W; baseplate, not ambient, is the limit. | Accepted. Section 4.2, R-4, T-3. |
+| The TVS clamp can exceed the brick's surge rating if the stopper FET fails short. | Accepted. R-17 and the 3.2 rule. |
+| A surge stopper in front of an undamped brick input can oscillate. | Accepted. The 3.2 rule: use the datasheet capacitors and damper. |
+| A 25 A brick on a board sized for 10 A; constant-current into a partial short cooks it. | Accepted. R-18 and the 3.2 rule. |
+| The isolated output needs one deliberate ground bond. | Accepted. The 3.2 rule. |
+| Some bricks are unstable with no load. | Accepted. R-19. |
+| Do not build the LM5146 first; the TRACO is a weak fallback. | Accepted. The LM5146 stays spin 2; the TRACO is rejected. |
+
 ## Appendix: Technical Names
 
 Raspberry Pi 5, Pi 5, Raspberry Pi, bookworm, NVMe, PCIe, GPIO, PMIC,
@@ -912,7 +978,9 @@ XT90, Molex Micro-Fit 3.0, JST-PH, Keystone 1043, D2PAK, SuperSO8,
 SOIC, MSOP, HTSSOP, VQFN-HR, SOT-23-6, LQFP, TVS, SMCJ58A, SMCJ70A,
 SMBJ18A, LT4363, LM5069, LTC4359, LM74700-Q1, IPB072N15N3,
 BSC160N15NS5, BSC098N10NS5, BSC160N10NS3, BSC0902NS, LM5146-Q1, LM5145,
-TEP 150-4815WI, TEP 150WI, TRACO, Mean Well SD-150C-12, TPS1HB08-Q1,
+TEP 150-4815WI, TEP 150WI, TRACO, Murata, HPQ-12/25-D48NB-C, Flex,
+PKB4313DPI, Cincon, CHB150W-48S12, eighth brick, half brick, baseplate,
+OVP, UVLO, Mean Well SD-150C-12, TPS1HB08-Q1,
 BTS7008-2EPA, PROFET, TE T9AS1D12-12, Omron G8P, LM61495, LM61495-Q1,
 LMQ61460, TPS25982, TPS25221, TPS2561, USB5744, BQ24610, BQ24650,
 BQ25713, BQ25792, BQ76905, S-8252, ABLIC, HY2120, HY2213, HYCON,
