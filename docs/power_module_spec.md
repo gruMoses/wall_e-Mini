@@ -165,6 +165,7 @@ potted, surge-rated, isolated, and known.
 | Cheaper alternative | Flex PKB4313DPI | Eighth brick, 36 V to 75 V, 12 V 25 A, 300 W, 96.2 percent, active. 56.78 USD, but none in stock and a 39-week lead time on 2026-11-04. VERIFY trim range. |
 | Wide-input alternative | Cincon CHB150W-48S12 | Half brick, 18 V to 75 V, 12 V 12.5 A, 150 W, 91 percent, trim about ±10 percent. 180 to 260 USD. Use it only if the HPQ undervoltage shutdown is a hard 36 V (risk R-16). |
 | Rejected | TRACO TEP 150-4815WI | 18 V to 75 V, 15 V 10 A, 150 W, 87 percent. The first draft priced it at 160 USD from memory. DigiKey lists it at about 268 USD with a 19-week lead time. It also makes 22 W of heat at full load, and a 15 V part may not trim down to 13.2 V. |
+| Off-board option | dkplnt "48V 36V to 12V 20A 240W" golf-cart converter (Amazon B08KDFQ4JT) and its clones | Seller data only: 30 V to 60 V input, fixed 12.0 V, 20 A, potted aluminium case, fuse, "up to 95 to 97 percent". About 25 USD (VERIFY). No datasheet, non-isolated buck, unit-to-unit variation unknown. Use it only after bench test T-17 passes, wired to the optional 12 V IN connector (rules below). Do not lower the surge clamp to protect it (section 11.5). |
 | Rejected | Murata MPQ1500-12V125-L48 | Checked 2026-11-04 from the datasheet (rev A01.D18). Quarter brick, 1500 W, 125 A, 97.2 percent peak, PMBus. Semi-regulated: below about 51 V input the output follows the input (9.6 V at 40 V, no load; 9.10 V to 12.10 V over 40 V to 52 V). The 13S pack is below 51 V for most of its discharge, so the rail would run about 9.5 V to 12 V. MFR_VOUT_MAX is 13.00 V, so 13.2 V is not possible. Operating input 40 V to 60 V, absolute maximum 65 V, input OVP 64 V: the pack's 37.7 V to 40 V tail is outside it, and the surge clamp must come down below 60 V. Current limit 137.5 to 162.5 percent of 125 A, that is 172 A to 203 A, on a 175 W design. Needs 270 uF of input capacitance. |
 | Alternative brick | Mean Well SD-150C-12 | 36 V to 72 V input, 12 V 12.5 A, 77 percent. Rejected: 36 V minimum sits at the 37.7 V BMS cut, a fixed 12 V output, 77 percent and 35 W of heat. https://www.meanwell.com/productDetail.aspx?i=361 |
 | Converter, spin 2 | TI LM5146-Q1 controller | 5.5 V to 100 V input, 0.8 V to 60 V output, synchronous buck. https://www.ti.com/product/LM5146-Q1 |
@@ -182,6 +183,16 @@ range.
 15.0 V comparator that opens the LTC4359 (3.5) and OUT1/OUT2. VERIFY
 that the brick's own OVP sits between 13.2 V and 15.0 V, or move the
 comparator just above it.
+
+Optional 12 V IN connector (for an off-board converter). The board
+keeps the brick footprint and adds a 12 V IN terminal. An external
+converter takes its input from the module's protected HV OUT terminal
+(after F1 and the surge stopper) and returns 12 V through, in order: a
+20 A fuse, a TVS that clamps under 28 V (below the BQ24610 33 V
+absolute maximum), and a 100 V-rated overvoltage disconnect (LM5069 or
+LTC4368 class) that opens at 15.0 V. A series FET alone can lose the
+race against a shorted high-side FET; the fuse and the TVS make the
+failure safe. This path saves about 65 USD per board.
 
 Rules for the brick, from the 2026-11-04 review (section 11.4):
 
@@ -837,6 +848,7 @@ the switched outputs are what the competitors lack most.
 | T-14 | Load the pack with 2.6 A for 10 s with the input off. | Sag under 0.25 V with the specified cells; the module reports the resistance within 20 percent of a 4-wire meter. |
 | T-15 | Near-field probe over the board, OAK and GPS running. RTK fix quality before and after. | No new spurs at the GPS L1/L5 bands; fix quality unchanged. |
 | T-16 | Idle current from the pack after a cut, input absent, 24 h. | Under 0.3 mA; pack voltage change under 5 mV. |
+| T-17 | Off-board converter, before it goes near the board: no-load and 10 A output voltage; real undervoltage shutdown; 60 V, 65 V and 68 V input for 1 s from a current-limited supply; output short (which way it fails, what the output does); 10 A for 2 h with the case at 50 C; the RTK fix quality and a near-field probe with it running next to the GPS. | Output 11.6 V to 12.6 V; survives 68 V; hiccup on a short; case under its rating; no change in the RTK fix. Any fail: use the Murata. |
 
 ## 10. Open questions for Kevin
 
@@ -961,6 +973,23 @@ holes.
 | Some bricks are unstable with no load. | Accepted. R-19. |
 | Do not build the LM5146 first; the TRACO is a weak fallback. | Accepted. The LM5146 stays spin 2; the TRACO is rejected. |
 
+### 11.5 The cheap off-board converter (2026-11-04)
+
+One `grok_second_opinion` call, Grok 4.7, medium effort, session
+`01a1a764`, 0.12 USD. Proposed: the dkplnt 20 A golf-cart converter
+off the board, the surge clamp lowered to 57-58 V to protect its 60 V
+input, and a 15 V overvoltage disconnect after it. Grok rejected it
+for spin 1.
+
+| Objection | Response |
+|---|---|
+| A 57-58 V clamp sits about 3 V above a full pack; the stopper FET then absorbs ordinary regen braking on a full pack until its timer opens, which is how these FETs fail short. | Accepted. The clamp stays at 68 V. The converter must survive 68 V on the bench (T-17). Open: the VESCs' own bus limit is not recorded in the repository; if they fault near 57 V, regen cannot hold the bus above the clamp. |
+| A series disconnect can lose the race to a shorted high-side FET; the BQ24610 (33 V) dies in tens of microseconds. | Accepted. Fuse and a TVS under 28 V before the disconnect. |
+| Low-side or double FET short, overshoot and hiccup are not covered; no datasheet means no spec and no test limit. | Accepted. T-17 measures them; the Murata stays the default. |
+| A non-isolated buck ties logic ground to the motor return; the RTK and the OAK sit on it. | Rejected in part. The Pi is already tied to pack negative through the CAN link to the VESCs, and section 3.2 bonds the brick output to pack negative anyway. The switching noise and the 20 A lead loop stay a real risk; T-17 checks the RTK fix. |
+| Plan on 90 percent, not 95 to 97; 20 A is often a peak rating. | Accepted. T-17 runs 10 A for 2 h at a 50 C case. |
+| 65 USD is less than one respin; spin 1 should be the boring, documented supply. | Accepted. The Murata stays on spin 1; the 12 V IN connector lets the cheap converter be tried without a respin. |
+
 ## Appendix: Technical Names
 
 Raspberry Pi 5, Pi 5, Raspberry Pi, bookworm, NVMe, PCIe, GPIO, PMIC,
@@ -980,7 +1009,7 @@ SOIC, MSOP, HTSSOP, VQFN-HR, SOT-23-6, LQFP, TVS, SMCJ58A, SMCJ70A,
 SMBJ18A, LT4363, LM5069, LTC4359, LM74700-Q1, IPB072N15N3,
 BSC160N15NS5, BSC098N10NS5, BSC160N10NS3, BSC0902NS, LM5146-Q1, LM5145,
 TEP 150-4815WI, TEP 150WI, TRACO, Murata, HPQ-12/25-D48NB-C, MPQ1500-12V125-L48,
-PMBus, MFR_VOUT_MAX, Flex,
+PMBus, MFR_VOUT_MAX, dkplnt, LTC4368, HV OUT, 12 V IN, Flex,
 PKB4313DPI, Cincon, CHB150W-48S12, eighth brick, half brick, baseplate,
 OVP, UVLO, Mean Well SD-150C-12, TPS1HB08-Q1,
 BTS7008-2EPA, PROFET, TE T9AS1D12-12, Omron G8P, LM61495, LM61495-Q1,
