@@ -8,9 +8,9 @@ pi_app/app/log_gating.py directly, with plain SimpleNamespace/dict fakes
 standing in for the live telemetry/reading objects main.py would pass.
 
 Written as unittest.TestCase (rather than test_log_gating.py's bare pytest
-functions) so `python3 -m unittest discover` actually collects and runs it --
-bare functions are silently NOT discovered by unittest's loader, only
-pytest's, and the project's mandated regression check is unittest discover.
+functions) so it runs under either loader. The project's test command is
+`python3 -m pytest pi_app/tests -q` (since 2026-11-03; `unittest discover`
+silently collects 0 cases from the bare-function files).
 """
 import unittest
 from types import SimpleNamespace

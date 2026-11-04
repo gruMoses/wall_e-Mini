@@ -1,5 +1,9 @@
 # Drivetrain Gearing Analysis — Follow-Me Jerkiness
 
+> Note (2026-11-03): `max_erpm` is 20000 since 2026-09-19 (1.6 m/s top speed in
+> every mode). The figures below were computed with the 15000 ceiling of the
+> time and are kept as written.
+
 Question: is gear ratio/ERPM headroom limiting low-speed control during person-following,
 or is this a control-loop problem? Evidence pulled from this repo only.
 

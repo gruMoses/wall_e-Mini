@@ -521,7 +521,7 @@ zero loss, reopen as mount/g-sensitivity — **do not** reintroduce scale `0.46`
 
 ```bash
 python3 -m unittest pi_app.tests.test_oak_imu_yaw_producer pi_app.tests.test_oak_imu -v
-python3 -m unittest discover -s pi_app/tests -p "test_*.py"
+python3 -m pytest pi_app/tests -q
 ```
 
 Coverage includes: sparse undercount reproduction, full-batch accuracy under delayed
