@@ -45,17 +45,20 @@ need more than 15 s.
 
 The charge limit is the buck setpoint. There is no code for it.
 
-- Robot: set the 8.4 V buck to **7.6 V** (3.80 V per cell, about 50 percent).
-  Use a buck with a current limit (CC/CV), 2 A or more. Kevin chose 7.6 V on
-  2026-11-03. Do not go below 7.2 V.
+- Robot: the supply is set to **7.5 V** (3.75 V per cell, about 45 percent;
+  Kevin, 2026-11-04, after first choosing 7.6 V). Use a supply with a
+  current limit (CC/CV), 2 A or more. Do not go below 7.2 V.
 - The balancers only work near 4.2 V per cell. Every few months, set the
   buck to 8.4 V for a few hours, let the current taper, then return to 7.6 V.
 - Tell the watcher the setpoint: `--supply-v` in `bin/walle-ups.service` and
-  `bin/walle-ups-wakecheck.service` (8.4 on the bench brick, 7.6 with the
-  robot buck). Then run the install script (section 6).
-- The day the setpoint goes down, the pack sits above the buck and carries
-  the Pi. The watcher reads this as `above_supply`, not as a loss, until the
-  pack sags to the setpoint. Expect a few hours.
+  `bin/walle-ups-wakecheck.service` (7.5 with the robot supply, 8.4 on the
+  bench brick). Then run the install script (section 6). The loss rules
+  depend on it. The watcher logs `SUPPLY SETPOINT MISMATCH` when the pack
+  floats more than 0.2 V away from it for a minute.
+- WARNING: when you lower the supply (an 8.4 V top-up back to 7.5 V), change
+  `--supply-v` first. The pack then sits above the supply and carries the
+  Pi while the supply idles. The watcher holds (`above_supply`, then
+  `discharge`) until the pack sags to the setpoint. Expect hours.
 
 ## 4. How the watcher works
 
@@ -63,37 +66,79 @@ The charge limit is the buck setpoint. There is no code for it.
 
 ### 4.1 `run` mode (`walle-ups.service`)
 
+The HAT does not sense its input jack. The watcher infers mains from the
+battery current I and the pack voltage V against the setpoint S. The hard
+case is a pack above the supply: the supply is present but idle, the
+cells carry the Pi, and the readings look like a lost supply. The rules
+of 2026-11-04 (Grok design review and two diff reviews, plus a Claude
+review) handle it.
+
 Every 0.5 s it reads the INA219 and classifies the sample:
 
-| State | Rule | Effect on the loss timer |
+| State | Rule | Effect |
 |---|---|---|
-| `present` | current ≥ −80 mA | reset to 0 |
-| `absent` | current ≤ −250 mA and pack ≤ setpoint + 0.15 V | add 0.5 s |
-| `above_supply` | current ≤ −250 mA and pack above setpoint + 0.15 V | hold |
-| `unknown` | the middle band, or an I2C error | hold |
+| `present` | I ≥ −80 mA | resets the loss count |
+| `unknown` | −250 < I < −80 mA, an I2C error, or an implausible reading (V outside 4 to 9.5 V, over 5 A) | holds |
+| `above_supply` | I ≤ −250 mA and V > S + 0.15 V | holds: the pack is fuller than the float |
+| `absent` | I ≤ −250 mA and V < S − 0.30 V | counts: a present supply would hold the pack at S |
+| `discharge` | I ≤ −250 mA, V between those two | holds: the supply may be present and below the pack |
 
-The timer counts absent samples, not wall-clock time. After 5 s of absent
-samples the watcher:
+- 5 s of counted `absent` samples halts. The count resets on `present`, and
+  after 10 s without a counted sample.
+- Low battery halts on any sample that is not `present`: 7.0 V for 10 s,
+  or 6.4 V on one sample. This is the only detector while the pack is
+  above the supply. A held discharge then ends in a clean halt, not the
+  HY2120 cutoff.
+- The edge rule (`--edge-s`) is off. With it on, a `discharge` sample
+  within 10 s of a `present` one counts as `absent`. That catches a pull
+  from the float in 5 s with healthy cells. It is off because healthy,
+  low-resistance cells turn a small supply droop under a load step into
+  the same readings (40 mV through 0.07 Ω is 0.57 A out of the pack).
+  With it off, a pull is caught when the pack sags below S − 0.30 V: at
+  once on the present cells (about 1 Ω), after part of the buffer on
+  healthy cells. Measure the supply's droop under load before you turn it
+  on.
+- Timers run on the boot clock, not the wall clock. The RTC resets to 0
+  when 5 V drops, and NTP then steps the wall clock forward.
 
-1. writes `/var/lib/walle-ups/loss.json` and an event line;
+The halt:
+
+1. writes `/var/lib/walle-ups/loss.json`, an event line, and `chain.json`
+   (the loss chain, with the halt kind: `hard`, `edge`, `floor`,
+   `critical` or `simulated`);
 2. sends SIGKILL to `wall-e.service` and stops it (its camera teardown can
    take 90 s, and the RTC alarm must not fire during the shutdown);
-3. arms the RTC alarm, `+90 s`, and checks the read-back;
-4. runs `sync` and `systemctl poweroff`.
+3. arms the RTC alarm and checks the read-back: `+90 s`, `+600 s` after a
+   low-battery halt, at least `+300 s` if `wall-e` is still stopping;
+4. runs `sync` and `systemctl poweroff`. If the Pi is still up 30 s later
+   it re-arms and retries; after 60 s it forces the poweroff.
 
 ### 4.2 `boot-check` mode (`walle-ups-wakecheck.service`)
 
 This oneshot runs on every boot before `basic.target`. It reads the sensor
-for 2.5 s.
+for 2.5 s. It has no history, so it cannot see an edge.
 
-- Any `present` sample: the boot continues.
-- At least 75 percent `absent` samples and no `present` sample: it arms the
-  alarm again (`+60 s`) and powers off. The Pi was on for about 16 s: about
-  12 s of firmware from the alarm to the kernel, then about 4 s of Linux.
-  One poll cycle is about 75 s (the 60 s alarm plus the time on).
-- Anything else (no sensor, I2C errors, middle band, `above_supply`): the
-  boot continues. The check fails open on purpose. A Pi that powers itself
-  off because a sensor is missing cannot be repaired from the bench.
+- Any `present` sample: the boot continues and the chain closes.
+- Fewer than 4 valid samples, or more than 25 percent bad ones: the boot
+  continues (fail open).
+- At least 75 percent of the valid samples:
+  - at or below 7.0 V, whatever the current: power off, alarm `+600 s`
+    (a low pack polls less), never capped. A present supply holds the
+    pack at S, so this cannot lock a live supply out;
+  - `absent`: power off, alarm `+60 s`;
+  - `discharge`, inside any chain except a simulated one: power off,
+    `+60 s` (under the light early-boot load the pack rebounds into the
+    band, and the outage is still going);
+  - `above_supply`: the boot continues and the chain closes.
+- Anything else: the boot continues. A Pi that powers itself off because
+  a sensor is missing cannot be repaired from the bench.
+- The cap: after 24 power-offs in one chain (about 30 min, both modes
+  count) the boot continues. Run mode then starts with a 10 min grace:
+  mains-loss halts off, low-battery halts on. A wrong `--supply-v`, or a
+  supply below the pack plugged in during an outage, cannot keep the Pi
+  off for good. A pack below the floor at boot is never capped.
+- The chain counts power-offs, not time, because the clock is not
+  trustworthy after a 5 V drop.
 
 ### 4.3 Bootloader settings
 
@@ -121,6 +166,16 @@ An earlier pull the same morning (08:53) halted in the same way. That time
 Kevin pressed the Pi's power button after the replug, so the Pi booted
 before its alarm. The button is not necessary: the next alarm wake sees
 mains and continues the boot.
+
+Second pull, 2026-11-04 10:47 (8.4 V brick, old rules): `MAINS LOST` 5 s
+after the pull at −510 mA, then six correct poll wakes, about 75 s apart.
+Each green flash was a 16 s wake, not a hung shutdown. About 10:56 the
+Pi's 5 V dropped for a moment. The RTC reset to 0, which wiped the
+alarm, and the power returning booted the Pi. On the 7.5 V supply the
+old boot check then powered it off four times, because the cells (8.27 V
+at rest, about 1.1 Ω) carried the Pi above the idle supply at 7.59 to
+7.70 V and −0.46 to −0.56 A. That is the reason for the rules in 4.1 and
+4.2.
 
 ## 5. Energy while mains is off
 
@@ -151,11 +206,15 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   I2C bus guard uses its age as the "reader can see the bus" witness. `ts_loop`
   shows that the process is alive. `input`, `batt_v`, `batt_ma`, `soc_pct`,
   `state`, `mode`, `absent_s`, `last_loss` feed the `/debug` page.
-- `/var/lib/walle-ups/events.jsonl`: every loss, alarm and boot check.
+- `/var/lib/walle-ups/events.jsonl`: every loss, alarm, boot check and cap.
+- `/var/lib/walle-ups/chain.json`: the open loss chain (kind, power-off
+  count). It closes on `present` or `above_supply`.
+- `/run/walle-ups/grace`: the cap grace deadline on the boot clock. It is
+  gone after a reboot.
 - `/var/lib/walle-ups/nohalt`: when this file exists, neither mode halts the
   Pi. The watcher logs a warning every 5 minutes and the dashboard shows
   NOHALT. Remove the file when the bench work is done.
-- `walle_ups.py once`: one reading, as JSON.
+- `walle_ups.py once`: one reading, its class and the open chain, as JSON.
 - `walle_ups.py run --detect-only`: the watcher logs what it would do and
   does nothing.
 - `sudo walle_ups.py simulate-loss --yes`: runs the real halt sequence once
@@ -167,8 +226,11 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 
 1. Confirm the setpoint in the unit files matches the supply.
 2. `journalctl -u walle-ups -f` in one terminal.
-3. Pull the mains plug. Within 5 s the journal shows `MAINS LOST`, then the
-   kill, the alarm and the poweroff. The Pi's LEDs go dark; the HAT's stay on.
+3. Pull the mains plug. With the present cells (about 1 Ω) the journal
+   shows `MAINS LOST (hard)` within 5 s, then the kill, the alarm and the
+   poweroff; the Pi's LED goes red (standby). With healthy cells and the
+   edge rule off, the halt waits until the pack sags 0.3 V below the
+   setpoint (section 4.1).
 4. After 90 s the Pi wakes. The wake check powers it off again within about
    16 s. This repeats about every 75 s.
 5. Plug mains in. Do not press the Pi's power button. The next wake continues
@@ -179,6 +241,11 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 
 ## 9. Open items
 
+- 2026-11-04: the `nohalt` flag is set on the bench Pi (while it ran on
+  USB-C with the HAT off). Remove it before the robot relies on the UPS:
+  `sudo rm /var/lib/walle-ups/nohalt`.
+- Before turning on `--edge-s` with new cells, measure the supply's droop
+  from idle to full Pi load. It must stay well under 0.30 V.
 - Done 2026-11-04: the real unplug test at the 10 mΩ scale (section 4.3).
   The first one, 2026-11-03 20:51, ran with the 0.1R scale, read −52 mA, and
   held in the middle band on purpose.
@@ -201,5 +268,6 @@ EEPROM, `POWER_OFF_ON_HALT`, `WAKE_ON_GPIO`, `rpi-eeprom-config`, GPIO3,
 `bin/install_walle_ups.sh`, `bin/i2c_bus_guard.py`, `wall-e.service`,
 `basic.target`, `systemctl poweroff`, SIGKILL, `/tmp/ups_status.json`,
 `/var/lib/walle-ups`, `events.jsonl`, `loss.json`, `nohalt`, `above_supply`,
-`--supply-v`, `--detect-only`, CC/CV, buck, 18650, 2S, I2C, ssh, `journalctl`,
+`--supply-v`, `--edge-s`, `--detect-only`, `chain.json`, `/run/walle-ups/grace`,
+`above_supply`, `discharge`, CLOCK_BOOTTIME, NTP, CC/CV, buck, 18650, 2S, I2C, ssh, `journalctl`,
 Kevin.
