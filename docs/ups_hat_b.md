@@ -210,6 +210,12 @@ the 24-wake cap (30 min). The current and pinned-voltage conditions in 4.2
 now let that boot. Swap supplies with the Pi shut down (a button shutdown
 opens no loss chain).
 
+Confirmed 2026-11-04 15:18-15:20 with a069476: a swap to the robot buck
+halted the Pi (7.18 V, −652 mA, hard). The first alarm wake read 7.50 V at
+−262 mA (no strong band samples) and the boot continued. The watcher then
+held, flickering between `unknown` and `discharge` at 7.47 to 7.50 V,
+−176 to −303 mA, while the cells rode down to the buck.
+
 ## 5. Energy while mains is off
 
 Each wake costs about 16 s of boot at 0.5 to 0.9 A. One poll cycle is about
