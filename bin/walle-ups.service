@@ -1,0 +1,19 @@
+[Unit]
+Description=WALL-E UPS watcher (Waveshare UPS HAT (B): halt on mains loss, RTC wake)
+Documentation=file:///home/pi/wall_e-Mini/docs/ups_hat_b.md
+After=local-fs.target walle-ups-wakecheck.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=2
+# --supply-v is the charger/buck setpoint the pack floats at: 8.4 on the bench
+# brick, 7.6 once the robot buck is installed (then re-run
+# bin/install_walle_ups.sh). Everything else is a documented default in
+# bin/walle_ups.py.
+ExecStart=/home/pi/.venv/bin/python3 /home/pi/wall_e-Mini/bin/walle_ups.py run --supply-v 8.4
+
+[Install]
+WantedBy=multi-user.target

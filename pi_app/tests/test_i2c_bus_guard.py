@@ -2,7 +2,7 @@
 
 bin/ is not a package, so the script is loaded via importlib straight from
 its file path (no sys.path changes needed -- the script is stdlib-only, so
-unlike scripts/upsPlus_power_daemon.py there is nothing to stub before
+unlike bin/walle_ups.py there is nothing to stub before
 import).
 
 All hardware access in the guard goes through one Hardware class

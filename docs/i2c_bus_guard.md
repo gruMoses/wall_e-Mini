@@ -16,10 +16,10 @@ i2c_designware 1f00074000.i2c: i2c_dw_handle_tx_abort: SDA stuck at low
 
 A device on I2C bus 1 froze mid-transfer. The device held the SDA line
 low. Two devices share bus 1: the RTK GPS co-processor (address 0x20) and
-the UPSPlus HAT. Both devices went dark for 17 hours. A human power-cycled
+the UPS HAT (B). Both devices went dark for 17 hours. A human power-cycled
 the robot to clear the fault.
 
-The UPS daemon (`upsplus-power.service`) logged an I2C read error every 10
+The UPS daemon (`walle-ups.service`) logged an I2C read error every 10
 seconds during the fault. Its status file (`/tmp/ups_status.json`) went
 stale. Nothing on the Pi 5 cleared the stuck bus on its own. The Pi 5
 kernel has no GPIO bus-recovery configured for this controller. This
@@ -119,7 +119,7 @@ Unbinding and rebinding the `i2c_designware` driver breaks any I2C
 connection a running program already had open on that bus, regardless of
 whether the bus recovery itself succeeded.
 
-- **The UPS daemon** (`upsplus-power.service`) opens its connection once,
+- **The UPS daemon** (`walle-ups.service`) opens its connection once,
   at startup. It never reopens that connection on its own. So this guard
   restarts that service -- unless you pass `--no-restart-ups` -- after
   ANY bus recovery attempt (success or failure) and after any self-heal
@@ -226,7 +226,7 @@ net), for example while you are also testing the UPS daemon itself.
 `i2c_bus_guard.py`, `i2c-bus-guard.service`, `install_i2c_bus_guard.sh`,
 `i2c-bus-guard`, I2C, SDA, SCL, GPIO2, GPIO3, `pinctrl`, `i2c_designware`,
 `1f00074000.i2c`, RTK GPS, `RtkGpsReader`, UPSPlus, HAT,
-`upsplus-power.service`, `wall-e.service`, `/tmp/ups_status.json`,
+`walle-ups.service`, `wall-e.service`, `/tmp/ups_status.json`,
 `/tmp/i2c_guard_status.json`, `UPS_STATUS_FILE`, open-drain, push-pull,
 pull-up, STOP condition, START condition, SIGTERM, SIGINT, SIGKILL,
 Ctrl-C, OOM killer, Raspberry Pi 5, Pi 5, systemd, `systemctl`,

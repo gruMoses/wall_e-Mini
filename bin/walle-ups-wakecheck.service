@@ -1,0 +1,23 @@
+[Unit]
+Description=WALL-E UPS wake check (power off again if mains is still absent)
+Documentation=file:///home/pi/wall_e-Mini/docs/ups_hat_b.md
+# Runs once, early: after the RTC alarm wakes the Pi this decides within a
+# few seconds whether mains is back. Ordered before basic.target so nothing
+# heavy (wall-e, the camera, the network) starts when the answer is "no",
+# and before the time-sync units so nothing steps the RTC while the alarm
+# is being re-armed. It never blocks on a device unit: the script itself
+# waits up to 5 s for /dev/i2c-1 and fails OPEN (boot continues) if the
+# sensor cannot be read.
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Before=basic.target fake-hwclock.service systemd-timesyncd.service time-sync.target
+ConditionPathExists=!/var/lib/walle-ups/nohalt
+
+[Service]
+Type=oneshot
+User=root
+TimeoutStartSec=30
+ExecStart=/home/pi/.venv/bin/python3 /home/pi/wall_e-Mini/bin/walle_ups.py boot-check --supply-v 8.4
+
+[Install]
+WantedBy=sysinit.target

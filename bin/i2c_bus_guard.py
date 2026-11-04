@@ -6,7 +6,7 @@ WHY THIS EXISTS (incident 2026-09-25 21:36:16): the kernel logged
 A device on I2C bus 1 froze mid-transfer and held SDA low. Both devices on
 that bus went dark for 17 hours until a human power-cycled the robot: the
 RTK GPS co-processor (address 0x20, read by the wall-e service) and the
-UPSPlus HAT (read by upsPlus_power_daemon.py / upsplus-power.service, which
+UPS HAT (B) (read by walle_ups.py / walle-ups.service, which
 triggers a graceful shutdown on real power loss). The UPS daemon logged
 "WARNING: I2C read error (N consecutive)" every ~10 s the whole time and its
 /tmp/ups_status.json status file went stale, but nothing on the Pi 5 clears
@@ -57,7 +57,7 @@ Every --interval seconds (default 5):
      daemon's only I2C file handle, and it never reopens that handle on
      its own. After ANY bus recovery attempt (success or failure), or any
      self-heal that rebound the driver, once the driver is bound again,
-     this guard restarts upsplus-power.service (unless --no-restart-ups).
+     this guard restarts walle-ups.service (unless --no-restart-ups).
      wall-e.service is deliberately never restarted here -- see
      docs/i2c_bus_guard.md for why, and for the one case that still needs
      a person.
@@ -104,7 +104,7 @@ _DRIVER_DIR = "/sys/bus/platform/drivers/i2c_designware"
 UNBIND_PATH = f"{_DRIVER_DIR}/unbind"
 BIND_PATH = f"{_DRIVER_DIR}/bind"
 DEVICE_LINK_PATH = f"{_DRIVER_DIR}/{DEVICE_NAME}"  # symlink present only while bound
-UPS_SERVICE_NAME = "upsplus-power.service"
+UPS_SERVICE_NAME = "walle-ups.service"
 
 # --- Recovery shape ----------------------------------------------------------
 MAX_PULSES = 16
@@ -274,7 +274,7 @@ class Hardware:
             f.write(value)
 
     def restart_ups_service(self) -> None:
-        """Restart upsplus-power.service so it reopens its I2C handle.
+        """Restart walle-ups.service so it reopens its I2C handle.
 
         Unbinding/rebinding the i2c_designware driver invalidates any
         smbus2.SMBus handle opened before the unbind. The UPS daemon opens
@@ -557,7 +557,7 @@ class RateLimiter:
 
     Pure logic over a caller-supplied clock (pass time.monotonic() values)
     so it is unit-testable with no real waiting. Mirrors the hardware-free
-    design of AcPresenceTracker in scripts/upsPlus_power_daemon.py. Used
+    design of AcPresenceTracker in bin/walle_ups.py. Used
     for two independent limits: bus recoveries (--max-per-hour, an hour
     window) and the UPS safety-net restart (once per 15 minutes).
     """
@@ -607,7 +607,7 @@ def write_status_file(path: str, status: dict) -> None:
     opens with O_EXCL under an unpredictable name in the same directory,
     so a pre-planted symlink or file at a guessed temp path is refused
     rather than followed -- the same concern write_status_file in
-    scripts/upsPlus_power_daemon.py documents in more detail, since this
+    bin/walle_ups.py documents in more detail, since this
     guard is also a root daemon writing into a world-writable /tmp.
 
     Any failure is logged and swallowed: a skipped status publish must
@@ -909,7 +909,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-restart-ups", dest="restart_ups", action="store_false", default=True,
         help=(
-            "do not restart upsplus-power.service after a bus recovery, a "
+            "do not restart walle-ups.service after a bus recovery, a "
             "self-heal that rebinds the driver, or the stale-UPS safety net "
             "(default: restart it)"
         ),
