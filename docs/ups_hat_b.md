@@ -88,7 +88,9 @@ for 2.5 s.
 
 - Any `present` sample: the boot continues.
 - At least 75 percent `absent` samples and no `present` sample: it arms the
-  alarm again (`+60 s`) and powers off. The Pi was on for about 16 s.
+  alarm again (`+60 s`) and powers off. The Pi was on for about 16 s: about
+  12 s of firmware from the alarm to the kernel, then about 4 s of Linux.
+  One poll cycle is about 75 s (the 60 s alarm plus the time on).
 - Anything else (no sensor, I2C errors, middle band, `above_supply`): the
   boot continues. The check fails open on purpose. A Pi that powers itself
   off because a sensor is missing cannot be repaired from the bench.
@@ -103,11 +105,29 @@ so the RTC runs without a coin cell.
 Bench 2026-11-03: `systemctl poweroff` to "Journal stopped" 8 s; alarm `+90`
 to ssh 108 s after the poweroff command (about 18 s from the alarm to ssh).
 
+Real unplug, 2026-11-04 (8.4 V brick, 10 mΩ scale):
+
+| Time | Event |
+|---|---|
+| 09:03:49 | Brick pulled (first absent sample 5 s before the loss) |
+| 09:03:54.6 | `MAINS LOST`, −646 mA at 7.70 V; wall-e killed; alarm +90 s |
+| 09:03:59.0 | Journal stopped: the Pi is dark 9.5 s after the pull |
+| 09:05:24 | Alarm wake; at 09:05:39.6 the wake check reads 11 of 11 absent (−551 mA), arms +60 s, powers off |
+| 09:06:39 | Alarm wake; at 09:06:54.7 the same result (−547 mA) |
+| 09:07:54 | Alarm wake after the replug; at 09:08:09.7 the wake check reads 11 of 11 present (+29 mA) and the boot continues |
+| 09:08:24 | ssh answers (uptime 20.7 s) |
+
+An earlier pull the same morning (08:53) halted in the same way. That time
+Kevin pressed the Pi's power button after the replug, so the Pi booted
+before its alarm. The button is not necessary: the next alarm wake sees
+mains and continues the boot.
+
 ## 5. Energy while mains is off
 
-Each wake costs about 16 s of boot at 0.5 to 0.9 A. At 60 s polls that is a
-quarter of the time on. With the cells measured on 2026-11-03 (about 1 Ω,
-see section 2) the pack reaches the HY2120 cutoff within the hour. Then the
+Each wake costs about 16 s of boot at 0.5 to 0.9 A. One poll cycle is about
+75 s, so the Pi is on about a fifth of the time. With the cells measured on
+2026-11-03 (about 1 Ω, see section 2) the pack reaches the HY2120 cutoff
+within the hour. Then the
 HAT removes the 5 V, the Pi is fully off, and it boots on power-up when mains
 returns. Healthy cells would last roughly a day. For long storage, switch the
 HAT off.
@@ -150,16 +170,18 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 3. Pull the mains plug. Within 5 s the journal shows `MAINS LOST`, then the
    kill, the alarm and the poweroff. The Pi's LEDs go dark; the HAT's stay on.
 4. After 90 s the Pi wakes. The wake check powers it off again within about
-   16 s. Repeat every 60 s.
-5. Plug mains in. The next wake continues the boot. `events.jsonl` shows the
-   whole sequence with times and currents.
+   16 s. This repeats about every 75 s.
+5. Plug mains in. Do not press the Pi's power button. The next wake continues
+   the boot, at most about 75 s after the replug, and ssh answers about 15 s
+   later. `events.jsonl` shows the whole sequence with times and currents.
+   Each boot has its own journal (`journalctl --list-boots`).
 6. `sudo reboot` must come back without an alarm.
 
 ## 9. Open items
 
-- Repeat the unplug test with the 10 mΩ scale (the first one, 2026-11-03
-  20:51, ran with the 0.1R scale, read −52 mA, and held in the middle band
-  on purpose). Expected: `MAINS LOST` within 5 s, the Pi dark within 15 s.
+- Done 2026-11-04: the real unplug test at the 10 mΩ scale (section 4.3).
+  The first one, 2026-11-03 20:51, ran with the 0.1R scale, read −52 mA, and
+  held in the middle band on purpose.
 - The cells: about 1 Ω internal resistance. Decide whether to replace them.
   With them, the pack runs down to the cutoff within the hour at 60 s polls.
 - Measure the battery current under the worst robot load (camera, boot) with
