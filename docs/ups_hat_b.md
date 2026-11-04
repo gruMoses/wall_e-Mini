@@ -113,7 +113,13 @@ The halt:
 2. sends SIGKILL to `wall-e.service` and stops it (its camera teardown can
    take 90 s, and the RTC alarm must not fire during the shutdown);
 3. arms the RTC alarm and checks the read-back: `+90 s`, `+600 s` after a
-   low-battery halt, at least `+300 s` if `wall-e` is still stopping;
+   critical halt, at least `+300 s` if `wall-e` is still stopping. It also
+   writes the seconds and the uptime to `/run/walle-ups/arm`. The shutdown
+   hook `bin/walle-ups-shutdown-alarm` (installed in
+   `/usr/lib/systemd/system-shutdown/`) arms the alarm again in the last
+   second before power-off, so a slow shutdown cannot use the alarm up. It
+   ignores a file more than 600 s old, and a manual poweroff or the ch5
+   e-stop writes no file, so neither arms a wake;
 4. runs `sync` and `systemctl poweroff`. If the Pi is still up 30 s later
    it re-arms and retries; after 60 s it forces the poweroff.
 
@@ -126,9 +132,11 @@ for 2.5 s. It has no history, so it cannot see an edge.
 - Fewer than 4 valid samples, or more than 25 percent bad ones: the boot
   continues (fail open).
 - At least 75 percent of the valid samples:
-  - at or below 7.0 V, whatever the current: power off, alarm `+600 s`
-    (a low pack polls less), never capped. A present supply holds the
-    pack at S, so this cannot lock a live supply out;
+  - at or below 7.0 V, whatever the current: power off, never capped,
+    alarm `+60 s`, or `+600 s` at or below 6.4 V (a nearly empty pack polls
+    less). With 1 Ω cells a half-full pack reads about 6.9 V under the boot
+    load. A present supply holds the pack at S, so this cannot lock a live
+    supply out;
   - `absent`: power off, alarm `+60 s`;
   - `discharge` at −400 mA or more, and not within 0.03 V of the setpoint,
     inside any chain except a simulated one: power off, `+60 s` (under the
@@ -242,8 +250,18 @@ HAT off.
 sudo bash bin/install_walle_ups.sh
 ```
 
-The script copies both unit files, enables them, restarts the watcher and
-prints one reading. Auto-deploy pulls the code but does not restart the
+The script copies both unit files, installs the shutdown hook and two
+stop-timeout limits (`/etc/systemd/system.conf.d/10-walle-fast-stop.conf`,
+30 s for system units; `/etc/systemd/user.conf.d/10-walle-fast-stop.conf`,
+10 s for desktop-session units), enables the units, restarts the watcher
+and prints one reading.
+
+Since 2026-11-04 the Pi boots to the console with autologin
+(`raspi-config nonint do_boot_behaviour B2`), not to the desktop. On that
+day a hung desktop service, `xdg-document-portal`, held a mains-loss
+shutdown for 91 s against the 90 s alarm. The autologin keeps the `pi`
+session, so Pi Connect's remote shell still works; its screen sharing
+does not. To undo: `sudo raspi-config nonint do_boot_behaviour B4`. Auto-deploy pulls the code but does not restart the
 watcher: run the script after each change to `bin/walle_ups.py` or to a
 unit file. The I2C bus guard restarts `walle-ups.service` after a bus
 recovery; after a change to `bin/i2c_bus_guard.py` run
