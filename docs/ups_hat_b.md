@@ -344,6 +344,8 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   dark). The extra current is the USB hub: with its own supply off, it
   back-powers from the Pi's ports, so the HAT also carries the hub, the
   OAK and the Arduino. 6.34 V is close to the HY2120 cutoff (5.8 to 6.0 V).
+  The shutdown took 5 s (17:27:15 to 17:27:20), and the hook's +600 s alarm
+  (the old rule) woke the Pi at 17:37:32 into a `present` boot check.
   Fix: cut the 5 V wire in the Pi-to-hub cable (Kevin is getting a USB 3
   extension to cut). The critical halt's first alarm is now +90 s, not
   +600 s (1aa9621).
