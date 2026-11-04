@@ -17,7 +17,7 @@ ConditionPathExists=!/var/lib/walle-ups/nohalt
 Type=oneshot
 User=root
 TimeoutStartSec=30
-ExecStart=/home/pi/.venv/bin/python3 /home/pi/wall_e-Mini/bin/walle_ups.py boot-check --supply-v 8.4
+ExecStart=/home/pi/.venv/bin/python3 /home/pi/wall_e-Mini/bin/walle_ups.py boot-check --supply-v 7.5
 
 [Install]
 WantedBy=sysinit.target

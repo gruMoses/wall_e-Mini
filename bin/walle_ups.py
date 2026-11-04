@@ -24,40 +24,94 @@ Hardware facts (schematic UPS_HAT_B_Schematic.pdf, read 2026-11-03):
     "mains is back". The Pi 5 wakes only from its power button, the RTC
     alarm, or 5 V being removed and re-applied.
 
-Design (Grok-reviewed 2026-11-03, Grok session 01a1a410-deab-79f3-a336-30eea7088807):
+Why the rules look the way they do (2026-11-04)
+  The HAT does not sense its input jack. Mains is INFERRED from the battery
+  current I (+ = into the pack) and the pack voltage V against the supply
+  setpoint S (--supply-v). With a CC/CV supply present the pack floats at S
+  and I is near zero. The hard case is a pack that sits ABOVE the supply
+  (after an 8.4 V top-up, or when a lower supply is plugged in): the supply
+  is present but idle, the cells carry the Pi, and (I, V) look exactly like
+  a lost supply. Field, 2026-11-04: cells of about 1.1 ohm resting at
+  8.27 V on a 7.5 V supply read 7.59-7.70 V at -0.46..-0.56 A, and the
+  2026-11-03 rules powered the Pi off four times with the supply connected.
+  Design reviewed by Grok twice that day (sessions 01a1a78e and the diff
+  review recorded in docs/ups_hat_b.md).
 
-  run mode  (walle-ups.service, root, after boot)
-    Poll the INA219 at 2 Hz and classify every sample:
-      present       batt_ma >= PRESENT_MA (-80)                  -> loss timer := 0
-      absent        batt_ma <= ABSENT_MA (-250) and
-                    batt_v  <= supply_v + GATE_MARGIN_V (0.15)   -> loss timer += poll
-      above_supply  batt_ma <= ABSENT_MA but the pack is above the supply
-                    setpoint. The pack is simply higher than the charger
-                    (the day the buck is turned down from 8.4 V). Not a
-                    loss; the timer holds. The Pi rides the pack down.
-      unknown       the middle band, or an I2C error             -> timer holds
-    The timer counts absent SAMPLES (5 s worth), not wall-clock time, so a
-    stalled bus cannot jump it. When it expires and halting is enabled:
-      1. persist loss.json and an event line (NVMe, survives the halt);
-      2. SIGKILL + stop wall-e.service. Its camera teardown can take the
-         full 90 s TimeoutStopSec, and the RTC alarm must not fire while
-         the shutdown is still running or it is consumed and lost;
-      3. arm the RTC alarm (+FIRST_ALARM_S), clear-write-read-back;
-      4. sync, `systemctl poweroff`.
+Classification of one sample, the same in both modes:
+  present       I >= PRESENT_MA (-80 mA)                      resets the timer
+  unknown       -250 < I < -80 mA, an I2C error, or an implausible reading
+                (V outside 4-9.5 V, |I| over 5 A, overflow)  holds
+  discharging, I <= ABSENT_MA (-250 mA), judged by V against S:
+    above_supply  V > S + GATE_MARGIN_V (0.15)   the pack is fuller than the
+                                                 float; holds
+    absent        V < S - HARD_MARGIN_V (0.30)   a present CC/CV supply holds
+                                                 the node at S, so it is gone;
+                                                 counts
+    discharge     the band between               ambiguous; holds
 
-  boot-check mode  (walle-ups-wakecheck.service, early boot, before basic.target)
-    Read the sensor for ~2.5 s. Any present sample -> continue the boot.
-    A clear majority of absent samples and no present ones -> re-arm the
-    alarm (+WAKE_S) and power off again (about 8 s of boot per check).
-    Anything else (sensor missing, I2C errors, middle band, pack above the
-    supply) FAILS OPEN: the boot continues and run mode takes over. A Pi
-    that powers itself off because a sensor is unreadable cannot be
-    debugged; Grok argued for fail-closed here and that trade was rejected.
+  The edge rule (--edge-s, OFF by default): with EDGE_S > 0, run mode counts
+  a band sample as absent when it comes within EDGE_S of the last present
+  sample, because a real pull flips floating to discharging at once. It is
+  off because healthy, low-resistance cells make a small supply droop under
+  a load step look the same: 40 mV of droop through a 0.07 ohm pack is
+  0.57 A out of the cells, right after a floating sample (Grok review
+  01a1a7a9). With the rule off, a pull from the float is caught when the
+  pack sags below S - 0.30 V (at once on high-resistance cells, after part
+  of the buffer on healthy ones) or by the floor. Turn it on only after
+  measuring that the supply's droop under load stays well under the
+  hard margin.
+
+run mode  (walle-ups.service, root, after boot)
+  Polls at 2 Hz. 5 s of counted absent samples halts. The count resets on
+  any present sample and after GAP_S (10 s) without a counted sample, so
+  scattered blips cannot add up. Low battery halts whatever the class,
+  except present:
+    V <= FLOOR_V (7.0 V, 3.5 V/cell under load) for FLOOR_S (10 s)
+    V <= CRIT_V  (6.4 V) on a single sample
+  While the pack carries the Pi above the supply, the floor is the only
+  detector, so a held discharge still ends in a clean halt and not in the
+  HY2120 cutoff. The halt, when halting is enabled:
+    1. persist loss.json, an event line, and chain.json (the loss chain,
+       with the halt kind: edge, hard, floor, critical or simulated). An
+       open chain keeps its wake count, so power-offs from both modes
+       count toward the cap, and a low-battery kind stays until it closes;
+    2. SIGKILL + stop wall-e.service. Its camera teardown can take the
+       full 90 s TimeoutStopSec, and the RTC alarm must not fire while the
+       shutdown is still running or it is consumed and lost;
+    3. arm the RTC alarm (+FIRST_ALARM_S), clear-write-read-back;
+    4. sync, `systemctl poweroff`.
+  It warns when the pack floats more than 0.2 V away from S for a minute:
+  --supply-v is wrong.
+
+boot-check mode  (walle-ups-wakecheck.service, early boot, before basic.target)
+  About 2.5 s of samples and no history. Errors stay out of the
+  denominator; fewer than 4 valid samples, or more than 25 % bad ones,
+  fails open. Any present sample boots (and closes the chain). Otherwise,
+  on 75 % or more of the valid samples:
+    V <= CRIT_V                  power off, +SLOW_WAKE_S (600 s): the pack
+                                 is nearly empty; no cap
+    absent                       power off, +WAKE_S (60 s); opens a chain
+    discharge, in a chain opened
+      by an edge halt            power off, +WAKE_S
+    above_supply                 boot, close the chain
+  A mains chain caps at CHAIN_MAX_WAKES (24, about 30 min) of power-offs.
+  Then the boot continues and run mode gets GRACE_S (600 s, on the boot
+  clock, kept across restarts of the watcher) with mains-loss halts off
+  and the low-battery halts on, so a wrong --supply-v or a lower supply
+  plugged in mid-outage cannot keep the Pi off for good. A low-battery
+  chain (floor or critical) is never capped: booting a nearly empty pack
+  is how a clean halt turns into the HY2120 cutoff. Anything
+  else FAILS OPEN: a Pi that powers itself off because a sensor is
+  unreadable cannot be debugged. The chain counts wakes, not time: with no
+  coin cell the RTC resets to 0 whenever 5 V drops (seen 2026-11-04).
 
   POWER_OFF_ON_HALT=1 and WAKE_ON_GPIO=0 in the bootloader EEPROM (set
   2026-11-03) make the halt a PMIC standby (~3 mA) that the RTC alarm can
-  wake. The HAT keeps 5 V on the Pi, so the RTC keeps running without a
-  coin cell.
+  wake. The HAT keeps 5 V on the Pi, so the RTC keeps running.
+
+Operator rule: when you LOWER the supply (an 8.4 V top-up back to 7.5 V),
+change --supply-v in both unit files and reinstall. The pack then rides
+down to the new setpoint as above_supply and discharge, which hold.
 
 Status file (/tmp/ups_status.json, schema walle-ups/1): `ts` is the time
 of the last SUCCESSFUL INA219 read. bin/i2c_bus_guard.py uses its age as
@@ -99,29 +153,57 @@ BUS_LSB_V = 4e-3
 # --- classification -------------------------------------------------------
 PRESENT = "present"
 ABSENT = "absent"
+DISCHARGE = "discharge"
 ABOVE_SUPPLY = "above_supply"
 UNKNOWN = "unknown"
+
+# Why a halt happened. The chain kind decides what the boot check may count.
+KIND_EDGE = "edge"            # band samples right after a present sample
+KIND_HARD = "hard"            # pack well below the supply setpoint
+KIND_FLOOR = "floor"          # low battery
+KIND_CRIT = "critical"        # very low battery
+KIND_SIM = "simulated"        # simulate-loss on the bench
+MAINS_KINDS = (KIND_EDGE, KIND_HARD, KIND_SIM)
+LOW_KINDS = (KIND_FLOOR, KIND_CRIT)
+_SEVERITY = {KIND_CRIT: 2, KIND_FLOOR: 1}  # a chain keeps its most severe kind
 
 # --- defaults (every one is a CLI knob) -----------------------------------
 DEFAULT_BUS = 1
 DEFAULT_ADDR = 0x42
 DEFAULT_SHUNT_OHM = 0.01        # 10 mOhm by measurement; the schematic's "0.1R" label is wrong
-DEFAULT_SUPPLY_V = 8.4          # bench brick today; 7.6 once the robot buck is in
-DEFAULT_GATE_MARGIN_V = 0.15
+DEFAULT_SUPPLY_V = 7.5          # robot supply (Kevin, 2026-11-04); the bench brick is 8.4
+DEFAULT_GATE_MARGIN_V = 0.15    # above S + this: the pack is fuller than the float
+DEFAULT_HARD_MARGIN_V = 0.30    # below S - this: no CC/CV supply is holding the node
 DEFAULT_PRESENT_MA = -80.0      # floating noise is +/-40 mA at this scale
 DEFAULT_ABSENT_MA = -250.0
 DEFAULT_LOSS_S = 5.0
+DEFAULT_EDGE_S = 0.0            # OFF: see the module doc. 10 counts band samples for 10 s after present
+DEFAULT_GAP_S = 10.0            # the loss count resets after this long without a counted sample
+DEFAULT_FLOOR_V = 7.0           # 3.5 V/cell under load
+DEFAULT_FLOOR_S = 10.0
+DEFAULT_CRIT_V = 6.4            # 3.2 V/cell under load: halt now
+DEFAULT_CRIT_S = 0.5            # one sample
+DEFAULT_MIN_V = 4.0             # outside 4.0-9.5 V the reading is not a 2S pack: hold
+DEFAULT_MAX_V = 9.5
+DEFAULT_MAX_ABS_MA = 5000.0
 DEFAULT_POLL_S = 0.5
-DEFAULT_FIRST_ALARM_S = 90      # must outlast the measured shutdown; bench 2026-11-03 pending
+DEFAULT_FIRST_ALARM_S = 90      # outlasts the measured halt (3-8 s) and the wall-e kill
 DEFAULT_WAKE_S = 60             # Kevin: "let's do a minute"
-DEFAULT_WAKE_FAST_S = 60
-DEFAULT_WAKE_FAST_WINDOW_S = 600
+DEFAULT_SLOW_WAKE_S = 600       # nearly empty pack: poll less, so the polls do not drain it
+DEFAULT_CHAIN_MAX_WAKES = 24    # about 30 min of power-offs, then boot with a grace period
+DEFAULT_GRACE_S = 600
+DEFAULT_GRACE_FILE = "/run/walle-ups/grace"
+DEFAULT_MISMATCH_V = 0.20       # floating this far from S for a minute: --supply-v is wrong
+DEFAULT_MISMATCH_S = 60.0
 DEFAULT_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
 DEFAULT_STATE_DIR = "/var/lib/walle-ups"
 DEFAULT_RTC = "/sys/class/rtc/rtc0"
 DEFAULT_KILL_SERVICES = ("wall-e.service",)
 DEFAULT_BOOT_CHECK_S = 2.5
 DEFAULT_BOOT_POLL_S = 0.25
+BOOT_MIN_VALID = 4
+BOOT_MAX_BAD_FRACTION = 0.25
+BOOT_MAJORITY = 0.75
 
 # Open-circuit voltage per cell -> approximate state of charge, generic NMC
 # 18650 at rest. Indicative only: while the pack floats on the supply it
@@ -150,9 +232,19 @@ def soc_estimate_pct(batt_v: float, cells: int = 2) -> int:
 class Thresholds:
     supply_v: float = DEFAULT_SUPPLY_V
     gate_margin_v: float = DEFAULT_GATE_MARGIN_V
+    hard_margin_v: float = DEFAULT_HARD_MARGIN_V
     present_ma: float = DEFAULT_PRESENT_MA
     absent_ma: float = DEFAULT_ABSENT_MA
     loss_s: float = DEFAULT_LOSS_S
+    edge_s: float = DEFAULT_EDGE_S
+    gap_s: float = DEFAULT_GAP_S
+    floor_v: float = DEFAULT_FLOOR_V
+    floor_s: float = DEFAULT_FLOOR_S
+    crit_v: float = DEFAULT_CRIT_V
+    crit_s: float = DEFAULT_CRIT_S
+    min_v: float = DEFAULT_MIN_V
+    max_v: float = DEFAULT_MAX_V
+    max_abs_ma: float = DEFAULT_MAX_ABS_MA
 
 
 @dataclasses.dataclass(frozen=True)
@@ -163,34 +255,79 @@ class Sample:
     overflow: bool = False
 
 
+def plausible(sample: Sample, th: Thresholds) -> bool:
+    """A reading a 2S pack can produce. Anything else holds; it never counts."""
+    return (not sample.overflow and th.min_v <= sample.batt_v <= th.max_v
+            and abs(sample.batt_ma) <= th.max_abs_ma)
+
+
 def classify(batt_ma: float, batt_v: float, th: Thresholds) -> str:
-    """Three bands plus the above-supply gate. Pure; see the module doc."""
+    """One sample, no history (see the module doc). Pure. The edge rule that
+    can turn DISCHARGE into ABSENT lives in Watcher, which has the history."""
     if batt_ma >= th.present_ma:
         return PRESENT
-    if batt_ma <= th.absent_ma:
-        if batt_v > th.supply_v + th.gate_margin_v:
-            return ABOVE_SUPPLY
+    if batt_ma > th.absent_ma:
+        return UNKNOWN
+    if batt_v > th.supply_v + th.gate_margin_v:
+        return ABOVE_SUPPLY
+    if batt_v < th.supply_v - th.hard_margin_v:
         return ABSENT
-    return UNKNOWN
+    return DISCHARGE
 
 
 class LossTimer:
-    """Accumulates absent samples. Present resets; unknown/above hold."""
+    """Accumulates counted absent samples. Present resets; everything else
+    holds, but a gap longer than `gap_s` since the last counted sample resets."""
 
-    def __init__(self, loss_s: float, poll_s: float) -> None:
+    def __init__(self, loss_s: float, poll_s: float, gap_s: float = DEFAULT_GAP_S) -> None:
         self.loss_s = float(loss_s)
         self.poll_s = float(poll_s)
+        self.gap_s = float(gap_s)
         self.absent_s = 0.0
+        self._last_counted: float | None = None
 
-    def update(self, state: str) -> bool:
+    def update(self, state: str, now: float | None = None) -> bool:
         if state == PRESENT:
-            self.absent_s = 0.0
-        elif state == ABSENT:
+            self.reset()
+            return False
+        if (self.absent_s > 0 and now is not None and self._last_counted is not None
+                and now - self._last_counted > self.gap_s):
+            self.reset()  # also before an absent sample: a stale count never completes
+        if state == ABSENT:
             self.absent_s += self.poll_s
-        return self.absent_s >= self.loss_s
+            self._last_counted = now
+        return self.absent_s >= self.loss_s - 1e-9
 
     def reset(self) -> None:
         self.absent_s = 0.0
+        self._last_counted = None
+
+
+class LevelTimer:
+    """Time spent at or below a voltage. Present resets, and so does a valid
+    reading more than `hysteresis_v` above the level; errors hold."""
+
+    def __init__(self, level_v: float, hold_s: float, poll_s: float,
+                 hysteresis_v: float = 0.10) -> None:
+        self.level_v = float(level_v)
+        self.hold_s = float(hold_s)
+        self.poll_s = float(poll_s)
+        self.hysteresis_v = float(hysteresis_v)
+        self.below_s = 0.0
+
+    def update(self, state: str, batt_v: float | None) -> bool:
+        if state == PRESENT:
+            self.below_s = 0.0
+        elif batt_v is None:
+            pass
+        elif batt_v <= self.level_v:
+            self.below_s += self.poll_s
+        elif batt_v > self.level_v + self.hysteresis_v:
+            self.below_s = 0.0
+        return self.below_s >= self.hold_s - 1e-9
+
+    def reset(self) -> None:
+        self.below_s = 0.0
 
 
 # --- hardware access (all replaceable in tests) ---------------------------
@@ -337,6 +474,7 @@ class StateDir:
     """Persistent state on the root filesystem (survives the halt)."""
 
     LOSS = "loss.json"
+    CHAIN = "chain.json"
     NOHALT = "nohalt"
     EVENTS = "events.jsonl"
 
@@ -352,33 +490,100 @@ class StateDir:
     def nohalt(self) -> bool:
         return os.path.exists(self._file(self.NOHALT))
 
-    def read_loss(self) -> dict | None:
+    def _read_json(self, name: str) -> dict | None:
         try:
-            with open(self._file(self.LOSS)) as f:
+            with open(self._file(name)) as f:
                 data = json.load(f)
         except (OSError, ValueError):
             return None
         return data if isinstance(data, dict) else None
 
-    def write_loss(self, record: dict) -> None:
+    def _write_json(self, name: str, record: dict) -> None:
         self.ensure()
-        tmp = self._file(self.LOSS + ".tmp")
+        tmp = self._file(name + ".tmp")
         with open(tmp, "w") as f:
             json.dump(record, f)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, self._file(self.LOSS))
+        os.replace(tmp, self._file(name))
 
-    def append_event(self, kind: str, **fields) -> None:
-        """One JSON line per event; never raises."""
+    def read_loss(self) -> dict | None:
+        return self._read_json(self.LOSS)
+
+    def write_loss(self, record: dict) -> None:
+        self._write_json(self.LOSS, record)
+
+    def read_chain(self) -> dict | None:
+        """The open loss chain: {"kind": ..., "wakes": n}. None when closed."""
+        chain = self._read_json(self.CHAIN)
+        if chain is None:
+            return None
+        try:
+            chain["wakes"] = int(chain.get("wakes", 0))
+        except (TypeError, ValueError):
+            chain["wakes"] = 0
+        chain.setdefault("kind", KIND_HARD)
+        return chain
+
+    def write_chain(self, record: dict) -> None:
+        self._write_json(self.CHAIN, record)
+
+    def clear_chain(self) -> bool:
+        try:
+            os.unlink(self._file(self.CHAIN))
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            LOG.warning("could not clear %s: %s", self.CHAIN, error)
+            return False
+
+    def append_event(self, event: str, /, **fields) -> None:
+        """One JSON line per event; never raises. `event` is positional-only
+        so a field may be called "kind"."""
         try:
             self.ensure()
-            record = {"ts": time.time(), "event": kind}
+            record = {"ts": time.time(), "event": event}
             record.update(fields)
             with open(self._file(self.EVENTS), "a") as f:
                 f.write(json.dumps(record) + "\n")
         except OSError as error:
-            LOG.warning("could not append event %s: %s", kind, error)
+            LOG.warning("could not append event %s: %s", event, error)
+
+
+def boot_clock() -> float:
+    """Seconds since this boot. Survives a service restart and ignores the
+    wall clock, which jumps when the RTC has reset and NTP corrects it."""
+    try:
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    except (AttributeError, OSError):  # not Linux (tests on a Mac)
+        return time.monotonic()
+
+
+def write_grace(path: str, seconds: float, boot_now: float | None = None) -> bool:
+    """Boot check -> run mode: mains-loss halts off until boot-clock time
+    now + `seconds`. Lives in /run (tmpfs), so it never outlasts this boot,
+    and it is not removed when read, so a restarted watcher keeps it."""
+    boot_now = boot_clock() if boot_now is None else boot_now
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(f"{boot_now + float(seconds):.1f}\n")
+        return True
+    except OSError as error:
+        LOG.error("could not write the grace file %s: %s", path, error)
+        return False
+
+
+def read_grace(path: str, boot_now: float | None = None) -> float:
+    """Seconds of grace left, 0.0 when there is none."""
+    boot_now = boot_clock() if boot_now is None else boot_now
+    try:
+        with open(path) as f:
+            expiry = float(f.read().strip())
+    except (OSError, ValueError):
+        return 0.0
+    return max(0.0, expiry - boot_now)
 
 
 def write_status_file(path: str, payload: dict) -> bool:
@@ -406,13 +611,24 @@ class Watcher:
     BLIND_WARN_PERIOD_S = 60.0
     HEARTBEAT_S = 600.0
     NOHALT_WARN_PERIOD_S = 300.0
+    GRACE_WARN_PERIOD_S = 60.0
+    MISMATCH_WARN_PERIOD_S = 3600.0
 
     def __init__(self, sensor, th: Thresholds, actions: SystemActions, rtc: Rtc,
                  state: StateDir, *, status_file: str = DEFAULT_STATUS_FILE,
                  poll_s: float = DEFAULT_POLL_S,
                  first_alarm_s: int = DEFAULT_FIRST_ALARM_S,
                  kill_services=DEFAULT_KILL_SERVICES,
-                 detect_only: bool = False) -> None:
+                 detect_only: bool = False,
+                 grace_s: float = 0.0, now: float | None = None,
+                 clock=None, chain_max_wakes: int = DEFAULT_CHAIN_MAX_WAKES,
+                 cap_grace_s: float = DEFAULT_GRACE_S,
+                 grace_file: str | None = None) -> None:
+        """`grace_s`: seconds of grace left from the grace file (read_grace).
+        `clock`: the timing clock (boot_clock); every timer, window and the
+        grace deadline use it, never the wall clock, which jumps when NTP
+        corrects an RTC that reset to 0. `now`, when a test passes it, is
+        used for both."""
         self.sensor = sensor
         self.th = th
         self.actions = actions
@@ -423,16 +639,48 @@ class Watcher:
         self.first_alarm_s = int(first_alarm_s)
         self.kill_services = tuple(kill_services)
         self.detect_only = detect_only
-        self.timer = LossTimer(th.loss_s, poll_s)
+        self.timer = LossTimer(th.loss_s, poll_s, th.gap_s)
+        self.floor = LevelTimer(th.floor_v, th.floor_s, poll_s)
+        self.crit = LevelTimer(th.crit_v, th.crit_s, poll_s)
         self.last_sample: Sample | None = None
         self.last_state: str | None = None
+        self.last_present_at: float | None = None
+        self._run_edge = False
         self.errors_total = 0
         self.errors_run = 0
+        self.implausible_total = 0
         self.last_error: str | None = None
         self.halting = False
-        self._blind_warned_at = 0.0
-        self._heartbeat_at = 0.0
-        self._nohalt_warned_at = 0.0
+        self.clock = clock or boot_clock
+        self.grace_file = grace_file
+        self._mono = self.clock() if now is None else now
+        start = self._mono
+        self.grace_until = start + grace_s if grace_s and grace_s > 0 else None
+        chain = state.read_chain()
+        self.chain_open = chain is not None
+        if chain is not None and chain["wakes"] >= chain_max_wakes:
+            # The boot check let a capped chain through (or failed open on
+            # one that ran past the cap): start the grace here, once, and
+            # keep it across restarts through the grace file.
+            LOG.warning("loss chain at %d power-offs (cap %d): mains-loss halts off for %.0f s; "
+                        "the low-battery halts stay on. Check --supply-v and the supply.",
+                        chain["wakes"], chain_max_wakes, cap_grace_s)
+            self.grace_until = max(self.grace_until or 0.0, start + cap_grace_s)
+            if grace_file:
+                write_grace(grace_file, cap_grace_s, boot_now=start)
+            state.append_event("chain_cap", wakes=chain["wakes"], kind=chain["kind"],
+                               grace_s=cap_grace_s)
+            state.clear_chain()
+            self.chain_open = False
+        self._float_since: float | None = None
+        self.supply_mismatch = False
+        # The boot clock starts near 0, so "never" is far in the past.
+        self._blind_warned_at = -1e18
+        self._heartbeat_at = -1e18
+        self._nohalt_warned_at = -1e18
+        self._grace_warned_at = -1e18
+        self._mismatch_warned_at = -1e18
+        self._ignored_until = -1e18
         self._status_write_failed = False
 
     # -- helpers ----------------------------------------------------------
@@ -446,7 +694,11 @@ class Watcher:
             return "nohalt-flag"
         return "armed"
 
+    def in_grace(self, now: float) -> bool:
+        return self.grace_until is not None and now < self.grace_until
+
     def status(self, now: float, state_name: str) -> dict:
+        """`now` is wall time (the bus guard compares `ts` with its own clock)."""
         s = self.last_sample
         return {
             "schema": SCHEMA,
@@ -458,13 +710,20 @@ class Watcher:
             "soc_pct": soc_estimate_pct(s.batt_v) if s else None,
             "overflow": s.overflow if s else None,
             "supply_v": self.th.supply_v,
+            "supply_mismatch": self.supply_mismatch,
             "absent_s": round(self.timer.absent_s, 2),
             "loss_s": self.th.loss_s,
+            "floor_s": round(self.floor.below_s, 2),
+            "floor_v": self.th.floor_v,
             "state": state_name,
             "mode": self.mode(),
             "halt_enabled": self.halt_enabled(),
+            "grace_s_left": (round(self.grace_until - self._mono, 1)
+                             if self.in_grace(self._mono) else 0.0),
+            "chain_open": self.chain_open,
             "errors": self.errors_total,
             "errors_run": self.errors_run,
+            "implausible": self.implausible_total,
             "last_error": self.last_error,
             "last_loss": self.state.read_loss(),
             "first_alarm_s": self.first_alarm_s,
@@ -476,18 +735,59 @@ class Watcher:
             LOG.warning("cannot write %s (will keep trying quietly)", self.status_file)
         self._status_write_failed = not ok
 
+    def _classify_live(self, sample: Sample, now: float) -> str:
+        c = classify(sample.batt_ma, sample.batt_v, self.th)
+        if c == PRESENT:
+            self.last_present_at = now
+        elif (c == DISCHARGE and self.th.edge_s > 0 and self.last_present_at is not None
+              and now - self.last_present_at <= self.th.edge_s):
+            self._run_edge = True
+            return ABSENT
+        return c
+
+    def _check_setpoint(self, sample: Sample, state: str, now: float) -> None:
+        """Floating on the supply, the pack reads the supply's voltage."""
+        floating = state == PRESENT and abs(sample.batt_ma) < abs(self.th.present_ma)
+        if not floating:
+            self._float_since = None
+            return
+        if self._float_since is None:
+            self._float_since = now
+            return
+        if now - self._float_since < DEFAULT_MISMATCH_S:
+            return
+        off = abs(sample.batt_v - self.th.supply_v) > DEFAULT_MISMATCH_V
+        if off and now - self._mismatch_warned_at >= self.MISMATCH_WARN_PERIOD_S:
+            self._mismatch_warned_at = now
+            LOG.warning("SUPPLY SETPOINT MISMATCH: --supply-v is %.2f V but the pack has "
+                        "floated at %.3f V for %.0f s. Fix --supply-v in both unit files "
+                        "and reinstall; the loss rules depend on it.",
+                        self.th.supply_v, sample.batt_v, now - self._float_since)
+        self.supply_mismatch = off
+
     # -- the poll -----------------------------------------------------------
     def step(self, now: float | None = None) -> str:
-        now = time.time() if now is None else now
+        """One poll. `now` (tests only) stands in for both clocks; otherwise
+        the wall clock stamps the status and the boot clock, read after the
+        sensor, drives every timer."""
+        wall = time.time() if now is None else now
         if self.halting:
-            self.publish(now, "shutdown")
+            self.publish(wall, "shutdown")
             return "shutdown"
+        batt_v: float | None = None
+        read_error: Exception | None = None
+        sample: Sample | None = None
         try:
-            sample = self.sensor.read(now)
+            sample = self.sensor.read(wall)
         except Exception as error:  # noqa: BLE001 - any bus failure is "unknown"
+            read_error = error
+        mono = self.clock() if now is None else now
+        self._mono = mono
+
+        if read_error is not None:
             self.errors_total += 1
             self.errors_run += 1
-            self.last_error = f"{type(error).__name__}: {error}"
+            self.last_error = f"{type(read_error).__name__}: {read_error}"
             state = UNKNOWN
             if self.errors_run == self.REOPEN_AFTER_ERRORS:
                 LOG.warning("%d consecutive INA219 read errors; reopening the bus (%s)",
@@ -497,8 +797,8 @@ class Watcher:
                     self.sensor.configure()
                 except Exception as reopen_error:  # noqa: BLE001
                     LOG.warning("reopen failed: %s", reopen_error)
-            elif now - self._blind_warned_at >= self.BLIND_WARN_PERIOD_S:
-                self._blind_warned_at = now
+            elif mono - self._blind_warned_at >= self.BLIND_WARN_PERIOD_S:
+                self._blind_warned_at = mono
                 LOG.warning("INA219 unreadable (%d in a row): %s", self.errors_run,
                             self.last_error)
         else:
@@ -506,45 +806,92 @@ class Watcher:
                 LOG.info("INA219 readable again after %d errors", self.errors_run)
             self.errors_run = 0
             self.last_sample = sample
-            state = classify(sample.batt_ma, sample.batt_v, self.th)
+            if not plausible(sample, self.th):
+                self.implausible_total += 1
+                self.last_error = (f"implausible reading {sample.batt_v:.3f} V "
+                                   f"{sample.batt_ma:+.0f} mA (overflow={sample.overflow})")
+                state = UNKNOWN
+                if mono - self._blind_warned_at >= self.BLIND_WARN_PERIOD_S:
+                    self._blind_warned_at = mono
+                    LOG.warning("INA219 %s; holding", self.last_error)
+            else:
+                batt_v = sample.batt_v
+                state = self._classify_live(sample, mono)
+                self._check_setpoint(sample, state, mono)
             if state != self.last_state:
                 LOG.info("input %s -> %s (batt %.3f V %+.0f mA, soc~%d%%)",
                          self.last_state, state, sample.batt_v, sample.batt_ma,
                          soc_estimate_pct(sample.batt_v))
             self.last_state = state
 
-        triggered = self.timer.update(state)
-        if not self.halt_enabled() and now - self._nohalt_warned_at >= self.NOHALT_WARN_PERIOD_S:
-            self._nohalt_warned_at = now
+        triggered = self.timer.update(state, mono)
+        if self.timer.absent_s == 0.0:
+            self._run_edge = False
+        low = self.floor.update(state, batt_v)
+        critical = self.crit.update(state, batt_v)
+        if state in (PRESENT, ABOVE_SUPPLY) and self.chain_open:
+            if self.state.clear_chain():
+                LOG.info("loss chain closed (%s)", state)
+            self.chain_open = False
+
+        if not self.halt_enabled() and mono - self._nohalt_warned_at >= self.NOHALT_WARN_PERIOD_S:
+            self._nohalt_warned_at = mono
             LOG.warning("HALT DISABLED (%s): a real power loss will NOT shut the Pi down",
                         self.mode())
-        if now - self._heartbeat_at >= self.HEARTBEAT_S and self.last_sample:
-            self._heartbeat_at = now
-            LOG.info("heartbeat: input=%s batt %.3f V %+.0f mA absent_s=%.1f errors=%d",
-                     state, self.last_sample.batt_v, self.last_sample.batt_ma,
-                     self.timer.absent_s, self.errors_total)
+        if mono - self._heartbeat_at >= self.HEARTBEAT_S and self.last_sample:
+            self._heartbeat_at = mono
+            LOG.info("heartbeat: input=%s batt %.3f V %+.0f mA absent_s=%.1f floor_s=%.1f "
+                     "errors=%d", state, self.last_sample.batt_v, self.last_sample.batt_ma,
+                     self.timer.absent_s, self.floor.below_s, self.errors_total)
 
+        if (critical or low or triggered) and not self.halt_enabled() \
+                and mono < self._ignored_until:
+            # Halting is off and this was already logged: keep counting quietly.
+            self.publish(wall, "loss-ignored")
+            return "loss-ignored"
+        if critical:
+            return self._on_loss(wall, kind=KIND_CRIT)
+        if low:
+            return self._on_loss(wall, kind=KIND_FLOOR)
         if triggered:
-            return self._on_loss(now)
-        state_name = "countdown" if self.timer.absent_s > 0 else "monitoring"
-        self.publish(now, state_name)
+            if self.in_grace(mono):
+                if mono - self._grace_warned_at >= self.GRACE_WARN_PERIOD_S:
+                    self._grace_warned_at = mono
+                    LOG.warning("mains loss ignored: grace period after a capped loss chain "
+                                "(%.0f s left); the low-battery halts stay on",
+                                self.grace_until - mono)
+                self.timer.reset()
+                self._run_edge = False
+                self.publish(wall, "grace")
+                return "grace"
+            return self._on_loss(wall, kind=KIND_EDGE if self._run_edge else KIND_HARD)
+        state_name = "countdown" if (self.timer.absent_s > 0 or self.floor.below_s > 0) \
+            else "monitoring"
+        self.publish(wall, state_name)
         return state_name
 
     # -- the loss -----------------------------------------------------------
-    def _on_loss(self, now: float, *, simulated: bool = False) -> str:
+    def _on_loss(self, now: float, *, kind: str = KIND_HARD, simulated: bool = False) -> str:
         s = self.last_sample
+        reason = "mains" if kind in MAINS_KINDS else "low_battery"
         record = {
             "ts": now,
             "batt_v": round(s.batt_v, 3) if s else None,
             "batt_ma": round(s.batt_ma, 1) if s else None,
             "supply_v": self.th.supply_v,
+            "kind": kind,
+            "reason": reason,
             "halt_enabled": self.halt_enabled(),
             "mode": self.mode(),
             "simulated": simulated,
         }
-        LOG.warning("%sMAINS LOST: %.1f s of absent samples (batt %s V %s mA). %s",
-                    "SIMULATED " if simulated else "",
-                    self.timer.absent_s, record["batt_v"], record["batt_ma"],
+        if reason == "mains":
+            what = (f"MAINS LOST ({kind}): {self.timer.absent_s:.1f} s of absent samples "
+                    f"(batt {record['batt_v']} V {record['batt_ma']} mA).")
+        else:
+            what = (f"LOW BATTERY ({kind}): pack {record['batt_v']} V at "
+                    f"{record['batt_ma']} mA.")
+        LOG.warning("%s%s %s", "SIMULATED " if simulated else "", what,
                     "Shutting down." if self.halt_enabled() else
                     f"HALT DISABLED ({self.mode()}), staying up.")
         self.state.append_event("loss", **record)
@@ -555,10 +902,29 @@ class Watcher:
 
         if not self.halt_enabled():
             self.timer.reset()
+            self.floor.reset()
+            self.crit.reset()
+            self._run_edge = False
+            self._ignored_until = self._mono + 60.0
             self.publish(now, "loss-ignored")
             return "loss-ignored"
 
         self.halting = True
+        try:
+            # An outage can alternate boot-check power-offs, fail-open boots
+            # and run-mode halts; all of them count toward the cap. The most
+            # severe kind (critical, then floor) stays until the chain closes.
+            prev = self.state.read_chain()
+            chain_kind = kind
+            if prev and _SEVERITY.get(prev.get("kind"), 0) > _SEVERITY.get(kind, 0):
+                chain_kind = prev["kind"]
+            self.state.write_chain({
+                "kind": chain_kind,
+                "wakes": prev["wakes"] + 1 if prev else 0,
+                "opened": prev.get("opened") if prev else now})
+            self.chain_open = True
+        except OSError as error:
+            LOG.error("could not persist chain.json: %s", error)
         self.publish(now, "shutdown")
         for name in self.kill_services:
             LOG.warning("killing %s before the halt", name)
@@ -588,10 +954,18 @@ def run_loop(w: Watcher) -> None:
         w.rtc.clear()
     except OSError as error:
         LOG.warning("could not clear a stale RTC alarm: %s", error)
+    th = w.th
     LOG.warning("walle-ups watching INA219 0x%02x on bus %d: supply %.2f V, present >= %.0f mA, "
-                "absent <= %.0f mA, loss after %.1f s, first alarm +%d s, mode %s",
-                w.sensor.addr, w.sensor.bus_num, w.th.supply_v, w.th.present_ma,
-                w.th.absent_ma, w.th.loss_s, w.first_alarm_s, w.mode())
+                "discharging <= %.0f mA, absent below %.2f V or within %.0f s of present, "
+                "above_supply over %.2f V, loss after %.1f s, floor %.2f V/%.0f s, "
+                "critical %.2f V/%.0f s, first alarm +%d s, mode %s",
+                w.sensor.addr, w.sensor.bus_num, th.supply_v, th.present_ma, th.absent_ma,
+                th.supply_v - th.hard_margin_v, th.edge_s, th.supply_v + th.gate_margin_v,
+                th.loss_s, th.floor_v, th.floor_s, th.crit_v, th.crit_s, w.first_alarm_s,
+                w.mode())
+    if w.in_grace(w._mono):
+        LOG.warning("GRACE: mains-loss halts are off for %.0f s more (a capped loss chain let "
+                    "this boot through); the low-battery halts stay on", w.grace_until - w._mono)
     while True:
         started = time.monotonic()
         result = w.step()
@@ -614,11 +988,11 @@ def wait_for_path(path: str, timeout_s: float, sleep=time.sleep, exists=os.path.
 
 def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: StateDir,
                *, duration_s: float = DEFAULT_BOOT_CHECK_S, poll_s: float = DEFAULT_BOOT_POLL_S,
-               wake_s: int = DEFAULT_WAKE_S, wake_fast_s: int = DEFAULT_WAKE_FAST_S,
-               fast_window_s: float = DEFAULT_WAKE_FAST_WINDOW_S,
+               wake_s: int = DEFAULT_WAKE_S, slow_wake_s: int = DEFAULT_SLOW_WAKE_S,
+               chain_max_wakes: int = DEFAULT_CHAIN_MAX_WAKES,
                now_fn=time.time, sleep=time.sleep, dev_wait_s: float = 5.0) -> str:
-    """Returns the decision: "present", "nohalt", "poweroff" or "inconclusive".
-    Only "poweroff" has a side effect."""
+    """Returns the decision: "present", "nohalt", "inconclusive", "cap" or
+    "poweroff". Only "poweroff" has a side effect on the power state."""
     if state.nohalt():
         LOG.warning("boot-check: nohalt flag present (%s); continuing the boot",
                     os.path.join(state.path, StateDir.NOHALT))
@@ -631,9 +1005,10 @@ def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: 
         state.append_event("boot_check", decision="inconclusive", reason="no-device")
         return "inconclusive"
 
-    states: list[str] = []
-    samples: list[Sample] = []
+    valid: list[Sample] = []
+    classes: list[str] = []
     errors = 0
+    implausible = 0
     deadline = now_fn() + duration_s
     try:
         sensor.open()
@@ -648,39 +1023,84 @@ def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: 
             errors += 1
             LOG.info("boot-check: read error %s", error)
         else:
-            samples.append(s)
-            states.append(classify(s.batt_ma, s.batt_v, th))
+            if plausible(s, th):
+                valid.append(s)
+                classes.append(classify(s.batt_ma, s.batt_v, th))
+            else:
+                implausible += 1
         if now_fn() >= deadline:
             break
         sleep(poll_s)
 
+    chain = state.read_chain()
+    n = len(valid)
+    crit_n = sum(1 for s, c in zip(valid, classes) if c != PRESENT and s.batt_v <= th.crit_v)
     summary = {
-        "n": len(samples), "errors": errors,
-        "present": states.count(PRESENT), "absent": states.count(ABSENT),
-        "above": states.count(ABOVE_SUPPLY), "unknown": states.count(UNKNOWN),
-        "batt_v": round(samples[-1].batt_v, 3) if samples else None,
-        "batt_ma": round(samples[-1].batt_ma, 1) if samples else None,
+        "n": n, "errors": errors, "implausible": implausible,
+        "present": classes.count(PRESENT), "absent": classes.count(ABSENT),
+        "discharge": classes.count(DISCHARGE), "above": classes.count(ABOVE_SUPPLY),
+        "unknown": classes.count(UNKNOWN), "critical": crit_n,
+        "chain": chain["kind"] if chain else None,
+        "chain_wakes": chain["wakes"] if chain else None,
+        "batt_v": round(valid[-1].batt_v, 3) if valid else None,
+        "batt_ma": round(valid[-1].batt_ma, 1) if valid else None,
     }
+
+    def fail_open(reason: str) -> str:
+        LOG.warning("boot-check: inconclusive (%s, %s); continuing the boot (fail open)",
+                    reason, summary)
+        state.append_event("boot_check", decision="inconclusive", reason=reason, **summary)
+        return "inconclusive"
+
     if summary["present"]:
+        if chain and state.clear_chain():
+            LOG.info("boot-check: loss chain closed")
         LOG.warning("boot-check: mains present (%s); continuing the boot", summary)
         state.append_event("boot_check", decision="present", **summary)
         return "present"
-    clear_majority = (summary["n"] >= 4 and summary["absent"] >= 0.75 * summary["n"]
-                      and summary["above"] == 0)
-    if not clear_majority:
-        LOG.warning("boot-check: inconclusive (%s); continuing the boot (fail open)", summary)
-        state.append_event("boot_check", decision="inconclusive", **summary)
-        return "inconclusive"
+    bad = errors + implausible
+    if n < BOOT_MIN_VALID or bad > BOOT_MAX_BAD_FRACTION * (n + bad):
+        return fail_open("too few valid samples")
+    need = BOOT_MAJORITY * n
+    if summary["above"] >= need:
+        if chain:
+            state.clear_chain()
+        return fail_open("pack above the supply")
 
-    loss = state.read_loss()
-    age = None
-    if loss and isinstance(loss.get("ts"), (int, float)):
-        age = max(0.0, now_fn() - float(loss["ts"]))
-    seconds = wake_fast_s if (age is not None and age <= fast_window_s) else wake_s
-    LOG.warning("boot-check: mains still absent (%s, loss %s s ago); re-arming +%d s and "
-                "powering off", summary, None if age is None else int(age), seconds)
-    state.append_event("boot_check", decision="poweroff", wake_s=seconds, loss_age_s=age,
-                       **summary)
+    chain_kind = chain["kind"] if chain else None
+    if crit_n >= need:
+        kind, seconds = KIND_CRIT, slow_wake_s
+    elif summary["absent"] >= need:
+        kind = chain_kind or KIND_HARD
+        seconds = slow_wake_s if kind == KIND_CRIT else wake_s
+    elif (chain_kind in (KIND_EDGE, KIND_HARD, KIND_FLOOR)
+          and summary["absent"] + summary["discharge"] >= need):
+        # A real halt opened this chain. Under the light early-boot load the
+        # pack rebounds into the band, so the band is the outage still going.
+        # The cap bounds the case where a supply below the pack came back.
+        kind, seconds = chain_kind, wake_s
+    else:
+        return fail_open("no clear loss")
+    capped = kind != KIND_CRIT          # never boot a nearly empty pack on a cap
+
+    wakes = chain["wakes"] if chain else 0
+    if capped and wakes >= chain_max_wakes:
+        # Run mode sees the capped chain at start, grants the grace, writes
+        # the grace file and closes the chain (Watcher.__init__).
+        LOG.warning("boot-check: loss chain capped after %d power-offs (%s); continuing the boot. "
+                    "Run mode starts with a grace for mains-loss halts. Check --supply-v and "
+                    "the supply.", wakes, summary)
+        state.append_event("boot_check", decision="cap", **summary)
+        return "cap"
+
+    LOG.warning("boot-check: mains still absent (%s); re-arming +%d s and powering off",
+                summary, seconds)
+    try:
+        state.write_chain({"kind": kind, "wakes": wakes + 1,
+                           "opened": chain.get("opened") if chain else None})
+    except OSError as error:
+        LOG.error("boot-check: could not persist chain.json: %s", error)
+    state.append_event("boot_check", decision="poweroff", wake_s=seconds, **summary)
     try:
         alarm = rtc.arm(seconds)
         state.append_event("alarm", seconds=seconds, alarm=alarm, source="boot-check")
@@ -706,17 +1126,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--addr", type=lambda s: int(s, 0), default=DEFAULT_ADDR)
     p.add_argument("--shunt-ohm", type=float, default=DEFAULT_SHUNT_OHM, dest="shunt_ohm")
     p.add_argument("--supply-v", type=float, default=DEFAULT_SUPPLY_V, dest="supply_v",
-                   help="charger/buck setpoint the pack floats at (bench brick 8.4, robot buck 7.6)")
+                   help="the supply setpoint the pack floats at (robot 7.5, bench brick 8.4)")
     p.add_argument("--gate-margin-v", type=float, default=DEFAULT_GATE_MARGIN_V, dest="gate_margin_v")
+    p.add_argument("--hard-margin-v", type=float, default=DEFAULT_HARD_MARGIN_V, dest="hard_margin_v")
     p.add_argument("--present-ma", type=float, default=DEFAULT_PRESENT_MA, dest="present_ma")
     p.add_argument("--absent-ma", type=float, default=DEFAULT_ABSENT_MA, dest="absent_ma")
     p.add_argument("--loss-s", type=float, default=DEFAULT_LOSS_S, dest="loss_s")
+    p.add_argument("--edge-s", type=float, default=DEFAULT_EDGE_S, dest="edge_s")
+    p.add_argument("--gap-s", type=float, default=DEFAULT_GAP_S, dest="gap_s")
+    p.add_argument("--floor-v", type=float, default=DEFAULT_FLOOR_V, dest="floor_v")
+    p.add_argument("--floor-s", type=float, default=DEFAULT_FLOOR_S, dest="floor_s")
+    p.add_argument("--crit-v", type=float, default=DEFAULT_CRIT_V, dest="crit_v")
+    p.add_argument("--crit-s", type=float, default=DEFAULT_CRIT_S, dest="crit_s")
     p.add_argument("--poll-s", type=float, default=DEFAULT_POLL_S, dest="poll_s")
     p.add_argument("--first-alarm-s", type=int, default=DEFAULT_FIRST_ALARM_S, dest="first_alarm_s")
     p.add_argument("--wake-s", type=int, default=DEFAULT_WAKE_S, dest="wake_s")
-    p.add_argument("--wake-fast-s", type=int, default=DEFAULT_WAKE_FAST_S, dest="wake_fast_s")
-    p.add_argument("--wake-fast-window-s", type=float, default=DEFAULT_WAKE_FAST_WINDOW_S,
-                   dest="wake_fast_window_s")
+    p.add_argument("--slow-wake-s", type=int, default=DEFAULT_SLOW_WAKE_S, dest="slow_wake_s")
+    p.add_argument("--chain-max-wakes", type=int, default=DEFAULT_CHAIN_MAX_WAKES,
+                   dest="chain_max_wakes")
+    p.add_argument("--grace-s", type=float, default=DEFAULT_GRACE_S, dest="grace_s")
+    p.add_argument("--grace-file", default=DEFAULT_GRACE_FILE, dest="grace_file")
     p.add_argument("--status-file", default=DEFAULT_STATUS_FILE, dest="status_file")
     p.add_argument("--state-dir", default=DEFAULT_STATE_DIR, dest="state_dir")
     p.add_argument("--rtc", default=DEFAULT_RTC)
@@ -728,12 +1157,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+def thresholds_from_args(args) -> Thresholds:
+    return Thresholds(
+        supply_v=args.supply_v, gate_margin_v=args.gate_margin_v,
+        hard_margin_v=args.hard_margin_v, present_ma=args.present_ma,
+        absent_ma=args.absent_ma, loss_s=args.loss_s, edge_s=args.edge_s, gap_s=args.gap_s,
+        floor_v=args.floor_v, floor_s=args.floor_s, crit_v=args.crit_v, crit_s=args.crit_s)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s: %(message)s", stream=sys.stderr)
-    th = Thresholds(supply_v=args.supply_v, gate_margin_v=args.gate_margin_v,
-                    present_ma=args.present_ma, absent_ma=args.absent_ma, loss_s=args.loss_s)
+    th = thresholds_from_args(args)
     sensor = Ina219(args.bus, args.addr, args.shunt_ohm)
     actions = SystemActions(dry_run=args.detect_only)
     rtc = Rtc(args.rtc)
@@ -746,19 +1182,25 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({
             "batt_v": round(s.batt_v, 3), "batt_ma": round(s.batt_ma, 1),
             "soc_pct": soc_estimate_pct(s.batt_v), "overflow": s.overflow,
-            "input": classify(s.batt_ma, s.batt_v, th), "supply_v": th.supply_v,
-            "nohalt_flag": state.nohalt(),
+            "plausible": plausible(s, th),
+            "input": classify(s.batt_ma, s.batt_v, th) if plausible(s, th) else UNKNOWN,
+            "supply_v": th.supply_v, "nohalt_flag": state.nohalt(),
+            "chain": state.read_chain(),
         }, indent=2))
         return 0
 
     if args.mode == "boot-check":
-        decision = boot_check(sensor, th, actions, rtc, state, wake_s=args.wake_s,
-                              wake_fast_s=args.wake_fast_s, fast_window_s=args.wake_fast_window_s)
-        return 0 if decision else 1
+        boot_check(sensor, th, actions, rtc, state, wake_s=args.wake_s,
+                   slow_wake_s=args.slow_wake_s, chain_max_wakes=args.chain_max_wakes)
+        return 0
 
+    grace = read_grace(args.grace_file) if args.mode == "run" else 0.0
     w = Watcher(sensor, th, actions, rtc, state, status_file=args.status_file,
                 poll_s=args.poll_s, first_alarm_s=args.first_alarm_s,
-                kill_services=kill, detect_only=args.detect_only)
+                kill_services=kill, detect_only=args.detect_only,
+                grace_s=grace or 0.0, chain_max_wakes=args.chain_max_wakes,
+                cap_grace_s=args.grace_s,
+                grace_file=args.grace_file if args.mode == "run" else None)
 
     if args.mode == "simulate-loss":
         if not args.yes:
@@ -774,7 +1216,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as error:  # noqa: BLE001
             LOG.warning("simulate-loss: sensor read failed (%s); continuing", error)
         w.timer.absent_s = th.loss_s
-        w._on_loss(time.time(), simulated=True)
+        w._on_loss(time.time(), kind=KIND_SIM, simulated=True)
         time.sleep(30)
         return 0
 

@@ -98,8 +98,8 @@ def read_ups_status(path: str = UPS_STATUS_FILE,
         "ts_loop": data.get("ts_loop"),
         "schema": data.get("schema"),
         # Mains presence, inferred from the battery current:
-        # "present" | "absent" | "unknown" | "above_supply" (None before the
-        # first successful read).
+        # "present" | "absent" | "discharge" | "unknown" | "above_supply"
+        # (None before the first successful read).
         "input": data.get("input"),
         "batt_v": data.get("batt_v"),
         "batt_ma": data.get("batt_ma"),
@@ -1470,6 +1470,9 @@ function applyUps(u) {
   else if (inp === 'absent') { mtxt = 'ABSENT'; mcls = 'red'; }
   else if (inp === 'unknown') { mtxt = 'UNKNOWN'; mcls = 'grey'; }
   else if (inp === 'above_supply') { mtxt = 'ABOVE SUPPLY'; mcls = 'amber'; }
+  /* discharging near the setpoint with no fresh present sample: the supply may be
+     connected but below the pack, or gone; the low-battery floor decides. */
+  else if (inp === 'discharge') { mtxt = 'ON BATTERY?'; mcls = 'amber'; }
   pill('u-mains', mtxt, mcls);
   val('u-battv', num(u.batt_v, 3, ' V') +
       ((u.batt_v == null || u.soc_pct == null) ? '' : ' ~' + u.soc_pct + '%'),

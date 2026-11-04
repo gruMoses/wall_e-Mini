@@ -9,11 +9,11 @@ Type=simple
 User=root
 Restart=always
 RestartSec=2
-# --supply-v is the charger/buck setpoint the pack floats at: 8.4 on the bench
-# brick, 7.6 once the robot buck is installed (then re-run
-# bin/install_walle_ups.sh). Everything else is a documented default in
-# bin/walle_ups.py.
-ExecStart=/home/pi/.venv/bin/python3 /home/pi/wall_e-Mini/bin/walle_ups.py run --supply-v 8.4
+# --supply-v is the supply setpoint the pack floats at: 7.5 for the robot
+# supply (2026-11-04), 8.4 for the bench brick. The loss rules depend on it:
+# change it in BOTH unit files, then re-run bin/install_walle_ups.sh.
+# Everything else is a documented default in bin/walle_ups.py.
+ExecStart=/home/pi/.venv/bin/python3 /home/pi/wall_e-Mini/bin/walle_ups.py run --supply-v 7.5
 
 [Install]
 WantedBy=multi-user.target
