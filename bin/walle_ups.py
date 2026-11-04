@@ -64,8 +64,11 @@ Classification of one sample, the same in both modes:
 run mode  (walle-ups.service, root, after boot)
   Polls at 2 Hz. 5 s of counted absent samples halts. The count resets on
   any present sample and after GAP_S (10 s) without a counted sample, so
-  scattered blips cannot add up. Low battery halts whatever the class,
-  except present:
+  scattered blips cannot add up. The hard line has hysteresis: a count
+  starts below S - 0.30 V, and while it runs a discharging sample below
+  S - 0.30 + HARD_HYST_V (0.10) also counts, so a pack that hovers at the
+  line (7.14-7.27 V for 6 min on 2026-11-04) cannot keep restarting it.
+  Low battery halts whatever the class, except present:
     V <= FLOOR_V (7.0 V, 3.5 V/cell under load) for FLOOR_S (10 s)
     V <= CRIT_V  (6.4 V) on a single sample
   While the pack carries the Pi above the supply, the floor is the only
@@ -183,6 +186,7 @@ DEFAULT_SHUNT_OHM = 0.01        # 10 mOhm by measurement; the schematic's "0.1R"
 DEFAULT_SUPPLY_V = 7.5          # robot supply (Kevin, 2026-11-04); the bench brick is 8.4
 DEFAULT_GATE_MARGIN_V = 0.15    # above S + this: the pack is fuller than the float
 DEFAULT_HARD_MARGIN_V = 0.30    # below S - this: no CC/CV supply is holding the node
+DEFAULT_HARD_HYST_V = 0.10      # while a loss count runs, the hard line moves up by this
 DEFAULT_PRESENT_MA = -80.0      # floating noise is +/-40 mA at this scale
 DEFAULT_ABSENT_MA = -250.0
 DEFAULT_LOSS_S = 5.0
@@ -242,6 +246,7 @@ class Thresholds:
     supply_v: float = DEFAULT_SUPPLY_V
     gate_margin_v: float = DEFAULT_GATE_MARGIN_V
     hard_margin_v: float = DEFAULT_HARD_MARGIN_V
+    hard_hyst_v: float = DEFAULT_HARD_HYST_V
     present_ma: float = DEFAULT_PRESENT_MA
     absent_ma: float = DEFAULT_ABSENT_MA
     loss_s: float = DEFAULT_LOSS_S
@@ -310,6 +315,11 @@ class LossTimer:
     def reset(self) -> None:
         self.absent_s = 0.0
         self._last_counted = None
+
+    def running(self, now: float) -> bool:
+        """A count is in progress and its last counted sample is within the gap."""
+        return (self.absent_s > 0 and self._last_counted is not None
+                and now - self._last_counted <= self.gap_s)
 
 
 class LevelTimer:
@@ -778,6 +788,14 @@ class Watcher:
         c = classify(sample.batt_ma, sample.batt_v, self.th)
         if c == PRESENT:
             self.last_present_at = now
+        elif (c == DISCHARGE and self.timer.running(now)
+              and sample.batt_v < self.th.supply_v - self.th.hard_margin_v + self.th.hard_hyst_v):
+            # Hysteresis on the hard line: a count only starts below S - 0.30 V,
+            # but once it runs, a discharging pack below S - 0.20 V keeps it
+            # going. Field 2026-11-04: the pack hovered at 7.14-7.27 V for 6 min
+            # and the count kept resetting. A reset (present, or the 10 s gap)
+            # ends the hysteresis.
+            return ABSENT
         elif (c == DISCHARGE and self.th.edge_s > 0 and self.last_present_at is not None
               and now - self.last_present_at <= self.th.edge_s):
             self._run_edge = True
@@ -1199,6 +1217,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="the supply setpoint the pack floats at (robot 7.5, bench brick 8.4)")
     p.add_argument("--gate-margin-v", type=float, default=DEFAULT_GATE_MARGIN_V, dest="gate_margin_v")
     p.add_argument("--hard-margin-v", type=float, default=DEFAULT_HARD_MARGIN_V, dest="hard_margin_v")
+    p.add_argument("--hard-hyst-v", type=float, default=DEFAULT_HARD_HYST_V, dest="hard_hyst_v")
     p.add_argument("--present-ma", type=float, default=DEFAULT_PRESENT_MA, dest="present_ma")
     p.add_argument("--absent-ma", type=float, default=DEFAULT_ABSENT_MA, dest="absent_ma")
     p.add_argument("--loss-s", type=float, default=DEFAULT_LOSS_S, dest="loss_s")
@@ -1230,7 +1249,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def thresholds_from_args(args) -> Thresholds:
     return Thresholds(
         supply_v=args.supply_v, gate_margin_v=args.gate_margin_v,
-        hard_margin_v=args.hard_margin_v, present_ma=args.present_ma,
+        hard_margin_v=args.hard_margin_v, hard_hyst_v=args.hard_hyst_v, present_ma=args.present_ma,
         absent_ma=args.absent_ma, loss_s=args.loss_s, edge_s=args.edge_s, gap_s=args.gap_s,
         floor_v=args.floor_v, floor_s=args.floor_s, crit_v=args.crit_v, crit_s=args.crit_s)
 

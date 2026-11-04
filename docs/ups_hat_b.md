@@ -85,6 +85,10 @@ Every 0.5 s it reads the INA219 and classifies the sample:
 
 - 5 s of counted `absent` samples halts. The count resets on `present`, and
   after 10 s without a counted sample.
+- The hard line has hysteresis. A count starts only below S − 0.30 V
+  (7.20 V). While it runs, a discharging sample below S − 0.20 V (7.30 V)
+  also counts. A pack that hovers at the line then halts in 5 s instead
+  of restarting the count (6 min of that on 2026-11-04).
 - Low battery halts on any sample that is not `present`: 7.0 V for 10 s,
   or 6.4 V on one sample. This is the only detector while the pack is
   above the supply. A held discharge then ends in a clean halt, not the
@@ -258,10 +262,9 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 
 - Done 2026-11-04 13:23-14:04: a real pull on the 7.5 V supply with the new
   rules (table in section 4.3).
-- The loss count dithered for about 6 min while the pack hovered at the
-  7.20 V line (13:33-13:40): the 10 s gap reset kept restarting it. It is
-  harmless (the pack still held most of its charge) but it delays the
-  halt. A small hysteresis on the hard line would remove it.
+- Done 2026-11-04: the loss count dithered for about 6 min while the pack
+  hovered at the 7.20 V line (13:33-13:40). The hard line now has 0.10 V
+  of hysteresis (section 4.1).
 - Done 2026-11-04 13:13: the hold check. The Pi booted on the HAT with the
   7.5 V supply and cells resting at 8.32 V. The cells carried it at 7.66
   to 7.71 V and −0.37 to −0.64 A for 3 min, read as `above_supply`, with

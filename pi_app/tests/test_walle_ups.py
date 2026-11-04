@@ -344,6 +344,59 @@ class WatcherTests(unittest.TestCase):
         finally:
             h.close()
 
+    # Field 2026-11-04 13:33-13:40, 7.5 V supply pulled: the pack hovered at
+    # the 7.20 V hard line and the count kept restarting for 6 minutes.
+    DITHER = [(7.14, -1020.0)] + [(7.27, -570.0), (7.26, -630.0)] * 10
+    S75 = ups.Thresholds(supply_v=7.5)
+
+    def test_hysteresis_holds_a_count_through_dithering_at_the_hard_line(self):
+        h = WatcherHarness(self.DITHER, th=self.S75)
+        try:
+            results = h.run(len(self.DITHER))
+            self.assertIn("shutdown", results)
+            self.assertEqual(results.index("shutdown"), ABSENT_SAMPLES - 1)  # 5 s
+            self.assertEqual(h.state.read_loss()["kind"], ups.KIND_HARD)
+        finally:
+            h.close()
+
+    def test_without_hysteresis_the_dither_restarts_the_count(self):
+        th = ups.Thresholds(supply_v=7.5, hard_hyst_v=0.0)
+        h = WatcherHarness(self.DITHER, th=th)
+        try:
+            self.assertNotIn("shutdown", h.run(len(self.DITHER)))
+        finally:
+            h.close()
+
+    def test_hysteresis_stops_above_its_release_level(self):
+        h = WatcherHarness([(7.14, -1020.0)] + [(7.32, -600.0)] * 30, th=self.S75)
+        try:
+            self.assertNotIn("shutdown", h.run(31))
+        finally:
+            h.close()
+
+    def test_hysteresis_ends_when_the_count_resets(self):
+        for reset in ([(7.25, -120.0)] * 22,       # middle band past the 10 s gap
+                      [(7.60, 10.0)]):             # one present sample
+            h = WatcherHarness([(7.14, -1020.0)] * 3 + reset + [(7.25, -600.0)] * 20,
+                               th=self.S75)
+            try:
+                self.assertNotIn("shutdown", h.run(23 + len(reset)))
+            finally:
+                h.close()
+
+    def test_hysteresis_never_starts_a_count_after_a_stall(self):
+        # A stalled loop (no step() for over 10 s) must not let a band sample
+        # continue a stale count: the count has to start below S - 0.30 V.
+        h = WatcherHarness([(7.14, -1020.0)] + [(7.25, -600.0)] * 12, th=self.S75)
+        try:
+            h.step()
+            h.now += 11.0                                  # the stall
+            results = h.run(12)
+            self.assertNotIn("shutdown", results)
+            self.assertEqual(h.w.timer.absent_s, 0.0)
+        finally:
+            h.close()
+
     def test_one_present_sample_resets_the_countdown(self):
         h = WatcherHarness([HARD] * (ABSENT_SAMPLES - 1) + [PRESENT] + [HARD] * (ABSENT_SAMPLES - 1))
         try:
