@@ -327,10 +327,17 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   held in the middle band on purpose.
 - The cells: about 1 Ω internal resistance. Decide whether to replace them.
   With them, the pack runs down to the cutoff within the hour at 60 s polls.
-- Measure the battery current under the worst robot load (camera, boot) with
-  the robot buck connected. It must stay above −80 mA. If the buck folds back
-  and the pack shares the load, raise the buck's current limit; the watcher
-  cannot tell that case from a loss.
+- Done 2026-11-04 17:07-17:22, in the robot on the test stand, robot buck
+  at 7.5 V, wall-e running with the OAK: idle 7.54 V at about −65 mA; all
+  four CPU cores loaded 7.48 to 7.49 V at −93 to −124 mA (buck droop about
+  60 mV, far under the 0.30 V hard margin; the worst current is half the
+  −250 mA discharge line); back to 7.55 V after. No USB over-current trips
+  that boot (167 before), `throttled=0x0`, EXT5V 5.20 V. The `/debug` UPS
+  panel renders live. The cells were still settling onto the buck, so the
+  mains pill flickers between present and unknown; both hold.
+- Found in passing: the OAK enumerates at USB 2 speed (480M) under the
+  hub's USB 2 side; the hub's USB 3 side is empty. Nothing in the config
+  limits it. Check the OAK-to-hub cable (it must be a USB 3 cable).
 - Run the pack to the HY2120 cutoff once and confirm that the 5 V drops to
   zero and the Pi boots when mains returns.
 - Kevin plans a custom HAT that can switch its output off after the halt and

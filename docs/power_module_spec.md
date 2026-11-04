@@ -277,7 +277,8 @@ protect only the converter. The actions:
 
 1. Record the VESC hardware model and firmware version. The repository
    does not have them today.
-2. VERIFY whether the firmware has a high-side regen voltage limit.
+2. VESC Tool 6.05 and later have "Battery Voltage Regen Cutoff Start/End" (off by default at
+   1000/1100 V; research 2026-11-04). VERIFY the robot's firmware version, then set it near 55.5/57 V.
 3. WARNING: "Battery Voltage Cutoff Start/End" in VESC Tool is the
    LOW-voltage cutoff. Do not set it near 56 V. The robot then stops
    driving.

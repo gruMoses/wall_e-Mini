@@ -68,11 +68,34 @@ the main switch and feeds the Pi 5 at 5.1 V. There is no buffer battery.
   filesystem tolerant (option E on top).
 
 Converter (Grok): a 60 V module (Pololu D42V55F5) cannot be made safe on 13S
-with a TVS: a TVS that stays off at 54.6 V clamps near 90 V. Use a module
-rated 75 to 100 V continuous that gives 5 V at 5 A after derating at 50 V,
-with a measured off-state current at 55 V, an output fuse and a crowbar.
-The TI LM5013 (100 V) is 3.5 A, non-synchronous, and too small for a Pi 5
-with the OAK-D. Not chosen yet; see question 1.
+with a TVS: a TVS that stays off at 54.6 V clamps near 90 V (Vishay:
+SMBJ58A clamps at 93.6 V). Use a module rated 75 V continuous with a
+100 V / 100 ms surge rating, 5 V at 4 to 6 A, a remote-off pin, an output
+fuse and a crowbar. The TI LM5013 (100 V) is 3.5 A, non-synchronous, and
+too small. Candidates found on 2026-11-04 (all isolated telecom bricks, no
+part checked on the bench):
+
+| Part | Rating | Off current | Price, stock |
+|---|---|---|---|
+| TRACO TEN 30-4811WIN | 18-75 V in (100 V/100 ms), 5.1 V 6 A, 88 % | 3 mA typ | $66.80, none at TME |
+| RECOM RP30-4805SFW/N | 18-75 V (100 V/100 ms), 5 V 6 A, trims to 5.1 V; /N fails off | 3 mA max | €91, 11-week lead |
+| TRACO TEN 20-4811WIN | 18-75 V, 5 V 4 A, 88 % | 2.5 mA typ | $49.05, 25 at TME |
+| Mean Well RSD-60L-5 | 18-72 V, 5 V 12 A, 89 % | no remote pin | $44.18 |
+
+A brick's 3 mA off current is about 70 mAh a day, 2 Ah a month, from the
+pack. For true months of storage, put a high-side switch (a 100 V P-FET
+or an LTC4368-class controller) in front of the brick, driven by the same
+ignition-or-grace logic, so the brick itself is disconnected.
+
+Bus spikes (research, 2026-11-04): no scope capture of a 13S bus was
+found. The 60 V-class VESC 6 firmware limits the input to 57 V by default;
+a full 13S pack (54.6 V; WALL-E's BMS read 54.10 V at 99.4 % that day)
+leaves 2.4 V, and over-voltage is a fault that stops PWM, not a derate.
+Trampa reports a 12S board seeing over 60 V on regen. VESC Tool 6.05 and
+later have "Battery Voltage Regen Cutoff Start/End", off by default
+(1000/1100 V). Setting it near 55.5/57 V is the free first fix. Record
+WALL-E's VESC hardware and firmware with VESC Tool first: nothing in the
+repository or the logs says which they are.
 
 Storage estimate (agent, 20 Ah pack at 50 percent, BMS asleep 0.5 mA, cell
 leakage about 2 percent a month): about 8 months with the converter idling,
@@ -92,8 +115,10 @@ about 12 months with it off. A Daly BMS sleeps only after 3600 s idle.
 
 ## 6. Questions for Kevin
 
-1. Which converter module: a bought 75 to 100 V module (to be found), or
-   wait for the custom board?
+1. Which converter: a TRACO TEN 30-4811WIN or RECOM RP30-4805SFW/N brick
+   (section 4) behind a high-side switch, or wait for the custom board?
+4. Which VESC hardware and firmware are on the robot? If the firmware is
+   6.05 or later, set the regen cutoff near 55.5/57 V.
 2. Is there a point on the robot where the BMS pack output is available on
    the battery side of the main switch?
 3. Should the robot ever wake on a schedule while stored? Option A cannot,
@@ -116,4 +141,5 @@ Raspberry Pi 5, PMIC, RTC, J2, PWR_BUT, `POWER_OFF_ON_HALT`, `WAKE_ON_GPIO`,
 UPS_Scap, Pololu D42V55F5, TI LM5013, LM5164, TPL5110, Daly BMS, VESC,
 OAK-D, 13S, 2S, 18650, supercap, ESR, TVS, opto, crowbar, buck, ENABLE,
 overlayfs, read-only root, Clearpath Jackal, Husarion ROSbot, Duckietown,
-Grok, Kevin, WALL-E.
+TRACO TEN 30-4811WIN, TEN 20-4811WIN, RECOM RP30-4805SFW/N, Mean Well RSD-60L-5,
+SMBJ58A, LTC4368, P-FET, VESC Tool, Trampa, Grok, Kevin, WALL-E.
