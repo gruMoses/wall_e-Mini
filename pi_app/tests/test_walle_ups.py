@@ -10,11 +10,13 @@ these run anywhere. They pin the safety contract from the module doc
     present sample;
   * 5 s of counted absent samples halt, in the order kill -> alarm -> sync ->
     poweroff; a 10 s gap without a counted sample resets the count;
-  * low battery halts: 7.0 V for 10 s, 6.4 V on one sample, with a 600 s
-    alarm; a unit still stopping after the kill stretches the alarm to
-    300 s; a poweroff that did not happen is retried, then forced;
-  * the boot check fails open on doubt; it powers off, uncapped and with a
-    600 s alarm, when the pack reads at or below the floor; it counts band
+  * low battery halts: 7.0 V for 10 s, 6.4 V on one sample; only a
+    critical halt gets the 600 s alarm; a unit still stopping after the kill
+    stretches the alarm to 300 s; a poweroff that did not happen is retried,
+    then forced; every power-off writes the alarm seconds for the shutdown
+    hook, which re-arms in the last second;
+  * the boot check fails open on doubt; it powers off, uncapped, when the
+    pack reads at or below the floor (60 s, or 600 s at or below 6.4 V); it counts band
     samples inside any chain except a simulated one; after 24 power-offs
     the boot continues and run mode grants a grace once.
 """
@@ -23,6 +25,7 @@ import importlib.util
 import json
 import os
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -227,6 +230,7 @@ class WatcherHarness:
         if chain:
             self.state.write_chain(chain)
         self.status_file = os.path.join(self.tmp.name, "ups_status.json")
+        self.arm_file = os.path.join(self.tmp.name, "run", "arm")
         self.sensor = FakeSensor(readings)
         self.actions = FakeActions(stuck=stuck)
         self.rtc = rtc or FakeRtc()
@@ -235,7 +239,8 @@ class WatcherHarness:
                              status_file=self.status_file, poll_s=POLL,
                              first_alarm_s=90, kill_services=("wall-e.service",),
                              detect_only=detect_only, grace_s=grace_s, now=self.now,
-                             grace_file=grace_file, slow_wake_s=600)
+                             grace_file=grace_file, slow_wake_s=600,
+                             arm_file=self.arm_file)
 
     def step(self):
         self.now += POLL
@@ -247,6 +252,13 @@ class WatcherHarness:
     def status(self):
         with open(self.status_file) as f:
             return json.load(f)
+
+    def armed_file(self):
+        try:
+            with open(self.arm_file) as f:
+                return int(f.read().split()[0])
+        except OSError:
+            return None
 
     def events(self):
         path = os.path.join(self.state.path, ups.StateDir.EVENTS)
@@ -472,7 +484,8 @@ class WatcherTests(unittest.TestCase):
             loss = h.state.read_loss()
             self.assertEqual(loss["kind"], ups.KIND_FLOOR)
             self.assertEqual(loss["reason"], "low_battery")
-            self.assertEqual(h.rtc.armed, [600])   # a low pack polls slowly
+            self.assertEqual(h.rtc.armed, [90])    # only a critical halt polls slowly
+            self.assertEqual(h.armed_file(), 90)   # for the shutdown hook
         finally:
             h.close()
 
@@ -481,6 +494,8 @@ class WatcherTests(unittest.TestCase):
         try:
             self.assertEqual(h.run(1), ["shutdown"])
             self.assertEqual(h.state.read_loss()["kind"], ups.KIND_CRIT)
+            self.assertEqual(h.rtc.armed, [600])
+            self.assertEqual(h.armed_file(), 600)
         finally:
             h.close()
 
@@ -521,6 +536,7 @@ class WatcherTests(unittest.TestCase):
         try:
             self.assertEqual(h.run(ABSENT_SAMPLES)[-1], "shutdown")
             self.assertEqual(h.rtc.armed, [300])
+            self.assertEqual(h.armed_file(), 300)
         finally:
             h.close()
 
@@ -667,6 +683,20 @@ class WatcherTests(unittest.TestCase):
         finally:
             h.close()
 
+    def test_a_mains_halt_writes_the_arm_file_and_halting_off_does_not(self):
+        h = WatcherHarness([HARD] * ABSENT_SAMPLES)
+        try:
+            h.run(ABSENT_SAMPLES)
+            self.assertEqual(h.armed_file(), 90)
+        finally:
+            h.close()
+        h = WatcherHarness([HARD] * ABSENT_SAMPLES, nohalt=True)
+        try:
+            h.run(ABSENT_SAMPLES)
+            self.assertIsNone(h.armed_file())   # a later manual poweroff must not wake
+        finally:
+            h.close()
+
     def test_detect_only_logs_the_loss_but_never_halts(self):
         h = WatcherHarness([HARD] * (ABSENT_SAMPLES + 2), detect_only=True)
         try:
@@ -753,6 +783,7 @@ class BootCheckHarness:
         kw.setdefault("wake_s", 60)
         kw.setdefault("slow_wake_s", 600)
         kw.setdefault("chain_max_wakes", 24)
+        kw.setdefault("arm_file", os.path.join(self.tmp.name, "run", "arm"))
         return ups.boot_check(self.sensor, self.th, self.actions, self.rtc, self.state,
                               now_fn=self.clock.now, sleep=self.clock.sleep, **kw)
 
@@ -780,6 +811,8 @@ class BootCheckTests(unittest.TestCase):
         try:
             self.assertEqual(h.run(), "poweroff")
             self.assertEqual(h.rtc.armed, [60])
+            with open(os.path.join(h.tmp.name, "run", "arm")) as f:
+                self.assertEqual(f.read().split()[0], "60")    # for the shutdown hook
             self.assertEqual(h.actions.calls, [("sync",), ("poweroff",)])
             chain = h.state.read_chain()
             self.assertEqual((chain["kind"], chain["wakes"]), (ups.KIND_HARD, 1))
@@ -881,16 +914,18 @@ class BootCheckTests(unittest.TestCase):
         finally:
             h.close()
 
-    def test_a_pack_below_the_floor_at_boot_powers_off_slowly_whatever_the_current(self):
+    def test_a_pack_below_the_floor_at_boot_powers_off_whatever_the_current(self):
         # Opus review: 6.9 V at -200 mA (the middle band) used to fail open and
-        # full-boot a nearly empty pack.
-        for chain in (None, {"kind": ups.KIND_HARD, "wakes": 40}):
-            h = BootCheckHarness([(6.9, -200.0)] * 30, chain=chain)
-            try:
-                self.assertEqual(h.run(), "poweroff", chain)
-                self.assertEqual(h.rtc.armed, [600])
-            finally:
-                h.close()
+        # full-boot a low pack. It polls slowly only when critical: with 1 ohm
+        # cells a half-full pack reads about 6.9 V at boot (field 2026-11-04).
+        for v, wake in ((6.9, 60), (6.3, 600)):
+            for chain in (None, {"kind": ups.KIND_HARD, "wakes": 40}):
+                h = BootCheckHarness([(v, -200.0)] * 30, chain=chain)
+                try:
+                    self.assertEqual(h.run(), "poweroff", (v, chain))
+                    self.assertEqual(h.rtc.armed, [wake])
+                finally:
+                    h.close()
 
     def test_band_in_a_capped_hard_chain_boots(self):
         h = BootCheckHarness([BAND] * 30, chain={"kind": ups.KIND_HARD, "wakes": 24})
@@ -922,13 +957,14 @@ class BootCheckTests(unittest.TestCase):
             h.close()
 
     def test_a_low_pack_is_never_capped(self):
-        h = BootCheckHarness([(6.8, -600.0)] * 30, chain={"kind": ups.KIND_CRIT, "wakes": 40})
-        try:
-            self.assertEqual(h.run(), "poweroff")
-            self.assertEqual(h.rtc.armed, [600])
-            self.assertEqual(h.state.read_chain()["wakes"], 41)
-        finally:
-            h.close()
+        for v, wake in ((6.8, 60), (6.2, 600)):
+            h = BootCheckHarness([(v, -600.0)] * 30, chain={"kind": ups.KIND_CRIT, "wakes": 40})
+            try:
+                self.assertEqual(h.run(), "poweroff")
+                self.assertEqual(h.rtc.armed, [wake])
+                self.assertEqual(h.state.read_chain()["wakes"], 41)
+            finally:
+                h.close()
 
     def test_a_floor_chain_above_the_floor_at_boot_is_capped(self):
         # 1 ohm cells can halt on the floor with the pack resting near 8 V.
@@ -1006,6 +1042,49 @@ class BootCheckTests(unittest.TestCase):
             self.assertEqual(h.actions.calls, [("sync",), ("poweroff",)])
         finally:
             h.close()
+
+
+class ShutdownHookTests(unittest.TestCase):
+    HOOK = os.path.join(_REPO_ROOT, "bin", "walle-ups-shutdown-alarm")
+
+    def _run(self, verb, arm_content, uptime="1000.42 900.1"):
+        with tempfile.TemporaryDirectory() as d:
+            rtc = os.path.join(d, "rtc")
+            os.makedirs(rtc)
+            with open(os.path.join(rtc, "wakealarm"), "w") as f:
+                f.write("untouched\n")
+            arm = os.path.join(d, "arm")
+            if arm_content is not None:
+                with open(arm, "w") as f:
+                    f.write(arm_content)
+            up = os.path.join(d, "uptime")
+            with open(up, "w") as f:
+                f.write(uptime + "\n")
+            env = dict(os.environ, WALLE_UPS_ARM=arm, WALLE_UPS_RTC=rtc, WALLE_UPS_UPTIME=up)
+            proc = subprocess.run(["sh", self.HOOK, verb], env=env, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            with open(os.path.join(rtc, "wakealarm")) as f:
+                return f.read().strip()
+
+    def test_poweroff_with_a_fresh_arm_file_arms_the_alarm(self):
+        self.assertEqual(self._run("poweroff", "90 990\n"), "+90")
+        self.assertEqual(self._run("halt", "600 400"), "+600")         # exactly 600 s old
+
+    def test_anything_else_leaves_the_alarm_alone(self):
+        self.assertEqual(self._run("reboot", "90 990"), "untouched")
+        self.assertEqual(self._run("poweroff", None), "untouched")     # manual poweroff, e-stop
+        self.assertEqual(self._run("poweroff", "90 399"), "untouched") # stale: a failed halt
+        for junk in ("", "abc", "-5 990", "0 990", "90", "90 x", "9 0 1"):
+            self.assertEqual(self._run("poweroff", junk), "untouched", junk)
+
+    def test_the_watcher_writes_what_the_hook_reads(self):
+        with tempfile.TemporaryDirectory() as d:
+            arm = os.path.join(d, "run", "arm")
+            self.assertTrue(ups.write_arm(arm, 90))
+            with open(arm) as f:
+                seconds, stamp = f.read().split()
+            self.assertEqual(seconds, "90")
+            self.assertEqual(stamp, str(int(ups.boot_clock())))
 
 
 class UnitFileTests(unittest.TestCase):

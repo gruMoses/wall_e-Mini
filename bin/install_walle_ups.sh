@@ -4,8 +4,10 @@
 #   sudo bash bin/install_walle_ups.sh
 #
 # It copies bin/walle-ups.service and bin/walle-ups-wakecheck.service to
-# /etc/systemd/system, reloads systemd, enables both, and restarts the
-# watcher so it runs the code in this checkout. The wake check is a oneshot
+# /etc/systemd/system, installs the shutdown hook bin/walle-ups-shutdown-alarm
+# and the stop-timeout limits bin/walle-fast-stop-{system,user}.conf, reloads
+# systemd, enables both units, and restarts the watcher so it runs the code
+# in this checkout. The wake check is a oneshot
 # that only matters at boot. Auto-deploy does NOT restart this service:
 # re-run this script after changing bin/walle_ups.py or either unit file
 # (for example when --supply-v changes from 8.4 to 7.6 with the robot buck).
@@ -25,6 +27,19 @@ for unit in walle-ups.service walle-ups-wakecheck.service; do
   install -m 0644 "$REPO_DIR/bin/$unit" "/etc/systemd/system/$unit"
 done
 chmod +x "$REPO_DIR/bin/walle_ups.py"
+
+# Last-moment alarm: systemd-shutdown runs this just before power-off.
+install -d -m 0755 /usr/lib/systemd/system-shutdown
+install -m 0755 "$REPO_DIR/bin/walle-ups-shutdown-alarm" \
+  /usr/lib/systemd/system-shutdown/walle-ups-alarm
+
+# Bounded stop timeouts, so a hung service cannot hold a shutdown for 90 s.
+install -d -m 0755 /etc/systemd/system.conf.d /etc/systemd/user.conf.d
+install -m 0644 "$REPO_DIR/bin/walle-fast-stop-system.conf" \
+  /etc/systemd/system.conf.d/10-walle-fast-stop.conf
+install -m 0644 "$REPO_DIR/bin/walle-fast-stop-user.conf" \
+  /etc/systemd/user.conf.d/10-walle-fast-stop.conf
+systemctl daemon-reexec   # the system manager re-reads system.conf.d; the user manager at next login
 
 systemctl daemon-reload
 systemctl enable walle-ups-wakecheck.service walle-ups.service

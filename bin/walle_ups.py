@@ -82,9 +82,12 @@ run mode  (walle-ups.service, root, after boot)
        full 90 s TimeoutStopSec, and the RTC alarm must not fire while the
        shutdown is still running or it is consumed and lost;
     3. arm the RTC alarm, clear-write-read-back: +FIRST_ALARM_S (90 s),
-       +SLOW_WAKE_S (600 s) after a low-battery halt, and at least +300 s
-       when a killed unit is still stopping (stuck in the kernel), so the
-       alarm cannot fire during the shutdown and be lost;
+       +SLOW_WAKE_S (600 s) after a critical halt, and at least +300 s when
+       a killed unit is still stopping (stuck in the kernel). It also writes
+       the seconds to /run/walle-ups/arm, and the shutdown hook
+       bin/walle-ups-shutdown-alarm arms the alarm again in the last second
+       before power-off, so no shutdown length can use it up early (a hung
+       desktop service held one for 91 s on 2026-11-04);
     4. sync, `systemctl poweroff`. Still running 30 s later: re-arm and
        retry; after 60 s, `systemctl poweroff --force`.
   It warns when the pack floats more than 0.2 V away from S for a minute:
@@ -95,8 +98,9 @@ boot-check mode  (walle-ups-wakecheck.service, early boot, before basic.target)
   denominator; fewer than 4 valid samples, or more than 25 % bad ones,
   fails open. Any present sample boots (and closes the chain). Otherwise,
   on 75 % or more of the valid samples:
-    V <= FLOOR_V, whatever the     power off, +SLOW_WAKE_S (600 s); never
-      current                      capped. No supply is holding the pack at
+    V <= FLOOR_V, whatever the     power off, +WAKE_S (60 s), or
+      current                      +SLOW_WAKE_S (600 s) at V <= CRIT_V; never
+                                   capped. No supply is holding the pack at
                                    S, and a boot's load peak is where the
                                    HY2120 cutoff lands. A present supply
                                    holds the pack at S, so this cannot lock
@@ -216,6 +220,7 @@ DEFAULT_SLOW_WAKE_S = 600       # nearly empty pack: poll less, so the polls do 
 DEFAULT_CHAIN_MAX_WAKES = 24    # about 30 min of power-offs, then boot with a grace period
 DEFAULT_GRACE_S = 600
 DEFAULT_GRACE_FILE = "/run/walle-ups/grace"
+DEFAULT_ARM_FILE = "/run/walle-ups/arm"   # read by bin/walle-ups-shutdown-alarm
 DEFAULT_MISMATCH_V = 0.20       # floating this far from S for a minute: --supply-v is wrong
 DEFAULT_MISMATCH_S = 60.0
 DEFAULT_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
@@ -595,6 +600,24 @@ class StateDir:
             LOG.warning("could not append event %s: %s", event, error)
 
 
+def write_arm(path: str | None, seconds: int) -> bool:
+    """Tell the shutdown hook (bin/walle-ups-shutdown-alarm) to arm +seconds
+    in the last second before power-off. The line is "<seconds> <uptime>":
+    the hook ignores a file more than 600 s old. Never raises."""
+    if not path:
+        return False
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w") as f:
+            f.write(f"{int(seconds)} {int(boot_clock())}\n")
+        os.replace(tmp, path)
+        return True
+    except OSError as error:
+        LOG.warning("could not write the shutdown-hook arm file %s: %s", path, error)
+        return False
+
+
 def boot_clock() -> float:
     """Seconds since this boot. Survives a service restart and ignores the
     wall clock, which jumps when the RTC has reset and NTP corrects it."""
@@ -678,7 +701,8 @@ class Watcher:
                  clock=None, chain_max_wakes: int = DEFAULT_CHAIN_MAX_WAKES,
                  cap_grace_s: float = DEFAULT_GRACE_S,
                  grace_file: str | None = None,
-                 slow_wake_s: int = DEFAULT_SLOW_WAKE_S) -> None:
+                 slow_wake_s: int = DEFAULT_SLOW_WAKE_S,
+                 arm_file: str | None = DEFAULT_ARM_FILE) -> None:
         """`grace_s`: seconds of grace left from the grace file (read_grace).
         `clock`: the timing clock (boot_clock); every timer, window and the
         grace deadline use it, never the wall clock, which jumps when NTP
@@ -693,6 +717,7 @@ class Watcher:
         self.poll_s = float(poll_s)
         self.first_alarm_s = int(first_alarm_s)
         self.slow_wake_s = int(slow_wake_s)
+        self.arm_file = arm_file
         self.kill_services = tuple(kill_services)
         self.detect_only = detect_only
         self.timer = LossTimer(th.loss_s, poll_s, th.gap_s)
@@ -854,6 +879,7 @@ class Watcher:
                           mono - self._halt_at, self._halt_retries, " (forced)" if force else "")
                 self.state.append_event("poweroff_retry", retry=self._halt_retries, force=force)
                 self._arm_alarm(self._halt_alarm_s)
+                write_arm(self.arm_file, self._halt_alarm_s)
                 self.actions.sync()
                 self.actions.poweroff(force=force)
             self.publish(wall, "shutdown")
@@ -1016,7 +1042,7 @@ class Watcher:
         # A low pack polls slowly so the polls do not finish it. A unit that
         # survived the kill (stuck in the kernel) can stretch the shutdown past
         # the first alarm, which would then fire early and be lost.
-        alarm_s = self.slow_wake_s if kind in LOW_KINDS else self.first_alarm_s
+        alarm_s = self.slow_wake_s if kind == KIND_CRIT else self.first_alarm_s
         stuck = [n for n in self.kill_services if self.actions.is_active(n)]
         if stuck:
             alarm_s = max(alarm_s, self.STUCK_ALARM_S)
@@ -1024,6 +1050,7 @@ class Watcher:
         self._halt_alarm_s = alarm_s
         self._halt_at = self._mono
         self._arm_alarm(alarm_s)
+        write_arm(self.arm_file, alarm_s)
         self.actions.sync()
         LOG.warning("systemctl poweroff")
         self.actions.poweroff()
@@ -1088,6 +1115,7 @@ def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: 
                *, duration_s: float = DEFAULT_BOOT_CHECK_S, poll_s: float = DEFAULT_BOOT_POLL_S,
                wake_s: int = DEFAULT_WAKE_S, slow_wake_s: int = DEFAULT_SLOW_WAKE_S,
                chain_max_wakes: int = DEFAULT_CHAIN_MAX_WAKES,
+               arm_file: str | None = DEFAULT_ARM_FILE,
                now_fn=time.time, sleep=time.sleep, dev_wait_s: float = 5.0) -> str:
     """Returns the decision: "present", "nohalt", "inconclusive", "cap" or
     "poweroff". Only "poweroff" has a side effect on the power state."""
@@ -1173,9 +1201,15 @@ def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: 
     if low_n >= need:
         # At or below the floor at boot, whatever the current: no supply is
         # holding the pack at S. Never boot it on a cap (a boot's load peak
-        # is where the HY2120 cutoff lands) and poll slowly. A present supply
-        # holds the pack at S, so this cannot lock a live supply out.
-        kind, seconds, capped = (chain_kind or KIND_FLOOR), slow_wake_s, False
+        # is where the HY2120 cutoff lands). Poll slowly only when the pack
+        # is critical: with 1 ohm cells a half-full pack already reads about
+        # 6.9 V under the boot load (field 2026-11-04), and Kevin wants the
+        # 1-minute poll. A present supply holds the pack at S, so this cannot
+        # lock a live supply out.
+        crit_n = sum(1 for s, c in zip(valid, classes)
+                     if c != PRESENT and s.batt_v <= th.crit_v)
+        seconds = slow_wake_s if crit_n >= need else wake_s
+        kind, capped = (chain_kind or KIND_FLOOR), False
     elif summary["absent"] >= need:
         kind, seconds, capped = (chain_kind or KIND_HARD), wake_s, True
     elif (chain_kind and chain_kind != KIND_SIM
@@ -1211,6 +1245,7 @@ def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: 
     except Exception as error:  # noqa: BLE001
         LOG.error("boot-check: could not arm the RTC alarm (%s); powering off anyway", error)
         state.append_event("alarm_failed", error=str(error), source="boot-check")
+    write_arm(arm_file, seconds)
     actions.sync()
     actions.poweroff()
     return "poweroff"

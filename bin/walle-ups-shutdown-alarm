@@ -1,0 +1,47 @@
+#!/bin/sh
+# WALL-E UPS: re-arm the RTC wake alarm in the last second of a shutdown.
+#
+# Installed as /usr/lib/systemd/system-shutdown/walle-ups-alarm by
+# bin/install_walle_ups.sh. systemd-shutdown runs every executable in that
+# directory with "poweroff", "halt", "reboot" or "kexec" as $1, after all
+# units have stopped and just before the power goes off.
+#
+# bin/walle_ups.py writes the wake seconds to /run/walle-ups/arm when it
+# powers the Pi off for a loss (run mode or the boot check). The watcher arms
+# the alarm itself too, but a slow shutdown can outlast that alarm: on
+# 2026-11-04 a hung desktop service (xdg-document-portal) held a shutdown for
+# 91 s against a 90 s alarm. Arming again here, a moment before power-off,
+# makes the wake independent of the shutdown length. /run is a tmpfs, so the
+# file never outlives its boot: a manual poweroff or the ch5 e-stop (no file)
+# arms nothing.
+#
+# The file holds "<seconds> <uptime when written>". A file more than 600 s
+# old is ignored, so a halt that failed and a later manual poweroff or e-stop
+# in the same boot cannot arm a wake (Grok review 01a1a8af).
+ARM="${WALLE_UPS_ARM:-/run/walle-ups/arm}"
+RTC="${WALLE_UPS_RTC:-/sys/class/rtc/rtc0}"
+UPTIME="${WALLE_UPS_UPTIME:-/proc/uptime}"
+MAX_AGE=600
+
+case "$1" in
+  poweroff|halt) ;;
+  *) exit 0 ;;
+esac
+[ -r "$ARM" ] || exit 0
+line=$(cat "$ARM" 2>/dev/null)
+set -f
+# shellcheck disable=SC2086  # word splitting is the point
+set -- $line
+set +f
+[ $# -eq 2 ] || exit 0
+s=$1
+stamp=$2
+case "$s" in ''|*[!0-9]*) exit 0 ;; esac
+case "$stamp" in ''|*[!0-9]*) exit 0 ;; esac
+[ "$s" -gt 0 ] 2>/dev/null || exit 0
+up=$(cut -d. -f1 "$UPTIME" 2>/dev/null)
+case "$up" in ''|*[!0-9]*) exit 0 ;; esac
+[ $((up - stamp)) -le "$MAX_AGE" ] || exit 0
+echo 0 > "$RTC/wakealarm" 2>/dev/null
+echo "+$s" > "$RTC/wakealarm" 2>/dev/null
+exit 0
