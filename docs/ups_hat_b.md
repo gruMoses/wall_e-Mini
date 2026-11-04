@@ -338,6 +338,22 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 - Found in passing: the OAK enumerates at USB 2 speed (480M) under the
   hub's USB 2 side; the hub's USB 3 side is empty. Nothing in the config
   limits it. Check the OAK-to-hub cable (it must be a USB 3 cable).
+- Main-switch pull in the robot, 2026-11-04 17:27: the HAT current jumped
+  from −46 mA to −1105 mA, then −1646 mA at 6.34 V within 5 s, and the
+  critical rule halted the Pi on one sample (clean: the LED went red, not
+  dark). The extra current is the USB hub: with its own supply off, it
+  back-powers from the Pi's ports, so the HAT also carries the hub, the
+  OAK and the Arduino. 6.34 V is close to the HY2120 cutoff (5.8 to 6.0 V).
+  Fix: cut the 5 V wire in the Pi-to-hub cable (Kevin is getting a USB 3
+  extension to cut). The critical halt's first alarm is now +90 s, not
+  +600 s (1aa9621).
+- The RTK GPS (I2C 0x20) is powered from the Pi's 5 V header pin. The HAT
+  feeds that same line, and it stays live while the Pi is halted (only the
+  Pi's own rails switch off). The RTK therefore runs, and drains the HAT's
+  cells, the whole time the Pi is in standby. Measure its draw. If the
+  module accepts 3.3 V (VERIFY on its datasheet), move its power to the
+  Pi's 3V3 pin, which switches off at the halt. For storage, switch the HAT
+  off either way.
 - Run the pack to the HY2120 cutoff once and confirm that the 5 V drops to
   zero and the Pi boots when mains returns.
 - Kevin plans a custom HAT that can switch its output off after the halt and
