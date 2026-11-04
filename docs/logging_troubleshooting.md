@@ -164,8 +164,8 @@ The per-tick `gps` block gains `utc` (ISO 8601 string, `None` before the
 receiver has a time fix), `cog_deg` and `sog_mps` (course/speed over
 ground; `None` when the receiver reports no course, e.g. stationary),
 `nmea_mode` (the RMC/VTG mode-indicator character), and `geoid_sep_m`.
-`cog_deg`/`sog_mps` are logged only -- nothing in the control path reads
-them yet.
+`cog_deg`/`sog_mps` are logged, and the heading lock reads them
+(`GpsHeadingAligner.update_cog()`; see `docs/gps_heading_alignment.md`).
 
 The slow line gains `gps_health`: `RtkGpsReader.get_health()` --
 `reconnect_count`, `poll_error_count`, `consecutive_i2c_errors`,

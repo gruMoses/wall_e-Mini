@@ -1,3 +1,6 @@
+> Historical (2026-11-03): this file is superseded by CLAUDE.md and config.py.
+> The numbers below are not current.
+
 # RESULT — fable-follow-fixes (2026-09-19)
 
 This document gives the before and after state of the work on branch `fable-follow-fixes`. Section A (follow-me) is on `main` at a0a2776. Section B (heading) is on `main` and deployed. Section C (logging) is on `main` after this commit.

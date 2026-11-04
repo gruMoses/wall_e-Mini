@@ -6,8 +6,14 @@ Run full unit suite:
 
 ```bash
 cd /home/pi/wall_e-Mini
-python3 -m unittest discover -s pi_app/tests -p "test_*.py"
+python3 -m pytest pi_app/tests -q
 ```
+
+Use pytest, not `unittest discover`. Several test files (for example
+`test_teleop.py` and `test_spp_control_gate.py`) use plain `def test_`
+functions and no `TestCase`. `unittest discover` collects 0 cases from them and
+reports no error. pytest is a test-only tool and is not in `requirements.txt`.
+Run `pip install pytest` if it is missing.
 
 Key coverage areas:
 

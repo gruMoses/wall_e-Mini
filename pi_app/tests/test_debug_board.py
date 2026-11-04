@@ -134,6 +134,27 @@ def test_api_ups_returns_200_when_file_missing(client):
     assert "available" in body and "stale" in body
 
 
+def test_debug_page_ups_panel_matches_walle_ups_bridge(client):
+    """The UPS panel names its watcher (bin/walle_ups.py) and carries one cell
+    per field of the walle-ups/1 status file; the cells of the retired HAT are
+    gone, and every u-* id that applyUps() writes to exists in the page."""
+    import re
+
+    body = client.get("/debug").get_data(as_text=True)
+    for cell_id in ("u-mains", "u-battv", "u-battma", "u-supply", "u-loss",
+                    "u-mode", "u-state", "u-errors", "u-hint"):
+        assert f'id="{cell_id}"' in body, cell_id
+    assert "bin/walle_ups.py" in body
+    assert "walle-ups.service" in body
+    for gone in ("u-ac", "u-typec", "u-microusb", "u-protect", "u-swc"):
+        assert f'id="{gone}"' not in body, gone
+    js = body[body.index("function applyUps"):body.index("function pollUps")]
+    used = set(re.findall(r"'(u-[a-z]+)'", js))
+    assert used, "applyUps() references no u-* ids"
+    for ident in used:
+        assert f'id="{ident}"' in body, ident
+
+
 def test_read_ups_status_missing_file(tmp_path):
     st = read_ups_status(str(tmp_path / "nope.json"))
     assert st["available"] is False
@@ -158,42 +179,85 @@ def test_read_ups_status_non_dict_payload(tmp_path):
 
 
 def test_read_ups_status_fresh(tmp_path):
+    # Shape of the bin/walle_ups.py status file (schema walle-ups/1).
     p = tmp_path / "ups_status.json"
     now = 1_000_000.0
     p.write_text(json.dumps({
-        "ts": now - 1.0, "ac_present": True, "typec_mv": 5000, "microusb_mv": 0,
-        "batt_v": 3.9, "batt_ma": 1200.0, "protect_mv": 3400,
-        "detect_only": False, "seconds_without_charge": 0,
+        "schema": "walle-ups/1", "ts": now - 1.0, "ts_loop": now - 0.5,
+        "input": "present", "batt_v": 8.35, "batt_ma": 12.0, "soc_pct": 55,
+        "overflow": False, "supply_v": 8.4, "absent_s": 0.0, "loss_s": 5.0,
+        "state": "monitoring", "mode": "armed", "halt_enabled": True,
+        "errors": 0, "errors_run": 0, "last_error": None, "last_loss": None,
+        "first_alarm_s": 90,
     }))
     st = read_ups_status(str(p), max_age_s=10.0, now=now)
     assert st["available"] is True
     assert st["stale"] is False
-    assert st["ac_present"] is True
-    assert st["typec_mv"] == 5000
-    assert st["batt_v"] == 3.9
-    assert st["protect_mv"] == 3400
+    assert st["input"] == "present"
+    assert st["batt_v"] == 8.35
+    assert st["batt_ma"] == 12.0
+    assert st["soc_pct"] == 55
+    assert st["overflow"] is False
+    assert st["supply_v"] == 8.4
+    assert st["absent_s"] == 0.0
+    assert st["loss_s"] == 5.0
+    assert st["state"] == "monitoring"
+    assert st["mode"] == "armed"
+    assert st["halt_enabled"] is True
+    assert st["errors"] == 0
+    assert st["last_error"] is None
+    assert st["last_loss"] is None
+    assert st["schema"] == "walle-ups/1"
+    assert st["ts_loop"] == now - 0.5
     assert st["age_s"] == pytest.approx(1.0, abs=0.01)
+    # The keys of the retired HAT's daemon must not come back.
+    for gone in ("typec_mv", "ac_present", "microusb_mv", "protect_mv",
+                 "ts_batt", "batt_stale", "detect_only", "seconds_without_charge"):
+        assert gone not in st, gone
 
 
 def test_read_ups_status_stale(tmp_path):
     p = tmp_path / "ups_status.json"
     now = 1_000_000.0
-    p.write_text(json.dumps({"ts": now - 30.0, "ac_present": False}))
+    p.write_text(json.dumps({"ts": now - 30.0, "input": "absent"}))
     st = read_ups_status(str(p), max_age_s=10.0, now=now)
     # Old-but-readable: still "available" so last-known values can be shown
     # greyed out, but flagged stale.
     assert st["available"] is True
     assert st["stale"] is True
+    assert st["input"] == "absent"
     assert st["age_s"] == pytest.approx(30.0, abs=0.01)
 
 
 def test_read_ups_status_missing_ts_is_stale(tmp_path):
     p = tmp_path / "ups_status.json"
-    p.write_text(json.dumps({"ac_present": True}))  # no ts
+    p.write_text(json.dumps({"input": "present"}))  # no ts
     st = read_ups_status(str(p), now=1_000_000.0)
     assert st["available"] is True
     assert st["stale"] is True
     assert st["age_s"] is None
+
+
+def test_read_ups_status_blind_watcher_is_stale(tmp_path):
+    """walle-ups publishes ``ts`` = last SUCCESSFUL INA219 read (None before
+    the first one) and ``ts_loop`` = last poll. A watcher that is alive but
+    cannot read the sensor must look stale, whatever ts_loop says."""
+    p = tmp_path / "ups_status.json"
+    now = 1_000_000.0
+    p.write_text(json.dumps({
+        "schema": "walle-ups/1", "ts": None, "ts_loop": now - 0.2,
+        "input": None, "batt_v": None, "batt_ma": None, "soc_pct": None,
+        "state": "monitoring", "mode": "armed",
+        "errors": 7, "last_error": "OSError: [Errno 121] Remote I/O error",
+    }))
+    st = read_ups_status(str(p), max_age_s=10.0, now=now)
+    assert st["available"] is True
+    assert st["stale"] is True
+    assert st["age_s"] is None
+    assert st["ts_loop"] == now - 0.2
+    assert st["input"] is None
+    assert st["errors"] == 7
+    assert st["last_error"].startswith("OSError")
 
 
 # ---------------------------------------------------------------------------

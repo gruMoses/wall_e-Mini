@@ -181,8 +181,9 @@ class Controller:
         self._follow_me = follow_me
         self._waypoint_nav = waypoint_nav
         self._gesture = gesture_controller
-        # GPS→IMU heading alignment locks only from an explicit forward,
-        # straight manual-RC run, then remains frozen for the armed session.
+        # GPS→IMU heading alignment locks only from an explicit forward
+        # manual run, then the offset is kept for the life of the process,
+        # including disarm. A service restart or an IMU frame break clears it.
         self._gps_heading_aligner = gps_heading_aligner
         self._mode = "MANUAL"  # "MANUAL", "FOLLOW_ME", or "WAYPOINT_NAV"
         self._obstacle_distance_m: float | None = None
@@ -1872,7 +1873,8 @@ class Controller:
         else:
             imu_correction = self._apply_imu_compensation(steering_input, mono_now)
         if wp_in_align:
-            # ALIGN state drives a fixed pivot yaw directly; don't stack an
+            # ALIGN state drives a proportional pivot yaw directly (see
+            # WaypointNavController._pivot_yaw_for_error); don't stack an
             # IMU correction on top. PID state still advances for the DRIVE
             # transition.
             imu_correction = None

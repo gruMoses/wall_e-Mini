@@ -29,7 +29,9 @@ All gates must pass on **distinct GPS samples** (deduped by `GpsReading.timestam
 Fix quality in this codebase (`rtk_gps.py`): `0=none`, `1=GPS`, `2=DGPS`,
 `4=RTK fixed`, `5=RTK float`.
 
-After lock, the offset is **frozen** until the armed session ends. Continuous
+After lock, the offset is **frozen**. The aligner keeps it for the life of the
+process, including disarm. A service restart or an IMU frame break clears it
+(see "Lock persistence and verification" below). Continuous
 EMA refinement is disabled: the 2026-07-12 field trace proved that GPS COG
 during a turn is not the robot body heading and drove the offset through nearly
 200°, producing a self-sustaining circle.
@@ -41,14 +43,20 @@ timestamps clear unlocked history (fail-closed).
 
 ## Armed session lifecycle
 
-`GpsHeadingAligner.reset()` runs on every transition that **ends an armed
-session**:
+The lock outlives the armed session. `Controller._on_armed_session_ended()`
+runs on each transition that **ends an armed session**, and it keeps the lock:
 
 - Manual RC disarm (ch3 low)
 - RC link stale (>1 s)
 - Emergency stop (ch5 latched)
 
-A new arm starts fresh — drive forward with equal manual RC commands on RTK fixed to
+The emergency stop is a special case. The same event schedules
+`sudo shutdown -h now` 5 s later. The Pi halts, the process ends, and the lock
+is gone.
+
+`GpsHeadingAligner.reset()` runs in one place: the IMU frame check in the
+controller (see "Lock persistence and verification" below). A service restart
+also starts unlocked. After a reset or a restart, drive forward on RTK fixed to
 re-lock before waypoint missions.
 
 ## Waypoint navigation gate (field test)
@@ -92,7 +100,7 @@ Dashboard heading card shows `raw° → corrected°` when locked.
    `HDG_OFF(… F)`.
 3. Command a short turn; confirm the offset does not change.
 4. Start waypoint nav — it must succeed only after lock.
-5. Disarm — offset clears (`HDG_OFF(… -)`); re-arm requires a new drive to lock.
+5. Disarm — the offset is kept (`HDG_OFF(… F)` stays); the next arm does not need a new drive to lock. A service restart clears it.
 6. Run a short waypoint mission — compare cross-track error vs pre-alignment baseline.
 
 Disable the gate temporarily with `gps_heading_align.enabled = False` in
@@ -112,11 +120,11 @@ Gates (all fail-closed):
 
 Procedure: with the robot armed and the fix at 4, drive forward at walking pace for about 10 seconds. The path does not need to be straight. The nav page shows "GPS heading alignment locked" and the journal shows the lock line with the sample count and the spread.
 
-The displacement method stays in place; either method can lock first. The offset stays frozen until the armed session ends (`reset()`).
+The displacement method stays in place; either method can lock first. The offset stays frozen for the life of the process, including disarm.
 
 ### Lock persistence and verification (2026-09-19)
 
-The lock is kept across disarm, RC stale and e-stop within one service run (Kevin's decision). The IMU boot frame is continuous across those events: the gyro keeps integrating, ZUPT holds the heading while the robot is parked, and the tracked bias keeps it honest. Two guards replace the old reset:
+The lock is kept across disarm and RC stale within one service run (Kevin's decision). A ch5 e-stop does not keep it: that e-stop halts the Pi 5 s later (`sudo shutdown -h now`), and the halt ends the process. The IMU boot frame is continuous across disarm and RC stale: the gyro keeps integrating, ZUPT holds the heading while the robot is parked, and the tracked bias keeps it honest. Two guards replace the old reset:
 
 1. Verification. While locked, qualifying epochs keep feeding the course-over-ground window. When six epochs agree with each other (spread at most 8 degrees) but disagree with the frozen offset by more than `cog_verify_max_error_deg` (15 degrees), the offset moves to the new value, `lock_source` becomes `"cog-relock"`, `relock_count` increments, and the journal shows a WARNING. Verification happens only in MANUAL mode under the same gates as the lock, so a waypoint run never changes the offset.
 2. Frame discontinuity. Once per second the controller reads the OAK IMU health counters `oak_reconnect_count` and `count_cum_reset`. If either changes while locked, the lock is dropped with a WARNING, because rotation during an outage can be lost. Drive forward at RTK fixed to relock.

@@ -2365,7 +2365,7 @@ class OakDepthReader:
             # Load the device's factory calibration for the socket the depth
             # frame is expressed in. Every OAK ships per-device intrinsics in
             # EEPROM; deriving fx from a hand-entered FOV constant is strictly
-            # worse and is currently wrong (see _depth_intrinsics_for).
+            # worse and is currently wrong (see get_intrinsics / _intrinsics_for).
             self._load_calibration(pipeline, dai, _use_yolo)
 
             self._device_ready.set()

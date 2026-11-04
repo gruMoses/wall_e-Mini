@@ -2,9 +2,14 @@
 
 Adapter MAC: 88:A2:9E:03:1A:07
 
-This project uses an external SPP server process (`wall-e-spp.service`) that
-writes latest BT commands to `/tmp/wall_e_bt_latest.json`. The main control loop
-reads that file and treats commands as valid only while fresh.
+NOTE: Bluetooth SPP is a diagnostics channel. It is not the phone drive path.
+The phone drives through the web teleop (`pi_app/web/teleop.py`, page `/drive`),
+which owns the command file `/tmp/wall_e_bt_latest.json`. The SPP server
+(`wall-e-spp.service`, `pi_app/cli/spp_server.py`) accepts connections and
+parses, acknowledges, and logs commands. Its writes to the command file are
+gated OFF by default (commit `a2628f0`, 2026-07-17). Set
+`WALL_E_SPP_CONTROL_ENABLED=1` on the service unit only for supervised bench
+testing. See `docs/spp_writer_audit.md`.
 
 ### One-time prerequisites
 - Ensure the Bluetooth service is running: `systemctl is-active bluetooth`
@@ -66,11 +71,14 @@ connect <PHONE_MAC>
 - Sequence numbers must strictly increase per connection.
 
 ### Runtime data path
-- `pi_app/cli/spp_server.py` parses incoming commands and writes:
+- `pi_app/web/teleop.py` (class `FileCommandSink`) writes the phone command file:
   - `/tmp/wall_e_bt_latest.json`
   - fields: `left_byte`, `right_byte`, `last_update_epoch_s`
-- `pi_app/app/main.py` reads this file and uses BT override only when command age
-  is `<= 0.6s`.
+- `pi_app/app/main.py` reads this file and uses the override only when command age
+  is `<= 0.6s`. RC arming still gates the motors.
+- `pi_app/cli/spp_server.py` parses incoming SPP commands. It writes the same file
+  only when `WALL_E_SPP_CONTROL_ENABLED` is set (default off). With the gate off it
+  writes nothing, so SPP data cannot reach the motors.
 
 ### Run an RFCOMM SPP server (for testing)
 Install PyBluez from apt (avoids pip restrictions):

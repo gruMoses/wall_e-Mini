@@ -10,8 +10,10 @@ from dataclasses import dataclass
 class GpsHeadingAlignConfig:
     """One-shot GPS alignment for the gyro-only IMU.
 
-    Lock history is accepted only from forward, straight manual-RC motion.
-    Once locked, the offset is frozen until the armed session ends.
+    The displacement lock below wants a forward straight manual run.
+    The COG lock (``cog_lock_enabled``) does not need a straight path.
+    Once locked, the offset is kept for the life of the process, including
+    disarm. A service restart or an IMU frame break clears it.
     """
     enabled: bool = True
     # Calibrated for slower forward manual runs.
@@ -298,9 +300,9 @@ class ObstacleAvoidanceConfig:
     # mask guarded a ~0.67 m wide robot instead of the real 0.82 m and ignored
     # obstacles ~7 cm inside each edge of its own swept path.
     #
-    # This value is now only a FALLBACK: oak_depth._depth_intrinsics_for() reads
-    # the per-unit calibration off the device and uses that. It matters only if
-    # the EEPROM read fails.
+    # This value is now only a FALLBACK: OakDepthReader.get_intrinsics() (through
+    # _intrinsics_for()) reads the per-unit calibration off the device and uses
+    # that. It matters only if the EEPROM read fails.
     camera_hfov_deg: float = 70.0
     min_depth_mm: int = 350            # OAK-D Lite extended disparity minimum (~0.35m)
     min_valid_pct: float = 8.0         # ignore corridor if fewer than this % of pixels are valid
@@ -729,7 +731,8 @@ class FollowMeConfig:
     # turn begins.
     slip_straight_persist_ticks: int = 3
     # Dedicated ceiling for any slip steer feed-forward, well below the global
-    # ±max_steer_offset_byte (25) and at/under the direct cap (18). The TOTAL
+    # ±max_steer_offset_byte and the direct cap (both 32 since 2026-09-20; they
+    # were 25 and 18 when this was written). The TOTAL
     # post-slip steer is additionally clamped to direct_mode_max_steer_byte so slip
     # can never push the emitted steer past the direct cap.
     slip_max_steer_byte: float = 12.0
@@ -752,11 +755,12 @@ class FollowMeConfig:
     max_steer_offset_byte: float = 32.0          # 25 -> 40 on 2026-09-19 (bad 0.22 plant); 40 -> 32 on 2026-09-20, see pid_lateral_kp (was 15 before that)
     # Search-rotation steer magnitude (bytes) while pivoting in place to reacquire
     # a lost target. Was previously read via a phantom getattr fallback (30.0)
-    # that had no backing field and EXCEEDED both max_steer_offset_byte (25) and
-    # direct_mode_max_steer_byte (18). 20 keeps search comfortably under the
-    # global cap (25) while still turning harder than the tighter direct-pursuit
-    # cap (18), matching the pre-existing effective ceiling search operated
-    # under once the (now also slew-capped) emission gate clamps everything.
+    # that had no backing field and EXCEEDED the caps of the time
+    # (max_steer_offset_byte 25, direct_mode_max_steer_byte 18). Since 2026-09-20
+    # both caps are 32, so the search pivot (20) is now SOFTER than direct
+    # pursuit. That is by design: search is gentler than pursuit. The value has
+    # been 20 since 2026-07-05 and was the live value in the validated runs of
+    # 2026-09-20. The (slew-capped) emission gate still clamps everything.
     search_steer_cap_byte: float = 20.0
     # Gain on the trail-tangent/last-known-position bias blended into blind
     # trail-pursuit steer as elapsed lost-time grows (anticipates the turn the
@@ -811,7 +815,7 @@ class FollowMeConfig:
     # ── Direct pursuit steering cap ──────────────────────────────────────────
     direct_mode_max_steer_byte: float = 32.0   # 18 -> 40 on 2026-09-19 (bad 0.22 plant); 40 -> 32 on 2026-09-20, see pid_lateral_kp; the mixer clips at 254 anyway
     # Direct-pursuit forward-speed reduction while the person is off-centre.
-    # The mixer clips at 245. True yaw authority is 0.65-0.71 deg/s per L-R
+    # The mixer clips at 254. True yaw authority is 0.65-0.71 deg/s per L-R
     # byte (~0.45 s lag) from the heading derivative; the 0.22 figure was
     # zero-filled yaw-rate samples. Below the knee, scale is 1.0 (byte-identical).
     direct_turn_speed_knee_norm: float = 0.30
@@ -1253,7 +1257,8 @@ class Config:
     # Waypoint navigation
     waypoint_nav: WaypointNavConfig = WaypointNavConfig()
 
-    # GPS-derived heading alignment (manual forward lock, then frozen)
+    # GPS-derived heading alignment (locks from a forward manual run; the
+    # offset is then kept for the life of the process, including disarm)
     gps_heading_align: GpsHeadingAlignConfig = GpsHeadingAlignConfig()
 
     # Follow Me person-tracking mode

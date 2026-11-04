@@ -9,9 +9,11 @@ single scalar offset so that:
 
     corrected_heading = (raw_imu_heading + offset) mod 360
 
-is referenced to true north for the remainder of the armed session. Other
-modes may consume the corrected heading but cannot collect lock history,
-establish a lock, or refine the frozen offset.
+is referenced to true north for the life of the process, including disarm
+(Controller._on_armed_session_ended keeps the lock). A service restart or an
+IMU frame break (Controller._check_imu_frame_continuity calls reset())
+clears it. Other modes may consume the corrected heading but cannot collect
+lock history, establish a lock, or refine the frozen offset.
 """
 
 from __future__ import annotations
@@ -155,7 +157,11 @@ class GpsHeadingAligner:
         )
 
     def reset(self) -> None:
-        """Drop history and unlock. Use when an armed session ends."""
+        """Drop history and unlock.
+
+        The controller calls this only on an IMU frame discontinuity. A
+        disarm does not call it: the lock is kept for the life of the process.
+        """
         self._offset_deg = 0.0
         self._locked = False
         self._history.clear()
@@ -205,7 +211,8 @@ class GpsHeadingAligner:
         condition from the controller. While it is false on a **new** GPS
         sample, or body yaw exceeds the configured limit, movement history is
         discarded so a later lock cannot include curved motion. Once locked, the
-        offset is frozen until ``reset()``.
+        offset is frozen until ``reset()``. The controller calls ``reset()``
+        only on an IMU frame discontinuity, not on disarm.
         """
         cfg = self._cfg
         if not cfg.enabled:

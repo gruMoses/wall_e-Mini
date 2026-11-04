@@ -20,7 +20,7 @@ Safety thresholds (default):
 
 ## Arduino RC Firmware Mapping
 
-Sketch: `arduino_rc_reader/arduino_rc_reader.ino` (and mirrored top-level copy).
+Sketch: `arduino_rc_reader/arduino_rc_reader.ino`.
 
 ### RC input pins
 

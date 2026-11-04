@@ -531,12 +531,12 @@ _NAV_HTML = r"""<!DOCTYPE html>
         <ul class="event-log" id="eventLog"></ul>
       </div>
       <div class="setting-group">
-        <label>Cruise Speed <span class="setting-val" id="speedVal">40</span></label>
-        <input type="range" id="speedSlider" min="10" max="80" value="40" oninput="document.getElementById('speedVal').textContent=this.value; refreshRouteSummary()">
+        <label>Cruise Speed <span class="setting-val" id="speedVal">@@CRUISE_SPEED@@</span></label>
+        <input type="range" id="speedSlider" min="10" max="80" value="@@CRUISE_SPEED@@" oninput="document.getElementById('speedVal').textContent=this.value; refreshRouteSummary()">
       </div>
       <div class="setting-group">
-        <label>Arrival Radius <span class="setting-val" id="radiusVal">0.5 m</span></label>
-        <input type="range" id="radiusSlider" min="0.3" max="3.0" step="0.1" value="0.5" oninput="document.getElementById('radiusVal').textContent=parseFloat(this.value).toFixed(1)+' m'">
+        <label>Arrival Radius <span class="setting-val" id="radiusVal">@@ARRIVAL_RADIUS@@ m</span></label>
+        <input type="range" id="radiusSlider" min="0.3" max="3.0" step="0.1" value="@@ARRIVAL_RADIUS@@" oninput="document.getElementById('radiusVal').textContent=parseFloat(this.value).toFixed(1)+' m'">
       </div>
     </div>
   </div>
@@ -2387,6 +2387,32 @@ initMap();
 </html>"""
 
 
+# Slider limits in _NAV_HTML (speedSlider / radiusSlider min and max). Keep in sync.
+_SPEED_SLIDER_RANGE = (10, 80)
+_RADIUS_SLIDER_RANGE = (0.3, 3.0)
+
+
+def _render_nav_html() -> str:
+    """Return the page with the slider defaults taken from ``config.waypoint_nav``.
+
+    The page posts the slider values on every start, so a slider literal that
+    differs from the config silently overrides it from the phone (the radius
+    slider said 0.5 m while ``arrival_radius_m`` is 1.0). The template holds
+    placeholders; the values come from the config, clamped to the slider range
+    so the label and the value the slider posts always agree.
+    """
+    wp = config.waypoint_nav
+    lo_s, hi_s = _SPEED_SLIDER_RANGE
+    lo_r, hi_r = _RADIUS_SLIDER_RANGE
+    speed = min(hi_s, max(lo_s, int(wp.cruise_speed_byte)))
+    radius = min(hi_r, max(lo_r, float(wp.arrival_radius_m)))
+    return (
+        _NAV_HTML
+        .replace("@@CRUISE_SPEED@@", str(speed))
+        .replace("@@ARRIVAL_RADIUS@@", f"{radius:.1f}")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Flask Blueprint
 # ---------------------------------------------------------------------------
@@ -2432,7 +2458,7 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
 
     @bp.route("/navigate")
     def navigate_page():
-        return Response(_NAV_HTML, content_type="text/html")
+        return Response(_render_nav_html(), content_type="text/html")
 
     # ── List saved routes ──
 
@@ -2506,8 +2532,8 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
 
         data = request.get_json(force=True)
         wp_list = data.get("waypoints", [])
-        cruise_speed = data.get("cruise_speed", 40)
-        arrival_radius = data.get("arrival_radius", 0.5)
+        cruise_speed = data.get("cruise_speed", config.waypoint_nav.cruise_speed_byte)
+        arrival_radius = data.get("arrival_radius", config.waypoint_nav.arrival_radius_m)
 
         if len(wp_list) < 1:
             return _json_resp({"ok": False, "error": "need at least 1 waypoint"}, 400)
@@ -2664,8 +2690,8 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
             return _json_resp({"ok": False, "error": "teleop session e-stop latched"}, 409)
 
         data = request.get_json(force=True) or {}
-        cruise_speed = int(data.get("cruise_speed", 40))
-        arrival_radius = float(data.get("arrival_radius", 0.5))
+        cruise_speed = int(data.get("cruise_speed", config.waypoint_nav.cruise_speed_byte))
+        arrival_radius = float(data.get("arrival_radius", config.waypoint_nav.arrival_radius_m))
 
         _DIRECTION_BEARING = {
             "north":     0.0,

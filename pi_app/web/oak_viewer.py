@@ -37,11 +37,21 @@ from config import OakWebViewerConfig
 # UPS status bridge (read side)
 # ---------------------------------------------------------------------------
 #
-# The UPSPlus HAT is watched by a *separate* process (scripts/upsPlus_power_daemon.py)
-# that has the I2C bus; WALL-E's control loop never touches it. That daemon
-# atomically publishes a small JSON snapshot to UPS_STATUS_FILE each poll; this
-# reader lets the /debug board show live UPS state without giving the web app
-# any hardware access. Both sides read the same env var so they stay in sync.
+# The Waveshare UPS HAT (B) is watched by a *separate* root process
+# (bin/walle_ups.py, walle-ups.service) that has the I2C bus; WALL-E's control
+# loop never touches it. The HAT has no MCU: its only sensor is an INA219 on
+# the battery-leg shunt, and mains presence is INFERRED from the battery
+# current (a small positive trickle means mains is on the jack; a large
+# negative current means the pack is carrying the Pi). The watcher atomically
+# publishes a small JSON snapshot (schema "walle-ups/1") to UPS_STATUS_FILE on
+# every poll; this reader lets the /debug board show live UPS state without
+# giving the web app any hardware access. Both sides read the same env var so
+# they stay in sync.
+#
+# In that file "ts" is the time of the last SUCCESSFUL INA219 read, so a
+# watcher that is alive but cannot read the sensor looks stale here (it is the
+# same witness bin/i2c_bus_guard.py uses). "ts_loop" is the time of its last
+# poll.
 
 UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
 UPS_STATUS_MAX_AGE_S = 10.0
@@ -50,7 +60,7 @@ UPS_STATUS_MAX_AGE_S = 10.0
 def read_ups_status(path: str = UPS_STATUS_FILE,
                     max_age_s: float = UPS_STATUS_MAX_AGE_S,
                     now: float | None = None) -> dict:
-    """Read the UPS status JSON published by the power daemon.
+    """Read the UPS status JSON published by bin/walle_ups.py.
 
     Always returns a dict with at least ``available`` and ``stale`` bools —
     a missing file, unreadable path, corrupt/undecodable JSON, or a non-dict
@@ -83,21 +93,31 @@ def read_ups_status(path: str = UPS_STATUS_FILE,
         "stale": bool(stale),
         "age_s": round(age_s, 2) if age_s is not None else None,
         "ts": ts,
-        "ac_present": data.get("ac_present"),
-        "typec_mv": data.get("typec_mv"),
-        "microusb_mv": data.get("microusb_mv"),
+        # Time of the watcher's last poll (the process is alive), and the
+        # file schema ("walle-ups/1").
+        "ts_loop": data.get("ts_loop"),
+        "schema": data.get("schema"),
+        # Mains presence, inferred from the battery current:
+        # "present" | "absent" | "unknown" | "above_supply" (None before the
+        # first successful read).
+        "input": data.get("input"),
         "batt_v": data.get("batt_v"),
         "batt_ma": data.get("batt_ma"),
-        "protect_mv": data.get("protect_mv"),
-        # Battery/protect fields refresh at a slower cadence than the whole file
-        # and are suppressed entirely during power-transfer windows (the daemon
-        # minimizes I2C to the UPS MCU then). ts_batt is when they were last
-        # actually read; batt_stale flags that they are last-known, not fresh —
-        # the page greys them so the owner isn't misled during an outage.
-        "ts_batt": data.get("ts_batt"),
-        "batt_stale": data.get("batt_stale"),
-        "detect_only": data.get("detect_only"),
-        "seconds_without_charge": data.get("seconds_without_charge"),
+        "soc_pct": data.get("soc_pct"),
+        "overflow": data.get("overflow"),
+        "supply_v": data.get("supply_v"),
+        # Loss timer: seconds of "absent" samples so far, and the threshold
+        # at which the watcher halts the Pi (when halting is enabled).
+        "absent_s": data.get("absent_s"),
+        "loss_s": data.get("loss_s"),
+        # "monitoring" | "countdown" | "shutdown" | "loss-ignored"
+        "state": data.get("state"),
+        # "armed" | "detect-only" | "nohalt-flag"
+        "mode": data.get("mode"),
+        "halt_enabled": data.get("halt_enabled"),
+        "errors": data.get("errors"),
+        "last_error": data.get("last_error"),
+        "last_loss": data.get("last_loss"),
     }
 
 
@@ -1203,16 +1223,16 @@ _DEBUG_HTML = """<!DOCTYPE html>
   <div class="panel" id="p-ups">
     <h2>UPS <span id="ups-tag" class="stale-tag"></span></h2>
     <div class="grid">
-      <div class="cell"><div class="k">AC Power</div><span id="u-ac" class="pill grey">&mdash;</span></div>
-      <div class="cell"><div class="k">Type-C In</div><span id="u-typec" class="val grey">&mdash;</span></div>
-      <div class="cell"><div class="k">Micro-USB In</div><span id="u-microusb" class="val grey">&mdash;</span></div>
-      <div class="cell"><div class="k">Battery Voltage</div><span id="u-battv" class="val grey">&mdash;</span></div>
-      <div class="cell"><div class="k">Battery Current</div><span id="u-battma" class="val grey">&mdash;</span></div>
-      <div class="cell"><div class="k">Protect Threshold</div><span id="u-protect" class="val grey">&mdash;</span></div>
-      <div class="cell"><div class="k">Secs Without Charge</div><span id="u-swc" class="val grey">&mdash;</span></div>
-      <div class="cell"><div class="k">Daemon Mode</div><span id="u-mode" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Mains</div><span id="u-mains" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Battery</div><span id="u-battv" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Current</div><span id="u-battma" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Supply Setpoint</div><span id="u-supply" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Loss Timer</div><span id="u-loss" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Mode</div><span id="u-mode" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">State</div><span id="u-state" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Errors</div><span id="u-errors" class="val grey">&mdash;</span></div>
     </div>
-    <div class="hint" id="u-hint">Waiting for /tmp/ups_status.json from upsPlus_power_daemon.py &hellip;</div>
+    <div class="hint" id="u-hint">Waiting for /tmp/ups_status.json from bin/walle_ups.py (walle-ups.service) &hellip;</div>
   </div>
 
   <div class="panel" id="p-temp">
@@ -1414,7 +1434,7 @@ sse.onmessage = function(e) {
   pushTempSample(d, Date.now());
 };
 
-/* ── UPS poll (separate daemon via /api/ups) ───────────────────────── */
+/* ── UPS poll (separate watcher via /api/ups) ──────────────────────── */
 function applyUps(u) {
   var panel = document.getElementById('p-ups');
   var tag = document.getElementById('ups-tag');
@@ -1423,10 +1443,10 @@ function applyUps(u) {
     panel.classList.add('stale');
     tag.textContent = 'UNAVAILABLE';
     var reason = u && u.reason ? u.reason : 'no data';
-    hint.textContent = 'UPS status unavailable (' + reason + '). Is upsPlus_power_daemon.py running?';
-    ['u-ac','u-mode'].forEach(function(id){ pill(id, '—', 'grey'); });
-    ['u-typec','u-microusb','u-battv','u-battma','u-protect','u-swc'].forEach(function(id){ val(id,'—','grey'); });
-    watch('ac', 'ups_ac_present', undefined, null, null);
+    hint.textContent = 'UPS status unavailable (' + reason + '). Is walle-ups.service running? (bin/walle_ups.py)';
+    ['u-mains','u-mode'].forEach(function(id){ pill(id, '—', 'grey'); });
+    ['u-battv','u-battma','u-supply','u-loss','u-state','u-errors'].forEach(function(id){ val(id,'—','grey'); });
+    watch('mains', 'ups_mains', undefined, null, null);
     return;
   }
   if (u.stale) {
@@ -1439,41 +1459,46 @@ function applyUps(u) {
     tag.textContent = '';
     hint.textContent = 'Live — updated ' + (u.age_s != null ? u.age_s + 's ago' : 'just now') + '.';
   }
-  var ac = u.ac_present;
-  pill('u-ac', ac == null ? '—' : (ac ? 'PRESENT' : 'MISSING'),
-       ac == null ? 'grey' : (ac ? 'green' : 'red'));
-  val('u-typec', num(u.typec_mv, 0, ' mV'), u.typec_mv == null ? 'grey' : '');
-  val('u-microusb', num(u.microusb_mv, 0, ' mV'), u.microusb_mv == null ? 'grey' : '');
-  /* Battery/protect come from the daemon's supplemental read, which is
-     suppressed during power-transfer windows and throttled to a slow cadence
-     to keep I2C off the UPS MCU. When batt_stale, these are last-known (not
-     fresh this poll) — grey them and tag with age so the owner isn't misled. */
-  var bstale = !!u.batt_stale;
-  var bage = (u.ts_batt != null) ? Math.max(0, Math.round(Date.now()/1000 - u.ts_batt)) : null;
-  var bsuffix = (bstale && bage != null) ? ' (' + bage + 's old)' : bstale ? ' (stale)' : '';
-  val('u-battv', num(u.batt_v, 3, ' V') + (u.batt_v == null ? '' : bsuffix),
-      (u.batt_v == null || bstale) ? 'grey' : '');
+  /* ts only advances on a good INA219 read, so a watcher that cannot read the
+     sensor shows STALE; its last read error says why. */
+  if (u.last_error) hint.textContent += ' Last error: ' + u.last_error;
+  /* The HAT has no MCU: the watcher INFERS mains from the battery current.
+     A missing or unknown value renders '—', never PRESENT. */
+  var inp = u.input;
+  var mtxt = '—', mcls = 'grey';
+  if (inp === 'present') { mtxt = 'PRESENT'; mcls = 'green'; }
+  else if (inp === 'absent') { mtxt = 'ABSENT'; mcls = 'red'; }
+  else if (inp === 'unknown') { mtxt = 'UNKNOWN'; mcls = 'grey'; }
+  else if (inp === 'above_supply') { mtxt = 'ABOVE SUPPLY'; mcls = 'amber'; }
+  pill('u-mains', mtxt, mcls);
+  val('u-battv', num(u.batt_v, 3, ' V') +
+      ((u.batt_v == null || u.soc_pct == null) ? '' : ' ~' + u.soc_pct + '%'),
+      u.batt_v == null ? 'grey' : '');
   if (u.batt_ma == null) { val('u-battma', '—', 'grey'); }
-  else if (bstale) { val('u-battma', u.batt_ma.toFixed(0) + ' mA' + bsuffix, 'grey'); }
   else {
     var mlbl = u.batt_ma > 20 ? ' (charging)' : u.batt_ma < -20 ? ' (discharging)' : '';
     val('u-battma', u.batt_ma.toFixed(0) + ' mA' + mlbl,
         u.batt_ma > 20 ? 'green' : u.batt_ma < -20 ? 'amber' : '');
   }
-  val('u-protect', num(u.protect_mv, 0, ' mV'),
-      (u.protect_mv == null || bstale) ? 'grey' : '');
-  var swc = u.seconds_without_charge;
-  val('u-swc', swc == null ? '—' : swc + ' s',
-      swc == null ? 'grey' : swc > 0 ? 'amber' : 'green');
-  /* Older daemons may not publish detect_only at all — render unknown as
-     '—', never as ARMED (a false "armed" claim about power protection). */
-  var dm = u.detect_only;
-  pill('u-mode', dm == null ? '—' : (dm ? 'DETECT-ONLY' : 'ARMED'),
-       dm == null ? 'grey' : (dm ? 'amber' : 'green'));
+  val('u-supply', num(u.supply_v, 2, ' V'), u.supply_v == null ? 'grey' : '');
+  var absS = u.absent_s, lossS = u.loss_s;
+  val('u-loss', (absS == null ? '—' : absS) + ' / ' + (lossS == null ? '—' : lossS) + ' s',
+      absS == null ? 'grey' : absS > 0 ? 'amber' : 'green');
+  /* A missing or unknown mode renders '—', never ARMED (a false "armed"
+     claim about power protection). */
+  var md = u.mode;
+  var dtxt = '—', dcls = 'grey';
+  if (md === 'armed') { dtxt = 'ARMED'; dcls = 'green'; }
+  else if (md === 'detect-only') { dtxt = 'DETECT-ONLY'; dcls = 'amber'; }
+  else if (md === 'nohalt-flag') { dtxt = 'NOHALT'; dcls = 'red'; }
+  pill('u-mode', dtxt, dcls);
+  var st = u.state;
+  val('u-state', st == null ? '—' : st, st == null ? 'grey' : st === 'shutdown' ? 'red' : '');
+  val('u-errors', u.errors == null ? '—' : u.errors, u.errors == null ? 'grey' : '');
 
-  watch('ac', 'ups_ac_present', ac, boolStr, function(v){ return v ? 'up' : 'down'; });
-  watch('upsmode', 'ups_daemon_mode',
-        dm == null ? undefined : (dm ? 'detect-only' : 'armed'), null, null);
+  watch('mains', 'ups_mains', inp == null ? undefined : inp, null,
+        function(v){ return v === 'present' ? 'up' : 'down'; });
+  watch('upsmode', 'ups_daemon_mode', md == null ? undefined : md, null, null);
 }
 function pollUps() {
   fetch('/api/ups', {cache: 'no-store'})

@@ -23,7 +23,7 @@ VESC driver converts command bytes to RPM-like command units:
 
 `config.py` default:
 
-- `vesc.max_erpm = 15000`
+- `vesc.max_erpm = 20000` (raised from 15000 on 2026-09-19; 1.6 m/s top speed in every mode)
 
 ## CAN Frame Format
 

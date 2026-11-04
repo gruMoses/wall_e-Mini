@@ -1,3 +1,6 @@
+> Historical (2026-11-03): this file is superseded by CLAUDE.md and config.py.
+> The numbers below are not current.
+
 # WALL-E Mini TODO
 
 Last updated: 2026-04-18

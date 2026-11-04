@@ -11,9 +11,9 @@ The IMU steering compensation system uses an IMU (accelerometer + gyroscope) to:
 
 ## Hardware
 
-The active IMU is the **OAK-D Lite onboard BMI270** (gyroscope + accelerometer only — **no magnetometer**). Heading is integrated from the gyro and is **relative to the robot's orientation at startup**, not referenced to magnetic north.
+The IMU is the **OAK-D Lite onboard BMI270** (gyroscope + accelerometer only — **no magnetometer**). `imu_source = "oak_d"` in `config.py` (pinned 2026-09-19). Heading is integrated from the gyro and is **relative to the robot's orientation at startup**, not referenced to magnetic north.
 
-The system also supports external I2C breakout boards (ICM-20948, or ISM330DHCX + MMC5983MA combo). Source priority is controlled by `imu_source` in `config.py` (default `"auto"`: external first, OAK-D BMI270 fallback). The magnetometer is disabled by default (`imu_use_magnetometer = False`).
+Do not restore `imu_source = "auto"`. It tries an external I2C IMU first, and that path publishes the opposite yaw-rate sign. The external path is unvalidated and has no tests; see `docs/external_imu_postmortem.md`. Magnetometer fusion is off (`imu_use_magnetometer = False`).
 
 ## Sign convention
 
@@ -64,30 +64,7 @@ The system implements a PID controller:
 
 ## Configuration
 
-Edit `config.py` to adjust IMU steering parameters:
-
-```python
-@dataclass(frozen=True)
-class ImuSteeringConfig:
-    enabled: bool = True
-    kp: float = 1.7
-    ki: float = 0.4
-    kd: float = 0.08
-    max_correction: int = 220
-    deadband_deg: float = 0.9
-    max_integral: float = 80.0
-    steering_neutral_enter: float = 0.08
-    steering_neutral_exit: float = 0.15
-    neutral_dwell_s: float = 0.0
-    straight_equal_tolerance_us: int = 120
-    straight_min_throttle_us: int = 80
-    straight_relative_tolerance_pct: float = 0.35
-    straight_disengage_hysteresis_s: float = 0.80
-    correction_zero_at_steering: float = 0.50
-    update_rate_hz: float = 80.0
-```
-
-Magnetometer fusion is off by default (`imu_use_magnetometer = False`). If an external I2C IMU with a magnetometer is present and you want to use it, set `imu_use_magnetometer = True` in `Config`.
+The live values are in `ImuSteeringConfig` in `config.py`; do not copy numbers from this document.
 
 ### Tuning Guidelines
 
@@ -97,32 +74,19 @@ Magnetometer fusion is off by default (`imu_use_magnetometer = False`). If an ex
 4. **Add D gain**: To reduce oscillations and overshoot
 5. **Adjust deadband**: Increase if corrections are too sensitive
 
-## Installation
+## Setup
 
-1. **Install dependencies**:
-   ```bash
-   cd /home/pi/wall_e-Mini
-   pip install -r requirements.txt
-   ```
+The OAK-D Lite is the IMU. It needs no separate IMU hardware and no I2C wiring. The steering compensator calibrates the gyro bias at startup (`ImuSteeringCompensator._initialize_imu`), so keep the robot still during boot. Boot calibration and mount orientation are in `docs/heading_tuning.md`. Install the Python dependencies with `pip install -r requirements.txt`.
 
-2. **Connect IMU hardware** to I2C bus
-
-3. **Test IMU functionality** (available tools):
-   ```bash
-   cd /home/pi/wall_e-Mini
-   python3 -m pi_app.cli.calibrate_imu
-   python3 -m pi_app.cli.advanced_imu_calibration
-   python3 -m pi_app.cli.imu_axis_mapping_tuner
-   python3 -m pi_app.cli.imu_cli_manual
-   ```
+The CLI tools `calibrate_imu`, `advanced_imu_calibration`, `imu_axis_mapping_tuner` and `imu_cli_manual` work with the external I2C IMU only. Do not use them for the OAK IMU.
 
 ## Runtime Source Selection
 
-`config.py` controls IMU source priority:
-- `imu_source="auto"`: external I2C IMU first, fallback to OAK-D IMU
-- `imu_source="external"`: external only
-- `imu_source="oak_d"`: OAK-D onboard IMU only
-- `imu_source="none"`: disable IMU steering
+`config.py` sets `imu_source = "oak_d"` (pinned 2026-09-19). The IMU is the OAK-D onboard BMI270.
+
+- `"oak_d"`: the OAK-D onboard IMU. This is the only validated source.
+- `"none"`: disables IMU steering.
+- `"auto"` and `"external"` select the external I2C IMU path. That path is unvalidated, has no tests, and publishes the opposite yaw-rate sign. Do not restore `"auto"`: it lets a plugged-in external board take over the heading.
 
 ## Integration
 
@@ -148,9 +112,7 @@ if imu_status:
 ## Troubleshooting
 
 ### IMU Not Detected
-- Check I2C connections (for external breakout)
-- Verify OAK-D is connected and OAK pipeline is running (for BMI270)
-- Run `i2cdetect -y 1` to scan for external devices
+- Verify the OAK-D is connected and the OAK pipeline is running (the BMI270 is on the OAK)
 
 ### Excessive Corrections
 - Reduce `kp` gain
@@ -175,7 +137,7 @@ if imu_status:
 
 ## Performance Characteristics
 
-- **Update rate**: 20 Hz (configurable)
+- **Update rate**: set by `ImuSteeringConfig.update_rate_hz` in `config.py`
 - **Latency**: < 50ms from IMU reading to motor correction
 - **Accuracy**: ±2° heading hold (configurable deadband)
 - **Fallback time**: Immediate (< 1ms) when IMU unavailable

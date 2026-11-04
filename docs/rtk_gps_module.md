@@ -91,7 +91,7 @@ Two behavior changes from before this commit:
   (registers 0-6) changes from the last publish. The data-flush register
   is not read at all for this gate.
 
-## Course and speed over ground (logging only)
+## Course and speed over ground
 
 `GpsReading.cog_deg` / `.sog_mps` / `.nmea_mode` come from the RMC
 sentence, read every `GpsConfig.cog_read_every` epochs (default: every
@@ -101,9 +101,11 @@ failure never breaks the position read — it increments `rmc_errors`
 (visible in `get_health()`) and leaves `cog_deg`/`sog_mps`/`nmea_mode` at
 `None` for that epoch.
 
-**As of this commit, `cog_deg` is not fed into the heading aligner or any
-control path — it is logged only**, pending a separate hardware register
-check.
+`cog_deg` and `sog_mps` feed the heading lock. The controller passes them
+to `GpsHeadingAligner.update_cog()` on each GPS epoch (`Controller.process`
+in `pi_app/control/controller.py`). The lock needs RTK fixed, forward manual
+intent, enough speed, and a low yaw rate; see `docs/gps_heading_alignment.md`.
+The fields are also logged.
 
 ## Health
 

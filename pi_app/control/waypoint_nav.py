@@ -8,8 +8,9 @@ POSITIVE ``yaw_cmd`` (``mix_to_bytes``: +yaw = right).
 
 State machine:
 - IDLE: no active waypoint sequence -> (v=0, yaw=0)
-- ALIGN: heading error too large to drive forward; pivot in place at a fixed
-         normalized yaw command until the error drops below align_threshold_deg
+- ALIGN: heading error too large to drive forward; pivot in place at a yaw
+         command proportional to the error (at most pivot_yaw_cmd, with a
+         pivot_yaw_min floor) until the error drops below align_threshold_deg
 - DRIVE: drive forward with PID-based steering; fall back to ALIGN if the
          heading error exceeds recovery_threshold_deg
 - ARRIVE: inside arrival_radius_m of the current target -> (v=0, yaw=0) before

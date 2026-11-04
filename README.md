@@ -1,16 +1,19 @@
 # wall_e-Mini
 
-Modular Raspberry Pi robot control stack for RC/manual drive, Bluetooth override,
-IMU steering compensation, OAK-D obstacle avoidance + Follow Me, and optional RTK
-waypoint navigation.
+Modular Raspberry Pi robot control stack for RC/manual drive, phone drive (web
+teleop), IMU steering compensation, OAK-D obstacle avoidance + Follow Me, and
+optional RTK waypoint navigation.
 
 ## Features
 
 - RC input from Arduino over serial (`ch1..ch5`)
 - Arm/disarm + emergency safety state machine
-- Bluetooth SPP control path through external `wall-e-spp.service`
+- Phone drive through the web teleop (`pi_app/web/teleop.py`, page `/drive`):
+  arming ceremony, latched e-stop, 250 ms deadman; RC stays the safety authority
+- Bluetooth SPP diagnostics server (`wall-e-spp.service`); its control writes are
+  gated OFF by default
 - VESC over CAN (`can0`) with Arduino motor-driver fallback
-- IMU steering hold (external IMU preferred, OAK IMU fallback)
+- IMU steering hold (OAK-D onboard BMI270; `imu_source = "oak_d"`)
 - OAK-D Lite obstacle avoidance + person-following mode
 - Activity-triggered recording (H.265 + MCAP) and web viewer
 - Optional RTK GPS waypoint navigation
@@ -39,10 +42,15 @@ Service-based runtime in production typically uses `run_main.sh` via
 
 ## Key Runtime Notes
 
-- Main loop consumes BT commands from `/tmp/wall_e_bt_latest.json` written by
-  `wall-e-spp.service`.
-- `run_main.sh` attempts to start UPS monitoring (`upsplus-power.service`) when
-  UPS hardware is detected on I2C.
+- The phone drives through the web teleop (`pi_app/web/teleop.py`), which owns
+  the command file `/tmp/wall_e_bt_latest.json`. The main loop reads that file
+  and applies it only while it is fresh (600 ms). RC arming still gates the motors.
+- `wall-e-spp.service` is a Bluetooth SPP diagnostics server. Its control writes
+  to the command file are gated OFF by default (commit `a2628f0`, 2026-07-17;
+  environment variable `WALL_E_SPP_CONTROL_ENABLED`). See `docs/spp_writer_audit.md`.
+- The UPS watcher is a separate root service, `walle-ups.service`
+  (`bin/walle_ups.py`, Waveshare UPS HAT (B)), installed by
+  `bin/install_walle_ups.sh`. See `docs/ups_hat_b.md`.
 - Safety defaults:
   - `ch3` high/low arms/disarms
   - `ch4` high enters Follow Me, low exits
@@ -54,8 +62,12 @@ Run unit tests:
 
 ```bash
 cd /home/pi/wall_e-Mini
-python3 -m unittest discover -s pi_app/tests -p "test_*.py"
+python3 -m pytest pi_app/tests -q
 ```
+
+Use pytest, not `unittest discover`. Several test files use plain `def test_`
+functions and no `TestCase`. `unittest discover` collects 0 cases from them and
+reports no error.
 
 ## PID Debug Mode
 
@@ -89,15 +101,17 @@ GPS COG heading alignment is **implemented** (software); field validation is pen
 - **VESC telemetry / RPM** — *resolved 2026-06-11*, bench-verified with
   `tools/vesc_rpm_bench.py` (wheels off ground): commanded +1500 eRPM read back
   with −1.0% / −0.4% steady-state error and zero parse errors. The old "always
-  0" reading did not reproduce. Still open: confirm nonzero readback on a real
-  drive, then decide whether to re-enable the velocity PID (`speed_kp/ki/kd`
-  are currently 0).
+  0" reading did not reproduce. The velocity PID is on (`speed_kp` 0.6,
+  `speed_ki` 0.15, `speed_kd` 0.0 since 2026-09-19; see `FollowMeConfig` in
+  `config.py`), and the 2026-09-20 follow-me logs show nonzero
+  `left_rpm`/`right_rpm`.
 - **IMU heading drift**: OAK-D Lite BMI270 is gyro+accel only (no magnetometer). Heading drifts over time and is relative to startup orientation.
-- **Camera corridor — field check pending.** The camera geometry was measured
-  from the device EEPROM on 2026-07-26 and several constants were corrected
-  (see "Camera calibration" below). The obstacle corridor is now *wider* than
-  it was, which is the safe direction, but it has not been checked against the
-  physical robot. Do not run an autonomous mode until it has.
+- **Camera corridor — field-validated.** The camera geometry comes from the
+  device EEPROM (measured 2026-07-26; several constants were corrected, see
+  "Camera calibration" in `CLAUDE.md`). Follow-me and waypoint navigation were
+  field-validated on 2026-09-19 and 2026-09-20 (see `CLAUDE.md`). Still open:
+  `detect_min_person_height_m` 1.20 was tuned under the old vertical FOV and
+  needs one recorded walk replayed through `tools/replay_follow_me_log.py`.
 
 ## Documentation Index
 
