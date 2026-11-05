@@ -54,6 +54,12 @@ robot disarmed.
    `python3 -m pip install --user --break-system-packages depthai==3.6.1`
    (the system Python is marked externally managed). Do not use 3.12.0 for the
    first step. To go back, install `depthai==3.3.0` the same way.
+   Before this step, test 3.6.1 without changing what wall-e uses: a copy
+   is staged in `/home/pi/depthai-3.6.1` (installed 2026-11-05 with
+   `pip install --no-deps --target`; it imports, and it has `BasaltVIO` and
+   the `UNCALIBRATED` reports). Run a tool on it with
+   `PYTHONPATH=/home/pi/depthai-3.6.1 python3 tools/depthai_upgrade_check.py`.
+   wall-e still imports 3.3.0 from the user site-packages.
 3. Run `python3 tools/depthai_upgrade_check.py` again. The expected result is
    PASS, with the `UNCALIBRATED` family showing gravity on -Y, and the same
    fx and cx. If the robot's family does not show gravity on -Y, stop and go
