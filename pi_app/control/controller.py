@@ -290,6 +290,11 @@ class Controller:
         self._actual_right_motor_temp_c: Optional[float] = None
         self._actual_left_duty: Optional[float] = None
         self._actual_right_duty: Optional[float] = None
+        # Bus input voltage (V) and input current (A, negative = regen) per VESC.
+        self._actual_left_bus_v: Optional[float] = None
+        self._actual_right_bus_v: Optional[float] = None
+        self._actual_left_bus_a: Optional[float] = None
+        self._actual_right_bus_a: Optional[float] = None
         self._vesc_rx_frame_count: int = 0
         self._vesc_rx_parse_error_count: int = 0
         self._vesc_rx_recv_error_count: int = 0
@@ -1471,6 +1476,10 @@ class Controller:
                 self._actual_right_motor_temp_c = getattr(_telem, "right_motor_temp_c", None)
                 self._actual_left_duty = getattr(_telem, "left_duty_cycle", None)
                 self._actual_right_duty = getattr(_telem, "right_duty_cycle", None)
+                self._actual_left_bus_v = getattr(_telem, "left_voltage_v", None)
+                self._actual_right_bus_v = getattr(_telem, "right_voltage_v", None)
+                self._actual_left_bus_a = getattr(_telem, "left_current_in_a", None)
+                self._actual_right_bus_a = getattr(_telem, "right_current_in_a", None)
                 # Convert the SIGNED mean eRPM to forward wheel speed (m/s). The
                 # signed mean cancels the steering differential (left = v + yaw,
                 # right = v − yaw), so a turn does not read as overspeed to the
@@ -1552,6 +1561,10 @@ class Controller:
                     self._actual_right_motor_temp_c = None
                     self._actual_left_duty = None
                     self._actual_right_duty = None
+                    self._actual_left_bus_v = None
+                    self._actual_right_bus_v = None
+                    self._actual_left_bus_a = None
+                    self._actual_right_bus_a = None
                 else:
                     self._telem_stale_warned = False
 
@@ -1605,6 +1618,10 @@ class Controller:
                 self._actual_right_temp_c = None
                 self._actual_left_motor_temp_c = None
                 self._actual_right_motor_temp_c = None
+                self._actual_left_bus_v = None
+                self._actual_right_bus_v = None
+                self._actual_left_bus_a = None
+                self._actual_right_bus_a = None
             if isinstance(_rx_health, dict):
                 self._vesc_rx_frame_count = int(_rx_health.get("rx_frame_count", self._vesc_rx_frame_count))
                 self._vesc_rx_parse_error_count = int(
@@ -2335,6 +2352,14 @@ class Controller:
         )
         telemetry["vesc_left_duty"] = self._actual_left_duty
         telemetry["vesc_right_duty"] = self._actual_right_duty
+        # Bus input voltage / input current / motor current per VESC; None when
+        # missing or stale. Run-log vesc block: l_bus_v, l_bus_a, l_motor_a.
+        telemetry["vesc_left_bus_v"] = self._actual_left_bus_v
+        telemetry["vesc_right_bus_v"] = self._actual_right_bus_v
+        telemetry["vesc_left_bus_a"] = self._actual_left_bus_a
+        telemetry["vesc_right_bus_a"] = self._actual_right_bus_a
+        telemetry["vesc_left_motor_a"] = self._actual_left_current_a
+        telemetry["vesc_right_motor_a"] = self._actual_right_current_a
         telemetry["vesc_rx_frame_count"] = self._vesc_rx_frame_count
         telemetry["vesc_rx_parse_error_count"] = self._vesc_rx_parse_error_count
         telemetry["vesc_rx_recv_error_count"] = self._vesc_rx_recv_error_count

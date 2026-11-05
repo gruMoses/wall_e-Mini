@@ -393,6 +393,65 @@ class TestControllerPackLowLatch(unittest.TestCase):
         self.assertFalse(telem["vesc_pack_low_latched"])
 
 
+class TestControllerVescBusTelemetry(unittest.TestCase):
+    """Bus voltage, input current and motor current per VESC reach the telemetry
+    dict (and from there the run log) and clear to None when the VESC goes stale."""
+
+    class _FakeVescTelemetry:
+        left_rpm = 100
+        right_rpm = 100
+        left_voltage_v = 54.5
+        right_voltage_v = 54.6
+        left_current_in_a = -6.5
+        right_current_in_a = -5.0
+        left_current_a = -18.2
+        right_current_a = -17.9
+
+        def __init__(self, left_status_age_s=0.01):
+            self.left_status_age_s = left_status_age_s
+            self.right_status_age_s = 0.01
+
+    class _FakeVescMotor(FakeMotor):
+        def __init__(self):
+            super().__init__()
+            self.status_age_s = 0.01
+
+        def get_telemetry(self):
+            return TestControllerVescBusTelemetry._FakeVescTelemetry(self.status_age_s)
+
+    def _process(self, motor):
+        c = Controller(motor_driver=motor, arm_relay=FakeRelay(),
+                       shutdown_scheduler=FakeShutdown())
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000,
+                      ch5_us=1000, last_update_epoch_s=0.0)
+        _, _, telem = c.process(rc, now_epoch_s=0.3)
+        return telem
+
+    def test_bus_values_in_telemetry(self):
+        telem = self._process(self._FakeVescMotor())
+        self.assertEqual(telem["vesc_left_bus_v"], 54.5)
+        self.assertEqual(telem["vesc_right_bus_v"], 54.6)
+        self.assertEqual(telem["vesc_left_bus_a"], -6.5)
+        self.assertEqual(telem["vesc_right_bus_a"], -5.0)
+        self.assertEqual(telem["vesc_left_motor_a"], -18.2)
+        self.assertEqual(telem["vesc_right_motor_a"], -17.9)
+
+    def test_bus_values_none_when_a_vesc_goes_stale(self):
+        motor = self._FakeVescMotor()
+        motor.status_age_s = 1.0  # past the 0.5 s staleness cut-off
+        telem = self._process(motor)
+        for key in ("vesc_left_bus_v", "vesc_right_bus_v",
+                    "vesc_left_bus_a", "vesc_right_bus_a",
+                    "vesc_left_motor_a", "vesc_right_motor_a"):
+            self.assertIn(key, telem)
+            self.assertIsNone(telem[key])
+
+    def test_bus_keys_none_without_vesc_telemetry(self):
+        telem = self._process(FakeMotor())
+        self.assertIsNone(telem["vesc_left_bus_v"])
+        self.assertIsNone(telem["vesc_right_bus_a"])
+
+
 class TestFollowMeNoTargetRegression(unittest.TestCase):
     """Bug #2: flipping ch4 (follow-me) while armed with no person in frame
     must NOT raise UnboundLocalError on the telemetry dict."""

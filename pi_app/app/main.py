@@ -1205,6 +1205,15 @@ def run() -> int:
                             )
                         except Exception:
                             _oak_animals_for_log = None
+                    # Bus peak-hold since the previous written line; the take
+                    # resets the driver's window, so only this call site makes it.
+                    _vesc_peaks_for_log = None
+                    _take_peaks = getattr(motor_driver, "take_bus_peaks", None)
+                    if callable(_take_peaks):
+                        try:
+                            _vesc_peaks_for_log = _take_peaks()
+                        except Exception:
+                            _vesc_peaks_for_log = None
                     log_obj = build_log_obj(
                         now_ts=now_ts,
                         src=src,
@@ -1226,6 +1235,7 @@ def run() -> int:
                         events=events,
                         oak_camera_health=oak_camera_health,
                         oak_animals=_oak_animals_for_log,
+                        vesc_bus_peaks=_vesc_peaks_for_log,
                     )
                     line = json.dumps(log_obj)
                     # Do not print structured JSON to console; keep file logging only

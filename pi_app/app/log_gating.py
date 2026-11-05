@@ -371,6 +371,7 @@ def build_log_obj(
     events,
     oak_camera_health=None,
     oak_animals=None,
+    vesc_bus_peaks=None,
 ) -> dict:
     """Build the per-tick structured JSON log object.
 
@@ -393,6 +394,9 @@ def build_log_obj(
     _oak = oak_camera_health if isinstance(oak_camera_health, dict) else {}
     _g = telem.get("gesture") if isinstance(telem.get("gesture"), dict) else {}
     _au = telem.get("arms_up") if isinstance(telem.get("arms_up"), dict) else {}
+    # The caller passes VescCanDriver.take_bus_peaks() here, once per written
+    # line (the take resets the window); None keeps the peak keys null.
+    _bus_peaks = vesc_bus_peaks if isinstance(vesc_bus_peaks, dict) else {}
     return {
         "ts": round(now_ts, 3),
         "ts_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
@@ -592,6 +596,20 @@ def build_log_obj(
             "r_motor_temp_c": telem.get("vesc_right_motor_temp_c"),
             "l_duty": telem.get("vesc_left_duty"),
             "r_duty": telem.get("vesc_right_duty"),
+            # Bus input voltage (V), input current (A, negative = regen into the
+            # pack) and motor current (A), latest per VESC; None when missing or
+            # stale. The *_max / *_min keys hold the peak in any frame since the
+            # previous log line (VescCanDriver.take_bus_peaks).
+            "l_bus_v": telem.get("vesc_left_bus_v"),
+            "r_bus_v": telem.get("vesc_right_bus_v"),
+            "l_bus_a": telem.get("vesc_left_bus_a"),
+            "r_bus_a": telem.get("vesc_right_bus_a"),
+            "l_motor_a": telem.get("vesc_left_motor_a"),
+            "r_motor_a": telem.get("vesc_right_motor_a"),
+            "l_bus_v_max": _bus_peaks.get("left_bus_v_max"),
+            "r_bus_v_max": _bus_peaks.get("right_bus_v_max"),
+            "l_bus_a_min": _bus_peaks.get("left_bus_a_min"),
+            "r_bus_a_min": _bus_peaks.get("right_bus_a_min"),
         },
         "motor": to_int({"L": cmd.left_byte, "R": cmd.right_byte}),
         "safety": {"armed": cmd.is_armed, "emergency": cmd.emergency_active},

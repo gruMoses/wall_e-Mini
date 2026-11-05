@@ -60,6 +60,11 @@ _CAN_PACKET_STATUS_5 = 27
 # threshold as a marginal pack sags and rebounds).
 _PACK_LOW_RECOVERY_HYST_V = 2.0
 
+# A bus voltage / input current older than this reads as None in get_telemetry().
+# Same 0.5 s as the controller's STATUS(9) staleness cut-off; STATUS_4 and
+# STATUS_5 have their own frame times, so they get their own check.
+_BUS_STALE_S = 0.5
+
 
 @dataclass
 class _MotorTelemetry:
@@ -74,6 +79,11 @@ class _MotorTelemetry:
     last_status_s: float = 0.0
     last_status4_s: float = 0.0
     last_status5_s: float = 0.0
+    # Peak-hold since the last take_bus_peaks(): the highest bus voltage and the
+    # most negative input current (regen into the pack) in ANY frame, so a spike
+    # shorter than one log line still shows. None = no frame since the last take.
+    bus_v_max: Optional[float] = None
+    bus_in_a_min: Optional[float] = None
 
 
 @dataclass
@@ -99,6 +109,13 @@ class VescTelemetry:
     left_duty_cycle: Optional[float] = None
     right_duty_cycle: Optional[float] = None
     voltage_v: Optional[float] = None
+    # Per-VESC bus input voltage (STATUS_5, V) and input current (STATUS_4, A;
+    # negative = regen into the pack). None when never received or older than
+    # _BUS_STALE_S. voltage_v above is the pack-watchdog max and never goes stale.
+    left_voltage_v: Optional[float] = None
+    right_voltage_v: Optional[float] = None
+    left_current_in_a: Optional[float] = None
+    right_current_in_a: Optional[float] = None
     timestamp: float = 0.0
     can_send_alert: bool = False
     can_send_fail_count: int = 0
@@ -287,6 +304,10 @@ class VescCanDriver:
             readings = [v for v in (lv, rv) if v is not None]
             voltage = max(readings) if readings else None
             now = time.monotonic()
+
+            def _fresh(value: Optional[float], last_s: float) -> Optional[float]:
+                return value if (last_s > 0.0 and now - last_s <= _BUS_STALE_S) else None
+
             telem = VescTelemetry(
                 left_rpm=l.rpm,
                 right_rpm=r.rpm,
@@ -299,6 +320,10 @@ class VescCanDriver:
                 left_duty_cycle=l.duty_cycle,
                 right_duty_cycle=r.duty_cycle,
                 voltage_v=voltage,
+                left_voltage_v=_fresh(l.voltage_v, l.last_status5_s),
+                right_voltage_v=_fresh(r.voltage_v, r.last_status5_s),
+                left_current_in_a=_fresh(l.current_in_a, l.last_status4_s),
+                right_current_in_a=_fresh(r.current_in_a, r.last_status4_s),
                 timestamp=max(l.last_status_s, r.last_status_s),
                 left_status_age_s=(now - l.last_status_s) if l.last_status_s > 0.0 else None,
                 right_status_age_s=(now - r.last_status_s) if r.last_status_s > 0.0 else None,
@@ -320,6 +345,28 @@ class VescCanDriver:
         _rx_thread = self._rx_thread
         telem.rx_thread_alive = _rx_thread.is_alive() if _rx_thread is not None else None
         return telem
+
+    def take_bus_peaks(self) -> dict:
+        """Return the bus peaks since the previous call, then reset them.
+
+        The RX thread sees every STATUS frame (~48 Hz per VESC), so a spike that
+        falls between two log lines still lands here. Per side: the highest bus
+        input voltage (V) and the most negative input current (A, regen into the
+        pack). A value is None when no frame of that kind arrived since the last
+        call. Call it from the log writer only: each call starts a new window.
+        """
+        with self._telem_lock:
+            l = self._left_telem
+            r = self._right_telem
+            peaks = {
+                "left_bus_v_max": l.bus_v_max,
+                "right_bus_v_max": r.bus_v_max,
+                "left_bus_a_min": l.bus_in_a_min,
+                "right_bus_a_min": r.bus_in_a_min,
+            }
+            l.bus_v_max = l.bus_in_a_min = None
+            r.bus_v_max = r.bus_in_a_min = None
+        return peaks
 
     def get_rx_health(self) -> dict:
         """Return CAN RX health counters for diagnostics/telemetry UI."""
@@ -482,6 +529,8 @@ class VescCanDriver:
             t.temp_fet_c = temp_fet_raw / 10.0
             t.temp_motor_c = temp_motor_raw / 10.0
             t.current_in_a = current_in_raw / 10.0
+            if t.bus_in_a_min is None or t.current_in_a < t.bus_in_a_min:
+                t.bus_in_a_min = t.current_in_a
             t.last_status4_s = now
 
     def _parse_status5(self, motor: str, data: bytes, now: float) -> None:
@@ -495,6 +544,8 @@ class VescCanDriver:
         with self._telem_lock:
             t = self._telem_for(motor)
             t.voltage_v = voltage_raw / 10.0
+            if t.bus_v_max is None or t.voltage_v > t.bus_v_max:
+                t.bus_v_max = t.voltage_v
             t.last_status5_s = now
 
     # ──────────────────────────────────────────────────────────────────────────

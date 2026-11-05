@@ -753,6 +753,145 @@ class TestRxLoopStaleBlockContainment(unittest.TestCase):
             d.shutdown()
 
 
+class TestBusVoltageAndPeaks(unittest.TestCase):
+    """Bus input voltage / current per VESC and the peak-hold between log lines.
+
+    Regen braking pushes energy back onto the pack; with the BMS charge FET open
+    the bus rises toward the VESC over-voltage fault. The run log needs the
+    latest values and a peak that survives a spike shorter than one log line.
+    """
+
+    def _driver(self) -> VescCanDriver:
+        d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg())
+        d._bus = _FakeBus()
+        return d
+
+    def _telem(self, d: VescCanDriver, now: float):
+        # An RPM frame is required for get_telemetry() to return a snapshot.
+        d._parse_status("left", _status_frame(2, 100, 1.0, 0.1).data, now)
+        telem = d.get_telemetry()
+        self.assertIsNotNone(telem)
+        return telem
+
+    def test_latest_values_reach_snapshot_per_side(self):
+        d = self._driver()
+        now = time.monotonic()
+        d._parse_status5("left", _status5_frame(2, 54.5).data, now)
+        d._parse_status5("right", _status5_frame(1, 55.0).data, now)
+        d._parse_status4("left", _status4_frame(2, 30.0, 40.0, -6.5).data, now)
+        d._parse_status4("right", _status4_frame(1, 30.0, 40.0, 3.5).data, now)
+        telem = self._telem(d, now)
+        self.assertAlmostEqual(telem.left_voltage_v, 54.5, places=1)
+        self.assertAlmostEqual(telem.right_voltage_v, 55.0, places=1)
+        self.assertAlmostEqual(telem.left_current_in_a, -6.5, places=1)
+        self.assertAlmostEqual(telem.right_current_in_a, 3.5, places=1)
+        # Motor current is the existing STATUS(9) field.
+        self.assertAlmostEqual(telem.left_current_a, 1.0, places=1)
+
+    def test_latest_values_none_when_never_received(self):
+        d = self._driver()
+        telem = self._telem(d, time.monotonic())
+        self.assertIsNone(telem.left_voltage_v)
+        self.assertIsNone(telem.right_voltage_v)
+        self.assertIsNone(telem.left_current_in_a)
+        self.assertIsNone(telem.right_current_in_a)
+
+    def test_latest_values_none_when_stale(self):
+        """STATUS_4/5 keep their own frame times: RPM traffic must not keep a
+        dead bus voltage or current looking fresh."""
+        d = self._driver()
+        now = time.monotonic()
+        d._parse_status5("left", _status5_frame(2, 54.5).data, now - 2.0)
+        d._parse_status4("left", _status4_frame(2, 30.0, 40.0, -6.5).data, now - 2.0)
+        d._parse_status5("right", _status5_frame(1, 55.0).data, now)
+        d._parse_status4("right", _status4_frame(1, 30.0, 40.0, 3.5).data, now)
+        telem = self._telem(d, now)
+        self.assertIsNone(telem.left_voltage_v)
+        self.assertIsNone(telem.left_current_in_a)
+        self.assertAlmostEqual(telem.right_voltage_v, 55.0, places=1)
+        self.assertAlmostEqual(telem.right_current_in_a, 3.5, places=1)
+
+    def test_peaks_none_before_any_frame(self):
+        peaks = self._driver().take_bus_peaks()
+        self.assertEqual(peaks, {
+            "left_bus_v_max": None, "right_bus_v_max": None,
+            "left_bus_a_min": None, "right_bus_a_min": None,
+        })
+
+    def test_voltage_peak_catches_spike_between_reads(self):
+        d = self._driver()
+        now = time.monotonic()
+        for v in (54.0, 61.5, 54.5):
+            d._parse_status5("left", _status5_frame(2, v).data, now)
+        # The latest reading has already fallen back; the peak still has the spike.
+        telem = self._telem(d, now)
+        self.assertAlmostEqual(telem.left_voltage_v, 54.5, places=1)
+        self.assertAlmostEqual(d.take_bus_peaks()["left_bus_v_max"], 61.5, places=1)
+
+    def test_peaks_reset_after_a_read(self):
+        d = self._driver()
+        now = time.monotonic()
+        d._parse_status5("left", _status5_frame(2, 61.5).data, now)
+        d._parse_status4("left", _status4_frame(2, 30.0, 40.0, -9.5).data, now)
+        first = d.take_bus_peaks()
+        self.assertAlmostEqual(first["left_bus_v_max"], 61.5, places=1)
+        self.assertAlmostEqual(first["left_bus_a_min"], -9.5, places=1)
+        # No frames since the read: nothing to report, not a repeat of the old peak.
+        second = d.take_bus_peaks()
+        self.assertIsNone(second["left_bus_v_max"])
+        self.assertIsNone(second["left_bus_a_min"])
+        # The next window starts fresh, so a lower value is now the peak.
+        d._parse_status5("left", _status5_frame(2, 54.5).data, now)
+        self.assertAlmostEqual(d.take_bus_peaks()["left_bus_v_max"], 54.5, places=1)
+
+    def test_current_peak_is_most_negative(self):
+        d = self._driver()
+        now = time.monotonic()
+        for a in (3.5, -12.5, -4.0, 1.0):
+            d._parse_status4("right", _status4_frame(1, 30.0, 40.0, a).data, now)
+        self.assertAlmostEqual(d.take_bus_peaks()["right_bus_a_min"], -12.5, places=1)
+
+    def test_current_peak_is_lowest_value_when_never_negative(self):
+        d = self._driver()
+        now = time.monotonic()
+        for a in (8.5, 2.5, 6.0):
+            d._parse_status4("left", _status4_frame(2, 30.0, 40.0, a).data, now)
+        self.assertAlmostEqual(d.take_bus_peaks()["left_bus_a_min"], 2.5, places=1)
+
+    def test_peaks_are_per_side(self):
+        d = self._driver()
+        now = time.monotonic()
+        d._parse_status5("left", _status5_frame(2, 58.0).data, now)
+        d._parse_status4("right", _status4_frame(1, 30.0, 40.0, -7.5).data, now)
+        peaks = d.take_bus_peaks()
+        self.assertAlmostEqual(peaks["left_bus_v_max"], 58.0, places=1)
+        self.assertIsNone(peaks["right_bus_v_max"])
+        self.assertIsNone(peaks["left_bus_a_min"])
+        self.assertAlmostEqual(peaks["right_bus_a_min"], -7.5, places=1)
+
+    def test_short_frames_do_not_touch_peaks(self):
+        d = self._driver()
+        now = time.monotonic()
+        d._parse_status5("left", b"\x00" * 5, now)   # needs 6 bytes
+        d._parse_status4("left", b"\x00" * 7, now)   # needs 8 bytes
+        peaks = d.take_bus_peaks()
+        self.assertIsNone(peaks["left_bus_v_max"])
+        self.assertIsNone(peaks["left_bus_a_min"])
+
+    def test_rx_thread_feeds_peaks(self):
+        d = VescCanDriver(left_id=2, right_id=1, vesc_cfg=_Cfg())
+        d._bus = _FakeBus()
+        d.start()
+        try:
+            _inject(d, _status5_frame(2, 54.5), _status5_frame(2, 62.5), _status5_frame(2, 54.0),
+                    _status4_frame(2, 30.0, 40.0, -11.5), _status4_frame(2, 30.0, 40.0, 2.0))
+            peaks = d.take_bus_peaks()
+            self.assertAlmostEqual(peaks["left_bus_v_max"], 62.5, places=1)
+            self.assertAlmostEqual(peaks["left_bus_a_min"], -11.5, places=1)
+        finally:
+            d.shutdown()
+
+
 class TestPackLowLatch(unittest.TestCase):
     """Revised low-voltage contract (2026-07-10): plausibility floor + a
     recoverable pack-low latch, and NO OS shutdown. Uses realistic 13S voltages
