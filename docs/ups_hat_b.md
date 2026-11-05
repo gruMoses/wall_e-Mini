@@ -360,7 +360,12 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   link in the journal. Idle `oak.det_latency_s` p50 0.196 s, p90 0.211 s,
   depth 15 fps (the same as at USB 2). The A-to-C cable wires one side of
   the C plug only, so the plug orientation is load-bearing: mark it. Not
-  checked yet: the RC link with the remote on (USB 3 noise near 2.4 GHz).
+  checked yet: the RC link at range (USB 3 noise near 2.4 GHz); at close
+  range on the stand at 15:15 the channels were clean. Grok (session
+  `01a1ad8f`) advised forcing USB 2 with `maxUsbSpeed=HIGH` because the
+  pipeline does not need the bandwidth. Kevin's decision, 2026-11-05: keep
+  USB 3, it may be needed for more of the camera's capabilities. If the RC
+  link drops at range, force USB 2 in the config first.
   CAUTION: the unplug for the turn-over made depthai 3.3.0 abort at
   14:59:06 (`Resource deadlock avoided` in `PipelineImpl::wait`, the
   self-join that 3.6.1 fixes). systemd restarted wall-e before the camera
