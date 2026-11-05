@@ -47,8 +47,26 @@ class TestImuReportNames(unittest.TestCase):
             with self.subTest(version=version):
                 self.assertEqual(imu_report_names(version), UNCAL)
 
-    def test_unknown_version_keeps_the_validated_raw_path(self):
-        self.assertEqual(imu_report_names(""), RAW)
+    def test_unparseable_version_falls_back_to_the_enum(self):
+        class OldEnum:  # 3.3.0: no ACCELEROMETER_UNCALIBRATED
+            ACCELEROMETER_RAW = GYROSCOPE_RAW = GYROSCOPE_UNCALIBRATED = object()
+
+        class NewEnum(OldEnum):  # 3.6.1+
+            ACCELEROMETER_UNCALIBRATED = object()
+
+        for version in ("", "v3.6.1", "3.6", "unknown", None):
+            with self.subTest(version=version):
+                self.assertEqual(imu_report_names(version, NewEnum), UNCAL)
+                self.assertEqual(imu_report_names(version, OldEnum), RAW)
+                self.assertEqual(imu_report_names(version), RAW)
+
+    def test_a_parsed_version_wins_over_the_enum(self):
+        class NewEnum:
+            ACCELEROMETER_UNCALIBRATED = object()
+
+        # 3.6.0 had no RAW change, whatever its enum holds.
+        self.assertEqual(imu_report_names("3.6.0", NewEnum), RAW)
+        self.assertEqual(imu_report_names("3.6.1.dev0", NewEnum), UNCAL)
 
     def test_names_exist_in_the_depthai_enum_when_installed(self):
         try:
@@ -59,7 +77,7 @@ class TestImuReportNames(unittest.TestCase):
         # real wheel (a file on disk with a version) can answer this.
         if not getattr(dai, "__file__", None) or not hasattr(dai, "__version__"):
             self.skipTest("a test stand-in replaced depthai")
-        for name in imu_report_names(getattr(dai, "__version__", "")):
+        for name in imu_report_names(getattr(dai, "__version__", ""), dai.IMUSensor):
             self.assertTrue(hasattr(dai.IMUSensor, name), name)
 
 

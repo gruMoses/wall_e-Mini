@@ -89,7 +89,7 @@ def main() -> int:
         return 2
 
     if args.imu_report == "auto":
-        accel_name, gyro_name = imu_report_names(dai.__version__)
+        accel_name, gyro_name = imu_report_names(dai.__version__, dai.IMUSensor)
     else:
         accel_name, gyro_name = REPORTS[args.imu_report]
 

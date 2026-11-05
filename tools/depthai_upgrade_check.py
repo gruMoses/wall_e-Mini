@@ -145,7 +145,7 @@ def main() -> int:
     print(f"CAM_A 640x400 fx={fx:.2f} cx={cx:.2f} (expect {EXPECTED_FX} / {EXPECTED_CX})"
           f"   {'PASS' if intr_ok else 'FAIL'}")
 
-    robot_accel, robot_gyro = imu_report_names(version)
+    robot_accel, robot_gyro = imu_report_names(version, dai.IMUSensor)
     robot_family = next(
         (fam for fam, (a, g) in FAMILIES.items() if robot_accel in a and robot_gyro in g),
         None,

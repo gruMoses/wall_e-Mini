@@ -51,8 +51,9 @@ robot disarmed.
    and the `RAW` family with gravity on -Y.
 2. Install the new version for the user that runs wall-e (it uses the
    system `python3` with the user site-packages):
-   `python3 -m pip install --user depthai==3.6.1`. Do not use 3.12.0 for the
-   first step. To go back: `python3 -m pip install --user depthai==3.3.0`.
+   `python3 -m pip install --user --break-system-packages depthai==3.6.1`
+   (the system Python is marked externally managed). Do not use 3.12.0 for the
+   first step. To go back, install `depthai==3.3.0` the same way.
 3. Run `python3 tools/depthai_upgrade_check.py` again. The expected result is
    PASS, with the `UNCALIBRATED` family showing gravity on -Y, and the same
    fx and cx. If the robot's family does not show gravity on -Y, stop and go
@@ -87,6 +88,20 @@ Runs to do (wall-e stopped, robot moved by hand or on the stand):
 2. A 90 degree right turn on the chalk marks: the yaw change and its sign.
 3. A straight push along a tape: the distance against the tape.
 4. The CPU figure that the tool prints, at 30 fps and at 60 fps.
+
+## 6. Open items
+
+- Grok review 2026-11-05 (session `01a1adba`): the boot gravity check in
+  `oak_imu` only logs a warning. A wrong IMU frame then gives a wrong
+  heading without a stop. Make a failed gravity check (gravity not on -Y,
+  or a magnitude far from 1 g) disable the heading-dependent features
+  (MANUAL heading hold, waypoint navigation) until a restart. This is a
+  behaviour change: get Kevin's decision first.
+- Adopted from the same review: an unparseable depthai version now selects
+  the IMU report from the enum, not RAW.
+- When the OAK is missing at startup, wall-e runs without the camera until
+  the next restart. Decide with Kevin whether wall-e must start the camera
+  reader anyway and let its supervisor wait for the device.
 
 ## Appendix: Technical Names
 

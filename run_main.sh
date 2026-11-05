@@ -74,6 +74,10 @@ cd "$APP_DIR"
 # Set-but-empty disables /drive token auth. To re-enable: delete this line
 # (auto-generates a chmod-600 token file) or set a value here.
 export WALL_E_TELEOP_TOKEN=""
+# depthai 3.6+ runs AutoCalibration by default, which can change the camera
+# geometry the corridor uses; keep it off until evaluated (docs/depthai_upgrade.md).
+# Older depthai ignores the variable.
+export DEPTHAI_AUTOCALIBRATION="${DEPTHAI_AUTOCALIBRATION:-OFF}"
 
 # --pid-debug spams ~30 journal lines/sec (SD wear, unreadable logs).
 # Re-add it temporarily when actively debugging the PID loops.

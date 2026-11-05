@@ -40,8 +40,9 @@ logger = logging.getLogger(__name__)
 # depthai 3.6+ runs AutoCalibration at pipeline start by default, and it can
 # change the calibration the corridor and person geometry are built on (see
 # "Camera calibration" in CLAUDE.md). Keep it off until it has been evaluated
-# on this unit; set DEPTHAI_AUTOCALIBRATION explicitly to override. Set here,
-# before any depthai import in this process. Older depthai ignores it.
+# on this unit; set DEPTHAI_AUTOCALIBRATION explicitly to override. pi_app
+# imports depthai only inside functions, after this module has loaded, and
+# run_main.sh exports the same default for the service. Older depthai ignores it.
 os.environ.setdefault("DEPTHAI_AUTOCALIBRATION", "OFF")
 
 # depthai 3.6.1 changed the IMU RAW reports: before, RAW was pre-rotated into
@@ -61,11 +62,20 @@ def _depthai_version_tuple(version: str) -> Optional[tuple]:
     return tuple(int(part) for part in m.groups())
 
 
-def imu_report_names(depthai_version: str) -> tuple:
-    """IMU report names (accelerometer, gyroscope) that arrive in the RDF frame."""
+def imu_report_names(depthai_version: str, imu_sensor_enum=None) -> tuple:
+    """IMU report names (accelerometer, gyroscope) that arrive in the RDF frame.
+
+    The version decides. When it cannot be parsed, the enum decides instead:
+    ACCELEROMETER_UNCALIBRATED arrived with the 3.6.1 RAW change, so its
+    presence means RAW is no longer RDF. Falling back to RAW there would put
+    the yaw on the sensor's own axes without any error.
+    """
+    uncal = ("ACCELEROMETER_UNCALIBRATED", "GYROSCOPE_UNCALIBRATED")
     parsed = _depthai_version_tuple(depthai_version)
-    if parsed is not None and parsed >= _IMU_UNCALIBRATED_IS_RDF_SINCE:
-        return ("ACCELEROMETER_UNCALIBRATED", "GYROSCOPE_UNCALIBRATED")
+    if parsed is not None:
+        return uncal if parsed >= _IMU_UNCALIBRATED_IS_RDF_SINCE else ("ACCELEROMETER_RAW", "GYROSCOPE_RAW")
+    if imu_sensor_enum is not None and hasattr(imu_sensor_enum, uncal[0]):
+        return uncal
     return ("ACCELEROMETER_RAW", "GYROSCOPE_RAW")
 
 
@@ -2330,7 +2340,9 @@ class OakDepthReader:
             # IMU node (BMI270: accel + gyro at 100 Hz), in the RDF frame
             # on every depthai version (see imu_report_names).
             imu_node = pipeline.create(dai.node.IMU)
-            accel_report, gyro_report = imu_report_names(getattr(dai, "__version__", ""))
+            accel_report, gyro_report = imu_report_names(
+                getattr(dai, "__version__", ""), dai.IMUSensor
+            )
             imu_node.enableIMUSensor(getattr(dai.IMUSensor, accel_report), 100)
             imu_node.enableIMUSensor(getattr(dai.IMUSensor, gyro_report), 100)
             imu_node.setBatchReportThreshold(1)
