@@ -2,6 +2,48 @@
 
 Date: 2026-09-19. Device: OAK-D Lite (RVC2), depthai 3.3.0, Python 3.11 on the Pi 5. This document answers two questions from Kevin: "Should the OAK-D Lite heading have worked without host-side work?" and "Which OAK-D features do we not use, or use incorrectly?" A 41-agent research pass fetched the Luxonis documentation and compared it with `pi_app/hardware/oak_depth.py`. Each claim below has a source URL in section 7. Claims marked VERIFY need a check on the unit before you act on them.
 
+## 0. Update 2026-11-05 (research agent, after the OAK reached USB 3)
+
+The OAK now links at USB 3 (5000M). Idle detection latency did not change
+(p50 0.196 s), so the current pipeline does not need the bandwidth. USB 3
+matters for 1080p and larger RGB to the host, 60 fps stereo for VIO, and
+raw multi-stream capture. Items marked V were checked against the source;
+U is not verified.
+
+Stale or wrong in this document:
+
+- The `RAW` IMU path is not safe across an upgrade. From depthai 3.6.1,
+  `RAW` is captured directly from the IMU, not pre-rotated to RDF; the old
+  behaviour is `UNCALIBRATED` (V, v3.6.1 release notes). Refer to the
+  depthai item in `docs/NEXT_SESSION.md`.
+- `SpatialDetectionNetwork` and `ObjectTracker` already exist in the code
+  on the MobileNet fallback path (V, `oak_depth.py`). The on-device
+  tracker is box-only (U), so it would not fix the tracklet-id churn, and
+  the host depth sampler and `TrackletTracker` carry field-tuned safety
+  logic. The gain from on-device detection is host CPU and a newer model,
+  not a large accuracy step.
+- A ready RVC2 model needs no converter: HubAI lists
+  `yolov6-nano:r2-coco-512x288` (U for this pipeline). The newer parsers
+  (YOLO26 in 3.6.1, YOLOv12 in 3.8.0) need an upgrade.
+- Subpixel and extended disparity may now be used together, with the
+  median filter limited to 1024 disparity (U, stereo depth page).
+- `FeatureTracker` as a yaw brake is superseded by `BasaltVIO` (host-side
+  on RVC2, early access; `Odometry` message from 3.11). Yaw stays relative,
+  so the GPS COG lock is still needed. The example runs 60 fps stereo,
+  against the load-bearing 15 fps cap. Run it log-only first.
+- Missing here: AprilTag (host node on RVC2, or `cv2.aruco` on the preview
+  frames today) for self-parking at a dock; record and replay with
+  calibration (`DEPTHAI_REPLAY`, 3.6.1); AutoCalibration on by default
+  from 3.6; `PointCloud` is host-only on RVC2.
+
+Ranked next steps from that research: (1) the depthai upgrade, with the
+two cautions in `docs/NEXT_SESSION.md`; (2) AprilTag docking on host
+frames; (3) a detector refresh through an NN Archive or HubAI model, with
+full person/animal re-validation; (4) record and replay for offline
+tuning; (5) `BasaltVIO` log-only; (6) on-device stereo filters on
+recorded depth; (7) a crop-zoom second stage for the operator beyond 7 m
+and for poultry.
+
 ## 1. Short answer
 
 1. The heading could not "just work" on this camera. The OAK-D Lite has a BMI270. The BMI270 is a 6-axis part: gyroscope and accelerometer, no magnetometer, and no on-chip sensor fusion. Luxonis lists ROTATION_VECTOR and GAME_ROTATION_VECTOR as "No" for the BMI270. Absolute heading from this IMU is not possible. Host-side gyro integration is the correct design for this part.
