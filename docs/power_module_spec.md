@@ -44,9 +44,21 @@ changed these items, most serious first:
    pull-downs on Q1 and Q2, the timer capacitor fixed at 39 nF with the
    vendor constants (3.7), an MCU check of the timer clock and a stuck-on
    detector (R-26, R-30), the storage arithmetic (4.3: 3 mA off current
-   gives about 3.5 months, not 8), the STM32G071CBT6 package (48 pins,
-   not 64), wire gauges (3.12), new risks R-26 to R-31, new tests T-21
+   on the 7 Ah pack gives about 6 weeks), the STM32G071CBT6 package
+   (48 pins, not 64), wire gauges (3.12), new risks R-26 to R-31, new tests T-21
    and T-22, open questions 21 to 25, and a Grok review (11.8).
+
+Update, 2026-11-05 (after `docs/battery_settings.md`, commit 9c5daff).
+The pack is 13S NMC, 7 Ah. The BMS (JHB-R24TH-V1.3) trips its
+overvoltage protection at the end of every full charge, and its charge
+low-temperature protection (1 C) and its 40 A charge over-current
+protection also open the charge FET. Those are the conditions where
+regen has no path. Section 3.2a now refers to the VESC and BMS targets
+of that document in place of the 55.5/57 V regen-cutoff numbers, and
+records the right VESC's 0.9 V reading offset. The `l_max_vin`
+proposal stays an open question with its brake-loss trade-off (open
+question 22). The storage table (4.3), the grace-window energy (4.4)
+and open questions 15, 20 and 24 now use these facts.
 
 Status: research draft. Nothing is ordered. No part is sampled. Each
 part number below was checked on the manufacturer's page or a
@@ -104,8 +116,8 @@ The module makes four things:
 
 With the main switch off, the module takes only leakage from the pack.
 The expected value is under 10 uA at 25 C. The datasheet maximums allow
-more, so test T-16 measures it (4.3). The Daly BMS itself takes 0.5 mA
-asleep (4.3).
+more, so test T-16 measures it (4.3). The BMS itself takes about 0.5 mA
+asleep (a Daly figure; VERIFY on the JHB-R24TH, 4.3).
 
 WARNING: Do not connect the brick to the battery tap until the bus
 conditions in 3.2a are true. With the VESC settings found on 2026-11-04
@@ -129,7 +141,7 @@ Assumptions are marked (A). Kevin's words are quoted.
 
 | # | Requirement | Source |
 |---|---|---|
-| R1 | Input: 13S Li-ion pack, 37.7 V (BMS cut) to 54.6 V (full). Design working input 60 V. Each part on the battery tap and the ignition lead survives 100 V for 100 ms. The robot holds the bus at or below about 61 V for any event longer than 100 ms (3.2a); until it does, the brick does not go on the bus. The 12 V converter follows 3.2. | Kevin: "up to 60 V straight from the battery". `config.py` lines 225-242. 100 V surge: `docs/pi_power_architecture.md` section 4. Bus limit: this review, 3.2a. |
+| R1 | Input: 13S Li-ion NMC pack, 7 Ah, 37.7 V (design minimum; the BMS pack undervoltage protection is 40.0 V, `docs/battery_settings.md`) to 54.6 V (full). Design working input 60 V. Each part on the battery tap and the ignition lead survives 100 V for 100 ms. The robot holds the bus at or below about 61 V for any event longer than 100 ms (3.2a); until it does, the brick does not go on the bus. The 12 V converter follows 3.2. | Kevin: "up to 60 V straight from the battery". `config.py` lines 225-242. 100 V surge: `docs/pi_power_architecture.md` section 4. Bus limit: this review, 3.2a. |
 | R2 | The board carries pack power only in the Pi power block: one battery tap of 2 A or less, fused at the tap, behind an isolation barrier (optos and the isolated brick). The 12 V converter stays off the board. | Option A. Kevin, 2026-11-04: "we're going to use something off the shelf." Bus overvoltage: section 3.2a. |
 | R3 | Fixed 12 V rail (12.0 V to 13.8 V, depending on the unit) from an off-board converter of 20 A class, 150 W continuous, fed from the switched side. Two switched outputs, each 10 A peak. 8 A combined continuous. | Kevin: "a tap for 10 A at 14 V", "a relay to control the 12V output, or better yet, two". Kevin chose "peaks are fine" on 2026-11-04 (open question 2). He then chose the converter (open question 13): "we're going to use something off the shelf." |
 | R4 | 5.1 V rail for the Pi 5, 6 A continuous, through the header. It comes from a brick rated 75 V continuous and 100 V for 100 ms, on the battery side of the main switch. | (A) Pi 5 needs 5 V 5 A to lift its USB limit. Brick class: option A, section 4. |
@@ -245,8 +257,10 @@ the pack in storage. The brick then runs from the switched side, and
 each switch-off is a hard cut.
 
 Where to tap. Tap the BMS pack output (after its discharge FET), not the
-raw cells, so that the BMS deep-discharge cut still protects the pack. A
-Daly BMS usually switches the negative lead. Then the battery tap is
+raw cells, so that the BMS deep-discharge cut still protects the pack.
+The BMS is a JHB-R24TH-V1.3 (Daly-app compatible,
+`docs/battery_settings.md`). A BMS of this type usually switches the
+negative lead. Then the battery tap is
 pack positive before the main switch, and its return is the BMS output
 negative (P-), not the cell negative (B-). VERIFY on WALL-E's BMS and
 harness (open question 4, risk R-21).
@@ -345,8 +359,8 @@ data, and then against bench test T-17:
 - A case that bolts to bare chassis metal.
 
 WARNING: A converter with a 40 V input floor drops its rail when the
-pack is low, because 40 V is above the 37.7 V BMS cut. The Vatrer
-example has that floor. Do not depend on the 12 V rail when the pack is
+pack is low, because 40 V is at the 40.0 V BMS cut and above the
+37.7 V design minimum. The Vatrer example has that floor. Do not depend on the 12 V rail when the pack is
 below 40 V. The Pi does not depend on it (3.4). A rail drop takes the
 USB devices and the outputs off. Section 5.3 says what follows.
 
@@ -387,8 +401,9 @@ Thermal case, section 4.
 Kevin doubted the 68 V clamp of the first draft (2026-11-04): "I'm not
 so sure that it's actually going to see 68 V. Wouldn't that be really
 bad for the batteries?" He is right that the pack cannot reach 68 V.
-Thirteen cells at 5.2 V would be a fire. The Daly BMS stops charge near
-4.25 V per cell, about 55 V in all.
+Thirteen cells at 5.2 V would be a fire. The BMS stops charge at its
+overvoltage protection. Today that is 4200 mV for a cell and 54.6 V for
+the pack (`docs/battery_settings.md`, section 3).
 
 The bus goes above about 56 V only when the cells do not absorb the
 energy. There are two cases:
@@ -404,6 +419,26 @@ energy. There are two cases:
    `max_erpm` 20000 (VERIFY with the motor KV). A robot that rolls
    downhill, or that a person pushes, can pass that speed.
 
+The charge FET is open more often than the first drafts assumed
+(`docs/battery_settings.md`, findings 1, 3 and 9). The BMS is a
+JHB-R24TH-V1.3 (Daly-app compatible, 24S 40 A hardware) on a 13S NMC
+pack of 7 Ah. The charger is an XM2703, 54.6 V 4 A. These conditions
+open the charge FET:
+
+- The end of every full charge. Cell overvoltage protection (4200 mV)
+  and pack overvoltage protection (54.6 V) are equal to the charger
+  target, so the BMS trips at the end of each full charge. On
+  2026-11-03 it reported `Cell OVP Trip` for 45 minutes. The first drive
+  after a full charge therefore starts with the charge FET open.
+- A hard stop. Each VESC allows -40 A of regen today (-80 A total), and
+  the BMS charge over-current protection is 40 A.
+- Cold. The BMS charge low-temperature protection is 1 C. Below it the
+  charge FET opens, and driving still works.
+
+The same document records that each VESC also allows +40 A of drive
+(80 A total) against a 40 A discharge over-current protection. That trip
+opens the discharge FET, which is a hard cut for the Pi (5.3).
+
 This affects the VESCs and every converter on the bus. It is not a
 problem of this board alone. A surge stopper on this board would
 protect only the converter. The Pi brick sees the same bus: the main
@@ -411,7 +446,8 @@ switch is closed while the robot drives, so the battery tap and the
 switched side are one node.
 
 Measured on WALL-E, 2026-11-04 and 2026-11-05
-(`docs/pi_power_architecture.md` section 4, read-only CAN query with
+(`docs/pi_power_architecture.md` section 4 and
+`docs/battery_settings.md`; read-only CAN query with
 `tools/vesc_info.py`, and a stand test with `candump`):
 
 | Item | Left (id 2) | Right (id 1) |
@@ -420,32 +456,42 @@ Measured on WALL-E, 2026-11-04 and 2026-11-05
 | `l_max_vin` (over-voltage fault) | 90 V | 90 V |
 | `l_battery_regen_cut_start` / `_end` | 1000 / 1100 V (off) | 1000 / 1100 V (off) |
 | `l_in_current_min` (regen into the pack) | -40 A | -40 A |
+| `l_in_current_max` (drive from the pack) | 40 A | 40 A |
 | `l_battery_cut_start` / `_end` (low-voltage cutoff) | 40.8 / 36 V | 40.8 / 36 V |
 | `si_battery_cells` | 13 | 12 |
+| Bus reading against the BMS cell sum | within 0.1 V | about 0.9 V high |
 
-The two VESCs read the same bus 1.0 V apart (52.5 V and 53.5 V in the
-architecture document). The stand test (wheels free, pack at 50.7 V, 48 Hz sampling) moved the
-bus at most 0.5 V above rest, with regen up to -12.1 A. CAUTION: that is
-the mild case. The wheels were free, the pack was not full, and a 48 Hz
-sample cannot see a spike shorter than about 20 ms. Do not use these
-numbers to size a part.
+The right VESC reads the bus about 0.9 V high in every sample from
+50.5 V to 54.5 V. The left VESC reads within 0.1 V of the BMS. Each
+voltage threshold on the right VESC therefore gets +0.9 V
+(`docs/battery_settings.md`, finding 7). The stand test (wheels free,
+pack at 50.7 V, 48 Hz sampling) moved the bus at most 0.5 V above rest,
+with regen up to -12.1 A: a pack resistance of about 42 mOhm. CAUTION:
+that is the mild case. The wheels were free, the pack was not full, and
+a 48 Hz sample cannot see a spike shorter than about 20 ms. Do not use
+these numbers to size a part.
 
-Note: 40.8 V and 36 V are 3.4 V and 3.0 V per cell for 12 cells. On the
-13S pack they are 3.14 V and 2.77 V per cell. The BMS cut (37.7 V) and
-the `config.py` motor cut (39 V) act first, so this setting does nothing
-today (open question 20).
+Note on the low-voltage cutoff. The VESC cutoff (40.8 V start, 36 V end)
+ends below the BMS pack undervoltage protection (40.0 V), so the BMS
+cuts the power first. `docs/battery_settings.md` section 4 gives the
+targets for 13S. The BMS cut is a hard cut for the Pi (5.3). This spec
+keeps 37.7 V as the design minimum of the input: it is lower than the
+40.0 V BMS cut, so each current and drive number at 37.7 V is
+conservative.
 
-Why a full-pack stop reaches the fault. The robot's kinetic energy at
-1.6 m/s is about 1.3 J for each kilogram of robot (VERIFY the mass). The
-VESC bus capacitors take about 0.8 J from 55 V to 62 V if they total
-2 mF (VERIFY the capacitance). With the BMS charge FET open, nothing
-else takes the energy. A hard stop on a full pack therefore drives the
-bus to the VESC over-voltage fault. With `l_max_vin` at 90 V, that is
-up to 90 V for the length of the stop (0.5 s to 1.6 s on the stand).
-The regen cutoff does not prevent this alone. It is a filtered software
-current limit. With the charge FET open, 80 A into a few millifarads
-moves the bus by tens of volts per millisecond, faster than the limit
-can act (Grok, 11.8; VERIFY on a scope in T-2).
+Why a stop with the charge FET open reaches the fault. The robot's
+kinetic energy at 1.6 m/s is about 90 J at 70 kg (the mass that
+`docs/battery_settings.md` uses; VERIFY). The VESC bus capacitors take
+about 0.8 J from 55 V to 62 V if they total 2 mF (VERIFY the
+capacitance). With the charge FET open, nothing else takes the energy.
+A hard stop therefore drives the bus to the VESC over-voltage fault.
+With `l_max_vin` at 90 V, that is up to 90 V for the length of the stop
+(0.5 s to 1.6 s on the stand). The regen cutoff is a filtered software
+current limit. With today's -80 A of regen into a few millifarads, the
+bus moves by tens of volts per millisecond, faster than the limit can
+act (Grok, 11.8). At the target of -5 A for each VESC
+(`docs/battery_settings.md`, section 4), the rise is about 5 V/ms, and
+the regen cutoff has a better chance to act (VERIFY on a scope in T-2).
 
 What 90 V does to this design:
 
@@ -464,67 +510,73 @@ What 90 V does to this design:
 The tap TVS is a clamp for hot-plug rings of microseconds. It is not a
 bus clamp, and the design must keep the bus below its breakdown.
 
-What must be true before the brick goes on the bus. Kevin sets these in
-VESC Tool (open questions 15 and 22). The numbers are starting numbers:
+What must be true before the brick goes on the bus. Kevin makes the
+changes in the phone apps:
 
-1. Read the Daly cell overcharge protection voltage and its release
-   voltage in the Daly app. Record them. VERIFY: about 4.25 V per cell,
-   55.25 V for the pack.
-2. Set "Battery Voltage Regen Cutoff Start/End"
-   (`l_battery_regen_cut_start`, `l_battery_regen_cut_end`) on both
-   VESCs. The architecture document gives 55.5 V and 57.0 V. CAUTION:
-   if the Daly opens its charge FET at 55.25 V, a cutoff that starts at
-   55.5 V acts only after the cells have left the bus. Then consider an
-   end below the Daly open point, less the 1 V difference between the
-   two VESC readings: for example 54.0 V and 55.0 V (Grok, 11.8). The
-   cost is weak regen braking on a full pack. Kevin decides (open
-   question 15).
-3. Set `l_max_vin` to the same value on both VESCs. Starting number:
-   61 V. It must be above the regen cutoff end plus the 1 V reading
-   difference. It must be below the cold breakdown of the tap TVS
-   (about 62 V). It must also be below the rating of the VESC bus
-   capacitors (VERIFY on the board, open question 25). The fault is a
-   "stop and coast"
-   backstop, not a bus regulator. It holds the bus near 61 V only while
-   the motor back-EMF is below the bus (case 2 above).
-4. Set `si_battery_cells` to 13 on the right VESC.
-5. Read the settings back on both VESCs with `tools/vesc_info.py`.
-   Record them in `docs/pi_power_architecture.md`.
-6. Run T-2 (9.2) before the brick is fitted, with the HAT (B) still on
+1. Apply the VESC targets of `docs/battery_settings.md` section 4 on
+   both VESCs: the regen current, the drive current, the low-voltage
+   cutoff, the regen cutoff ramp (with +0.9 V on the right VESC) and 13
+   cells on the right VESC. This spec does not repeat the numbers. That
+   document is the source.
+2. Apply the BMS targets of `docs/battery_settings.md` section 3 in the
+   order that it gives: the battery type, the charge over-current
+   protection, and the overvoltage protection only after the charger is
+   measured. The regen ramp ends below the BMS pack overvoltage trip, so
+   normal braking still goes into the cells.
+3. Decide `l_max_vin` (open question 22). `docs/battery_settings.md`
+   keeps 90 V. This review proposes about 61 V on the left VESC and
+   +0.9 V on the right VESC (the reading offset). The value must be
+   above the highest regen-cutoff end, below the cold breakdown of the
+   tap TVS (about 62 V), and below the rating of the VESC bus capacitors
+   (VERIFY on the board, open question 25). The trade-off is below.
+4. Read the settings back on both VESCs with `tools/vesc_info.py`.
+   Record them in `docs/battery_settings.md`.
+5. Run T-2 (9.2) before the brick is fitted, with the HAT (B) still on
    the Pi. Pass: the bus stays under 60 V in each shot.
-7. If T-2 fails, fit the bus dump clamp (below) before the brick.
-8. Do step 5 again after each VESC Tool session and each VESC firmware
-   update. A restore of the defaults sets the regen cutoff back to
-   1000/1100 V. VERIFY what it does to `l_max_vin`. The daemon checks
-   the settings at each boot (6.1).
+6. If T-2 fails, fit the bus dump clamp (below) before the brick.
+7. Do step 4 again after each VESC Tool session and each VESC firmware
+   update. Do not run the motor setup wizard: it overwrites the cutoffs
+   (`docs/battery_settings.md`, section 4). A restore of the defaults
+   sets the regen cutoff back to 1000/1100 V. The daemon checks the
+   settings at each boot (6.1).
 
-CAUTION (drivetrain, not this board): an over-voltage fault releases the
-motor, and that side coasts. The two VESCs read the bus 1.0 V apart, so
-one can fault first. That side coasts while the other still brakes, and
-the robot yaws. VERIFY in VESC Tool whether firmware 6.05 latches the
-over-voltage fault or clears it when the voltage falls (open question
-25). A lower
-`l_max_vin` does not remove braking that exists today: with the charge
-FET open, the energy has no place to go at 90 V either. The fix for
-braking on a full pack is the dump clamp. This matters most in
-FOLLOW_ME and WAYPOINT_NAV, which keep every protection (`CLAUDE.md`,
-safety principle).
+The `l_max_vin` trade-off. The fault is a "stop and coast" backstop, not
+a bus regulator. It holds the bus near its value only while the motor
+back-EMF is below the bus (case 2 above). After an over-voltage fault
+the VESC releases the motor for its fault stop time, about 500 ms
+(`m_fault_stop_time_ms`; VERIFY the value on WALL-E), so each fault is a
+brake-loss event. A lower fault protects the tap TVS and the brick, at
+the cost of such an event at a lower bus voltage. At 90 V the brake
+loss also happens, and the TVS burns first. A lower fault does not
+restore braking that the open charge FET removes
+(`docs/battery_settings.md`, section 4). What keeps the bus from the
+fault is the regen ramp at -5 A and the BMS overvoltage fix. CAUTION
+(drivetrain, not this board): the right VESC reads 0.9 V high, so
+without the offset it faults first. That side coasts while the other
+still brakes, and the robot yaws. This matters most in FOLLOW_ME and
+WAYPOINT_NAV, which keep every protection (`CLAUDE.md`, safety
+principle). `docs/battery_settings.md` lists a software guard as open:
+refuse to arm, or limit the speed and the deceleration, while the BMS
+reports the charge FET open.
 
 Bus dump clamp (open question 16). A FET, a power resistor and a
 comparator on the chassis, across the bus. These are the rules:
 
-- Set the trigger above the regen cutoff end and below `l_max_vin`, for
-  example on at 58 V and off at 57 V (VERIFY against the chosen cutoff).
+- Set the trigger above the highest regen-cutoff end
+  (`docs/battery_settings.md`, section 4) and below `l_max_vin`
+  (VERIFY against the values that Kevin sets).
 - Give it its own fuse, so that a shorted clamp FET cannot open F3.
 - Do not use a crowbar (an SCR) on the traction bus. A short brakes the
   motors hard through their body diodes and leaves the robot dead.
 - Size it from the T-2 traces. The energy for one stop is at most the
-  kinetic energy (about 1.3 J for each kilogram) plus the motor rotors.
-  The peak power is the full regen current at the trigger voltage
-  (2 x 40 A at 58 V, about 4.6 kW, for milliseconds; VERIFY).
+  kinetic energy (about 90 J at 70 kg and 1.6 m/s) plus the motor rotors.
+  The peak power is the full regen current at the trigger voltage: at
+  the -5 A target, 2 x 5 A at about 58 V is about 0.6 kW; at today's
+  -40 A it is about 4.6 kW, for milliseconds (VERIFY).
 
 Alternative: tap the brick on the cell side of the BMS (B+ to B-), open
-question 23. A Daly BMS usually switches the negative lead. With the
+question 23. A BMS of this type usually switches the negative lead
+(VERIFY on the JHB-R24TH). With the
 charge FET open, the bus rises, and the cells do not. A brick across
 the cells then never sees regen overvoltage, and neither does the tap
 TVS. A BMS low-voltage cut also kills the ignition (it is on the BMS
@@ -982,8 +1034,9 @@ TEN 20 would run at 63 percent.
 With the Pi halted and the ignition on (HALTED_IGN_ON, 5.1), the tap
 still feeds the brick's no-load loss (3.1 W), the RTK GPS (0.5 W) and
 the housekeeping: about 3.8 W from the pack. The VESCs and the 12 V
-side add to that. A robot left in that state runs the pack down in days
-(risk R-24).
+side add to that. The 7 Ah pack holds about 340 Wh (13 cells at 3.7 V
+nominal). From half charge, a robot left in that state runs the pack
+down in about two days at most (risk R-24).
 
 12 V rail, from the off-board converter:
 
@@ -1068,21 +1121,26 @@ With the main switch off:
 | Ignition string, 12 V converter, the 12 V rail and all on it | 0: switched side |
 | Total from this design | Expected about 4 uA at 25 C. The datasheet maximums do not guarantee R11 (50 uA). T-16 measures it at 25 C and at 45 C. |
 
-The BMS sets the storage time, not the module. The Daly BMS takes about
-0.5 mA asleep (about 0.36 Ah a month), and it sleeps only after 3600 s
-idle. Option A estimate (20 Ah pack at 50 percent, cell leakage about
-2 percent a month, that is 0.4 Ah): about 13 months with the brick
-disconnected (the architecture document says about 12). With the brick
-only switched off by its remote pin, its 3 mA adds about 2.2 Ah a month
-(70 mAh a day). That cuts the time to about 3.5 months, not the 8 months
-of the earlier draft. The architecture document gives "about 8 months
-with the converter idling"; that does not follow from its own figure of
-2 Ah a month.
+The BMS sets the storage time, not the module. The pack is 13S NMC,
+7 Ah (`docs/battery_settings.md`, section 1). The estimate below uses
+these assumptions: BMS current asleep 0.5 mA (the Daly figure of the
+architecture document; VERIFY on the JHB-R24TH), about 0.36 Ah a month;
+cell self-discharge about 2 percent a month, 0.14 Ah; and a start at
+50 percent, 3.5 Ah. The BMS sleeps only after 3600 s idle (Daly figure,
+VERIFY).
 
-VERIFY the pack capacity. The 20 Ah is an assumption of the research
-agent. Both VESCs carry `si_battery_ah` = 7 Ah, which may be a default.
-With 7 Ah at 50 percent the time with the brick disconnected is about
-7 months (open question 24).
+| Case | Drain a month | Time from 50 percent |
+|---|---|---|
+| Brick disconnected by the HSS (this design) | about 0.5 Ah | about 7 months |
+| Brick switched off by its remote pin only (3 mA) | about 2.7 Ah | about 6 weeks |
+| A stuck-on HSS with the Pi halted (risk R-26, about 3.7 W) | | about 2 days |
+| A hung Pi with no grace timer (about 10 W from the tap) | | about 17 hours |
+
+Note on `docs/pi_power_architecture.md`. Its storage estimate uses a
+20 Ah pack, which is wrong: the pack is 7 Ah. Its "about 8 months with
+the converter idling" also does not follow from its own figure of 2 Ah
+a month for a brick's 3 mA. Use the table above. That document is not
+changed by this review.
 
 ### 4.4 Grace window budget
 
@@ -1111,7 +1169,8 @@ then remounts the root read-only and powers off (VERIFY), and the
 filesystem check runs at the next boot (risk R-7).
 
 Energy for the grace window comes from the main pack: 90 s at 16 W is
-0.4 Wh. It is not a design limit.
+0.4 Wh, about 0.1 percent of the 7 Ah pack (about 340 Wh). It is not a
+design limit.
 
 ## 5. State machine
 
@@ -1272,8 +1331,8 @@ The watcher becomes the ignition daemon (option A). A new daemon
   module reports a stored `TIMER_FAULT` or `STUCK_ON`;
   `rpi-eeprom-config` does not show `POWER_OFF_ON_HALT=1` (3.7); or a
   read-only CAN read of both VESCs (the method of `tools/vesc_info.py`)
-  shows `l_max_vin` or the regen cutoff different from the recorded
-  values of 3.2a. VERIFY that the VESC read is safe beside
+  shows `l_max_vin`, the regen cutoff or the current limits different
+  from the values recorded in `docs/battery_settings.md`. VERIFY that the VESC read is safe beside
   `wall-e.service`.
 
 The UART is not in the halt path. A dead MCU or a dead UART does not
@@ -1475,7 +1534,7 @@ the competitors lack most.
 | # | Risk | Mitigation |
 |---|---|---|
 | R-1 | Hot-plug ring: microseconds above the pack voltage, up to about twice it with ceramic input capacitors. It can damage the converters and the VESCs. The battery tap is hot-plugged whenever the pack is connected. | Robot-level problem (3.2a). Margin: a 72 V-class 12 V converter, a 100 V-surge Pi brick, the SMBJ58A ahead of the HSS. The HSS is open at a hot-plug (Cgs holds it off, R-27), so the ring meets the TVS and the HSS, not the brick. T-1 at both inputs. |
-| R-2 | Regen overvoltage while the BMS charge FET is open, or from a faulted VESC that coasts and rectifies. The cells do not absorb it. | Robot-level problem (3.2a). Both VESCs are `75_100_V2`, firmware 6.05, with the fault at 90 V and the regen cutoff off. Before the brick goes on: the regen cutoff, `l_max_vin` at 61 V, 13 cells on the right VESC (open questions 15 and 22), and T-2. The bus dump clamp if T-2 fails (open question 16). See also R-28. |
+| R-2 | Regen overvoltage while the BMS charge FET is open, or from a faulted VESC that coasts and rectifies. The cells do not absorb it. | Robot-level problem (3.2a). Both VESCs are `75_100_V2`, firmware 6.05, with the fault at 90 V and the regen cutoff off. Before the brick goes on: the VESC and BMS targets of `docs/battery_settings.md`, a decision on `l_max_vin` (open question 22), and T-2. The bus dump clamp if T-2 fails (open question 16). See also R-28. |
 | R-3 | Brick trim. The Murata 12 V option: +10 percent trim is its limit, not a set point, and its OVP may sit within a volt. The RECOM and TEN 20 Pi bricks: 5.0 V trimmed to 5.1 V. | The TRACO bricks trim by plus or minus 10 percent and have OVP at 6.2 V typical (3.4). VERIFY the other trim ranges, the OVP thresholds and their modes. Sense at the brick pins. Fallback for the Murata: trim to +8 percent (13.0 V). |
 | R-4 | The 12 V converter dissipates about 17 W at 150 W out, on the chassis, in the sun. The TEN 30 Pi brick dissipates about 3.2 W at all loads, near its 105 C case limit in a hot enclosure (3.4). | T-3 thermal soak of the converter on the chassis and of the brick in the enclosure. VERIFY the unit's temperature limit and its derating. The TEN 20 makes about 1.4 W less heat. |
 | R-5 | The Pi rail does not fall to 0 V (a sneak feed), or it rises too slowly. The Pi 5 then stays in standby on the next ignition. | Supervisor bleed plus fixed bleed (3.8); injectors; UART tri-state; soft-start rule (3.4). T-5, T-6. |
@@ -1499,9 +1558,9 @@ the competitors lack most.
 | R-23 | The Pi stays halted after an e-stop or a flapping switch until a person cycles the main switch. | Designed (5.3). The MCU LED shows it (5.5). |
 | R-24 | A robot left with the ignition on runs the pack down to the BMS cut, which is a hard cut for the Pi. | Open question 20: a low-pack halt from the Daly BLE data. |
 | R-25 | Voltage margin on the HSS, Q1 and Q2: the SMBJ58A clamps at 93.6 V, and the bus as found can reach 90 V (3.2a). | Parts rated 150 V or more (3.5). Resistors on the battery side rated 200 V (1206 or larger). T-1 records the peak at the battery tap. |
-| R-26 | A shorted HSS, Q1 or Q2, or a shorted U1 or U3 output, holds the brick on for ever. With the Pi halted, the brick's no-load loss and the RTK GPS take about 3.7 W from the pack: days to the BMS cut. | Detect only: the MCU reports STUCK_ON (3.11). T-16 and T-22 at commissioning. A second series switch is open question 21. |
+| R-26 | A shorted HSS, Q1 or Q2, or a shorted U1 or U3 output, holds the brick on for ever. With the Pi halted, the brick's no-load loss and the RTK GPS take about 3.7 W from the pack: about 2 days from half charge to the BMS cut (4.3). | Detect only: the MCU reports STUCK_ON (3.11). T-16 and T-22 at commissioning. A second series switch is open question 21. |
 | R-27 | Hot-plug turn-on of the HSS. A fast step on the source couples through Cgd, and the Zener then holds Vgs at -12 V. The brick starts with the ignition off. The Pi gets a pulse or a short boot, then a grace cut. | Cgs of 66 times Cgd or more (3.5). T-21. |
-| R-28 | The tap TVS acts as a bus clamp. A regen overvoltage above its breakdown (64.4 V minimum, about 62 V cold) lasts longer than microseconds. The TVS burns, fails short and opens F3: a hard cut while the robot moves. The brick also sees more than 75 V. | The bus conditions in 3.2a before the brick goes on: the regen cutoff, `l_max_vin` at 61 V, T-2, and the dump clamp if T-2 fails. The daemon checks the VESC settings at each boot (6.1). |
+| R-28 | The tap TVS acts as a bus clamp. A regen overvoltage above its breakdown (64.4 V minimum, about 62 V cold) lasts longer than microseconds. The TVS burns, fails short and opens F3: a hard cut while the robot moves. The brick also sees more than 75 V. | The bus conditions in 3.2a before the brick goes on: the `docs/battery_settings.md` targets, a decision on `l_max_vin` (open question 22), T-2, and the dump clamp if T-2 fails. The daemon checks the VESC settings at each boot (6.1). |
 | R-29 | Heat: the TLP293 dark current (50 uA maximum at 85 C) makes IGN_OFF read "ignition on" and holds the timer in reset. The Pi never halts, and the backstop never cuts. The rail stays on until the BMS cut. One cause defeats both layers. | 10 kOhm pull-up on IGN_OFF and 10 kOhm on MR (3.6, 3.7). T-9 at +85 C. |
 | R-30 | A latent timer fault: a dead oscillator or an open Q6. A normal halt ends long before the timer, so normal use never tests it. A later hung Pi then holds the rail. | The MCU checks the timer clock in each GRACE (TIMER_FAULT, 3.11). T-9 at commissioning. Repeat T-8 once a year (VERIFY the interval with Kevin). An open Q6 is not detected; it needs a second fault (a hung Pi) to matter. |
 | R-31 | The HSS leakage charges the brick input in storage until the brick starts. The brick then pulses the Pi rail. | 22 kOhm input bleed (3.5): the IRF9640 maximum of 500 uA at 125 C gives 11 V, under the 15 V undervoltage lockout. T-16 at 45 C. |
@@ -1511,7 +1570,7 @@ the competitors lack most.
 | # | Test | Pass |
 |---|---|---|
 | T-1 | Hot-plug the real pack into the 12 V converter's input and into the battery tap through the real harness, 10 times each. Scope at the converter input and at the HSS. | Record the peaks. No part on the bus is above 80 percent of its rating. Fail: damp the input (a bulk capacitor with ESR, or a pre-charge). |
-| T-2 | Do this before the brick is fitted, with the HAT (B) still on the Pi (3.2a step 6). First do steps 1 to 5 of 3.2a. WARNING: Do not brake hard on a full pack until those steps are done. Scope the bus at the battery tap and at the 12 V converter input at 1 MS/s or more. Log both VESC voltage readings on the same trigger. A 48 Hz CAN log cannot see a spike shorter than about 20 ms. Shots, in this order: (a) on stands, low speed, pack at mid charge; (b) on stands, step up to full speed; (c) on the ground, a full pack just off the charger, hard stops from full speed in MANUAL, a person at the RC; (d) repeat (c) until the Daly app shows the charge FET open once, or record that it never opened; (e) on stands at full speed, release both VESCs (no brake) to see whether the body diodes pump the bus. | Record the peak and its length in each shot. Pass: under 60 V in each shot. Fail: fit the dump clamp (3.2a), then repeat. Both converters stay up. The Pi does not reboot. |
+| T-2 | Do this before the brick is fitted, with the HAT (B) still on the Pi (3.2a step 5). First do steps 1 to 4 of 3.2a. WARNING: Do not brake hard on a full pack until those steps are done. Scope the bus at the battery tap and at the 12 V converter input at 1 MS/s or more. Log both VESC voltage readings on the same trigger. A 48 Hz CAN log cannot see a spike shorter than about 20 ms. Shots, in this order: (a) on stands, low speed, pack at mid charge; (b) on stands, step up to full speed; (c) on the ground, a full pack just off the charger, hard stops from full speed in MANUAL, a person at the RC; (d) repeat (c) right after a full charge, while the BMS still reports `Cell OVP Trip` (charge FET open; `docs/battery_settings.md`, finding 1); (e) on stands at full speed, release both VESCs (no brake) to see whether the body diodes pump the bus. | Record the peak and its length in each shot. Pass: under 60 V in each shot. Fail: fit the dump clamp (3.2a), then repeat. Both converters stay up. The Pi does not reboot. |
 | T-3 | 150 W resistive load on the 12 V rail and 6 A on the Pi rail for 2 h, with the converter bolted to its chassis spot and the board in its enclosure, at 45 C ambient. | Converter case under its limit (VERIFY); the brick case under its limit (VERIFY); board under 85 C; 5 V rails in tolerance. |
 | T-4 | 12 V rail: load step 0 to 8 A, short on OUT1 with OUT2 loaded. | Pi rail unaffected; OUT1 limits and retries; OUT2 stays on. |
 | T-5 | Pi 5 + NVMe boot on ignition-on, 50 cycles, with the OAK on P1. Scope the 5.1 V rail at the header. | 50 boots; 10 to 90 percent rise under 50 ms; no `throttled` flag; rail dip under 250 mV. |
@@ -1547,7 +1606,7 @@ the competitors lack most.
 4. Taps on the robot. Where is the BMS output on the battery side of
    the main switch (for F3), and where is the switched side (for F1 and
    F4)? Which lead does the main switch interrupt, and which lead does
-   the Daly BMS switch? XT60 or XT90 for the converter's fused lead?
+   the BMS (JHB-R24TH) switch? XT60 or XT90 for the converter's fused lead?
 5. Answered 2026-11-04: smart FET (TPS1HB08-Q1).
 6. Which Pi brick: the TRACO TEN 30-4811WIN (none at TME), the RECOM
    RP30-4805SFW/N (11-week lead), or the TEN 20-4811WIN (4 A, in stock;
@@ -1580,19 +1639,16 @@ the competitors lack most.
 14. Where does the converter mount on the chassis, and is there bare
     metal under it with a path to the chassis skin? Where does the
     module mount, and how long are the 12 V lead and the battery tap?
-15. Partly answered 2026-11-04 and 2026-11-05: both drive VESCs are
-    hardware `75_100_V2`, firmware 6.05, with `l_max_vin` 90 V, the
-    regen cutoff off (1000/1100 V), -40 A of regen each, and 12 cells
-    set on the right VESC (3.2a). Still open: the regen cutoff numbers
-    on both VESCs. The architecture document gives 55.5/57.0 V. If the
-    Daly opens its charge FET at about 55.25 V, those numbers act only
-    after the cells have left the bus, and 54.0/55.0 V keeps regen into
-    the pack (weaker braking on a full pack). Which? Read the Daly
-    overcharge setting first.
+15. Answered 2026-11-05 by `docs/battery_settings.md` section 4: the
+    regen cutoff ramp for each VESC (with +0.9 V on the right VESC), the
+    regen and drive currents, and 13 cells on the right VESC. Kevin
+    applies them in VESC Tool.
 16. Fit a bus dump clamp on the robot (3.2a)? This review recommends it
     if T-2 shows the bus above 60 V with the settings in place, and as
-    the only real fix for braking on a full pack. Its size needs the
-    robot mass and the VESC bus capacitance (VERIFY both).
+    the only real fix for braking with the charge FET open. Its size
+    needs the robot mass (70 kg is the figure of
+    `docs/battery_settings.md`) and the VESC bus capacitance (VERIFY
+    both).
 17. Which 12 V converter: a 72 V-class unit (recommended), or the
     dkplnt after T-17 passes?
 18. Grace time: 75 s nominal (60 s to 90 s)? Shorten it after T-8
@@ -1607,28 +1663,30 @@ the competitors lack most.
 20. Low-pack halt: should `walle-power.service` halt the Pi when the
     Daly BLE pack voltage stays low (for example under the 39 V motor
     cutoff for 10 minutes), so that a robot left on does not end in a
-    BMS hard cut? Related: both VESCs carry a low-voltage cutoff of
-    40.8/36 V, which is 3.4/3.0 V per cell for 12 cells, not 13 (3.2a).
-    Set it for 13S (44.2/39.0 V), or leave it to `config.py` and the
-    BMS?
+    BMS hard cut? The VESC low-voltage cutoff for 13S is answered by
+    `docs/battery_settings.md` section 4 (2026-11-05). The halt itself
+    is still open.
 21. Single points of failure in the switch (risk R-26). A shorted HSS,
     Q1, Q2 or PV opto output holds the brick on until the BMS cut. The
     MCU only reports it. Accept this for spin 1, or add a second series
     switch now?
-22. `l_max_vin`: lower it on both VESCs from 90 V to about 61 V (3.2a
-    step 3)? It keeps the tap TVS out of breakdown and the brick inside
-    its rating. It does not remove braking that works today, but one
-    VESC can fault before the other (the readings are 1.0 V apart), and
-    that side coasts.
+22. `l_max_vin`: keep 90 V (`docs/battery_settings.md`) or lower it to
+    about 61 V on the left VESC and about 61.9 V on the right VESC (3.2a
+    step 3)? A lower fault keeps the tap TVS out of breakdown and the
+    brick inside its rating. Each fault releases the motor for about
+    500 ms, so it is a brake-loss event at a lower voltage. The regen
+    ramp at -5 A and the BMS overvoltage fix are what keep the bus from
+    reaching either value.
 23. Tap the brick on the cell side of the BMS (B+ to B-) in place of the
     BMS output (3.2a)? The brick then never sees regen overvoltage, and
     a BMS low-voltage cut gives a clean halt. The cost: a stuck-on HSS
     can then drain the cells below the BMS cut.
-24. What is the real capacity of the traction pack? The storage estimate
-    uses 20 Ah; the VESCs carry `si_battery_ah` = 7 Ah (4.3).
+24. Answered 2026-11-05 (Kevin, `docs/battery_settings.md`): the pack is
+    13S NMC, 7 Ah. Section 4.3 uses it.
 25. VESC Tool checks for Kevin, before 3.2a step 3: the voltage rating of
-    the VESC bus capacitors, and whether firmware 6.05 latches the
-    over-voltage fault or clears it when the voltage falls.
+    the VESC bus capacitors, and the fault stop time
+    (`m_fault_stop_time_ms`, about 500 ms by default) that releases the
+    motor after an over-voltage fault.
 
 ## 11. Appendix: Grok second opinions
 
@@ -1758,9 +1816,9 @@ dump clamp, and the old pull resistors and timer capacitor range.
 
 | Objection | Response |
 |---|---|
-| A lower `l_max_vin` is the wrong actuator. An over-voltage fault opens the bridge, which then rectifies while the line-line back-EMF is above the bus, so the fault can make a spike worse. | Accepted in part. The fault is a "stop and coast" backstop, not a bus regulator (3.2a step 3). It bounds the bus only while the back-EMF is below it. `config.py` puts that point near 22,000 eRPM, above `max_erpm` 20000, so it holds on flat ground. T-2 shot (e) checks it. The lower value stays recommended, because at 90 V the tap TVS burns. Kevin decides (open question 22). |
-| The regen cutoff starts after the Daly has opened its charge FET (about 55.25 V). On a bus with only capacitors, a filtered software limit overshoots. Put the cutoff end below the Daly open point. | Accepted as a CAUTION and an option (3.2a step 2, open question 15). The architecture document's 55.5/57.0 V stays the starting number, because that document wins. |
-| One VESC can fault first (the readings are 1 V apart). That side coasts and the robot yaws. Confirm whether the fault latches. | Accepted. CAUTION in 3.2a, open question 25. |
+| A lower `l_max_vin` is the wrong actuator. An over-voltage fault opens the bridge, which then rectifies while the line-line back-EMF is above the bus, so the fault can make a spike worse. | Accepted in part. The fault is a "stop and coast" backstop, not a bus regulator (3.2a step 3). It bounds the bus only while the back-EMF is below it. `config.py` puts that point near 22,000 eRPM, above `max_erpm` 20000, so it holds on flat ground. T-2 shot (e) checks it. The lower value stays a proposal, because at 90 V the tap TVS burns; `docs/battery_settings.md` keeps 90 V. Kevin decides (open question 22). |
+| The regen cutoff starts after the Daly has opened its charge FET (about 55.25 V). On a bus with only capacitors, a filtered software limit overshoots. Put the cutoff end below the Daly open point. | Accepted. Answered by `docs/battery_settings.md` section 4 (2026-11-05): the ramp ends below the BMS pack overvoltage trip, and the regen current falls to -5 A for each VESC (3.2a). |
+| One VESC can fault first (the readings are 1 V apart). That side coasts and the robot yaws. Confirm whether the fault latches. | Accepted. The right VESC reads 0.9 V high (`docs/battery_settings.md`, finding 7), so each threshold gets +0.9 V there. CAUTION in 3.2a, open question 25. |
 | Set `l_max_vin` from the bus capacitor rating, above anything the dump clamp lets the bus reach. | Accepted (3.2a step 3, open question 25). |
 | T-2 needs a shot with the charge FET open and a shot with both VESCs released at speed, at 1 MS/s, with both VESC readings on one trigger. | Accepted. T-2 is rewritten. |
 | The dump clamp needs its own fuse. Do not crowbar the traction bus. | Accepted (3.2a). |
@@ -1859,3 +1917,10 @@ uninterruptible sleep, runtime drop-in,
 `systemctl poweroff --force`, `DefaultDependencies=no`, remount
 read-only, SMBJ60A, AWG, RP1, MS/s,
 EEPROM recovery, 3.15 A slow-blow, time-delay fuse, breaking capacity.
+Added by the 2026-11-05 update: `docs/battery_settings.md`, JHB,
+JHB-R24TH-V1.3, Daly-app compatible, NMC, Ternary, LTO, XM2703, `Cell
+OVP Trip`, cell overvoltage protection, pack overvoltage protection,
+pack undervoltage protection, charge over-current protection, discharge
+over-current protection, charge low-temperature protection, discharge
+FET, `l_in_current_max`, `m_fault_stop_time_ms`, fault stop time,
+brake-loss event, regen ramp, motor setup wizard, reading offset.
