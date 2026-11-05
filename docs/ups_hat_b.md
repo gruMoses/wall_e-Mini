@@ -369,9 +369,16 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   data pairs and the braid kept). The hub enumerates on both sides (05e3:0610
   at 480M, 05e3:0626 at 5000M), so it does not need the Pi's 5 V to see the
   host. No over-current trips that boot, EXT5V 5.18 V, `throttled=0x0`, and
-  the OAK recovered on its own (camera health HEALTHY at 14:42:56). Not
-  done yet: the main-switch pull again, to confirm the HAT now carries only
-  the Pi (expect about −0.6 A, not −1.6 A).
+  the OAK recovered on its own (camera health HEALTHY at 14:42:56). The
+  Arduino is on hub port 2 too (ttyUSB0), so no device draws from the Pi's
+  ports. Main-switch pull at 14:52:37 with the cut cable, wall-e running:
+  −785 to −850 mA at 6.95 to 6.68 V for 4.5 s, then the normal 5 s absent
+  halt (not the critical rule). Before the cut: −1105 to −1646 mA at 6.34 V
+  (2026-11-04 17:27) and −1356 mA at 6.39 V (2026-11-05 14:29, critical
+  halt). The cut removed about 0.5 to 0.8 A, which is the hub, the OAK and
+  the Arduino. The remaining load is the Pi, wall-e and the RTK on the 5 V
+  header. 6.68 V keeps about 0.7 V above the HY2120 cutoff with these
+  cells.
 - The RTK GPS (I2C 0x20) is powered from the Pi's 5 V header pin. The HAT
   feeds that same line, and it stays live while the Pi is halted (only the
   Pi's own rails switch off). The RTK therefore runs, and drains the HAT's
