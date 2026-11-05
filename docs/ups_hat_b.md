@@ -354,6 +354,19 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   USB 3 radiates noise near 2.4 GHz (the RC receiver, Wi-Fi and the BMS
   link). After a change to 5000M, check the RC link and re-measure
   `oak.det_latency_s` (the 15 fps cap was tuned at USB 2).
+  FIXED 2026-11-05 15:05: Kevin turned the USB-C plug over at the camera
+  (the cable that came with it). The booted OAK linked at 5000M on the
+  hub's USB 3 side (`usb 2-1.1: new SuperSpeed`), the first SuperSpeed
+  link in the journal. Idle `oak.det_latency_s` p50 0.196 s, p90 0.211 s,
+  depth 15 fps (the same as at USB 2). The A-to-C cable wires one side of
+  the C plug only, so the plug orientation is load-bearing: mark it. Not
+  checked yet: the RC link with the remote on (USB 3 noise near 2.4 GHz).
+  CAUTION: the unplug for the turn-over made depthai 3.3.0 abort at
+  14:59:06 (`Resource deadlock avoided` in `PipelineImpl::wait`, the
+  self-join that 3.6.1 fixes). systemd restarted wall-e before the camera
+  was back, so wall-e ran with "OAK-D Lite not detected" (no obstacle
+  avoidance, no follow-me) until a disarmed restart at 15:05. After any
+  camera unplug, check for that line and restart wall-e disarmed.
 - Main-switch pull in the robot, 2026-11-04 17:27: the HAT current jumped
   from −46 mA to −1105 mA, then −1646 mA at 6.34 V within 5 s, and the
   critical rule halted the Pi on one sample (clean: the LED went red, not

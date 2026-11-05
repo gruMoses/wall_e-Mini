@@ -74,8 +74,8 @@ before the app connects, and start it again after.
 | Battery type | LTO | Ternary | Finding 2 |
 | Cell strings | 13 | 13 | Check after the type change |
 | Rated capacity | 7.0 Ah | 7.0 Ah | Check after the type change |
-| Cell overvoltage protection | 4200 mV | 4250 mV, release about 4150 mV if the app shows it | Finding 1. 4.25 V is the usual NMC trip, 50 mV above the charger |
-| Pack overvoltage protection | 54.6 V | 55.3 V, release about 54.0 V if the app shows it | Finding 1 (13 x 4.25 V) |
+| Cell overvoltage protection | 4200 mV | 4250 mV, release about 4200 mV if the app shows it (section 5) | Finding 1. 4.25 V is the usual NMC trip, 50 mV above the charger |
+| Pack overvoltage protection | 54.6 V | 55.3 V, release about 54.6 V if the app shows it (section 5) | Finding 1 (13 x 4.25 V) |
 | Cell undervoltage protection | 3000 mV | 3000 mV | Correct |
 | Pack undervoltage protection | 40.0 V | 40.0 V | Correct |
 | Voltage difference protection | 800 mV | 800 mV | Acceptable |
@@ -116,10 +116,33 @@ cost of a full charge. A charger that ends at 4.10-4.15 V/cell removes it.
 Read back the VESC values after the change:
 `/home/pi/.venv/bin/python3 tools/vesc_info.py` on the robot (read-only).
 
-## 5. Open items
+## 5. Charger measurement (2026-11-05, BMS log)
 
-- Measure the charger at the end of a charge (meter, or leave the robot on
-  during the charge so the BMS voltage is logged).
+wall-e logged the BMS during the charge of 10:28-11:10 (`logs/run_20261105_*.log`).
+
+| Time | Pack | Current | Highest cell | State |
+|---|---|---|---|---|
+| 10:28-10:59 | 50.6 to 54.1 V | 3.5 to 3.6 A | 3899 to 4177 mV | Constant current |
+| 11:00-11:09 | 54.2 to 54.4 V | 3.0 A falling to 1.0 A | 4181 to 4196 mV | Constant voltage |
+| 11:09:59 | 54.4 V | 0 A | 4193 mV | `Cell OVP Trip`, charge FET off |
+
+Result: the charger holds the pack at about 54.4 V (0.1 V BMS resolution)
+in its constant-voltage stage. That is at or below the 54.6 V target, so
+the charger is correct and the overvoltage targets in section 3 are safe.
+The trip came from the old 4200 mV limit while 1.0 A still flowed. The
+charge did not reach its natural end.
+
+After the trip the cells rest at 4170-4186 mV, and the trip stays latched
+(charge FET off from 11:09:59 to at least 15:05, with the charger on).
+CAUTION: An overvoltage release below the resting cells (for example
+4150 mV) keeps the charge FET off after every full charge, and regen then
+has no path into the pack. Set the cell release above the resting full
+cells, at about 4200 mV, with the 4250 mV trip, and the pack release at
+about 54.6 V, with the 55.3 V trip.
+
+## 6. Open items
+
+- Done 2026-11-05: the charger measurement (section 5).
 - Cell model and datasheet, to set the current limits from the cell rating.
 - A software guard: refuse to arm, or limit speed and deceleration, while
   the BMS reports the charge FET open, a cell overvoltage trip, or a charge
