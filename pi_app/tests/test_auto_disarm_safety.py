@@ -38,7 +38,7 @@ class TestForceDisarm(unittest.TestCase):
     def test_armed_state_disarms_latches_and_emits_disarmed(self):
         state = SafetyState(
             is_armed=True,
-            last_transition_epoch_s=10.0,
+            last_transition_mono_s=10.0,
             last_ch5_high=False,
             last_ch4_high=True,
             emergency_active=False,
@@ -49,7 +49,7 @@ class TestForceDisarm(unittest.TestCase):
         self.assertTrue(state.is_armed)  # input is not mutated
         self.assertFalse(new_state.is_armed)
         self.assertTrue(new_state.rearm_requires_switch_cycle)
-        self.assertEqual(new_state.last_transition_epoch_s, 50.0)
+        self.assertEqual(new_state.last_transition_mono_s, 50.0)
         self.assertFalse(new_state.emergency_active)
         self.assertFalse(new_state.last_ch5_high)
         self.assertTrue(new_state.last_ch4_high)
@@ -69,12 +69,12 @@ class TestForceDisarm(unittest.TestCase):
         )
 
     def test_already_disarmed_emits_no_disarmed_event(self):
-        state = SafetyState(is_armed=False, follow_me_active=False, last_transition_epoch_s=1.0)
+        state = SafetyState(is_armed=False, follow_me_active=False, last_transition_mono_s=1.0)
         new_state, events = force_disarm(state, 4.0)
 
         self.assertFalse(new_state.is_armed)
         self.assertTrue(new_state.rearm_requires_switch_cycle)
-        self.assertEqual(new_state.last_transition_epoch_s, 4.0)
+        self.assertEqual(new_state.last_transition_mono_s, 4.0)
         self.assertEqual(events, [])
 
     def test_disarmed_with_follow_me_exits_without_disarmed_event(self):
@@ -89,7 +89,7 @@ class TestRearmLatch(unittest.TestCase):
     def test_ch3_held_high_stays_disarmed_past_debounce(self):
         params = SafetyParams()  # debounce 0.3 s
         state, _ = force_disarm(
-            SafetyState(is_armed=True, last_transition_epoch_s=0.0),
+            SafetyState(is_armed=True, last_transition_mono_s=0.0),
             100.0,
         )
         self.assertTrue(state.rearm_requires_switch_cycle)
@@ -153,7 +153,7 @@ class TestRearmLatch(unittest.TestCase):
             follow_me_active=True,
             last_ch5_high=False,
             emergency_active=False,
-            last_transition_epoch_s=0.0,
+            last_transition_mono_s=0.0,
         )
         state, events = _step(state, CH3_HIGH, 5.0, params, ch5=CH5_HIGH)
 

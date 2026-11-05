@@ -159,10 +159,12 @@ kind: `{"type":"event","event":"oak_health","from":"HEALTHY"|"STALE",
 "OAK camera health transition" print.
 
 `{"type":"event","event":"arm_midband_disarm","ch3_us":...,"ch4_us":...,
-"midband_s":...,"mode":...,"ts":...}` (2026-11-05): the robot disarmed
-because ch3 stayed between the arm thresholds for longer than
-`SafetyParams.arm_midband_disarm_s` while armed (the RC ch3/ch4 hybrid-mix
-fault). The same tick's line has `ARM_MIDBAND_DISARM` and `DISARMED` in
+"since_held_high_s":...,"mode":...,"ts":...}` (2026-11-05): the robot
+disarmed because, while armed, ch3 was not held high (>= 1800 us for
+`SafetyParams.arm_high_persist_s`) for longer than
+`SafetyParams.arm_midband_disarm_s` and was not low (the RC ch3/ch4
+hybrid-mix fault). `since_held_high_s` is the time since the last held-high
+tick, on the monotonic clock. The same tick's line has `ARM_MIDBAND_DISARM` and `DISARMED` in
 `events`, and the journal has an `ARM SWITCH MID-BAND DISARM` warning.
 
 ### GPS (2026-09-19, Commit D)

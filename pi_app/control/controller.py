@@ -140,7 +140,6 @@ class Controller:
         # it from SafetyConfig.require_switch_off_at_startup).
         self._safety_state = SafetyState(
             is_armed=False,
-            last_transition_epoch_s=0.0,
             rearm_requires_switch_cycle=bool(startup_interlock),
         )
         if startup_interlock:
@@ -1378,7 +1377,7 @@ class Controller:
             or not self._sticks_within_auto_disarm_deadband(rc)
         ):
             return []
-        self._safety_state, events = force_disarm(self._safety_state, epoch_now)
+        self._safety_state, events = force_disarm(self._safety_state, mono_now)
         self._armed_idle_since = None
         _logger.warning(
             "AUTO-DISARM: armed and idle for %.0f s; flip the arm switch off and on to re-arm",
@@ -1639,7 +1638,7 @@ class Controller:
             held_rearm_latch = self._safety_state.rearm_requires_switch_cycle
             self._safety_state = SafetyState(
                 is_armed=False,
-                last_transition_epoch_s=epoch_now,
+                last_transition_mono_s=mono_now,
                 emergency_active=self._safety_state.emergency_active,
                 rearm_requires_switch_cycle=held_rearm_latch,
             )
@@ -1678,30 +1677,33 @@ class Controller:
             ch5_us=rc.ch5_us,
             now_epoch_s=epoch_now,
             params=self._safety_params,
+            # Safety timing runs on the monotonic clock: NTP steps the wall
+            # clock after boot (no RTC battery) and must not move it.
+            now_mono_s=mono_now,
         )
         if latched_before and not self._safety_state.rearm_requires_switch_cycle:
             _logger.warning("Arm latch cleared: arm switch seen OFF")
-        # RC arm-channel fail-safe (2026-11-05): ch3 sat mid-band while armed.
+        # RC arm-channel fail-safe (2026-11-05): armed, and ch3 has not been
+        # held high for arm_midband_disarm_s (the CH3/CH4 hybrid-mix fault).
         midband_disarm: dict | None = None
         if SafetyEvent.ARM_MIDBAND_DISARM in events:
-            _since = self._safety_state.ch3_midband_since_epoch_s
-            _midband_s = (epoch_now - _since) if _since is not None else None
+            _held = self._safety_state.ch3_held_high_mono_s
+            _since_s = (mono_now - _held) if _held is not None else None
             midband_disarm = {
                 "ch3_us": int(rc.ch3_us),
                 "ch4_us": int(rc.ch4_us),
-                "midband_s": round(_midband_s, 3) if _midband_s is not None else None,
+                "since_held_high_s": round(_since_s, 3) if _since_s is not None else None,
                 "mode": self._mode,
             }
             _logger.warning(
-                "ARM SWITCH MID-BAND DISARM: ch3 read %d us (between %d and %d) for "
-                "%.2f s while armed in %s. Check the transmitter's CH3/CH4 mix "
+                "ARM SWITCH MID-BAND DISARM: armed in %s, but ch3 has not held >= %d us "
+                "for %.2f s (now %d us). Check the transmitter's CH3/CH4 mix "
                 "(HotRC hybrid/jog mode must be off), then flip the arm switch "
                 "off and on to re-arm",
-                int(rc.ch3_us),
-                int(self._safety_params.arm_low_threshold_us),
-                int(self._safety_params.arm_high_threshold_us),
-                _midband_s if _midband_s is not None else float("nan"),
                 self._mode,
+                int(self._safety_params.arm_high_threshold_us),
+                _since_s if _since_s is not None else float("nan"),
+                int(rc.ch3_us),
             )
         if auto_events:
             events = [*auto_events, *events]

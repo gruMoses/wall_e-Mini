@@ -56,10 +56,11 @@ class TestController(unittest.TestCase):
         motor = FakeMotor()
         relay = FakeRelay()
         shutdown = FakeShutdown()
-        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
-        # Arm: ch3 held high for arm_high_persist_s (0.2 s)
+        # One-tick arm as setup (arm timing is in test_rc_arm_channel_failsafe).
+        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
+                       safety_params=SafetyParams(arm_high_persist_s=0.0))
+        # Arm
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
-        c.process(rc, now_epoch_s=0.05)
         cmd, events, _ = c.process(rc, now_epoch_s=0.3)
         self.assertTrue(cmd.is_armed)
         # Send some non-neutral values
@@ -79,10 +80,11 @@ class TestController(unittest.TestCase):
         motor = FakeMotor()
         relay = FakeRelay()
         shutdown = FakeShutdown()
-        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
-        # Arm first: ch3 held high for arm_high_persist_s (0.2 s)
+        # One-tick arm as setup (arm timing is in test_rc_arm_channel_failsafe).
+        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
+                       safety_params=SafetyParams(arm_high_persist_s=0.0))
+        # Arm first
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
-        c.process(rc, now_epoch_s=0.25)
         cmd, events, _ = c.process(rc, now_epoch_s=0.5)
         self.assertTrue(cmd.is_armed)
         # Trigger emergency rising edge
@@ -158,13 +160,14 @@ class TestRCStaleness(unittest.TestCase):
         motor = FakeMotor()
         relay = FakeRelay()
         shutdown = FakeShutdown()
-        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
+        # One-tick arm as setup (arm timing is in test_rc_arm_channel_failsafe).
+        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
+                       safety_params=SafetyParams(arm_high_persist_s=0.0))
 
         now = 100.0
-        # Arm: ch3 held high for arm_high_persist_s (0.2 s)
+        # Arm
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                        last_update_epoch_s=now)
-        c.process(rc, now_epoch_s=now + 0.05)
         cmd, events, _ = c.process(rc, now_epoch_s=now + 0.3)
         self.assertTrue(cmd.is_armed)
 
@@ -183,12 +186,13 @@ class TestRCStaleness(unittest.TestCase):
         motor = FakeMotor()
         relay = FakeRelay()
         shutdown = FakeShutdown()
-        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
+        # One-tick arm as setup (arm timing is in test_rc_arm_channel_failsafe).
+        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
+                       safety_params=SafetyParams(arm_high_persist_s=0.0))
 
         now = 100.0
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                        last_update_epoch_s=now)
-        c.process(rc, now_epoch_s=now + 0.05)  # ch3 held high 0.2 s to arm
         cmd, events, telem = c.process(rc, now_epoch_s=now + 0.3)
         self.assertTrue(cmd.is_armed)
         self.assertNotIn(SafetyEvent.RC_STALE, events)
@@ -397,11 +401,12 @@ class TestFollowMeNoTargetRegression(unittest.TestCase):
         motor = FakeMotor()
         relay = FakeRelay()
         shutdown = FakeShutdown()
-        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
+        # One-tick arm as setup (arm timing is in test_rc_arm_channel_failsafe).
+        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
+                       safety_params=SafetyParams(arm_high_persist_s=0.0))
         # Arm with ch4 low (no person detections fed → no target present)
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                       last_update_epoch_s=100.0)
-        c.process(rc, now_epoch_s=100.25)  # ch3 held high 0.2 s to arm
         cmd, _, _ = c.process(rc, now_epoch_s=100.5)
         self.assertTrue(cmd.is_armed)
         # ch4 rising edge while armed, still no target. Previously raised

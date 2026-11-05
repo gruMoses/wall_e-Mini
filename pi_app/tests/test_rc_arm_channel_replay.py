@@ -19,7 +19,8 @@ logs on Kevin's Mac, with each disarmed heartbeat tail cut to 2 rows:
   its ``armed`` and ``mode`` columns are empty.
 
 Logged ticks are ~10 Hz while armed (the control loop runs at ~30 Hz), so a
-decision lands on the first logged tick at or after the real one.
+decision lands on the first logged tick at or after the real one. The logged
+``ts`` is fed as the safety (monotonic) clock.
 """
 
 import csv
@@ -109,7 +110,9 @@ def _replay(ticks, params, state=None) -> List[Tuple[Tick, SafetyState, List[Saf
     state = state if state is not None else SafetyState()
     out = []
     for t in ticks:
-        state, events = update_safety(state, t.ch3, t.ch4, t.ch5, t.ts, params)
+        state, events = update_safety(
+            state, t.ch3, t.ch4, t.ch5, now_epoch_s=t.ts, params=params, now_mono_s=t.ts
+        )
         out.append((t, state, events))
     return out
 
@@ -136,7 +139,8 @@ def _seeded_armed(first: Tick) -> SafetyState:
     """The state the old level rule left on its ARMED tick."""
     return SafetyState(
         is_armed=True,
-        last_transition_epoch_s=first.ts,
+        last_transition_mono_s=first.ts,
+        ch3_held_high_mono_s=first.ts,
         last_ch4_high=first.ch4 >= NEW.follow_me_high_threshold_us,
         follow_me_active=first.mode == "FOLLOW_ME",
         last_ch5_high=first.ch5 >= NEW.emergency_threshold_us,
@@ -166,13 +170,16 @@ def test_midband_after_a_held_arm_disarms_and_latches(name):
     assert ticks[i_arm].ts - ticks[0].ts >= NEW.arm_high_persist_s
     assert ticks[i_arm - 1].ts - ticks[0].ts < NEW.arm_high_persist_s
 
-    # Mid-band onset while armed, then the trip on the first tick past the limit.
+    # Mid-band onset while armed, then the trip on the first tick more than
+    # arm_midband_disarm_s after the last held-high tick.
     i_on = next(i for i in range(i_arm, len(ticks)) if _midband(ticks[i].ch3))
+    t_held = ticks[i_on - 1].ts
+    assert rep[i_on - 1][1].ch3_held_high_mono_s == t_held
     i_trip = _first(rep, SafetyEvent.ARM_MIDBAND_DISARM)
     assert i_trip is not None and i_trip > i_on
     assert all(_midband(t.ch3) for t in ticks[i_on : i_trip + 1])
-    assert ticks[i_trip].ts - ticks[i_on].ts > NEW.arm_midband_disarm_s
-    assert ticks[i_trip - 1].ts - ticks[i_on].ts <= NEW.arm_midband_disarm_s
+    assert ticks[i_trip].ts - t_held > NEW.arm_midband_disarm_s
+    assert ticks[i_trip - 1].ts - t_held <= NEW.arm_midband_disarm_s
     t, state, events = rep[i_trip]
     assert SafetyEvent.DISARMED in events
     assert not state.is_armed and state.rearm_requires_switch_cycle
@@ -210,11 +217,10 @@ def test_midband_disarm_after_a_burst_arm(name):
     rep = _replay(ticks[1:], NEW, state=_seeded_armed(first))
     i_trip = _first(rep, SafetyEvent.ARM_MIDBAND_DISARM)
     assert i_trip is not None
-    i_on = next(i for i, (t, _s, _e) in enumerate(rep) if _midband(t.ch3))
-    t_on = rep[i_on][0].ts
+    # The burst tick is the last "held" tick the old rule left behind.
     t_trip = rep[i_trip][0].ts
-    assert t_trip - t_on > NEW.arm_midband_disarm_s
-    assert rep[i_trip - 1][0].ts - t_on <= NEW.arm_midband_disarm_s
+    assert t_trip - first.ts > NEW.arm_midband_disarm_s
+    assert rep[i_trip - 1][0].ts - first.ts <= NEW.arm_midband_disarm_s
     events = rep[i_trip][2]
     if first.mode == "FOLLOW_ME":
         assert events == [
@@ -230,7 +236,7 @@ def test_midband_disarm_after_a_burst_arm(name):
 
 
 def test_serial_capture_midband_disarm_when_seeded_armed():
-    """50 Hz: an arm left by a burst trips 0.5 s after ch3 returns mid-band."""
+    """50 Hz: an arm left by a burst trips 0.5 s after the burst."""
     trips = 0
     for seg in _segments(TRACES[TRUTH_TABLE]):
         i_hi = next(
@@ -239,10 +245,9 @@ def test_serial_capture_midband_disarm_when_seeded_armed():
         if i_hi is None:
             continue
         rep = _replay(seg[i_hi + 1 :], NEW, state=_seeded_armed(seg[i_hi]))
-        i_on = next(i for i, (t, _s, _e) in enumerate(rep) if _midband(t.ch3))
         i_trip = _first(rep, SafetyEvent.ARM_MIDBAND_DISARM)
         assert i_trip is not None
-        dt = rep[i_trip][0].ts - rep[i_on][0].ts
+        dt = rep[i_trip][0].ts - seg[i_hi].ts
         assert NEW.arm_midband_disarm_s < dt <= NEW.arm_midband_disarm_s + 0.025
         trips += 1
     assert trips == 2

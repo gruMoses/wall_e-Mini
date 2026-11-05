@@ -14,6 +14,7 @@ from unittest.mock import patch
 from config import config as default_config
 from pi_app.control.controller import Controller, RCInputs
 from pi_app.control.mapping import apply_stick_expo_pair, map_pulse_to_byte_saturated
+from pi_app.control.safety import SafetyParams
 
 
 class FakeMotor:
@@ -46,12 +47,14 @@ def _cfg(expo):
 
 def _first_cmd(expo, ch1, ch2, bt=None):
     with patch("pi_app.control.controller.config", _cfg(expo)):
+        # One-tick arm as setup (arm timing is in test_rc_arm_channel_failsafe).
         ctrl = Controller(motor_driver=FakeMotor(), arm_relay=FakeRelay(),
-                          shutdown_scheduler=FakeShutdown())
-        ctrl.process(ARMED_RC, now_epoch_s=0.25)
-        ctrl.process(ARMED_RC, now_epoch_s=0.5)  # armed: ch3 held high 0.25 s
+                          shutdown_scheduler=FakeShutdown(),
+                          safety_params=SafetyParams(arm_high_persist_s=0.0))
+        ctrl.process(ARMED_RC, now_epoch_s=0.5)
         rc = replace(ARMED_RC, ch1_us=ch1, ch2_us=ch2)
         cmd, _, telem = ctrl.process(rc, now_epoch_s=1.0, bt_override_bytes=bt)
+    assert cmd.is_armed  # a disarmed pair would compare equal and prove nothing
     return cmd, telem
 
 

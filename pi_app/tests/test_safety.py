@@ -11,7 +11,7 @@ from pi_app.control.safety import (
 class TestSafety(unittest.TestCase):
     def test_arm_disarm_with_debounce(self):
         params = SafetyParams()
-        s = SafetyState(is_armed=False, last_transition_epoch_s=0.0)
+        s = SafetyState(is_armed=False, last_transition_mono_s=0.0)
         now = 100.0
 
         # Below low threshold -> disarmed (already false, no event)
@@ -42,7 +42,7 @@ class TestSafety(unittest.TestCase):
 
     def test_emergency_rising_edge_latches(self):
         params = SafetyParams()
-        s = SafetyState(is_armed=True, last_transition_epoch_s=10.0, emergency_active=False, last_ch5_high=False)
+        s = SafetyState(is_armed=True, last_transition_mono_s=10.0, emergency_active=False, last_ch5_high=False)
         now = 20.0
 
         # Rising edge triggers emergency, forces disarm, emits events
@@ -60,7 +60,7 @@ class TestSafety(unittest.TestCase):
 
     def test_ch3_midband_holds_state(self):
         params = SafetyParams()
-        s = SafetyState(is_armed=False, last_transition_epoch_s=0.0)
+        s = SafetyState(is_armed=False, last_transition_mono_s=0.0)
         now = 0.0
         # Midband should hold current state
         s, events = update_safety(s, ch3_us=1500, ch4_us=1000, ch5_us=1000, now_epoch_s=now, params=params)
