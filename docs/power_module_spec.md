@@ -1,47 +1,84 @@
 # Pi 5 power module: hardware design specification
 
-Status: research draft, 2026-11-04. Revised the same day for Kevin's
-answers: a 13.2 V rail, peak ratings, smart FET outputs. Revised again
-on 2026-11-04 for Kevin's choice of an off-the-shelf converter that sits
-off the board. The rail is now a 12 V rail, and the board carries no
-pack power. Nothing is ordered. No part is sampled. Each part number
-below was checked on the manufacturer's page or a distributor page on
-2026-11-04 unless the text says VERIFY. A VERIFY mark means the number
-or the status comes from memory or from a third-party listing, and Kevin
-must check it in the datasheet before he buys the part.
+Revision note, 2026-11-04 (option A). This revision follows option A of
+`docs/pi_power_architecture.md`. That document is the decision document.
+If the two documents disagree, it wins. The Pi now gets 5.1 V from an
+isolated 75 V / 100 V-surge brick on the battery side of the main switch,
+behind a fuse and a high-side switch. An opto ignition sense on the
+switched side, a hardware grace timer and a 5 V bleed control it. The 2S
+18650 buffer, its charger, protector and balancers, the INA228, the SYS
+bus, the pack-sense lead and the RTC and J2 wake paths are removed. Power
+returns only when the ignition comes on again. The 12 V converter and
+outputs, the USB rail, the MCU, the Pi interface and the bus-overvoltage
+material (3.2a) stay. New fact: both drive VESCs read back as hardware
+`75_100_V2`, firmware 6.05. The buffer design is in the git history of
+this file (commit 037cc80).
+
+Status: research draft. Nothing is ordered. No part is sampled. Each
+part number below was checked on the manufacturer's page or a
+distributor page on 2026-11-04 unless the text says VERIFY. A VERIFY
+mark means the number or the status comes from memory or from a
+third-party listing, and Kevin must check it in the datasheet before he
+buys the part. The brick data in 3.4 comes from
+`docs/pi_power_architecture.md` (found 2026-11-04, no part checked on
+the bench). The parts that this revision adds for the switch, the
+optos, the timer and the bleed come from memory, and each carries a
+VERIFY mark.
+
+History: the first draft (2026-11-04) had a 14 V rail, a converter on
+the board and a 2S buffer. The same day it changed to a 13.2 V rail,
+peak ratings and smart FET outputs, then to an off-the-shelf 12 V
+converter off the board, then to option A (this revision).
 
 This document uses Simplified Technical English as far as is reasonable.
 The appendix lists the Technical Names.
 
 ## 0. Summary
 
-The module takes 12 V from an off-the-shelf converter that sits off the
-board. The converter runs from the robot's 13S traction pack (37.7 V to
-54.6 V). The module also senses the pack voltage on a thin lead. It
-makes four things:
+The module powers the Raspberry Pi 5, the USB devices and two switched
+12 V outputs on WALL-E. The robot's 13S traction pack (37.7 V to
+54.6 V) is the only energy source. There is no buffer battery.
 
-1. A 12 V rail, 150 W continuous, with two switched outputs that the Pi
-   controls. The rail comes from an off-the-shelf potted golf-cart
-   converter that is bolted to the chassis and rated for 72 V carts. The
-   board takes the 12 V in and switches the two outputs. It carries no
-   pack power.
-2. A 5.1 V rail for the Raspberry Pi 5 through the GPIO header, 6 A.
-3. A 5.0 V rail for the USB devices, with four current-limited ports.
-   The Pi's own USB ports do not carry the device power.
-4. A 2S 18650 buffer pack that carries the Pi through a clean halt when
-   the input is lost. The pack floats at 7.60 V (3.80 V per cell). The
-   module cuts the Pi's 5 V after the halt and applies it again when the
-   input returns. The Pi then boots. No RTC polling is necessary.
+Three supply leads come to the module:
 
-A small microcontroller (STM32G071) runs the state machine. It talks to
-the Pi over UART0 (GPIO 14 and 15) and two GPIO lines. It is not on the
-Pi's I2C bus 1.
+- The battery tap. It comes from the BMS output on the battery side of
+  the main switch, through fuse F3. It feeds only the Pi brick.
+- The ignition lead. It comes from the switched side of the main
+  switch, through fuse F4. It carries only an opto LED current (5 mA to
+  8 mA).
+- The 12 V lead. It comes from an off-the-shelf 12 V converter that is
+  bolted to the chassis and runs from the switched side through F1.
 
-Section 11 (the Grok appendix) records the three second opinions and
-what changed because of them, plus three more on the converter (11.4 to
-11.6). The Murata quarter brick and the discrete 100 V buck stay in
-section 3.2 as documented alternatives. The discrete buck is also the
-product spin.
+The module makes four things:
+
+1. A 5.1 V rail for the Pi 5 through the GPIO header, 6 A. An isolated
+   telecom brick (TRACO TEN 30-4811WIN class) makes it from the battery
+   tap. A high-side switch (HSS) in front of the brick is on while the
+   ignition is on, and for a grace window after the ignition goes off.
+2. An ignition signal to the Pi on GPIO 27. The Pi debounces it and
+   halts itself. A hardware grace timer forces the HSS off 60 s to 90 s
+   after the ignition goes off, even if the Pi never halts. A bleed then
+   takes the 5.1 V rail to 0 V, so the next ignition is a real power-up
+   and the Pi boots.
+3. A 12 V rail, 150 W continuous, with two switched outputs that the Pi
+   controls. The rail is off whenever the ignition is off.
+4. A 5.0 V rail for the USB devices, from the 12 V rail, with four
+   current-limited ports. The Pi's own USB ports do not carry the device
+   power.
+
+With the main switch off, the module takes only leakage from the pack:
+under 10 uA. The Daly BMS itself takes 0.5 mA asleep (4.3).
+
+A small microcontroller (STM32G071) switches the outputs and the USB
+ports, and reports the rails to the Pi over UART0 (GPIO 14 and 15). It
+is not in the Pi power path. A dead MCU does not change when the Pi gets
+power. It is not on the Pi's I2C bus 1.
+
+Section 11 (the Grok appendix) records the second opinions. 11.1 and
+11.4 to 11.6 still cover the 12 V converter and the bus. 11.7 records
+the option A review. The Murata quarter brick and the discrete 100 V
+buck stay in section 3.2 as documented alternatives for the 12 V rail.
+The discrete buck is also the product spin.
 
 ## 1. Requirements
 
@@ -49,77 +86,98 @@ Assumptions are marked (A). Kevin's words are quoted.
 
 | # | Requirement | Source |
 |---|---|---|
-| R1 | Input: 13S Li-ion pack, 37.7 V (BMS cut) to 54.6 V (full). Design working input 60 V. | Kevin: "up to 60 V straight from the battery". `config.py` lines 225-242. |
-| R2 | The board carries no pack power. The converter's own rating and a fuse at the pack cover the bus. The board's pack-sense lead survives 100 V. | Kevin, 2026-11-04: "we're going to use something off the shelf." Bus overvoltage: section 3.2a. |
-| R3 | Fixed 12 V rail (12.0 V to 13.8 V, depending on the unit) from an off-board converter of 20 A class, 150 W continuous. Two switched outputs, each 10 A peak. 8 A combined continuous while the Pi runs. | Kevin: "a tap for 10 A at 14 V", "a relay to control the 12V output, or better yet, two". Kevin chose "peaks are fine" on 2026-11-04 (open question 2). He then chose the converter (open question 13): "we're going to use something off the shelf." |
-| R4 | 5.1 V rail for the Pi 5, 6 A continuous, through the header. | (A) Pi 5 needs 5 V 5 A to lift its USB limit. |
-| R5 | 5.0 V rail for USB devices, 4 ports, each current-limited, no backfeed into the Pi. | Kevin: "power everything we need to power over USB". `docs/NEXT_SESSION.md`: 167 USB over-current trips from hub backfeed. |
-| R6 | 2S 18650 buffer with a charger that floats at 7.60 V, a protector, balancing that works, and a pack monitor. | Kevin: "whatever we need for a custom BMS with two 18650s", 3.80 V per cell. |
-| R7 | Input loss is detected on the 60 V side, not from battery current. | Lesson from `docs/ups_hat_b.md` section 4. |
-| R8 | On input loss: request a clean halt, wait for the halt, cut the Pi's 5 V, then idle. On input return: apply 5 V, the Pi boots. | Kevin: "safely shut down the Pi", "powers off the Pi and probably the HAT", "the Pi should boot automatically". |
-| R9 | A Pi that does not halt is cut after a timeout (120 s). | (A) field recovery over data safety. See risk R-7. |
+| R1 | Input: 13S Li-ion pack, 37.7 V (BMS cut) to 54.6 V (full). Design working input 60 V. Each part on the battery tap and the ignition lead survives 100 V for 100 ms. The 12 V converter follows 3.2. | Kevin: "up to 60 V straight from the battery". `config.py` lines 225-242. 100 V surge: `docs/pi_power_architecture.md` section 4. |
+| R2 | The board carries pack power only in the Pi power block: one battery tap of 2 A or less, fused at the tap, behind an isolation barrier (optos and the isolated brick). The 12 V converter stays off the board. | Option A. Kevin, 2026-11-04: "we're going to use something off the shelf." Bus overvoltage: section 3.2a. |
+| R3 | Fixed 12 V rail (12.0 V to 13.8 V, depending on the unit) from an off-board converter of 20 A class, 150 W continuous, fed from the switched side. Two switched outputs, each 10 A peak. 8 A combined continuous. | Kevin: "a tap for 10 A at 14 V", "a relay to control the 12V output, or better yet, two". Kevin chose "peaks are fine" on 2026-11-04 (open question 2). He then chose the converter (open question 13): "we're going to use something off the shelf." |
+| R4 | 5.1 V rail for the Pi 5, 6 A continuous, through the header. It comes from a brick rated 75 V continuous and 100 V for 100 ms, on the battery side of the main switch. | (A) Pi 5 needs 5 V 5 A to lift its USB limit. Brick class: option A, section 4. |
+| R5 | 5.0 V rail for USB devices, 4 ports, each current-limited. No feed from the Pi's ports and no feed into them. | Kevin: "power everything we need to power over USB". `docs/NEXT_SESSION.md`: 167 USB over-current trips from hub backfeed. `docs/ups_hat_b.md`: the hub back-powered from the Pi's ports on the 2026-11-04 main-switch pull. |
+| R6 | No buffer battery. The main pack carries the Pi through the halt. | Option A. The 2S buffer drains in storage (`docs/pi_power_architecture.md` section 1). |
+| R7 | The ignition is sensed from the switched side only, through an opto whose LED has its own fuse. No part may be able to bridge the main switch. | Option A, section 4. The main switch must still make the drivetrain dead. |
+| R8 | Ignition off: the Pi halts itself inside the grace window, then the 5.1 V rail goes off. Ignition on: 5.1 V is applied and the Pi boots. Power returns only with the ignition. | Kevin: "safely shut down the Pi", "the Pi should boot automatically". Option A. |
+| R9 | A hardware grace timer forces the Pi rail off 60 s to 90 s after the ignition goes off, even while the Pi's 3V3 is up. No firmware is in this path. | Grok, option A review (11.7): an `ignition OR 3V3` enable lets a hung Pi drain the pack in one to two weeks. |
 | R10 | The module interface cannot hang the Pi's I2C bus 1. | `docs/i2c_bus_guard.md`. |
-| R11 | Idle current from the buffer pack while the input is absent: under 0.3 mA. | (A) weeks of storage without a flat pack. |
+| R11 | With the main switch off, this design takes under 50 uA from the pack (target 10 uA). The brick is disconnected, not only switched off. | A brick's 3 mA off current is about 2 Ah a month (option A, section 4). |
 | R12 | The module tells the Pi its state, voltages and currents, and accepts output commands. | (A) replaces `bin/walle_ups.py`. |
-| R13 | The module's safe state with a dead microcontroller: charger at 7.60 V, 5 V on when the input is present, switched outputs off. | Grok objection, section 11. |
+| R13 | A dead microcontroller does not change the Pi power path. Its safe state: switched outputs off; USB ports as open question 10 decides. | Grok objection, section 11. Option A puts the timer in hardware. |
 | R14 | Outdoor enclosure, ambient -10 C to +45 C, no forced air. | (A) WALL-E lives outside in Texas. |
 | R15 | One person hand-assembles the first boards. Four-layer PCB, stencil, hot plate or oven. | Kevin builds it himself. |
+| R16 | When the HSS opens, the 5.1 V rail falls under 0.5 V within 2 s. When it closes, the rail rises in tens of milliseconds. | A slow 5 V ramp can leave the Pi 5 in standby (`docs/pi_power_architecture.md` section 2). |
 
 Not requirements: galvanic isolation of the 12 V rail (the converter is
-non-isolated, and its output negative is pack negative, section 3.2),
-ride-through of the robot's loads, USB Power Delivery to the Pi.
+non-isolated, and its output negative is pack negative, section 3.2);
+ride-through of the robot's loads; USB Power Delivery to the Pi; a
+scheduled wake in storage (open question 8); a clean halt on a BMS cut,
+a blown fuse, a converter fault or a loose connector. Those stay hard
+cuts (option A, section 4; risk R-7).
 
 ## 2. Block diagram
 
-```
- 13S pack     +----------+   +-----------------------------------+
- 37.7-54.6 V->| F1 fuse  |-->| 12 V converter, OFF THE BOARD     |
- (robot)      | at pack  |   | bolted to the chassis             |
-     |        +----------+   | 72 V-class golf-cart unit, potted |
-     |                       | 20 A class, 12.0 to 13.8 V        |
-     |                       +-----------------+-----------------+
-     | pack-sense lead                         |
-     | (0.5 A fuse)                            | 12 V
-- - -|- - - - - - - - - - - - - - - - - - - - -|- - - -  board edge
-  +--v------------------+    +-----------------v-----------------+
-  | VIN_OK divider      |    | 12 V IN (on the board)            |
-  | 998k + 43k, clamp,  |    | F2 fuse 20 A, TVS SMBJ15A,        |
-  | 100 nF, comparator  |    | LTC4368 and 2 x 100 V FETs,       |
-  +---------------------+    | OV trip 15.0 V, UV trip 10.5 V    |
-                             +-----------------+-----------------+
-                                               | 12 V rail
-            +------------------+---------------+-------------+
-            |                  |                             |
-   +--------v-------+  +-------v--------+          +---------v--------+
-   | OUT1 / OUT2    |  | Charger        |          | Ideal diode      |
-   | TPS1HB08-Q1 x2 |  | BQ24610        |          | LTC4359 (SHDN)   |
-   | 10 A peak each |  | CV 7.60/8.40 V |          +---------+--------+
-   +----------------+  | CC 1.0 A       |                    |
-                       +-------+--------+                    | SYS bus
-                               |                 +-----------+------+
-                    +----------v----------+      |                  |
-                    | 2S pack             |      |      +-----------v------+
-                    | protector S-8252    +------+      | 5.1 V Pi buck    |
-                    | balancers at 4.20 V | ideal       | LM61495, 6 A     |
-                    | INA228 monitor      | diode       +--------+---------+
-                    +---------------------+ LM74700              |
-                                                        +--------v---------+
-                                                        | eFuse TPS25982   |
-                                                        | + discharge FET  |
-                                                        +--------+---------+
-                                                                 | header
-                                                                 v pins 2,4
-                    +------------------+      +---------------+  Pi 5
-      SYS bus ----->| 5.0 V USB buck   |----->| TPS25221 x4   |--> OAK, hub,
-                    | LM61495, 5 A     |      | per-port limit|    Arduino,
-                    +------------------+      +---------------+    spare
-                                                     (USB 3 injectors
-                                                      pass data through,
-                                                      Pi-side VBUS open)
+Robot level:
 
-      MCU STM32G071: VIN_OK, 3V3 sense, UART0, SHUTDOWN_REQ,
-      J2 PWR_BUT pulse, OUT1/OUT2 enable, port enables,
-      charger top-up, INA228 (own I2C), LED, button.
+```
+            battery side            main switch           switched side
+ 13S pack -- BMS output --+-------------o/ o-------------+-- VESCs, drivetrain
+                          |                              |
+                       F3 2 A                            +-- F1 --+
+                          |                              |        |
+                          |                              |  +-----v--------------+
+                          |                              |  | 12 V converter     |
+                          |                              |  | OFF THE BOARD      |
+                          |                              |  | 72 V class, potted |
+                          |                              |  | 20 A, 12.0-13.8 V  |
+                          |                              |  +-----+--------------+
+                          |                        F4 0.25 A      |
+                          | battery tap    ignition lead |        | 12 V lead
+ - - - - - - - - - - - - -|- - - - - - - - - - - - - - - |- - - - | - - - - board edge
+                 +--------v---------+     +--------------v--+  +--v----------------+
+                 | Pi power block   |<-U1-| ignition sense  |  | 12 V IN: F2 20 A, |
+                 | 3.4 to 3.8:      |<-U2-| 3.6: LED string |  | SMBJ15A, LTC4368, |
+                 | HSS, brick, hold |     | U1, U2A, U2B    |  | 2 x 100 V FET     |
+                 | path, grace      |     +--------+--------+  +--+----------------+
+                 | timer, bleed     |              |              | 12 V rail
+                 +--------+---------+              | IGN_OFF      +------+------+------+
+                          | 5.1 V                  |              |      |      |      |
+                          v pins 2, 4              v GPIO 27      v      v      v      v
+                        Pi 5 <---------------------+           OUT1/2   USB    MCU   15 V
+                          ^                                   TPS1HB08 buck    LDO   comp.
+                          |                                      x 2   5.0 V (also on
+                          |   UART0, PI_3V3                              |   5.1 V)
+                          +--------------------> MCU                     |
+                                                        TPS25221 x 4: OAK, hub, Arduino,
+                                                        spare (USB 3 injectors, Pi-side
+                                                        VBUS open)
+```
+
+Pi power block (3.4 to 3.8):
+
+```
+ IGNITION LEAD (switched side), 5 mA to 8 mA
+   IGN+ -- F4 -- diode -- 2 x 3.3 kOhm -- U1 LED -- U2A LED -- U2B LED -- IGN-
+
+ BATTERY SIDE (pack voltage)               ||  LOGIC SIDE (system ground)
+                                           ||
+ battery tap -- F3 --+-- SMBJ58A           ||
+                     |                     ||
+               +-----v------+              ||
+               | HSS P-FET  |<-- Q1 <-- U1 ||
+               | -150 V     |<-- Q2 <-- U3 <==== U3 LED <-- Q5 <-- PI_3V3, pin 1
+               +-----+------+              ||                ^
+                     |                     ||                Q6 <-- GRACE_EXPIRED
+               +-----v------+              ||                             ^
+               | Pi brick,  |              ||              74HC4060 timer, reset by U2B
+               | isolated   |=====================> 5.1 V rail
+               +------------+              ||       +--> output fuse, crowbar, bleed
+                                           ||       +--> header pins 2, 4 --> Pi 5
+                                           ||
+                                           ||  U2A --> IGN_OFF --> GPIO 27
+
+ U1 and U3 are PV optos: their outputs are on the battery side. U2A and
+ U2B are phototransistor optos: their outputs are on the logic side.
+
+ ENABLE (HSS on)  = IGNITION  OR  HOLD
+ HOLD             = PI_3V3    AND NOT GRACE_EXPIRED
+ GRACE_EXPIRED    = ignition off for T (75 s nominal, 60 s to 90 s)
+ bleed on         = 5.1 V rail below about 4.6 V
 ```
 
 ## 3. Blocks and parts
@@ -127,21 +185,40 @@ ride-through of the robot's loads, USB Power Delivery to the Pi.
 Each block gives a recommended part and one alternative. Prices are
 single-unit distributor estimates (section 7).
 
-### 3.1 Pack sense and 12 V input
+### 3.1 Leads into the board, and the 12 V input
 
-The board carries no pack power. Two leads enter the board. One is a
-thin pack-sense lead. The other is the 12 V lead from the off-board
-converter (3.2).
+Three supply leads enter the board.
 
-Pack sense. The lead takes the pack voltage to the VIN_OK divider and
-comparator (3.7).
+| Lead | From | Fuse | Carries |
+|---|---|---|---|
+| Battery tap | BMS output, battery side of the main switch | F3: 2 A, DC rating 100 V or more, at the tap end (VERIFY the part) | The brick's input current: 0.2 A typical, 0.4 A peak (4.1). Nothing in storage: the HSS is open. |
+| Ignition lead | Across the switched side of the main switch | F4: 0.25 A, DC rating 100 V or more, at the switch end (VERIFY the part) | The opto LED current, 5 mA to 8 mA (3.6). |
+| 12 V lead | The off-board 12 V converter (3.2) | F2 on the board (below) | Up to 10 A peak. |
 
-| Item | Part | Key ratings |
-|---|---|---|
-| Sense-lead fuse | 0.5 A fuse at the pack end of the lead | DC rating 80 V or more (VERIFY the part). |
-| Divider | 2 x 499 kOhm 1206 in series, then 43 kOhm to ground | The two resistors share the voltage. 80 V reads 3.3 V. |
-| Clamp | Clamp diode from the divider node to 3.3 V | At 100 V the clamp carries less than 20 uA. The lead survives 100 V (R2). |
-| Filter | 100 nF at the ADC pin | Time constant about 4 ms. |
+WARNING: Key the battery-tap connector and the ignition connector
+differently. If they are swapped, the ignition string runs from the
+battery side and is always lit. The Pi then never halts, and it drains
+the pack in storage. The brick then runs from the switched side, and
+each switch-off is a hard cut.
+
+Where to tap. Tap the BMS pack output (after its discharge FET), not the
+raw cells, so that the BMS deep-discharge cut still protects the pack. A
+Daly BMS usually switches the negative lead. Then the battery tap is
+pack positive before the main switch, and its return is the BMS output
+negative (P-), not the cell negative (B-). VERIFY on WALL-E's BMS and
+harness (open question 4, risk R-21).
+
+The ignition lead is a pair taken across the switched side, after the
+main switch. Its LED string is then lit only while the switch is closed,
+whichever lead the switch interrupts.
+
+The isolation barrier. Do not tie the battery-side negative to system
+ground on the board. The only links across the barrier are the brick and
+the optos (3.4 to 3.7). The design then works whether the main switch is
+in the positive or the negative lead, and no part on the board can feed
+the switched side (R7, test T-14). System ground is the negative of the
+switched side: the 12 V converter's output negative, the Pi ground and
+the CAN ground.
 
 12 V IN. The converter's 12 V lead enters the board here. It passes, in
 this order, through the fuse F2, the TVS and the disconnect.
@@ -149,23 +226,23 @@ this order, through the fuse F2, the TVS and the disconnect.
 | Item | Part | Key ratings |
 |---|---|---|
 | Fuse F2 | Littelfuse 0895020.Z LP-JCASE 20 A, 58 V DC | At the board end of the 12 V lead. 58 V is above the 54.6 V pack maximum, so F2 also covers a converter that shorts its input to its output. VERIFY: for a 14S pack or for margin, use a fuse with a DC rating of 80 V or more. https://www.littelfuse.com/products/fuses/automotive-passenger-car/cartridge-fuses/895.aspx |
-| TVS | Littelfuse SMBJ15A | 15 V standoff, clamp about 24.4 V (VERIFY). The clamp is below the 33 V absolute maximum of the BQ24610. |
+| TVS | Littelfuse SMBJ15A | 15 V standoff, clamp about 24.4 V (VERIFY). The clamp is below the 36 V input maximum of the LM61495 USB buck, the weakest part on the rail (VERIFY its absolute maximum). |
 | Disconnect controller | ADI LTC4368 | 100 V controller for back-to-back N-FETs, with reverse protection. Overvoltage trip 15.0 V. Undervoltage trip 10.5 V. VERIFY the variant and its set points. https://www.analog.com/en/products/ltc4368.html |
 | Disconnect FETs | 2 x N-FET, 100 V, 5 mOhm or less, back to back | VERIFY the part, the gate drive and the heat at 10 A (about 1 W for the pair). |
 
 Why the fuse and the TVS. A converter can fail with its input shorted
-to its output. The pack voltage then reaches the 12 V line, and the
-BQ24610 fails in tens of microseconds. A series FET alone can lose that
-race. The TVS clamps the line first, and F2 opens. The disconnect FETs
-are rated 100 V so that they survive pack voltage on the line while F2
-opens (Grok, 11.5 and 11.6). VERIFY that the TVS survives until F2
-opens (risk R-20, test T-18).
+to its output. The pack voltage then reaches the 12 V line. The USB buck
+(36 V) and the output switches (40 V) then fail in tens of microseconds.
+A series FET alone can lose that race. The TVS clamps the line first,
+and F2 opens. The disconnect FETs are rated 100 V so that they survive
+pack voltage on the line while F2 opens (Grok, 11.5 and 11.6). VERIFY
+that the TVS survives until F2 opens (risk R-20, test T-18).
 
 The disconnect also opens at 15.0 V and at 10.5 V. The 15.0 V
 comparator on the rail is a second layer (3.2).
 
 Product spin. The surge stopper of the first draft moves to the product
-spin, where the converter is on the board. Its parts: ADI LT4363-2,
+spin, where the 12 V converter is on the board. Its parts: ADI LT4363-2,
 Infineon IPB072N15N3 G as the 150 V pass FET (alternative
 BSC160N15NS5), Littelfuse SMCJ70A as the TVS, an 8 mOhm sense resistor,
 and Littelfuse 0895020.Z or NANO2 0454010.MR as the input fuse. TI
@@ -182,6 +259,13 @@ shelf." The 12 V comes from a potted golf-cart DC-DC converter that is
 bolted to the chassis. The converter is not on the board. The board
 takes its 12 V through the 12 V IN block (3.1). The Murata brick and the
 discrete buck stay below as documented alternatives.
+
+The converter takes its input from the switched side of the main switch,
+through F1. It has no remote-off pin, and it needs none: the main switch
+turns it off, so it takes nothing from the pack in storage. The 12 V
+rail, the USB rail and the outputs are therefore off whenever the
+ignition is off. Nothing that must outlive the ignition hangs on them.
+The Pi runs from the battery tap (3.4).
 
 Why a bought unit (Grok, 11.1 and 11.6): the 100 V margin of a discrete
 buck does not help when the front end is the real limit; a shorted
@@ -214,21 +298,23 @@ data, and then against bench test T-17:
 - An output of 20 A or more.
 - A potted case.
 - Hiccup short-circuit protection.
-- A fuse at the pack end of its input lead (F1, below).
+- A fuse at the switched-side end of its input lead (F1, below).
 - A case that bolts to bare chassis metal.
 
 WARNING: A converter with a 40 V input floor drops its rail when the
 pack is low, because 40 V is above the 37.7 V BMS cut. The Vatrer
 example has that floor. Do not depend on the 12 V rail when the pack is
-below 40 V. The rail-lost rule in 5.3 keeps the Pi safe.
+below 40 V. The Pi does not depend on it (3.4). A rail drop takes the
+USB devices and the outputs off. Section 5.3 says what follows.
 
 Rules for the converter, from the 2026-11-04 reviews (11.4 and 11.6):
 
-- Fit a fuse at the pack end of the converter's input lead (F1). Use a
-  DC rating of 80 V or more. Size it above the converter's full-load
-  input current at the lowest pack voltage (about 9 A for 335 W at 40 V
-  and 90 percent, VERIFY).
-- The converter is non-isolated. Its output negative is pack negative.
+- Fit F1 at the switched-side end of the converter's input lead, near
+  the main switch. Use a DC rating of 80 V or more. Size it above the
+  converter's full-load input current at the lowest pack voltage (about
+  9 A for 335 W at 40 V and 90 percent, VERIFY).
+- The converter is non-isolated. Its output negative is its input
+  negative: the switched-side negative, which is system ground (3.1).
   Do not add a second ground bond. Do not let USB or signal cables
   become a second bond.
 - A short in the 12 V lead is upstream of F2. Size the lead for the
@@ -240,9 +326,9 @@ Rules for the converter, from the 2026-11-04 reviews (11.4 and 11.6):
 
 12 V rail protection. The 12 V IN block opens at 15.0 V (3.1). The
 board adds an SMBJ18A TVS on the rail, and a 15.0 V comparator that
-opens the LTC4359 (3.5) and OUT1/OUT2. VERIFY the converter's own OVP,
-if it has one, and VERIFY that its output stays under 15.0 V in normal
-use (13.8 V maximum).
+switches OUT1, OUT2 and the USB buck off. VERIFY the converter's own
+OVP, if it has one, and VERIFY that its output stays under 15.0 V in
+normal use (13.8 V maximum).
 
 Rules for the product spin, from the review: sense-resistor current
 limit, not RDS(on); bias (VCC) back-fed from the output through a small
@@ -273,19 +359,27 @@ energy. There are two cases:
 
 This affects the VESCs and every converter on the bus. It is not a
 problem of this board alone. A surge stopper on this board would
-protect only the converter. The actions:
+protect only the converter. The Pi brick sees the same bus: the main
+switch is closed while the robot drives, so the battery tap and the
+switched side are one node. The actions:
 
-1. Record the VESC hardware model and firmware version. The repository
-   does not have them today.
-2. VESC Tool 6.05 and later have "Battery Voltage Regen Cutoff Start/End" (off by default at
-   1000/1100 V; research 2026-11-04). VERIFY the robot's firmware version, then set it near 55.5/57 V.
+1. Done 2026-11-04: both drive VESCs read back in VESC Tool as hardware
+   `75_100_V2`, firmware 6.05. The hardware is 75 V class. The 57 V
+   input limit of the 60 V-class VESC 6 firmware
+   (`docs/pi_power_architecture.md` section 4) therefore does not
+   apply, and a full pack does not sit 2.4 V under a VESC fault. VERIFY
+   the hardware's own input-voltage limit in VESC Tool.
+2. Firmware 6.05 has "Battery Voltage Regen Cutoff Start/End" (off by
+   default at 1000/1100 V; research 2026-11-04). Set it near 55.5/57 V
+   on both VESCs (open question 15). This is the free first fix.
 3. WARNING: "Battery Voltage Cutoff Start/End" in VESC Tool is the
    LOW-voltage cutoff. Do not set it near 56 V. The robot then stops
    driving.
 4. Consider a chassis-mounted bus dump clamp: a FET, a power resistor
    and a trigger near 58 V. It sinks braking energy and protects the
-   VESCs and the converter together. This is open question 16.
-5. Buy converter voltage margin: a 72 V-class unit (3.2).
+   VESCs and the converters together. This is open question 16.
+5. Buy converter voltage margin: a 72 V-class 12 V unit (3.2) and a
+   Pi brick rated 100 V for 100 ms (3.4).
 
 Tests T-1 and T-2 measure the bus (9.2).
 
@@ -315,20 +409,189 @@ also catches a shorted light bar before it resets the computer.
 
 Each output: 2-pin Molex Micro-Fit 3.0 (8.5 A per pin, VERIFY) or
 5.08 mm screw terminal for 10 A. Current limit set to 12 A. Default
-off. The Pi turns an output on over UART. The module turns both off
-on input loss, on hard cut and on an overvoltage on the rail.
+off. The Pi turns an output on over UART. Both outputs go off with the
+12 V rail (ignition off), on an overvoltage on the rail, when the Pi
+halts, and on an MCU reset (5.5).
 
-### 3.4 5 V rails
+### 3.4 Pi 5.1 V rail: the brick
 
-Two independent bucks from the SYS bus (3.5). The Pi rail is 5.1 V.
-The USB rail is 5.0 V. A USB fault cannot brown out the Pi.
+The Pi rail comes from an isolated telecom brick on the battery tap,
+behind the HSS (3.5). Its isolation is not the main point. Its input
+rating is. A 60 V module (Pololu D42V55F5) cannot be made safe on 13S
+with a TVS: a TVS that stays off at 54.6 V clamps near 90 V (Vishay:
+SMBJ58A clamps at 93.6 V). The brick must take 75 V continuous and
+100 V for 100 ms (option A, section 4). The TI LM5013 (100 V) is 3.5 A,
+non-synchronous, and too small.
+
+Candidates found on 2026-11-04 (`docs/pi_power_architecture.md`; no
+part checked on the bench):
+
+| Item | Part | Rating | Off current | Price, stock |
+|---|---|---|---|---|
+| Default | TRACO TEN 30-4811WIN | 18 V to 75 V input (100 V for 100 ms), 5.1 V 6 A, 88 percent | 3 mA typical | 66.80 USD; none at TME |
+| Alternative | RECOM RP30-4805SFW/N | 18 V to 75 V (100 V for 100 ms), 5 V 6 A, trims to 5.1 V; the /N version fails off (VERIFY what the suffix sets) | 3 mA maximum | 91 EUR; 11-week lead |
+| Smaller, in stock | TRACO TEN 20-4811WIN | 18 V to 75 V, 5 V 4 A, 88 percent | 2.5 mA typical | 49.05 USD; 25 at TME. VERIFY its surge rating and whether its output is 5.0 V or 5.1 V. With 4 A, do not set `PSU_MAX_CURRENT=5000` (6.3). |
+| Not chosen | Mean Well RSD-60L-5 | 18 V to 72 V, 5 V 12 A, 89 percent | no remote pin | 44.18 USD. The HSS makes a remote pin unnecessary, but the 72 V maximum has no 100 V surge rating listed (VERIFY), and 12 A is far more than needed. |
+
+The 18 V input floor is far below the 37.7 V BMS cut. Motor sag on a low
+pack therefore cannot drop the Pi rail. The 12 V converter's floor
+(40 V on the Vatrer example) can drop the 12 V rail, but not the Pi.
+
+Rules for the brick:
+
+- The HSS (3.5) is the only ENABLE. Tie the brick's remote pin to its ON
+  level (VERIFY the logic of the chosen part). Reason: a remote pin
+  driven from the logic side loses its drive as the rail decays. The
+  brick could then restart from its input capacitors and pulse the Pi
+  rail (risk R-12).
+- Fit the input and output capacitors from the datasheet. Count the
+  input capacitors in the inrush (3.5).
+- If the part has a trim pin, trim to 5.10 V at the header under 2 A.
+  VERIFY the trim range.
+- Bond its output negative to system ground once, at the board. Keep
+  its input negative on the battery side (3.1).
+- No minimum load (VERIFY). The fixed 1 kOhm bleed (3.8) is a 5 mA load.
+- Soft start: the output must rise from 10 percent to 90 percent in
+  under 50 ms with the Pi connected (VERIFY in T-5; R16).
+- Output overvoltage protection in the brick (VERIFY its threshold and
+  mode). The crowbar (3.8) is a second layer.
+- Capacitive load: VERIFY that the brick starts into the Pi's input
+  capacitance plus the board's (risk R-8).
+
+The Pi rail also feeds the RTK GPS (I2C 0x20) through the header 5 V
+pin (`docs/ups_hat_b.md`). It now goes off with the Pi rail, so it no
+longer runs while the robot is stored. Measure its draw (VERIFY, 4.1).
+
+Pi firmware settings that this rail enables (section 6.3): with the 6 A
+brick, `PSU_MAX_CURRENT=5000` in the EEPROM is correct. The repository
+rule "do NOT set `usb_max_current_enable=1`" exists only because the
+HAT (B) could not supply 5 A. That rule ends when this module is
+installed with a 6 A brick. With the 4 A TEN 20, keep the rule. The Pi's
+USB ports carry no device power on this module (3.10), so the 4 A brick
+loses nothing that the robot uses.
+
+### 3.5 Battery-side switch (HSS) and ENABLE
+
+ENABLE is the state of the HSS. ENABLE = IGNITION OR HOLD (section 2).
+Two N-FETs in parallel pull the P-FET gate on: Q1 for the ignition, Q2
+for the hold. Each N-FET has its own photovoltaic opto (PV opto). A PV
+opto makes its gate voltage from the light of its own LED. It needs no
+supply on the battery side. With both LEDs dark, nothing on the battery
+side takes current except leakage (4.3).
 
 | Item | Part | Key ratings |
 |---|---|---|
-| Pi buck | TI LM61495 (LM61495-Q1) | 3 V to 36 V input, 10 A, synchronous, 400 kHz, VQFN-HR 4.5 x 3.5 mm. https://www.ti.com/product/LM61495-Q1 . Set 5.10 V. Rated 6 A continuous in this design. |
-| USB buck | TI LM61495 | Same part. Set 5.00 V. 5 A. |
-| Alternative | TI LMQ61460 | 36 V, 6 A. Pi rail only. |
-| Pi eFuse | TI TPS25982 | 2.7 V to 24 V, 15 A, 2.7 mOhm, adjustable current limit and slew, current monitor. https://www.ti.com/product/TPS25982 . Limit 8 A, slew about 2 ms. VERIFY output discharge feature; the design adds its own discharge FET (3.8). |
+| HSS | P-FET, -150 V or more, 0.5 ohm or less. Example: IRF9640 (-200 V, 0.5 ohm; VERIFY the part, its current availability and the package) | A -100 V part leaves only 6 percent over the SMBJ58A clamp (93.6 V). At 0.4 A the loss is under 0.1 W. |
+| Gate network | 100 kOhm and a 12 V Zener from gate to source; 100 kOhm from the gate to Q1 and Q2 | Vgs is -12 V whenever Q1 or Q2 conducts, at any pack voltage. 0.43 mA at 54.6 V while on. No current while off. |
+| Turn-on slew | Gate-to-drain capacitor, about 15 nF, 100 V or more (VERIFY) | About 2 ms. It limits the inrush into the brick's input capacitors to about 1.5 A (VERIFY with the datasheet capacitors). The brick's own soft start sets the 5 V ramp, not the HSS. |
+| Q1, Q2 | Small N-FET, 150 V or more, Vgs(th) under 2.5 V, SOT-23 (VERIFY the part) | They see the battery-side voltage while off. |
+| U1, U3 | PV MOSFET driver opto. Example: Vishay VOM1271 (VERIFY its output voltage and current at 5 mA LED current, and its built-in turn-off) | U1: LED in the ignition string (3.6). U3: LED driven from the logic side by the hold path (3.7). One opto per FET. Do not connect two PV outputs to one gate: the turn-off circuit of the dark one shunts the lit one. |
+| TVS | Littelfuse SMBJ58A, between F3 and the HSS | 58 V standoff, clamp 93.6 V. Leakage at 54.6 V about 1 uA (VERIFY). |
+| Alternative HSS | ADI LTC4368-class controller with back-to-back N-FETs | Named in option A. VERIFY its operating range on 13S (its operating maximum is close to the bus) and its shutdown current against R11. |
+
+No bridge across the main switch. The battery side has no galvanic link
+to the ignition lead (U1 isolates it) or to the logic side (U3 and the
+brick isolate it). No part of it can feed the switched side, so the
+main switch still makes the drivetrain dead (R7). Test T-14 checks this.
+
+### 3.6 Ignition sense
+
+The LED string is U1 (PV), U2A and U2B (phototransistor) in series. It
+runs from the ignition lead through F4, a series diode and a resistor
+chain.
+
+| Item | Part | Key ratings |
+|---|---|---|
+| Resistor chain | 2 x 3.3 kOhm, 2512, in series | 5.1 mA at 37.7 V, 7.7 mA at 54.6 V (0.42 W for the pair), 8.5 mA at 60 V. Two parts share the voltage. VERIFY that U1 gives full gate drive at 5 mA; if not, use a 100 V-class constant-current source. |
+| Series diode | 200 V or more (VERIFY the part) | Reverse polarity on the ignition lead. The LEDs take only about 5 V reverse. |
+| U2A, U2B | Phototransistor opto, 2 pieces or one dual. Example: Toshiba TLP293 (VERIFY CTR at 5 mA and the dark current at +70 C) | U2A: IGN_OFF to the Pi. U2B: grace timer reset (3.7). |
+
+IGN_OFF. U2A's collector goes to GPIO 27 through 1 kOhm. Its emitter
+goes to system ground. The pull-up is on the Pi only (libgpiod bias
+pull-up), so the module sources nothing into the pin. With the ignition
+on, U2A conducts and GPIO 27 reads low. With the ignition off, GPIO 27
+reads high. An open path (F4 blown, the lead broken, an opto open) also
+reads high, so every open fault reads as "ignition off", and the Pi
+halts (risk R-6).
+
+GPIO 27 is unclaimed on the robot (checked 2026-11-04, 6.3).
+
+### 3.7 Hold path and grace timer
+
+Hold path. Q5 (small N-FET, Vgs(th) under 1.5 V, BSS138 class, VERIFY)
+switches U3's LED from the 5.1 V rail, about 8 mA through 470 ohm
+(VERIFY against U3). Q5's gate takes the Pi's 3V3 (header pin 1)
+through 100 kOhm, with 1 MOhm to ground. The module sources nothing
+into the pin. Q6 (2N7002 class) pulls Q5's gate to ground when
+GRACE_EXPIRED is high. It then sinks 33 uA from the Pi's 3V3. That is
+the transistor that "pulls ENABLE off even if the Pi's 3V3 is still up"
+(option A, section 4).
+
+With `POWER_OFF_ON_HALT=1`, a halt puts the PMIC in STANDBY, and "all
+outputs are switched off" (Raspberry Pi documentation, bootloader
+properties). 3V3 falls to 0 V. That is the halt witness. The hold path
+then opens at once, without the timer.
+
+Grace timer. A counter timer, not a large RC: a phototransistor's dark
+current grows with heat, and a megohm RC timer at +70 C can then never
+expire (risk R-11).
+
+| Item | Part | Key ratings |
+|---|---|---|
+| Counter | 74HC4060 (VERIFY; CD4060B is the alternative) | 14-stage counter with an RC oscillator. R about 100 kOhm, C 39 nF to 47 nF C0G, about 110 Hz. Q14 goes high after 8192 periods: about 75 s. Trim R on the bench (T-9). |
+| Latch | Diode from Q14 to the oscillator input | Q14 stops its own oscillator, so GRACE_EXPIRED stays high until the reset or a loss of supply. |
+| Reset | U2B from the timer supply into the counter's reset pin, 47 kOhm to ground | With the ignition on, U2B holds the counter at reset. With the ignition off, the pull-down sets reset low. 10 uA of dark current gives 0.47 V, which is still a logic low. |
+| Timer supply | From the 5.1 V rail through a Schottky diode into 220 uF | It holds the counter and Q6 for seconds after the rail goes, so Q6 stays on until long after the Pi's 3V3 has gone (risk R-12). |
+| Alternative timer | TI TPL5110 or TPL5111 nano-power timer (VERIFY that its one-shot mode fits the reset-by-ignition rule) | Resistor-set interval. |
+
+Grace time. 75 s nominal, 60 s minimum, 90 s maximum over the
+oscillator tolerance and -10 C to +45 C. The halt needs under 50 s
+(4.4). The Pi cannot change the time: it is set by parts, and no
+register or command reaches it.
+
+### 3.8 Bleed, output fuse and crowbar
+
+These parts sit on the 5.1 V rail, on the logic side.
+
+| Item | Part | Key ratings |
+|---|---|---|
+| Output fuse | 7 A, 32 V DC or more, between the brick and the header (VERIFY the part) | Above the brick's 6 A rating. VERIFY that the brick's current limit can open it; if it cannot, the crowbar still holds the rail down. |
+| Crowbar | TL431 set near 5.9 V triggers an SCR rated 10 A or more across the rail after the fuse (VERIFY the parts, and 5.9 V against the Pi 5 input rating) | A second layer behind the brick's own output OVP. |
+| Switched bleed | Logic-level P-FET and 47 ohm, 1 W across the rail. Gate from a nano-power supervisor, for example TI TPS3839 or TPS3840 (VERIFY the threshold variant): on below about 4.6 V, off above about 4.8 V | When the brick stops, the rail sags, the supervisor trips, and 47 ohm takes the rail to about 1 V within 0.2 s with about 1000 uF on the rail (VERIFY the real capacitance). |
+| Fixed bleed | 1 kOhm, 0.125 W | 5 mA, 26 mW while running. It takes the last volt down within a few seconds. |
+
+The bleed does not use ENABLE. It acts on every loss of the rail: an
+ignition-off halt, a grace cut, a BMS cut, a blown F3, a brick fault.
+Each time the Pi sees a clean drop, and the next 5 V application is a
+real one (R16).
+
+Sneak feeds. Nothing may hold the rail up from outside. The USB
+injectors leave the Pi-side VBUS open (3.10). The MCU sets its UART TX
+to high impedance while the Pi's 3V3 is down (3.11). The RTK GPS on the
+header 5 V pin is a load, not a source. No other lead goes to the Pi.
+
+### 3.9 Pi interface signals
+
+| Signal | Direction | How |
+|---|---|---|
+| 5.1 V | Module to Pi, header pins 2 and 4 | From the brick through the output fuse. Ground on pins 6, 9, 14, 20. |
+| IGN_OFF | Module to Pi, GPIO 27 | U2A open collector to ground, through 1 kOhm. Pull-up on the Pi only. High means the ignition is off, or the path is open (3.6). |
+| PI_3V3 | Pi to module, header pin 1 | Into Q5's gate through 100 kOhm (3.7), and to a 5 V-tolerant MCU pin with no clamp to its supply. The module sources nothing into the pin. |
+| UART0 | GPIO 14 (TX), GPIO 15 (RX) | 3.3 V, 115200 8N1, 1 kOhm series resistor each way. The MCU's TX is high impedance while PI_3V3 is low. |
+
+Removed with the buffer design: SHUTDOWN_REQ, the PWR_BUT pulse on J2,
+PI_5V_SENSE as a control signal (the MCU still reads the 5.1 V rail for
+telemetry) and the HOLD latch with its 300 s timeout.
+
+### 3.10 5.0 V USB rail
+
+One buck from the 12 V rail makes the USB rail. A USB fault cannot
+brown out the Pi: the Pi has its own brick on another lead.
+
+| Item | Part | Key ratings |
+|---|---|---|
+| USB buck | TI LM61495 (LM61495-Q1) | 3 V to 36 V input, 10 A, synchronous, 400 kHz, VQFN-HR 4.5 x 3.5 mm. https://www.ti.com/product/LM61495-Q1 . Set 5.00 V. 5 A. |
+| Alternative | TI LMQ61460 | 36 V, 6 A. |
 | USB port switches, 4 pieces | TI TPS25221 | 2.5 V to 5.5 V, 70 mOhm, limit 275 mA to 2.7 A by resistor, reverse current blocking, FAULT pin. https://www.ti.com/product/TPS25221 |
 | Alternative port switch | TI TPS2561 (dual) | Two ports per package. VERIFY reverse blocking. |
 
@@ -349,253 +612,130 @@ Injector. A USB 3 injector is two connectors on the module: a USB 3
 Type-A receptacle for the device and a short USB 3 cable to the Pi.
 D+, D-, SSTX and SSRX pass straight through. The device VBUS comes
 from the module's port switch. The Pi-side VBUS pin is not connected.
-The device cannot backfeed the Pi. The Pi's port sees no load. The
-SuperSpeed pairs need 90 ohm differential routing, under 50 mm, on
-the four-layer board. VERIFY: enumerate the OAK at 5 Gbps through the
-injector (bench test T-10).
+The device cannot backfeed the Pi. The Pi's port sees no load. This
+also ends the hub back-power of the 2026-11-04 main-switch pull: with
+its own supply off, the hub back-powered from the Pi's ports, and the
+HAT carried 1.6 A at 6.34 V (`docs/ups_hat_b.md`). The SuperSpeed
+pairs need 90 ohm differential routing, under 50 mm, on the four-layer
+board. VERIFY: enumerate the OAK at 5 Gbps through the injector (bench
+test T-10).
+
+The USB rail is off whenever the 12 V rail is off: with the ignition
+off, and on a 12 V rail loss (5.3).
 
 Alternative for the product spin: a Microchip USB5744 four-port USB 3
 hub on the module, which removes the external hub.
 
-Pi firmware settings that this rail enables (section 6.3): with a 5 A
-capable rail, `PSU_MAX_CURRENT=5000` in the EEPROM is correct. The
-repository rule "do NOT set `usb_max_current_enable=1`" exists only
-because the HAT (B) could not supply 5 A. That rule ends when this
-module is installed.
-
-### 3.5 Power path (SYS bus)
-
-The SYS bus feeds both 5 V bucks. It is the OR of the 12 V rail and
-the buffer pack.
-
-| Item | Part | Key ratings |
-|---|---|---|
-| 12 V to SYS ideal diode | ADI LTC4359 | 4 V to 80 V, 9 uA shutdown, SHDN pin with internal pull-up (floats on). https://www.analog.com/en/products/ltc4359.html |
-| Pack to SYS ideal diode | TI LM74700-Q1 | 3.2 V to 65 V, 20 mV forward drop, 80 uA. https://www.ti.com/product/LM74700-Q1 |
-| Both FETs | Infineon BSC0902NS or similar 30 V, 2 mOhm | VERIFY. |
-| SYS holdup | 2 x 220 uF 25 V polymer | Covers the 12 V to 7.6 V hand-over. |
-
-Behaviour. Input present: SYS = the 12 V rail, the pack diode is reverse
-biased, the pack only sees the charger. Input lost: the 12 V rail
-falls, the pack diode conducts at about 7.5 V, SYS follows. The bucks
-accept 3 V to 36 V, so the 5 V rails do not see the step. There is no
-NVDC charger and no gap.
-
-Drain mode. The MCU pulls LTC4359 SHDN low. SYS falls to the pack.
-The Pi runs from the pack with the charger disabled. The module uses
-this to bring the pack from 8.40 V back down to 7.60 V after a top-up
-(3.6), without a bleed resistor. If the MCU dies, SHDN floats high and
-the 12 V path returns.
-
-### 3.6 Charger, protector, balancing, monitor (the "custom BMS")
-
-Lessons from the HAT (B) and how each is closed:
-
-| Lesson | Fix |
-|---|---|
-| No charger IC; the supply set point was the charge limit. | A real CC/CV charger. Its float is set by resistors, 7.60 V. |
-| Mains presence came from battery current. | Input presence comes from the pack-sense lead (3.7). |
-| Shunt labelled 0.1R, really 10 mOhm. | One 10 mOhm 1 percent shunt, measured by the INA228, calibrated on the bench (T-14). |
-| Nothing cut the Pi after a halt, nothing woke it. | 3.8. |
-| Cells with about 1 ohm. | Specify cells with 35 mOhm or less (Samsung INR18650-35E, initial impedance 35 mOhm AC maximum). |
-| Balancers only act near 4.2 V, so at 3.8 V they never balance. | Keep passive 4.20 V balancers and run a scheduled top-up to 8.40 V so that they get their chance. Host balancing at 3.80 V was rejected (section 11.2). |
-
-Why not a programmable charger (BQ25713 or BQ25792). Grok's objection
-(11.2) holds: the dead-MCU state of a register charger is whatever the
-power-on defaults say, and no default means "hold 7.60 V". With
-resistors the dead-MCU state is 7.60 V.
-
-| Item | Part | Key ratings |
-|---|---|---|
-| Charger | TI BQ24610 | Stand-alone synchronous buck charge controller, 1 to 6 cells, 5 V to 28 V input (33 V absolute), up to 10 A, CV by resistor divider, CE pin, TS pin for an NTC, STAT pins. https://www.ti.com/product/BQ24610 . VERIFY lifecycle: one distributor lists the RGET as obsolete, TI lists the part as active. |
-| Alternative charger | TI BQ24650 | Same family, solar MPPT input. Or TI BQ25713 for a product spin with a watchdog-safe firmware (11.2). |
-| Charger FETs | 2 x 30 V, 10 mOhm, SuperSO8 | VERIFY. |
-| Charger inductor | 10 uH, 3 A saturation | 1 A charge current. |
-| CV set | FB divider: 7.60 V | A 2N7002 switches a third resistor in parallel with the lower resistor. That lowers the lower leg and raises the CV to 8.40 V while the MCU drives the gate. Gate pulled down on the PCB. WARNING: do not put the FET across the whole lower resistor. That pulls FB to ground, and the charger then charges with no voltage limit until the protector opens at 4.25 V per cell. With the parallel resistor, a FET that fails short gives 8.40 V and never more. |
-| CC set | ISET: 1.0 A | 2 x 3500 mAh at 0.3 C. |
-| Protector | ABLIC S-8252 series (2 cells) | Fixed OV 4.25 V, UV 2.70 V, OCD, short. SOT-23-6. Low-side NFETs. https://www.ablic.com/en/semicon/products/battery-protection/battery-protection-ic/s-8252/ . Choose the suffix for 4.25 V OV and 2.7 V UV. Lineage note: the HAT (B) uses the HY2120, which is the same class of part. |
-| Alternative protector | TI BQ76905 | 2S to 5S, programmable, I2C, coulomb counter, host-controlled balancing. Rejected for spin 1: its ground is cell-negative, below the low-side FETs, so its I2C splits from the MCU ground when the FETs open. Product spin option with an MCU referenced to cell-negative. https://www.ti.com/product/BQ76905 |
-| Protector FETs | 2 x 30 V, 5 mOhm, in series back to back | VERIFY. |
-| Balancers | HYCON HY2213-BB3A, one per cell | Shunt balancer at 4.20 V, 50 mA class. Used on the HAT (B). VERIFY part suffix and current. Alternative: TL431 + resistor shunt at 4.20 V. |
-| Pack monitor | TI INA228 | 85 V, 20-bit, I2C, current, bus voltage, temperature, charge accumulator. https://www.ti.com/product/INA228 . On the module's own I2C bus, referenced to pack positive side of the protector (system ground). |
-| Cell temperature | 10 k NTC on the cell holder | Into BQ24610 TS and the MCU ADC. |
-| Cells | 2 x Samsung INR18650-35E | 3500 mAh, 35 mOhm maximum initial impedance. Alternative Molicel P28A. VERIFY the holder contact resistance. |
-
-Top-up schedule (firmware). Every 8 weeks, if the input is present,
-the cell temperature is above 10 C and the Pi is not armed (the Pi
-tells the module), the MCU raises CV to 8.40 V. The charger runs to
-taper. The balancers act above 4.20 V. The MCU then disables the
-charger, enters drain mode (3.5) until the pack reads 7.60 V at rest,
-and returns to float. An input loss during the top-up ends the top-up
-at once. The pack is fuller than usual at that moment, which is
-harmless.
-
-State of charge. The INA228 charge accumulator drifts (Grok). The MCU
-reports SOC from a resting-voltage table and reports the accumulator
-as a separate number. The number that matters is the 10 s load test:
-the MCU records the pack sag at the Pi's boot current once per day and
-reports the cell resistance. Above 150 mOhm per cell it raises a
-warning. That is the HAT (B) failure seen early.
-
-Chemistry. This design is for NMC or NCA cells. A LiFePO4 cell at
-3.80 V is already over its full charge, and 4.20 V damages it. Do not
-fit LiFePO4 cells.
-
-### 3.7 Input-present detection
-
-The pack-sense divider (3.1; 80 V reads 3.3 V) feeds the MCU ADC and a
-comparator with hysteresis (TI TLV7031, 335 nA). Thresholds: present at
-38.0 V rising, lost at 34.0 V falling. Present sits just above the
-37.7 V BMS cut. The divider draws from the sense lead only. With no
-input it draws nothing from the buffer pack. The comparator edge wakes
-the MCU from Stop mode.
-
-The converter's own undervoltage floor may sit above the "lost" line
-(40 V on the Vatrer example, VERIFY). The 12 V rail then drops while
-VIN still reads present. The rail-lost rule (5.3) covers this case.
-
-Debounce is in firmware (section 5): 2 s for a loss, 5 s for a
-return, longer after repeated flaps.
-
-### 3.8 Pi control path: halt detection, cut, wake
-
-Three signals and one pulse.
-
-| Signal | Direction | How |
-|---|---|---|
-| SHUTDOWN_REQ | Module to Pi, GPIO 27 | Open drain on the module. Pull-up on the Pi only. `dtoverlay=gpio-shutdown,gpio_pin=27,active_low=1,gpio_pull=up`. The kernel raises a power-key event, logind runs poweroff. No daemon is in the path. |
-| PI_HALTED | Pi to module, header pin 1 (3V3) | 100 k / 47 k divider into an MCU input. The module sources nothing into the pin. With `POWER_OFF_ON_HALT=1` and `WAKE_ON_GPIO=0`, a halt puts the PMIC in STANDBY and "all outputs are switched off" (Raspberry Pi documentation, bootloader properties). 3V3 falls to 0 V. That is the halt witness. |
-| PI_5V_SENSE | Pi side of the eFuse to module | Divider into an MCU input. Used for the collapse check and the apply check. |
-| PWR_BUT pulse | Module to Pi J2 pads | 2N7002 open drain across the J2 pads, 200 ms (VERIFY the width on the bench, T-9). "Briefly closing this switch will perform the same actions as the onboard power button" (Raspberry Pi documentation). Used only when the input is present and 3V3 is already down. Never push-pull. |
-
-Sequence on input loss (full state machine in section 5):
-
-1. Loss debounced. Assert SHUTDOWN_REQ. Send `SHUTDOWN_PENDING` on
-   UART. Start the 120 s timer. Keep 5 V and USB on.
-2. The Pi halts. 3V3 falls. Deassert SHUTDOWN_REQ. Open the Pi eFuse
-   and the USB port switches. Close the discharge FET (47 ohm, 1 W)
-   across the Pi-side rail for 200 ms.
-3. Read PI_5V_SENSE. Wait until it is below 1 V. If it does not fall
-   within 5 s, something feeds the Pi (a USB-C supply, a HAT). Log a
-   fault and keep waiting; never re-apply 5 V onto a rail that did not
-   collapse (Grok, 11.3).
-4. Module goes dark: outputs off, charger as the input allows, MCU in
-   Stop. The comparator wakes it.
-5. Input returns, debounced. SHUTDOWN_REQ is deasserted. Close the Pi
-   eFuse with slew control. Read PI_5V_SENSE within 100 ms. If it did
-   not rise, open, wait 1 s, retry, up to 5 times, then raise a fault
-   LED pattern. The Pi boots from a cold power-on. No J2 pulse on this
-   path.
-
-Sequence on a halt while the input is present (operator `poweroff`,
-ch5 e-stop): leave 5 V on. The Pi sits in PMIC standby at about
-3 mA. Wake only by the Pi's own button, the module's button, or a
-UART-set one-shot auto-wake that is off by default and is never
-armed after an e-stop (Grok, 11.3). See open question 8.
-
-Hard cut: if 3V3 is still up 120 s after SHUTDOWN_REQ, open the
-eFuse anyway, then run the same collapse check and the same cold apply.
-
-Dead-MCU hardware default: `EN_PI5V = MCU_EN OR (VIN_OK AND NOT
-HOLD)`. HOLD is a latch (74LVC1G74 or the MCU's own output with a
-300 s RC timeout) set at step 1 and cleared after step 3. A crashed
-MCU with the input present therefore leaves the Pi powered. A crashed
-MCU during a shutdown holds the cut until the timeout, then the
-hardware applies 5 V again. A powered, disarmed Pi is recoverable. A
-dark Pi is not.
-
-RTC. A cold apply loses the RTC time unless a cell sits on the Pi's J5
-connector. GPS or NTP sets the clock at boot. See open question 7.
-
-### 3.9 Microcontroller
+### 3.11 Microcontroller
 
 | Item | Part | Why |
 |---|---|---|
-| MCU | ST STM32G071CBT6 | 64 pin LQFP, 128 kB flash, UART x4, I2C x2, 12-bit ADC, Stop mode in the microamp range, independent watchdog, 2 V to 3.6 V. Hand-solderable. |
+| MCU | ST STM32G071CBT6 | 64 pin LQFP, 128 kB flash, UART x4, 12-bit ADC, Stop mode in the microamp range, independent watchdog, 2 V to 3.6 V. Hand-solderable. |
 | Alternative | Raspberry Pi RP2040 | Familiar to Pi users. Needs external flash and has higher sleep current. Firmware in MicroPython or C. |
-| 3.3 V housekeeping LDO | TI TPS7B81-Q1, from SYS | 40 V input, 150 mA, 2.7 uA quiescent. VERIFY part number. Alternative: TI TPS7B69. |
-| Status | 1 RGB LED, 1 button, 1 buzzer | Button short: wake the Pi (J2 pulse). Button 5 s: force cut (bench only, confirmed on UART). |
+| 3.3 V housekeeping LDO | TI TPS7B81-Q1, from a diode OR of the 12 V rail and the 5.1 V Pi rail | 40 V input, 150 mA, 2.7 uA quiescent. VERIFY part number. Alternative: TI TPS7B69. The 5.1 V feed keeps the MCU up when the 12 V rail is lost, so it can report that. The diodes stop any feed back into either rail. |
+| Status | 1 RGB LED, 1 buzzer | LED patterns in 5.5. The module has no button: there is no wake path to start. |
 
-The MCU's I2C bus carries only the INA228 and the optional BQ76905. It
-never touches the Pi. The UART to the Pi is UART0 on GPIO 14 and 15,
-3.3 V, 115200 8N1, through a 1 kOhm series resistor each way so that a
-live MCU cannot push current into a dead Pi.
+Inputs: the 12 V, 5.1 V and 5.0 V rails (dividers into the ADC), the
+OUT1 and OUT2 current-sense pins, the four port FAULT pins, a board NTC,
+PI_3V3 (3.9) and GRACE_EXPIRED. Outputs: OUT1 and OUT2 enables, the
+four port enables, the LED and the buzzer.
+
+The MCU has no output into the Pi power path. It cannot hold the Pi on,
+and it cannot cut it. Its I2C bus carries nothing in spin 1, and it
+never touches the Pi. The UART to the Pi is UART0 on GPIO 14 and 15
+(3.9).
 
 Firmware watchdog: the independent watchdog resets the MCU after 2 s
 without a kick. All pin defaults after a reset are the safe states in
 section 5.4.
 
-### 3.10 Connectors and fusing
+### 3.12 Connectors and fusing
 
 | Connector | Type | Rating |
 |---|---|---|
+| BATT TAP | 2-pin pluggable terminal, 5.08 mm | 2 A, 100 V or more (VERIFY the part). Keyed differently from IGNITION (3.1). |
+| IGNITION | 2-pin pluggable terminal, other key or pitch | 0.25 A, 100 V or more (VERIFY the part). |
 | 12 V IN | 2-pin screw terminal, 7.62 mm pitch | 20 A or more (VERIFY the part). Not an XT connector, so that the pack harness cannot plug into it. |
-| PACK SENSE | 2-pin pluggable terminal | 0.5 A, 100 V or more (VERIFY). Carries the pack voltage to the divider (3.1). |
 | OUT1, OUT2 | 5.08 mm screw terminal, 2 pin | 15 A. |
 | Pi power | 6-wire harness to header pins 2, 4 (5 V) and 6, 9, 14, 20 (GND) | 3 A per pin, 6 A on 2 pins. Alternative: pogo pins to the Pi 5 bottom pads as the HAT (B) does. |
-| Pi signals | 6-wire harness: 3V3 sense (pin 1), GPIO 14, 15, 27, 22, GND | Under 150 mm. |
-| J2 | 2-wire to the Pi's J2 pads | Solder or 2-pin 1.0 mm JST. |
+| Pi signals | 5-wire harness: 3V3 sense (pin 1), GPIO 14, 15, 27, GND | Under 150 mm. |
 | USB injectors | 2 x USB 3 Type-A receptacle + 2 x USB 3 Type-A plug cable, 150 mm | 90 ohm pairs. |
 | USB power outputs | 2 x USB Type-A receptacle, power only | D+ D- open. |
-| Cells | 2 x 18650 holder, Keystone 1043 or spring holder | VERIFY contact resistance under 10 mOhm. Alternative: solder tabs on protected cells. |
 | Fan (optional) | 2 pin JST-PH, 5 V | For the enclosure. |
 
-Fusing: F1 at the pack end of the converter's input lead (off the
-board, 3.2). A 0.5 A fuse in the sense lead, and F2 on the 12 V IN
-(3.1). The 12 V outputs are protected by the high-side switches. The 5 V
-rails are protected by the eFuse and the port switches. The pack path
-is protected by the protector FETs and a 5 A polyfuse in the cell lead
-as a second layer.
+Fusing: F1 at the switched-side end of the 12 V converter's input lead
+(off the board, 3.2). F3 at the battery tap and F4 on the ignition
+lead, each at its source end (off the board, 3.1). F2 on the 12 V IN
+(3.1). The output fuse on the Pi rail (3.8). The 12 V outputs are
+protected by the high-side switches. The USB rail is protected by the
+port switches.
 
 ## 4. Power budget, efficiency, thermal
 
 ### 4.1 Loads
 
+Pi rail, from the brick:
+
 | Load | Typical | Peak |
 |---|---|---|
 | Pi 5 + NVMe, control stack | 6 W | 12 W (boot, 2.5 A) |
+| RTK GPS on the header 5 V pin | 0.5 W (VERIFY: measure) | 0.5 W |
+| Hold LED, timer, supervisor, fixed bleed | 0.1 W | 0.1 W |
+| MCU, when the 12 V rail is down | 0 | 0.2 W |
+| Pi rail total | 6.6 W (1.3 A) | 12.8 W (2.5 A) |
+| Brick input at 88 percent, 37.7 V | 7.5 W (0.20 A) | 14.5 W (0.39 A) |
+
+The 6 A brick runs at 42 percent of its current rating at peak. The 4 A
+TEN 20 would run at 63 percent.
+
+12 V rail, from the off-board converter:
+
+| Load | Typical | Peak |
+|---|---|---|
 | OAK-D Lite | 4 W | 6.5 W |
 | Hub, RC receiver, Arduino | 2 W | 3 W |
 | Spare USB port | 0 | 7.5 W |
-| 5 V side total | 12 W | 29 W |
-| At 12 V after 92 percent bucks | 13 W | 32 W |
-| Charger at 1 A into 8.4 V, 90 percent | 0 (float) | 9.5 W |
+| USB side total | 6 W | 17 W |
+| At 12 V after the 92 percent USB buck | 6.5 W | 18.5 W |
 | OUT1 + OUT2 (future lidar, lights) | 0 today | 72 W (6 A) |
-| Module housekeeping | 1 W | 1 W |
-| 12 V rail total | 14 W (1.2 A) | 115 W (9.6 A) |
-| Converter input at 90 percent, 37.7 V | 16 W (0.41 A) | 128 W (3.4 A) |
+| Module housekeeping | 0.5 W | 0.5 W |
+| 12 V rail total | 7 W (0.6 A) | 91 W (7.6 A) |
+| Converter input at 90 percent, 37.7 V | 8 W (0.21 A) | 101 W (2.7 A) |
 
-The 10 A tap peak (120 W on the outputs alone) plus the Pi and the
-charger is about 165 W. The 20 A class converter carries it. The limit
-is heat, not the converter rating. Kevin chose "peaks are fine"
-(2026-11-04), so the outputs may draw 10 A combined for 60 s and 8 A
-continuous, and the charger pauses when the rail current passes 9 A.
+The ignition string takes 0.2 W to 0.42 W from the switched side.
+
+The 10 A tap peak (120 W on the outputs alone) plus the USB side is
+about 140 W. The 20 A class converter carries it. The limit is heat,
+not the converter rating. Kevin chose "peaks are fine" (2026-11-04), so
+the outputs may draw 10 A combined for 60 s and 8 A continuous.
 
 ### 4.2 Heat
 
-The converter is off the board. Its heat goes into the chassis through
-its case. The board has its own, smaller heat.
+The 12 V converter is off the board. Its heat goes into the chassis
+through its case. The Pi brick is on the board and is the largest heat
+source there.
 
 Board:
 
 | Source | Typical | Worst |
 |---|---|---|
-| Two 5 V bucks at 92 percent | 1 W | 2.5 W |
-| Charger | 0 | 1 W |
+| Pi brick at 88 percent | 0.9 W | 1.8 W (12.8 W out); 4.2 W at its 30 W rating |
+| USB buck at 92 percent | 0.5 W | 1.5 W |
 | OUT1 + OUT2, 8 mOhm each | 0 | 0.4 W |
 | 12 V IN FETs and fuse, about 14 mOhm | 0.02 W | 1.4 W |
-| Total, board | 1 W | 5 W |
+| Ignition resistor chain | 0.3 W | 0.5 W (60 V) |
+| HSS, gate network, bleed | 0.03 W | 0.05 W |
+| Total, board | 1.8 W | 5.7 W |
 
-The 5 V bucks, the charger and the output switches give about 3 to 4 W
-worst case. The 12 V IN path adds about 1.4 W at the full 10 A rail
-current. Typical WALL-E operation is near the typical column. The worst
-column is the future-loads case.
+Typical WALL-E operation is near the typical column. The worst column
+is the future-loads case. VERIFY the brick's derating curve at 45 C and
+in the enclosure (T-3).
 
 Converter, on the chassis. Plan on 90 percent efficiency.
 
-| Source | Typical (14 W out) | At 150 W out |
+| Source | Typical (7 W out) | At 150 W out |
 |---|---|---|
-| Converter at 90 percent | 2 W | 17 W |
+| Converter at 90 percent | 1 W | 17 W |
 
 If an isolated brick sits in its place, Grok puts the Murata brick at 9
 to 13 W at 150 W, and near 20 W at 300 W (11.4).
@@ -608,155 +748,192 @@ is a 51 K rise, which is too much at 45 C ambient. Use a larger chassis
 area, and measure the case temperature in T-3 against the unit's limit
 (VERIFY). A chassis in the Texas sun runs hotter than 45 C. The
 converter has its own thermal protection (VERIFY). The firmware reads
-the board thermistor and trims the output limits when the board is hot.
-The 5 V bucks dissipate 1 to 2.5 W on the PCB copper; a 4-layer board
-with 2 oz outer copper and thermal vias is enough.
+the board thermistor and reports it. The USB buck and the brick
+dissipate 1.4 W to 6 W on the PCB; a 4-layer board with 2 oz outer
+copper and thermal vias is enough, with the brick's case in free air
+(VERIFY).
 
-### 4.3 Buffer energy
+### 4.3 Storage drain
 
-Worst shutdown: Pi 12 W + USB 10 W + module 1 W for 120 s = 2.8 kJ
-= 0.77 Wh = 104 mAh at 7.4 V. Two 3500 mAh cells at 50 percent hold
-about 1750 mAh. The buffer has 16 times the worst case.
+With the main switch off:
 
-Sag at 2.6 A with 35 mOhm cells: 0.18 V on the pack. With the HAT (B)
-cells at 1 ohm: 5.2 V, which trips UV at once. The cell specification
-is the fix, not the circuit.
+| Path | Current |
+|---|---|
+| HSS P-FET leakage at 54.6 V | under 1 uA (VERIFY IDSS) |
+| Q1 and Q2 leakage | under 1 uA each (VERIFY) |
+| SMBJ58A at 54.6 V | about 1 uA (VERIFY) |
+| Gate network, PV opto outputs | 0: the gate sits at the source |
+| Brick off current (3 mA) | 0: the HSS disconnects the brick |
+| Ignition string, 12 V converter, the 12 V rail and all on it | 0: switched side |
+| Total from this design | about 4 uA, under 10 uA |
 
-Idle after the cut, input absent: MCU Stop 10 uA, LDO 3 uA, INA228
-shutdown 2 uA, LM74700 80 uA, two bucks disabled 10 uA, protector
-5 uA, measurement dividers 10 uA. About 120 uA. 1750 mAh / 120 uA is
-about 600 days. Requirement R11 is met with margin.
+The BMS sets the storage time, not the module. The Daly BMS takes about
+0.5 mA asleep, and it sleeps only after 3600 s idle. Option A estimate
+(20 Ah pack at 50 percent, cell leakage about 2 percent a month): about
+12 months with the brick disconnected. With the brick only switched off
+by its remote pin, its 3 mA (about 70 mAh a day) would cut that to
+about 8 months.
+
+### 4.4 Grace window budget
+
+| Step | Time |
+|---|---|
+| Daemon debounce | 3 s (settable, 5 s maximum) |
+| SIGKILL and stop `wall-e.service` | under 5 s (VERIFY; a unit stuck in the kernel can take longer) |
+| `systemctl poweroff`, measured on the robot | 3 s to 8 s (5 s on the 2026-11-04 main-switch pull) |
+| Bound on a slow unit: the system stop cap | 30 s (`DefaultTimeoutStopSec=30s`) |
+| Worst bounded total | about 45 s |
+| Grace timer | 60 s minimum, 75 s nominal, 90 s maximum |
+
+The stop cap does not bound a process that is stuck in the kernel after
+SIGKILL. The grace cut then lands during the shutdown (risk R-7).
+
+Energy for the grace window comes from the main pack: 90 s at 13 W is
+0.3 Wh. It is not a design limit.
 
 ## 5. State machine
 
-### 5.1 States
+### 5.1 States of the Pi power path
 
-| State | 5 V Pi | USB | OUT1/2 | Charger |
-|---|---|---|---|---|
-| OFF_NO_INPUT | off | off | off | off |
-| APPLYING | closing, check | off | off | on |
-| RUNNING | on | on | per Pi | on |
-| SHUTDOWN_REQ | on | on | off | on |
-| HALT_REQUESTED | on | on | off | on |
-| COLLAPSE_CHECK | off | off | off | as input |
-| OFF_LATCHED | off | off | off | on |
-| HALTED_INPUT_PRESENT | on (standby) | off | off | on |
-| HARD_CUT | off | off | off | as input |
-| FAULT | per fault | off | off | off |
+No firmware is in the Pi power path. These are the states of the
+hardware in 3.5 to 3.8.
+
+| State | Ignition | Grace timer | Pi 3V3 | HSS and 5.1 V | 12 V rail, USB, OUT |
+|---|---|---|---|---|---|
+| STORED | off | unpowered | off | off, bled to 0 V | off |
+| RUNNING | on | held at reset | on | on | on (OUT as the Pi sets) |
+| GRACE | off | counting | on | on, through the hold path | off |
+| HALTED_IGN_ON | on | held at reset | off (PMIC standby) | on, the Pi at about 3 mA | on (OUT off, 5.5) |
+| GRACE_CUT | off | expired | on, then falls | forced off, then bled | off |
 
 ### 5.2 Transitions
 
 | From | Event | To |
 |---|---|---|
-| OFF_NO_INPUT | VIN_OK for 5 s (or the backoff time) | APPLYING |
-| APPLYING | PI_5V_SENSE rose within 100 ms | RUNNING |
-| APPLYING | no rise, 5 tries | FAULT (apply) |
-| RUNNING | VIN lost for 2 s | SHUTDOWN_REQ |
-| RUNNING | 12 V rail under 10.5 V for 10 s, VIN present | SHUTDOWN_REQ |
-| RUNNING | 3V3 fell with input present | HALTED_INPUT_PRESENT |
-| RUNNING | UART `HALT_NOW` from the Pi (operator poweroff, ch5 e-stop) | HALT_REQUESTED |
-| HALT_REQUESTED | 3V3 fell, input present | HALTED_INPUT_PRESENT (no cut, no re-apply) |
-| HALT_REQUESTED | VIN lost for 2 s | SHUTDOWN_REQ |
-| HALT_REQUESTED | 120 s elapsed, 3V3 still up | HARD_CUT (latched) |
-| SHUTDOWN_REQ | 3V3 fell | COLLAPSE_CHECK |
-| SHUTDOWN_REQ | 120 s elapsed, 3V3 still up | HARD_CUT |
-| HARD_CUT | eFuse opened | COLLAPSE_CHECK |
-| COLLAPSE_CHECK | PI_5V_SENSE under 1 V and VIN lost | OFF_NO_INPUT |
-| COLLAPSE_CHECK | PI_5V_SENSE under 1 V and VIN_OK, after an input-loss shutdown | APPLYING |
-| COLLAPSE_CHECK | PI_5V_SENSE under 1 V and VIN_OK, after a latched hard cut | OFF_LATCHED |
-| OFF_LATCHED | module button | APPLYING |
-| OFF_LATCHED | VIN lost for 2 s | OFF_NO_INPUT |
-| COLLAPSE_CHECK | rail did not fall in 5 s | FAULT (sneak feed), keep checking |
-| HALTED_INPUT_PRESENT | button, J2 request, or auto-wake | pulse J2, then RUNNING |
-| HALTED_INPUT_PRESENT | VIN lost for 2 s | COLLAPSE_CHECK (open eFuse first) |
-| any | 12 V rail over 15.0 V | FAULT (OV): open LTC4359, OUT1/2 |
+| STORED | Ignition on | RUNNING. Q1 closes the HSS, the brick soft-starts, the Pi boots from a cold power-on. |
+| RUNNING | Ignition off | GRACE. Q1 opens, the hold path keeps the HSS on, the timer counts, the daemon debounces. |
+| GRACE | Ignition on inside the debounce | RUNNING. The timer resets. No halt. |
+| GRACE | The Pi halts, 3V3 falls, ignition still off | STORED. The hold path opens, the brick stops, the bleed takes the rail to 0 V. |
+| GRACE | Ignition on after the daemon started the halt | The halt completes. 3V3 falls with the ignition on: HALTED_IGN_ON. |
+| GRACE | Timer expires, 3V3 still up | GRACE_CUT. |
+| GRACE_CUT | Rail below 4.6 V | STORED, with the bleed on. |
+| RUNNING | The Pi halts with the ignition on (ch5 e-stop, operator `poweroff`) | HALTED_IGN_ON. |
+| HALTED_IGN_ON | Ignition off | STORED. The hold path is already open (3V3 is down), so the HSS opens at once. |
+| Any powered state | BMS cut, F3 open, brick fault, loose connector | STORED by a hard cut (5.3). |
 
-### 5.3 Flapping input, brown-out, a Pi that never halts
+### 5.3 Flapping, boot, a Pi that never halts, rail lost, hard cuts
 
-Flapping. A loss shorter than 2 s is ignored. Once SHUTDOWN_REQ is
-asserted, the shutdown completes; an input return does not cancel it.
-The return debounce grows: 5 s normally, 60 s after the third loss
-within 10 minutes, 300 s after the sixth. The counter clears after 1 h
-of stable input. The boot window (first 30 s after APPLYING) requires
-10 s of loss instead of 2 s, so that boot inrush sag cannot start a
-shutdown.
+Flapping ignition. The daemon ignores an ignition loss shorter than its
+debounce. Once it starts the halt, the halt completes. If the ignition
+is back by then, the Pi stays halted with 5 V on (HALTED_IGN_ON) until
+the next ignition cycle. The MCU shows this on the LED (5.5). This is
+the cost of the rule that power returns only with the ignition: the
+module cannot apply 5 V again by itself.
 
-Brown-out. Between 34 V and 38 V the module logs `degraded` and does
-nothing else. The converter runs to its own undervoltage floor (VERIFY;
-40 V on the Vatrer example). A pack at 40 V is nearly empty, about 3.1 V
-per cell. The VESC pack-low logic in `config.py` (39 V for 30 s) cuts
-the motors near that voltage. A converter floor above 39 V can drop the
-12 V rail first. The rail-lost rule below covers that case.
+Boot window. If the ignition goes off before the Pi's 3V3 is up, the
+hold path never closes, and the rail goes off at once. If it goes off
+later in the boot, the daemon reads IGN_OFF high when it starts, and it
+halts after the debounce. The daemon starts early (6.1). If the boot
+plus the halt is longer than the grace time, the grace cut lands. This
+is accepted (risk R-7).
 
-Rail lost with the input present. Motor sag on a low pack, a failed
-converter, a blown F2 or an open LTC4368 can stop the 12 V rail while
-VIN still reads present. The Pi does not notice: SYS falls to the buffer
-pack. If the rail stays below 10.5 V for 10 s with VIN present, the
-module treats it as an input loss and runs the shutdown. A shorter
-dropout only switches OUT1 and OUT2 off; the Pi turns them on again.
+A Pi that never halts. The grace timer forces the HSS off 60 s to 90 s
+after the ignition went off. The NVMe root may be dirty (risk R-7). The
+Pi cannot extend the timer.
 
-A Pi that never halts. 120 s after SHUTDOWN_REQ the eFuse opens. The
-NVMe root may be dirty. Section 6.3 sets the systemd timeouts so that
-the Pi gives up on a stuck camera driver before the module gives up on
-the Pi. The timeout is a UART-settable register (60 s to 600 s).
+Rail lost with the ignition on. A failed 12 V converter, a blown F2, an
+open LTC4368 or motor sag below the converter's input floor (40 V on
+the Vatrer example) stops the 12 V rail. The Pi keeps its power: it is
+on the battery tap. The USB devices and the outputs go off. The RC
+reader (the Arduino on P3) then goes silent, and the controller disarms
+on the RC dropout (`cmd.is_armed` goes False on a 1 s RC dropout,
+`CLAUDE.md`). The MCU runs on the Pi rail through its diode OR and
+reports `RAIL_LOST`. The Pi does not halt on it.
 
-Input returns during SHUTDOWN_REQ. The shutdown completes, the rail
-collapses, and the module applies 5 V again. The Pi reboots once. This
-is the designed behaviour for a 3 s to 120 s outage.
+Hard cuts. A BMS cut, a blown F3, a brick fault or a loose connector
+removes the Pi rail at once. There is no buffer to carry a halt. The
+bleed still drops the rail cleanly, so the next power-up boots. Keep the
+filesystem tolerant (open question 9). A robot left with the ignition on
+runs the pack down to the BMS cut. `config.py` cuts the motors at 39 V
+but does not halt the Pi, because it assumed a UPS. Open question 20
+asks for a low-pack halt.
 
-A halt that the Pi requests (HALT_NOW). This path never re-applies
-5 V by itself. The ch5 e-stop must leave the Pi down until a person
-acts (`CLAUDE.md`, "ch5 e-stop powers the Pi off"). After a normal
-halt the Pi sits in PMIC standby with 5 V on. After a hard cut the
-module holds 5 V off in OFF_LATCHED. In OFF_LATCHED the MCU re-arms
-the HOLD latch (3.8) every 60 s. If the MCU dies, the hardware applies
-5 V after 300 s. That is the dead-MCU rule in 5.4, and it wins on
-purpose. A pack switched off and on again is a deliberate power cycle,
-and the Pi boots.
+ch5 e-stop. `controller.py` schedules `sudo shutdown -h now` 5 s after
+the e-stop. Nothing on the module changes for it. With the ignition on,
+the Pi sits in PMIC standby at about 3 mA and stays down until a person
+cycles the main switch. That keeps the rule that the e-stop leaves the
+Pi down until a person acts (`CLAUDE.md`, "ch5 e-stop powers the Pi
+off").
 
 ### 5.4 Safe states with a dead MCU
 
 | Line | PCB default | Effect |
 |---|---|---|
-| EN_PI5V | hardware OR with VIN_OK | Pi powered when input present |
-| HOLD latch | cleared after 300 s | cut cannot stick |
-| SHUTDOWN_REQ | released (open drain) | no shutdown loop |
-| OUT1, OUT2 | pull-down, off | loads off |
-| USB port enables | pull-down, off | USB off until the MCU runs |
-| Charger CE | pull-up, on | charger runs at 7.60 V |
-| CV bump FET | pull-down | 7.60 V, not 8.40 V |
-| LTC4359 SHDN | floats high | 12 V path on |
-| J2 pulse FET | pull-down | no pulse |
+| HSS, hold path, grace timer, bleed | Hardware only | Unchanged. The Pi gets power, halts and boots as with a live MCU. |
+| OUT1, OUT2 | Pull-down, off | Loads off. |
+| USB port enables | Pull-down, off (open question 10) | USB off until the MCU runs. |
+| UART TX | High impedance (reset state) | No feed into the Pi. |
+| LED, buzzer | Off | |
 
 The USB default "off" means that a dead MCU with a running Pi has no
 camera. The Pi reports this on the dashboard (`module_alive` false in
 6.2). Open question 10 asks whether USB should default on instead.
 
+### 5.5 MCU rules
+
+- OUT1 and OUT2 are off at reset. The Pi turns them on over UART. The
+  MCU turns both off on a rail overvoltage (15.0 V; the comparator also
+  does this in hardware), on `RAIL_LOST`, and when PI_3V3 falls.
+- USB ports follow open question 10 at reset. The Pi can cycle a port
+  (`USB,<port>,OFF` then `ON`) for the camera restart case. The MCU
+  reports each FAULT pin.
+- LED: green, RUNNING. Slow amber blink: the Pi is halted with the 12 V
+  rail up (HALTED_IGN_ON); cycle the main switch. Fast amber blink: the
+  12 V rail is down with PI_3V3 up (GRACE, or a rail fault). Red: a rail
+  overvoltage. Dark: the module has no power.
+- The buzzer sounds on a rail overvoltage only.
+
 ## 6. Pi-side software interface
 
 ### 6.1 What replaces `bin/walle_ups.py`
 
-A new daemon `bin/walle_power.py` (`walle-power.service`, root) owns
+The watcher becomes the ignition daemon (option A). A new daemon
+`bin/walle_power.py` (`walle-power.service`, root) owns GPIO 27 and
 `/dev/ttyAMA0`. It:
 
+- reads IGN_OFF on GPIO 27 through libgpiod with the bias pull-up, and
+  debounces it for 3 s (settable, 5 s maximum);
+- on a debounced ignition-off: writes an `ignition_off` event line,
+  sends SIGKILL to `wall-e.service` and stops it (its camera teardown
+  can take the full 90 s `TimeoutStopSec`), runs `sync`, then
+  `systemctl poweroff`. This is the halt. The grace timer is the
+  backstop;
+- if IGN_OFF reads high when the daemon starts, starts the same
+  sequence after the debounce (the ignition went off during the boot);
+- starts early in the boot, before `wall-e.service`;
 - reads the module status at 2 Hz and writes `/tmp/ups_status.json`
   with the schema `walle-power/1` (fields in 6.2), so the `/debug` page
   and the dashboard keep working with small changes;
 - forwards output commands from the web UI (`POST /api/power/out`);
-- on `SHUTDOWN_PENDING`: sends SIGKILL to `wall-e.service` and stops
-  it (the camera teardown can take 90 s), then runs `sync`. It does not
-  call `poweroff`; the gpio-shutdown overlay already did. The daemon is
-  a head start, not the thing the halt depends on;
-- sends `ARMED` / `DISARMED` so the module never starts a top-up on an
-  armed robot;
-- sends a 1 Hz heartbeat. The module uses it only to know that user
-  space is up before it asserts SHUTDOWN_REQ (a request during the
-  kernel boot would loop the Pi).
+- sends a 1 Hz heartbeat;
+- logs `RAIL_LOST` from the module. It does not halt on it (5.3).
 
-`walle-ups-wakecheck.service` is deleted. There is no RTC polling.
-`i2c-bus-guard.service` loses its UPS witness (the UPS status age);
-it must use the RTK GPS reader's status age instead (open question
-12).
+The UART is not in the halt path. A dead MCU or a dead UART does not
+stop the halt.
+
+Alternative: the `gpio-shutdown` overlay with a 3000 ms debounce puts no
+daemon in the halt path (VERIFY that its `debounce` parameter takes
+3000 ms). The daemon is preferred: it stops `wall-e` first and logs the
+reason. Do not use both on GPIO 27.
+
+Deleted when the module goes in: `walle-ups.service`,
+`walle-ups-wakecheck.service`, the shutdown hook
+`bin/walle-ups-shutdown-alarm`, the RTC alarm and `chain.json`. There is
+no RTC polling. Keep the stop-timeout drop-ins
+(`bin/walle-fast-stop-system.conf`, `bin/walle-fast-stop-user.conf`).
+Today `bin/install_walle_ups.sh` installs them, so the new installer
+must take them over. `i2c-bus-guard.service` loses its UPS witness (the
+UPS status age); open question 12.
 
 ### 6.2 Protocol
 
@@ -765,13 +942,16 @@ ASCII lines, 115200 8N1, `\n` terminated, CRC-8 as the last field.
 Module to Pi, every 500 ms and on change:
 
 ```
-S,<state>,<vin>,<v14>,<i14>,<vsys>,<vpack>,<ipack>,
-  <soc>,<cell_mohm>,<t_cell>,<t_case>,<out1>,<i_out1>,
-  <out2>,<i_out2>,<usb_mask>,<flags>,<uptime>,<crc>
+S,<state>,<v12>,<v5pi>,<v5usb>,<pi3v3>,<grace_exp>,
+  <t_board>,<out1>,<i_out1>,<out2>,<i_out2>,<usb_mask>,
+  <usb_fault>,<flags>,<uptime>,<crc>
 ```
 
-Events: `E,SHUTDOWN_PENDING,<timeout_s>`, `E,INPUT_LOST`,
-`E,INPUT_BACK`, `E,TOPUP_START`, `E,TOPUP_END`, `E,FAULT,<code>`.
+`<state>` is the MCU's view: `RUN`, `PI_HALTED` (PI_3V3 down, 12 V up),
+`RAIL_LOST` (12 V down, PI_3V3 up) or `OV`.
+
+Events: `E,RAIL_LOST`, `E,RAIL_BACK`, `E,OV,<v12>`,
+`E,USB_FAULT,<port>`, `E,FAULT,<code>`.
 
 Pi to module:
 
@@ -780,42 +960,45 @@ Pi to module:
 | `HB` | heartbeat |
 | `OUT,1,ON` / `OUT,2,OFF` | switch an output |
 | `USB,<port>,ON/OFF` | switch a port (for the camera restart case) |
-| `ARMED` / `DISARMED` | top-up gate |
-| `HALT_NOW` | start a Pi-requested halt (replaces the ch5 `shutdown -h now`). The module never re-applies 5 V by itself after it (5.3). |
-| `SET,timeout,<s>` | hard-cut timeout |
-| `SET,autowake,<s>` | one-shot auto-wake after a halt with input present, 0 = off |
-| `SET,topup_weeks,<n>` | top-up period, 0 = never |
-| `TOPUP` | start a top-up now |
 | `GET,cfg` | dump configuration |
 | `ID` | firmware version, board revision |
 
+Removed with the buffer design: `ARMED`, `DISARMED`, `HALT_NOW`,
+`SET,timeout`, `SET,autowake`, `SET,topup_weeks`, `TOPUP`, and the
+events `SHUTDOWN_PENDING`, `INPUT_LOST`, `INPUT_BACK`, `TOPUP_START`,
+`TOPUP_END`.
+
 The module ignores a command with a bad CRC. It never trusts the Pi
-for a safety decision: the Pi cannot disable the hard cut, cannot
-raise the CV above 8.40 V, cannot keep an output on through an
-overvoltage.
+for a safety decision: the Pi cannot extend the grace timer (it is
+hardware), cannot keep an output on through an overvoltage, and has no
+command that reaches the Pi power path.
 
 ### 6.3 Pi settings that change
 
 EEPROM (`rpi-eeprom-config -e`):
 
 ```
-POWER_OFF_ON_HALT=1     # already set 2026-11-03
+POWER_OFF_ON_HALT=1     # already set 2026-11-03; load-bearing (below)
 WAKE_ON_GPIO=0          # already set 2026-11-03
-PSU_MAX_CURRENT=5000    # new: the module's Pi rail is 5 A capable
+PSU_MAX_CURRENT=5000    # new: only with a 6 A brick (3.4)
 ```
+
+`POWER_OFF_ON_HALT=1` is load-bearing. It drops 3V3 at the halt, so the
+hold path opens at once (3.7). Without it, a halt draws 1 to 1.4 W, 3V3
+stays up, and each ignition-off ends in a grace cut.
 
 `PSU_MAX_CURRENT` "instructs the firmware to skip USB power-delivery
 negotiation and assume that it is connected to a power supply with the
 given current rating" (Raspberry Pi documentation). With 5000 the
 firmware sets the USB limit to 1.6 A on its own, so
-`usb_max_current_enable` is not needed. Condition: the module's Pi
-rail must be rated 5 A continuous at the header, which 3.4 gives.
+`usb_max_current_enable` is not needed. Condition: the Pi rail must be
+rated 5 A continuous at the header, which the 6 A brick gives (3.4).
 
 `/boot/firmware/config.txt`:
 
 ```
 dtoverlay=uart0-pi5                 # /dev/ttyAMA0 on GPIO 14, 15
-dtoverlay=gpio-shutdown,gpio_pin=27,active_low=1,gpio_pull=up
+# GPIO 27 is IGN_OFF, read by walle-power.service (no overlay)
 # do NOT add gpio-poweroff: it interferes with the PMIC standby path
 ```
 
@@ -824,50 +1007,52 @@ Checked on the Pi on 2026-11-04: the CAN board is an MCP2515 on SPI0
 and GPIO 25 are in use. GPIO 14, 15, 22 and 27 are unclaimed. UART0 is
 free: `serial0` points to the debug UART `ttyAMA10`.
 
-systemd: `TimeoutStopSec=20` on `wall-e.service`, and
-`DefaultTimeoutStopSec=30s` in `/etc/systemd/system.conf`, so that the
-Pi finishes a poweroff inside the 120 s window even with a camera
-driver in state D. `HandlePowerKey` is not set in logind.conf, so the
-default `poweroff` applies (checked 2026-11-04).
+systemd: `wall-e.service` keeps `TimeoutStopSec=90`; the daemon kills
+it before the halt (6.1). `DefaultTimeoutStopSec=30s` (system) and 10 s
+(user) are set today (`bin/walle-fast-stop-system.conf`,
+`bin/walle-fast-stop-user.conf`). With the debounce, they keep a normal
+halt under the 60 s minimum grace time (4.4).
 
-The ch5 e-stop path in `controller.py` changes from `sudo shutdown -h
-now` to `HALT_NOW` over the daemon, so that the module knows the halt
-was requested and goes to HALTED_INPUT_PRESENT with no auto-wake.
+The ch5 e-stop path in `controller.py` does not change. Recovery after
+an e-stop is a main-switch cycle (5.3).
 
 ## 7. Rough bill of materials (research only)
 
 Single-unit prices, estimated from 2026 distributor listings. Not
-quotes. The Murata and TRACO prices in 3.2 were checked on DigiKey on
-2026-11-04. The first draft carried the TRACO TEP 150 at 160 USD from
-memory; its real price is about 268 USD. The price of the off-the-shelf
-converter (about 30 USD) is seller data (VERIFY).
+quotes. The brick prices come from `docs/pi_power_architecture.md`
+(2026-11-04). The Murata and TRACO TEP prices in 3.2 were checked on
+DigiKey on 2026-11-04. The price of the off-the-shelf 12 V converter
+(about 30 USD) is seller data (VERIFY). The other lines are estimates.
 
 | Block | Parts | Estimate USD |
 |---|---|---|
-| Pack sense lead, divider, clamp | | 2 |
-| 12 V converter, off the board, 72 V-class golf-cart unit | | 30 (VERIFY) |
-| 12 V IN: fuse, SMBJ15A, LTC4368, 2 FETs | | 10 |
-| OUT1/2: 2 x TPS1HB08-Q1, terminals | | 10 |
-| 5 V: 2 x LM61495, inductors, caps, TPS25982 | | 16 |
-| USB: 4 x TPS25221, 2 USB 3 receptacles, 2 cables, 2 USB-A | | 22 |
-| Power path: LTC4359, LM74700, FETs, polymer caps | | 10 |
-| Charger: BQ24610, FETs, inductor, sense | | 10 |
-| Protector, balancers, FETs, polyfuse | | 5 |
-| INA228, NTC, shunt | | 6 |
-| MCU, LDO, comparator, LED, button, buzzer, latch | | 8 |
-| Connectors: terminals, Micro-Fit, harnesses, JST | | 15 |
-| Passives, TVS on rails | | 12 |
-| 4-layer PCB, 5 pieces, 100 x 120 mm | per board | 15 |
-| Cells, 2 x INR18650-35E, holders | | 14 |
-| Total, first board | | about 185 |
-| Product spin: discrete buck and its input protection back on the board | | about 200 |
+| Pi brick | TRACO TEN 30-4811WIN | 67 (66.80; none at TME on 2026-11-04) |
+| Battery side | F3 and holder, SMBJ58A, HSS P-FET, gate parts, Q1, Q2 | 6 |
+| Ignition sense | F4 and holder, resistor chain, series diode, U1, U2 | 6 |
+| Hold path and grace timer | U3, Q5, Q6, 74HC4060, timer parts | 5 |
+| Pi rail | Output fuse, crowbar, bleed, supervisor | 4 |
+| 12 V converter, off the board | 72 V-class golf-cart unit | 30 (VERIFY) |
+| 12 V IN | F2, SMBJ15A, LTC4368, 2 FETs | 10 |
+| OUT1/2 | 2 x TPS1HB08-Q1, terminals | 10 |
+| USB rail | LM61495, inductor, caps | 8 |
+| USB ports | 4 x TPS25221, 2 USB 3 receptacles, 2 cables, 2 USB-A | 22 |
+| MCU | MCU, LDO, OR diodes, LED, buzzer | 6 |
+| Connectors | Terminals, Micro-Fit, harnesses, JST | 14 |
+| Passives | Passives, TVS on rails | 10 |
+| PCB | 4-layer, 5 pieces, 100 x 120 mm, per board | 15 |
+| Total, first board | | about 215 |
+| With the RECOM RP30-4805SFW/N | 91 EUR instead of 66.80 USD (VERIFY the exchange rate) | about 40 more |
+| With the TEN 20-4811WIN | 49.05 USD | about 195 |
+| Product spin: the discrete 12 V buck and its input protection back on the board | | about 230 |
 
-A product at 100 pieces lands near 120 to 140 USD in parts with the
-discrete buck. The first board costs about 80 USD less than the first
-draft (about 265 USD), because the converter is a bought unit off the
-board and the board carries no pack power. A product needs the
-converter inside its own enclosure, so the product spin puts the
-discrete buck and its input protection back on the board.
+Removed from the earlier board: the 2S cells and holders, the charger,
+the protector and balancers, the INA228, the power path, the Pi buck,
+the Pi eFuse and the pack-sense lead (about 55 USD). The Pi brick costs
+more than all of them. The first board is therefore about 30 USD over
+the earlier 185 USD. A product at 100 pieces with the discrete 12 V buck
+lands near 150 to 170 USD in parts; the Pi brick is the largest single
+part (VERIFY volume prices). A product spin could replace the brick with
+a 100 V synchronous buck (LM5146-Q1 class) for the Pi rail (VERIFY).
 
 ## 8. Build or buy
 
@@ -879,7 +1064,7 @@ Products checked on 2026-11-04 (vendor pages or retailer listings):
 | Joy-IT StromPi 3 | 6 to 61 V, 3 A out | 1000 mAh LiFePO4 option | not listed | 61 V input is right. 3 A cannot run a Pi 5. Pi 5 not in the compatibility list. |
 | Geekworm X1202 / DFRobot FIT0992 | 6 to 18 V | 4 or 2 x 18650 | yes | 18 V maximum. 5 A. Cuts power after halt. No wide input. |
 | Waveshare UPS HAT (E) | USB-C PD 5 to 20 V | 21700 | yes | PD input only. |
-| Waveshare UPS HAT (B), current | 8.4 V jack | 2 x 18650 | yes | The lessons in 3.6. |
+| Waveshare UPS HAT (B), current | 8.4 V jack | 2 x 18650 | yes | Cannot switch its output off or see its input; the buffer drains in storage (`docs/ups_hat_b.md`, `docs/pi_power_architecture.md` section 1). |
 | SunFounder PiPower 5 | USB-C PD 5 to 15 V | internal | yes | PD only. |
 | Geekworm UPS_Scap | 9 to 24 V | supercapacitor | yes | Seconds of hold-up, 24 V maximum. |
 | Sequent Super Watchdog | 5 V | 1 or 2 x 18650 | partial (3 A) | 5 V input. |
@@ -889,18 +1074,24 @@ Products checked on 2026-11-04 (vendor pages or retailer listings):
 
 How close the best one comes. The StromPi 3 takes the pack voltage but
 cannot run a Pi 5 and is not supported on it. The Witty Pi 5 has the
-right safe-shutdown logic and a 5 A rail but stops at 30 V and has no
-battery. Nothing found takes 36 to 60 V, runs a Pi 5 at 5 A, buffers
-the halt, cuts and re-applies 5 V, powers the USB devices, and gives
-switched accessory rails. The usual substitute is a Mean Well brick
-plus a Geekworm UPS, two boxes with no coordination and the 18 V cap.
+right safe-shutdown logic and a 5 A rail but stops at 30 V. Nothing
+found takes 36 to 60 V, runs a Pi 5 at 5 A, halts it on an ignition
+signal with a hardware backstop, takes nothing from the pack in
+storage, powers the USB devices, and gives switched accessory rails.
+The usual substitute is a Mean Well brick plus a Geekworm UPS, two
+boxes with no coordination and the 18 V cap. Robot vendors (Clearpath
+Jackal, Husarion ROSbot, Duckietown) have a controller ask the computer
+to shut down, then cut power. None treats a hard cut as normal
+(`docs/pi_power_architecture.md` section 2). This design does the same
+with a hardware timer in place of a controller.
 
 Market note. 24 V and 48 V packs are standard on ROS robots, mowers
 and AGVs, and the Pi 5 is the common computer. The gap is real but
 narrow: the buyers are robot builders, not makers with a bench supply.
 A board at 150 to 250 USD with a documented UART protocol and a Pi
-daemon would sell in the hundreds, not the thousands. The 12 V-class tap and
-the switched outputs are what the competitors lack most.
+daemon would sell in the hundreds, not the thousands. The 12 V-class
+tap, the switched outputs and the zero-drain ignition gating are what
+the competitors lack most.
 
 ## 9. Risks and bench test plan
 
@@ -908,49 +1099,56 @@ the switched outputs are what the competitors lack most.
 
 | # | Risk | Mitigation |
 |---|---|---|
-| R-1 | Hot-plug ring: microseconds above the pack voltage, up to about twice it with ceramic input capacitors. It can damage the converter and the VESCs. | Robot-level problem (3.2a). Converter voltage margin (72 V class). T-1 measures the ring at the converter input. |
-| R-2 | Regen overvoltage while the BMS charge FET is open, or from a faulted VESC that coasts and rectifies. The cells do not absorb it. | Robot-level problem (3.2a). VERIFY the VESC high-side limit. Consider a bus dump clamp. T-2, started at low speed. |
-| R-3 | Brick option only. +10 percent trim is the brick's limit, not a set point. Tolerance and temperature put the rail near 13.2 V, not on it, and the brick's OVP may sit within a volt. | VERIFY the trim range, the OVP threshold and its mode. Sense at the brick pins. Fallback: trim to +8 percent (13.0 V). |
-| R-4 | The converter dissipates about 17 W at 150 W out, on the chassis, in the sun. | T-3 thermal soak of the converter on the chassis. VERIFY the unit's temperature limit and its derating. |
-| R-5 | The Pi rail does not collapse (sneak feed) and a re-apply does not boot the Pi. | Discharge FET, collapse check, apply check, 5 retries. T-6. |
-| R-6 | SHUTDOWN_REQ asserted during boot loops the Pi. | Deassert before apply; assert only after the heartbeat. T-7. |
-| R-7 | Hard cut corrupts the NVMe root. | systemd timeouts; consider a read-only root (open question 9). T-8. |
-| R-8 | Boot inrush through the eFuse browns out mid-boot. | Slew control, 8 A limit, 30 s boot blanking. T-5. |
-| R-9 | A USB 3 injector degrades the OAK link to USB 2 speed. | T-10. Fallback: a Luxonis Y-cable from port P1. |
-| R-10 | Charger lifecycle (BQ24610 RGET listed obsolete by one distributor). | VERIFY at TI; BQ24650 fallback. |
-| R-11 | Top-up leaves the pack at 4.2 V per cell if the drain mode fails. | Drain mode is MCU-driven; a failed MCU floats SHDN high, the charger CE stays on at 7.60 V, and the pack self-discharges slowly. Log and alarm. T-13. |
-| R-12 | Cell holder contact resistance adds to cell resistance. | T-14 measures the whole string. |
-| R-13 | J2 pulse width wrong: ignored, or a forced power-off. | T-9. |
-| R-14 | Condensation on the 54 V pack-sense tracks. | Conformal coat except thermal pads and connectors. Creepage 2 mm minimum around the sense divider. |
-| R-15 | EMI from the converter and its leads next to the OAK and the GPS. | Mount the converter away from the GPS. Twist the 12 V leads. T-15 sniff with the converter running. T-17 repeats it for the chosen unit. |
-| R-16 | The converter's input floor sits above the BMS cut (40 V on the Vatrer example, 36 V on the HPQ). Motor sag on a low pack can take its input below the floor, and the 12 V rail drops out mid-throttle. | The Pi rides on the buffer (rail-lost rule, 5.3). A pack at 40 V is nearly empty. The VESCs stop at 39 V. If the floor is a problem, choose a unit with a lower floor (Cincon CHB150W-48S12 class, 18 V to 75 V) before changing the topology. |
+| R-1 | Hot-plug ring: microseconds above the pack voltage, up to about twice it with ceramic input capacitors. It can damage the converters and the VESCs. The battery tap is hot-plugged whenever the pack is connected. | Robot-level problem (3.2a). Margin: a 72 V-class 12 V converter, a 100 V-surge Pi brick, the SMBJ58A ahead of the HSS. The HSS is open at a hot-plug, so the ring meets the TVS and the HSS, not the brick. T-1 at both inputs. |
+| R-2 | Regen overvoltage while the BMS charge FET is open, or from a faulted VESC that coasts and rectifies. The cells do not absorb it. | Robot-level problem (3.2a). Both VESCs are `75_100_V2`, firmware 6.05: set the regen cutoff near 55.5/57 V (open question 15). Consider a bus dump clamp. T-2, started at low speed. |
+| R-3 | Brick trim. The Murata 12 V option: +10 percent trim is its limit, not a set point, and its OVP may sit within a volt. The RECOM Pi brick: 5 V trimmed to 5.1 V. | VERIFY the trim ranges, the OVP thresholds and their modes. Sense at the brick pins. Fallback for the Murata: trim to +8 percent (13.0 V). |
+| R-4 | The 12 V converter dissipates about 17 W at 150 W out, on the chassis, in the sun. | T-3 thermal soak of the converter on the chassis. VERIFY the unit's temperature limit and its derating. |
+| R-5 | The Pi rail does not fall to 0 V (a sneak feed), or it rises too slowly. The Pi 5 then stays in standby on the next ignition. | Supervisor bleed plus fixed bleed (3.8); injectors; UART tri-state; soft-start rule (3.4). T-5, T-6. |
+| R-6 | IGN_OFF reads high while the ignition is on (F4 blown, the lead broken, an opto open). | Fail-safe: the Pi halts, and the rail goes off. The robot can drive, but the Pi does not run until the fault is fixed. T-20. |
+| R-7 | A hard cut corrupts the NVMe root: a grace cut on a hung Pi, a BMS cut, F3, a brick fault, a loose connector. | The debounce and the stop caps bound a halt at about 45 s, under the 60 s minimum grace (4.4). Read-only root (open question 9). T-8. |
+| R-8 | The brick's start-up into the Pi's input capacitance trips its current limit, or a boot step browns out the rail. | VERIFY the brick's capacitive-load limit. T-5. |
+| R-9 | A USB 3 injector degrades the OAK link to USB 2 speed. The OAK already enumerates at USB 2 speed today, and the cable is the suspect (`docs/ups_hat_b.md`). | T-10. Fallback: a Luxonis Y-cable from port P1. |
+| R-10 | Brick stock and lead time: no TEN 30 at TME, 11 weeks for the RECOM (2026-11-04). | The TEN 20-4811WIN (4 A, 25 in stock) covers the 12.8 W peak. Then keep the USB current rule (3.4). Open question 6. |
+| R-11 | The grace timer runs short (a normal halt is cut) or never ends (a hung Pi holds the rail and drains the pack). | Counter timer with an RC oscillator, not a megohm RC (3.7). 47 kOhm reset pull-down against dark current. T-9. A U2B that fails shorted holds the reset; then only a second fault (a hung Pi) drains the pack. |
+| R-12 | A forced grace cut re-latches: the logic dies while the brick still has input charge, and the HSS closes again. | Brick remote pin tied ON (3.4). The timer supply holds Q6 on for seconds after the Pi's 3V3 has gone. The hold path needs the Pi's 3V3, and that needs a boot. T-13. |
+| R-13 | U2A fails shorted: IGN_OFF always reads low. The daemon never halts, and each ignition-off ends in a grace cut. | T-20 at commissioning. During the grace window, the daemon logs `RAIL_LOST` while IGN_OFF reads low; that pair is the signature. |
+| R-14 | Condensation on the pack-voltage tracks (battery side and ignition string). | Conformal coat except thermal pads and connectors. Creepage 2 mm minimum across the isolation barrier and around the battery side. |
+| R-15 | EMI from the converters and their leads next to the OAK and the GPS. | Mount the 12 V converter away from the GPS. Twist the 12 V leads. T-15 sniff with both converters running. T-17 repeats it for the chosen 12 V unit. |
+| R-16 | The 12 V converter's input floor sits above the BMS cut (40 V on the Vatrer example, 36 V on the HPQ). Motor sag on a low pack can take its input below the floor, and the 12 V rail drops out mid-throttle. | The Pi does not depend on the 12 V rail (3.4). The USB devices drop, and the controller disarms on the RC dropout (5.3). A pack at 40 V is nearly empty, and the VESCs stop at 39 V. If the floor is a problem, choose a unit with a lower floor (Cincon CHB150W-48S12 class, 18 V to 75 V). |
 | R-17 | Not applicable to the off-board design: no surge stopper is on the board. In the product spin, a shorted stopper FET passes the TVS clamp (about 113 V) to the converter. | Product spin only: a fuse or a second clamp on the converter side. |
-| R-18 | The converter's current limit into a partial short in its 12 V lead cooks the lead or a joint, if the limit is constant-current. | Select a unit with hiccup mode (3.2). Size the lead for the converter's current limit. T-17. |
-| R-19 | No load on the converter (both outputs off) makes some units unstable or trip OVP. | VERIFY "no minimum load" at its output voltage (T-17, no-load output). The charger and the SYS bus are a small load. |
-| R-20 | A converter fails with its input shorted to its output. The pack voltage reaches the 12 V line, and the BQ24610 (33 V maximum) fails in tens of microseconds. | F2 and the SMBJ15A TVS act first (clamp about 24.4 V). The LTC4368 and its 100 V FETs open at 15.0 V. VERIFY that the TVS survives until F2 opens. T-18. |
+| R-18 | The 12 V converter's current limit into a partial short in its 12 V lead cooks the lead or a joint, if the limit is constant-current. | Select a unit with hiccup mode (3.2). Size the lead for the converter's current limit. T-17. |
+| R-19 | No load on a converter makes some units unstable or trip OVP: the 12 V unit with both outputs off, the Pi brick with the Pi halted. | VERIFY "no minimum load" for both (T-17, T-19). The USB rail and the MCU load the 12 V rail; the fixed bleed loads the Pi brick. |
+| R-20 | The 12 V converter fails with its input shorted to its output. The pack voltage reaches the 12 V line, and the USB buck (36 V) and the output switches (40 V) fail in tens of microseconds. | F2 and the SMBJ15A TVS act first (clamp about 24.4 V). The LTC4368 and its 100 V FETs open at 15.0 V. VERIFY that the TVS survives until F2 opens. T-18. |
+| R-21 | The battery tap sits on the cell side of the BMS, or its return is B- on a BMS that switches the negative. The BMS cut then no longer protects the pack from the Pi. | Tap the BMS output (3.1). VERIFY the Daly topology and the harness (open question 4). |
+| R-22 | The battery-tap and ignition connectors are swapped. | Key them differently (3.1, 3.12). |
+| R-23 | The Pi stays halted after an e-stop or a flapping switch until a person cycles the main switch. | Designed (5.3). The MCU LED shows it (5.5). |
+| R-24 | A robot left with the ignition on runs the pack down to the BMS cut, which is a hard cut for the Pi. | Open question 20: a low-pack halt from the Daly BLE data. |
+| R-25 | Voltage margin on the HSS, Q1 and Q2: the SMBJ58A clamps at 93.6 V. | Parts rated 150 V or more (3.5). T-1 records the peak at the battery tap. |
 
 ### 9.2 Bench test plan, before the board goes on the robot
 
 | # | Test | Pass |
 |---|---|---|
-| T-1 | Hot-plug the real pack into the converter's input through the real harness, 10 times. Scope at the converter input. | Record the peak. No part on the bus is above 80 percent of its rating. Fail: damp the converter input (a bulk capacitor with ESR, or a pre-charge). |
-| T-2 | WARNING: Do not brake hard on a full pack with the BMS charge path open until a bus clamp is fitted or the VESC limit is confirmed. Robot on stands, both VESCs. Start with brake captures at low speed with the pack at mid charge, then step up the speed. Scope at the converter input. | Record the bus peak at each step. The peak stays under about 58 V. The converter stays up. The log shows no `INPUT_LOST`. |
-| T-3 | 150 W resistive load on the 12 V rail for 2 h, with the converter bolted to its chassis spot and the board in its enclosure, at 45 C ambient. | Converter case under its limit (VERIFY); board under 85 C; 5 V rails in tolerance. |
+| T-1 | Hot-plug the real pack into the 12 V converter's input and into the battery tap through the real harness, 10 times each. Scope at the converter input and at the HSS. | Record the peaks. No part on the bus is above 80 percent of its rating. Fail: damp the input (a bulk capacitor with ESR, or a pre-charge). |
+| T-2 | First set the VESC regen cutoff (3.2a). WARNING: Do not brake hard on a full pack with the BMS charge path open until a bus clamp is fitted or the cutoff is confirmed. Robot on stands, both VESCs. Start with brake captures at low speed with the pack at mid charge, then step up the speed. Scope at the 12 V converter input and at the battery tap. | Record the bus peak at each step. The peak stays under about 58 V. Both converters stay up. The Pi does not reboot. |
+| T-3 | 150 W resistive load on the 12 V rail and 6 A on the Pi rail for 2 h, with the converter bolted to its chassis spot and the board in its enclosure, at 45 C ambient. | Converter case under its limit (VERIFY); the brick case under its limit (VERIFY); board under 85 C; 5 V rails in tolerance. |
 | T-4 | 12 V rail: load step 0 to 8 A, short on OUT1 with OUT2 loaded. | Pi rail unaffected; OUT1 limits and retries; OUT2 stays on. |
-| T-5 | Pi 5 + NVMe boot through the eFuse, 50 cycles, with the OAK on P1. | 50 boots; no `throttled` flag; rail dip under 250 mV. |
-| T-6 | Pull the input 50 times at random points. | 50 clean halts (journal shows `Journal stopped`); 50 cold boots; collapse under 1 V each time. |
-| T-7 | Input pulse train: 1 s, 3 s, 10 s, 60 s, 150 s outages, 5 each. | 1 s ignored; others one halt and one boot; no boot loop; backoff timing as in 5.3. |
-| T-8 | Simulate a stuck camera driver (a process in state D, or `wall-e` with `TimeoutStopSec=300`). | Pi still halts under 60 s via systemd; hard cut at 120 s if forced; filesystem check passes on the next boot. |
-| T-9 | Halt with input present. Pulse J2 at 100, 200, 500 ms. | Find the width that wakes without a force-off. |
+| T-5 | Pi 5 + NVMe boot on ignition-on, 50 cycles, with the OAK on P1. Scope the 5.1 V rail at the header. | 50 boots; 10 to 90 percent rise under 50 ms; no `throttled` flag; rail dip under 250 mV. |
+| T-6 | Ignition off at random points, 50 times. | 50 clean halts (journal shows `Journal stopped`); the HSS opens within 1 s of 3V3 falling; the rail is under 0.5 V within 2 s; 50 cold boots on the next ignition. |
+| T-7 | Ignition pulse train: 1 s, 3 s, 10 s, 60 s, 150 s off, 5 each. | Shorter than the debounce: no halt, the timer resets. 10 s: the halt completes, and the Pi stays halted with 5 V on until the next ignition cycle (5.3). 60 s and 150 s: one halt, the rail off, one boot when the ignition returns. No boot loop. |
+| T-8 | Hung Pi: mask `walle-power.service`, then switch the ignition off. Then, with the daemon on, simulate a stuck camera driver (a process in state D). | First case: the grace cut lands 60 s to 90 s after the ignition went off. Second case: the Pi halts under 50 s, or the grace cut lands. The filesystem check passes on the next boot in both cases. |
+| T-9 | Grace timer alone, with a bench 3.3 V on PI_3V3: time it at -10 C, +25 C and +45 C, and at +70 C on U2B (heat gun). | 60 s to 90 s in every case. |
 | T-10 | OAK on P1 through the injector; `getUsbSpeed()` and a 1 h depth stream. | SUPER speed; zero USB resets in `dmesg`. |
 | T-11 | Hub on P2; pull the hub's power; probe the Pi-side VBUS pin of the injector. | 0 V on the Pi side; no over-current message in `dmesg`. |
-| T-12 | MCU held in reset for 10 min with input present; then during a shutdown. | 7.60 V on the charger; Pi stays powered in the first case; cut holds 300 s then applies in the second. |
-| T-13 | Force a top-up: CV reaches 8.40 V, taper, drain mode, return to 7.60 V. Pull the input mid-top-up. | Balancer LEDs light above 4.20 V; top-up ends on the loss; no cell above 4.25 V. |
-| T-14 | Load the pack with 2.6 A for 10 s with the input off. | Sag under 0.25 V with the specified cells; the module reports the resistance within 20 percent of a 4-wire meter. |
-| T-15 | Near-field probe over the board and the converter leads, OAK, GPS and the converter running. RTK fix quality before and after. | No new spurs at the GPS L1/L5 bands; fix quality unchanged. |
-| T-16 | Idle current from the pack after a cut, input absent, 24 h. | Under 0.3 mA; pack voltage change under 5 mV. |
-| T-17 | Chosen converter, before it goes on the robot: no-load and 10 A output voltage; real undervoltage shutdown and overvoltage limit; input at 60 V, 65 V and 68 V for 1 s (a 30 V to 60 V unit) or at 60 V, 70 V and 80 V for 1 s (a 72 V-class unit), from a current-limited supply; output short (which way it fails, what the output does); 10 A for 2 h with the case at 50 C; the RTK fix quality and a near-field probe with it running next to the GPS. | Output 11.6 V to 13.8 V; survives 68 V for 1 s (30 V to 60 V unit) or 80 V for 1 s (72 V-class unit); hiccup on a short; case under its rating; no change in the RTK fix. Any fail: choose another unit, or an isolated brick off the board. |
-| T-18 | 12 V IN block on a bench fixture, without the rest of the board: apply 30 V, 54 V and 60 V to the 12 V input from a supply that gives 30 A, into a dummy load on the rail side. | F2 opens. The rail side stays under 33 V for the whole event. A TVS that fails short is acceptable. Nothing burns. |
+| T-12 | MCU held in reset for 10 min; cycle the ignition twice. | The Pi halts and boots as normal. Outputs off. USB as open question 10 decides. |
+| T-13 | Forced grace cut with a real Pi (daemon masked), at no load and at 2 A on the rail. Scope the rail and the HSS gate for 10 s after the cut. | One clean drop. No restart pulse on the rail. |
+| T-14 | No bridge across the main switch: main switch off; drive the board through each state (ignition off, grace, hold, grace cut). Measure the switched side into 10 kOhm. Measure the resistance across the barrier. | Under 0.1 V on the switched side in every state. Over 10 MOhm across the barrier. |
+| T-15 | Near-field probe over the board, the brick and the converter leads, with the OAK, the GPS and both converters running. RTK fix quality before and after. | No new spurs at the GPS L1/L5 bands; fix quality unchanged. |
+| T-16 | Storage drain: main switch off, 24 h. Measure the current in F3, F4 and F1. | Under 50 uA in all (target 10 uA). |
+| T-17 | Chosen 12 V converter, before it goes on the robot: no-load and 10 A output voltage; real undervoltage shutdown and overvoltage limit; input at 60 V, 65 V and 68 V for 1 s (a 30 V to 60 V unit) or at 60 V, 70 V and 80 V for 1 s (a 72 V-class unit), from a current-limited supply; output short (which way it fails, what the output does); 10 A for 2 h with the case at 50 C; the RTK fix quality and a near-field probe with it running next to the GPS. | Output 11.6 V to 13.8 V; survives 68 V for 1 s (30 V to 60 V unit) or 80 V for 1 s (72 V-class unit); hiccup on a short; case under its rating; no change in the RTK fix. Any fail: choose another unit, or an isolated brick off the board. |
+| T-18 | 12 V IN block on a bench fixture, without the rest of the board: apply 30 V, 54 V and 60 V to the 12 V input from a supply that gives 30 A, into a dummy load on the rail side. | F2 opens. The rail side stays under 36 V for the whole event. A TVS that fails short is acceptable. Nothing burns. |
+| T-19 | Chosen Pi brick, before it goes on the board: input at 18 V, 37.7 V, 54.6 V and 75 V; output at 0 A and 6 A; output rise time; its output OVP; the crowbar trip from a bench supply on the output with the brick off; the 100 V for 100 ms surge only as its datasheet test allows (VERIFY). | 5.0 V to 5.2 V at every point; rise under 50 ms; the crowbar trips near 5.9 V and the brick survives it. |
+| T-20 | Ignition sense faults: pull F4 with the robot on; then short U2A's output. | F4 pulled: the Pi halts and the rail goes off. U2A shorted: the daemon does not halt, the grace cut lands at 60 s to 90 s, and the daemon log shows `RAIL_LOST` with IGN_OFF low. |
 
 ## 10. Open questions for Kevin
 
@@ -963,24 +1161,29 @@ the switched outputs are what the competitors lack most.
 3. Which loads go on OUT1 and OUT2 in the next year? Lidar (6 to
    13 W), lights, a heater, a horn? Their inrush sets the current
    limit.
-4. Pack connector on the robot harness for the converter's fused input
-   lead and the sense lead: XT60 or XT90? Do they hang behind the Daly
-   discharge FET (so a BMS cut also cuts the module) or straight on the
-   cells?
+4. Taps on the robot. Where is the BMS output on the battery side of
+   the main switch (for F3), and where is the switched side (for F1 and
+   F4)? Which lead does the main switch interrupt, and which lead does
+   the Daly BMS switch? XT60 or XT90 for the converter's fused lead?
 5. Answered 2026-11-04: smart FET (TPS1HB08-Q1).
-6. Cells: buy Samsung 35E or Molicel P28A now, and scrap the 1 ohm
-   cells?
-7. RTC: fit a rechargeable cell on J5 with `rtc_bbat_vchg` and
-   inhibit charging below 0 C, or accept a clock jump until GPS or
-   NTP sets it? Journald, TLS and log timestamps break on a backward
-   jump.
-8. After a ch5 e-stop the Pi halts with the input present. Button-only
-   wake (recommended) or an auto-wake after N minutes?
+6. Which Pi brick: the TRACO TEN 30-4811WIN (none at TME), the RECOM
+   RP30-4805SFW/N (11-week lead), or the TEN 20-4811WIN (4 A, in stock;
+   then `PSU_MAX_CURRENT` stays unset)?
+7. RTC clock (not a wake path: nothing arms an RTC alarm now). Each
+   ignition-on is a cold power-on, and the RTC loses the time unless a
+   cell sits on the Pi's J5 connector. Fit a rechargeable cell on J5
+   with `rtc_bbat_vchg` and inhibit charging below 0 C, or accept a
+   clock jump until GPS or NTP sets it? Journald, TLS and log
+   timestamps break on a backward jump.
+8. Should the robot ever wake on a schedule while stored? This design
+   cannot: nothing has 5 V while the main switch is off.
 9. Read-only root with a separate data partition, so that a hard cut
-   cannot leave the robot in an `fsck` prompt?
-10. USB ports: default off with a dead MCU (safe, no camera) or
-    default on (camera runs even with a dead MCU, but the module can
-    no longer shed USB before a cut)?
+   cannot leave the robot in an `fsck` prompt? With no buffer, a BMS
+   cut, a blown fuse and a grace cut are all hard cuts.
+10. USB ports: default off with a dead MCU (no camera) or default on
+    (camera runs even with a dead MCU)? The old reason for "off" was to
+    shed USB before a cut. That reason is gone: the USB rail now falls
+    with the 12 V rail. Recommendation: default on.
 11. Keep the external self-powered hub behind the injector, or put a
     USB5744 hub on the module in the product spin?
 12. The I2C bus guard uses the UPS status file as its witness. Move
@@ -990,18 +1193,31 @@ the switched outputs are what the competitors lack most.
     board.
 14. Where does the converter mount on the chassis, and is there bare
     metal under it with a path to the chassis skin? Where does the
-    module mount, and how long is the 12 V lead?
-15. Which VESC hardware model and firmware version are on the robot?
-    Does that firmware have a high-side regen voltage limit (3.2a)?
+    module mount, and how long are the 12 V lead and the battery tap?
+15. Answered 2026-11-04: both drive VESCs are hardware `75_100_V2`,
+    firmware 6.05. Still open: set "Battery Voltage Regen Cutoff
+    Start/End" near 55.5/57 V on both (3.2a)?
 16. Fit a bus dump clamp on the robot (3.2a)?
-17. Which converter: a 72 V-class unit (recommended), or the dkplnt
-    after T-17 passes?
+17. Which 12 V converter: a 72 V-class unit (recommended), or the
+    dkplnt after T-17 passes?
+18. Grace time: 75 s nominal (60 s to 90 s)? Shorten it after T-8
+    measures the halt on the robot?
+19. Build order: build the Pi power block (3.4 to 3.8) first, on its own
+    small board, so that the HAT (B) can retire before the rest of the
+    module is built?
+20. Low-pack halt: should `walle-power.service` halt the Pi when the
+    Daly BLE pack voltage stays low (for example under the 39 V motor
+    cutoff for 10 minutes), so that a robot left on does not end in a
+    BMS hard cut?
 
 ## 11. Appendix: Grok second opinions
 
 Six `grok_second_opinion` calls, Grok 4.7, 2026-11-04, single shot, no
 repository access. Sessions `01a1a72a`, `01a1a730`, `01a1a737` (11.1 to
-11.3, 0.51 USD in all) and the three below (11.4 to 11.6, 0.37 USD).
+11.3, 0.51 USD in all) and the three below (11.4 to 11.6, 0.37 USD). A
+seventh (session `01a1a8bd`) reviewed option A for
+`docs/pi_power_architecture.md` (11.7). Section references inside 11.1
+to 11.6 point to the design at the time of each review.
 
 ### 11.1 The 14 V converter
 
@@ -1022,45 +1238,24 @@ Proposed: LM5146-Q1 discrete buck with 100 V FETs first, brick second.
 | Measure the hot-plug ring and a hard brake before freezing the clamp. | Accepted. T-1 and T-2. |
 | Use the TRACO for the boards that make the robot move; discrete later. | Accepted as the spin plan. Rejected in part: Kevin wants a product, so spin 2 stays in the document with the review's rules. |
 
-### 11.2 The charger and BMS
+### 11.2 and 11.3 (removed design)
 
-Proposed: BQ25713 NVDC charger plus BQ76905 with host balancing at
-3.80 V and a coulomb counter.
+11.2 (the charger and BMS) and 11.3 (cut-and-wake) reviewed the 2S
+buffer design. Option A removed that design on 2026-11-04. Their tables
+are in the git history of this file (commit 037cc80). These points from
+11.3 carry over:
 
-| Objection | Response |
-|---|---|
-| A register charger's dead-MCU state is its power-on default, which is not 7.60 V; a watchdog expiry can restore an 8.4 V class float. | Accepted. The charger is now a stand-alone BQ24610 with the float in resistors and an MCU-held bump to 8.40 V (3.6). |
-| Dropping the CV register does not bring the cells down after a top-up; a bleed or a drain is needed. | Accepted. Drain mode through the LTC4359 SHDN pin (3.5). |
-| Host balancing at 3.80 V is unmeasurable (flat OCV, millivolt errors, sag on a 1 ohm cell). Passive bleeders near 4.2 V during the rare top-up are the right tool. | Accepted. HY2213-class balancers at 4.20 V plus the scheduled top-up. |
-| A coulomb counter is useless for a 65 mAh mission; offset drift is the whole buffer per month. | Accepted. INA228 stays as a monitor; SOC from resting voltage; the daily sag test reports cell resistance instead. |
-| NVDC seamlessness is hidden behind the 5 V bucks; an ideal-diode OR with holdup does the same. | Accepted. LTC4359 + LM74700 OR (3.5). |
-| Low-side protector FETs split the grounds; two I2C devices on one bus across that split are invalid when the FETs open. | Accepted. The I2C protector is dropped for spin 1; a fixed S-8252 with no bus. INA228 sits on the system side. |
-| Boot race: enables must default off in hardware; a floating MCU pin is not off. | Accepted. Section 5.4 table. |
-| Idle current is the charger's number; BQ25713 battery-only Iq blows a 1 mA budget. | Accepted. No BQ25713. Idle estimate 120 uA (4.3). |
-| 1 ohm cells are the HAT problem; neither IC repairs it. | Accepted. Cell specification 35 mOhm; T-14. |
-| LiFePO4 at 3.80 V is over full. | Accepted. NMC/NCA only, stated in 3.6. |
-| Skip the fuel gauge until the mission is longer than a minute. | Accepted in part. The INA228 stays for telemetry and the shunt-calibration lesson; it is not called a gauge. |
-| BQ76905 if programmable limits are wanted, with an MCU referenced to cell-negative. | Kept as the product-spin alternative. |
-
-### 11.3 Cut-and-wake
-
-Proposed: cut 5 V after the halt, re-apply on input return; J2 pulse
-only for the halt-with-input-present case. Grok agreed with the policy
-and listed the holes.
-
-| Objection | Response |
-|---|---|
-| A short outage can re-close the eFuse before the Pi rail collapsed; the PMIC standby latch then holds and the Pi never boots. | Accepted. Discharge FET, collapse check under 1 V, apply check, retries (3.8). |
-| gpio-shutdown is level-sensitive; a line still asserted at boot loops the Pi. Check `HandlePowerKey`. | Accepted. Deassert before apply; assert only after the heartbeat; logind check in 6.3. |
-| Do not use gpio-poweroff as a witness; it interferes with the standby path. | Accepted. Removed; 3V3 sense only. The overlay README says the same. |
-| Sense 3V3 with a high-impedance divider; source nothing into the pin. | Accepted. |
-| The 120 s cut is an NVMe corruption path; set systemd stop timeouts; consider a read-only root. | Accepted. 6.3 and open question 9. |
-| Size the eFuse for boot surge with slew control; blank the loss detector through the boot window. | Accepted. 8 A limit, slew, 30 s boot window with a 10 s loss rule. |
-| No auto-wake after an e-stop; J2 pulse only with input present and 3V3 down; confirm the width. | Accepted. HALT_NOW path, autowake default 0, T-9. |
-| RTC: a primary coin cell with charging enabled is a fire; a rechargeable cell must not charge below 0 C; GPS or NTP is the real clock. | Accepted. Open question 7. |
-| Hardware default: input present and not in an active shutdown forces 5 V on even with a dead MCU. | Accepted. EN_PI5V hardware OR with the HOLD latch and timeout (3.8, 5.4). |
-| The module should go fully dark after the cut; the 60 V comparator wakes it. | Accepted. 3.7 and 4.3. |
-| Treat the UART daemon as a head start, not the thing the cut depends on. | Accepted. 6.1. |
+- Sense 3V3 through a high impedance, and source nothing into the pin
+  (3.7, 3.9).
+- Do not use `gpio-poweroff`. It interferes with the PMIC standby path
+  (6.3).
+- Bound the systemd stop timeouts, and consider a read-only root (6.3,
+  open question 9).
+- No automatic wake after an e-stop (5.3).
+- The UART daemon is a head start, not the thing the cut depends on.
+  Option A goes further: no firmware is in the Pi power path (3.11).
+- A primary coin cell with charging enabled is a fire. A rechargeable
+  cell must not charge below 0 C (open question 7).
 
 ### 11.4 The 13.2 V brick (2026-11-04)
 
@@ -1093,8 +1288,8 @@ for spin 1.
 
 | Objection | Response |
 |---|---|
-| A 57-58 V clamp sits about 3 V above a full pack; the stopper FET then absorbs ordinary regen braking on a full pack until its timer opens, which is how these FETs fail short. | Accepted. The clamp stays at 68 V. The converter must survive 68 V on the bench (T-17). Open: the VESCs' own bus limit is not recorded in the repository; if they fault near 57 V, regen cannot hold the bus above the clamp. |
-| A series disconnect can lose the race to a shorted high-side FET; the BQ24610 (33 V) dies in tens of microseconds. | Accepted. Fuse and a TVS under 28 V before the disconnect. |
+| A 57-58 V clamp sits about 3 V above a full pack; the stopper FET then absorbs ordinary regen braking on a full pack until its timer opens, which is how these FETs fail short. | Accepted. The clamp stays at 68 V. The converter must survive 68 V on the bench (T-17). Open: the VESCs' own bus limit is not recorded in the repository; if they fault near 57 V, regen cannot hold the bus above the clamp. Closed 2026-11-04: both drive VESCs are `75_100_V2` (75 V class), firmware 6.05, so they do not fault near 57 V (3.2a). |
+| A series disconnect can lose the race to a shorted high-side FET; the BQ24610 (33 V) dies in tens of microseconds. | Accepted. Fuse and a TVS under 28 V before the disconnect. (Option A removed the BQ24610; the USB buck at 36 V is now the weakest part, 3.1.) |
 | Low-side or double FET short, overshoot and hiccup are not covered; no datasheet means no spec and no test limit. | Accepted. T-17 measures them; the Murata stays the default. |
 | A non-isolated buck ties logic ground to the motor return; the RTK and the OAK sit on it. | Rejected in part. The Pi is already tied to pack negative through the CAN link to the VESCs, and section 3.2 bonds the brick output to pack negative anyway. The switching noise and the 20 A lead loop stay a real risk; T-17 checks the RTK fix. |
 | Plan on 90 percent, not 95 to 97; 20 A is often a peak rating. | Accepted. T-17 runs 10 A for 2 h at a 50 C case. |
@@ -1109,59 +1304,87 @@ and 57.5 V. Grok agreed with dropping the stopper and rejected the rest.
 
 | Objection | Response |
 |---|---|
-| The VESC "Battery Voltage Cutoff Start/End" is the low-voltage cutoff, not a regen limit. | Accepted. WARNING added in 3.2a. VERIFY whether the firmware has a high-side limit. |
+| The VESC "Battery Voltage Cutoff Start/End" is the low-voltage cutoff, not a regen limit. | Accepted. WARNING added in 3.2a. Firmware 6.05 has the separate "Battery Voltage Regen Cutoff Start/End" (3.2a). |
 | A faulted, coasting VESC rectifies through its body diodes, and no setting stops that. | Accepted as a robot-level risk (3.2a). It needs a motor back-EMF above the bus voltage, which the robot's `max_erpm` 20000 cap may prevent. VERIFY against the motor KV. |
 | Golf-cart converters assume a pack that stays connected. A steady bench test says nothing about a 2x ring. | Accepted. A 72 V-class unit is the default (3.2). |
 | A TVS covers the hot-plug ring, not braking energy. | Accepted (3.2a). |
 | Keeping the stopper protects only the converter, never the VESCs. | Accepted. The stopper is dropped from the board (3.1). |
-| The halt must also start on loss of the 12 V rail. | Already in the design: the rail-lost rule (5.3). |
+| The halt must also start on loss of the 12 V rail. | Then: the rail-lost rule. Option A replaces it: the Pi runs from the battery tap, so a 12 V rail loss does not threaten the Pi (5.3). |
 | The overvoltage disconnect must withstand pack voltage if the converter shorts its input to its output. | Accepted. 100 V-rated parts, and F2 coordinated with the TVS (3.1, R-20, T-18). |
 | Buy voltage margin or add a dump clamp. | Accepted. A 72 V-class unit is the default. The clamp is open question 16. |
 | Do not run T-2 on a full pack to discover this. | Accepted. T-2 is rewritten with a WARNING and a low-speed start. |
 
+### 11.7 Option A (2026-11-04)
+
+Recorded in `docs/pi_power_architecture.md` section 4 (Grok, session
+`01a1a8bd`). Proposed: a gated tap on the main pack, with the enable
+taken from the ignition.
+
+| Objection | Response |
+|---|---|
+| A 60 V module (Pololu D42V55F5) cannot be made safe on 13S with a TVS: one that stays off at 54.6 V clamps near 90 V (SMBJ58A: 93.6 V). | Accepted. A brick rated 75 V continuous and 100 V for 100 ms (3.4). |
+| An `ignition OR 3V3` enable alone lets a hung Pi hold the converter on and drain the pack in one to two weeks. | Accepted. A hardware grace timer forces the HSS off 60 s to 90 s after the ignition goes off (3.7). |
+
 ## Appendix: Technical Names
 
-Raspberry Pi 5, Pi 5, Raspberry Pi, bookworm, NVMe, PCIe, GPIO, PMIC,
-STANDBY, EEPROM, `POWER_OFF_ON_HALT`, `WAKE_ON_GPIO`, `PSU_MAX_CURRENT`,
+Raspberry Pi 5, Pi 5, Raspberry Pi, NVMe, GPIO, PMIC, STANDBY, EEPROM,
+`POWER_OFF_ON_HALT`, `WAKE_ON_GPIO`, `PSU_MAX_CURRENT`,
 `usb_max_current_enable`, `rpi-eeprom-config`, `rtc_bbat_vchg`, J2, J5,
-PWR_BUT, RTC, UART, UART0, `/dev/ttyAMA0`, `dtoverlay`, `uart0-pi5`,
-`gpio-shutdown`, `gpio-poweroff`, `config.txt`, systemd, logind,
-`HandlePowerKey`, `TimeoutStopSec`, `DefaultTimeoutStopSec`, `fsck`,
-`dmesg`, `journalctl`, SIGKILL, `poweroff`, `sync`, `wall-e.service`,
-`walle-ups.service`, `walle-ups-wakecheck.service`, `walle-power.service`,
-`bin/walle_ups.py`, `bin/walle_power.py`, `i2c-bus-guard.service`,
-`/tmp/ups_status.json`, `/debug`, `controller.py`, `config.py`, ch5,
-e-stop, VESC, CAN, MCP2515, SPI0, Daly, BMS, 13S, 2S, 18650, Li-ion,
-NMC, NCA, LiFePO4, OCV, SOC, CC/CV, CV, CC, NTC, OV, UV, OCD, XT60,
-XT90, Molex Micro-Fit 3.0, JST-PH, Keystone 1043, D2PAK, SuperSO8,
-SOIC, MSOP, HTSSOP, VQFN-HR, SOT-23-6, LQFP, TVS, SMCJ58A, SMCJ70A,
-SMBJ18A, LT4363, LM5069, LTC4359, LM74700-Q1, IPB072N15N3,
-BSC160N15NS5, BSC098N10NS5, BSC160N10NS3, BSC0902NS, LM5146-Q1, LM5145,
-TEP 150-4815WI, TEP 150WI, TRACO, Murata, HPQ-12/25-D48NB-C, MPQ1500-12V125-L48,
-PMBus, MFR_VOUT_MAX, dkplnt, LTC4368, 12 V IN, Vatrer, SMBJ15A, 1206,
-IP55, golf-cart converter, potted, hiccup, regen, back-EMF, body diode,
-MOSFET, bus dump clamp, VESC Tool, `max_erpm`, KV, pack sense, F1, F2,
-Flex,
-PKB4313DPI, Cincon, CHB150W-48S12, eighth brick, half brick, baseplate,
-OVP, UVLO, Mean Well SD-150C-12, TPS1HB08-Q1,
-BTS7008-2EPA, PROFET, TE T9AS1D12-12, Omron G8P, LM61495, LM61495-Q1,
-LMQ61460, TPS25982, TPS25221, TPS2561, USB5744, BQ24610, BQ24650,
-BQ25713, BQ25792, BQ76905, S-8252, ABLIC, HY2120, HY2213, HYCON,
-TL431, INA228, INA219, TLV7031, STM32G071, STM32G071CBT6, RP2040,
-RP2350, TPS7B81-Q1, TPS7B69, 74LVC1G74, 2N7002, Samsung INR18650-35E,
-Molicel P28A, Littelfuse, LP-JCASE, NANO2, OAK-D Lite, Luxonis,
-`getUsbSpeed`, USB, USB 3, USB 2, USB-C, USB-A, VBUS, SuperSpeed, SSTX,
-SSRX, D+, D-, Arduino, RC, RTK, GPS, L1, L5, NTP, TLS, journald, Grok,
-Grok 4.7, `grok_second_opinion`, Kevin, WALL-E, Texas, Witty Pi 5,
-UUGear, HAT+, StromPi 3, Joy-IT, Geekworm X1202, Geekworm UPS_Scap,
-DFRobot FIT0992, Waveshare UPS HAT (B), Waveshare UPS HAT (E),
-SunFounder PiPower 5, Sequent Microsystems, Super Watchdog, PiJuice,
-Sfera Labs, Strato Pi UPS, mjbots, VBCores, ROS, AGV, Mean Well,
-quarter brick, eFuse, ideal diode, surge stopper, hot-swap, NVDC,
-OR-ing, SYS bus, holdup, brown-out, flapping, debounce, backoff,
-heartbeat, watchdog, CRC-8, firmware, spin, BOM, PCB, four-layer,
-2 oz, thermal via, conformal coat, creepage, SOA, RDS(on), EMI, PD,
-Power Delivery, Stop mode, EXTI, ADC, I2C, SHDN, CE, FB, ISET, TS,
-STAT, FAULT, SNS, EN, HOLD, VIN_OK, PI_HALTED, PI_5V_SENSE,
-SHUTDOWN_REQ, EN_PI5V, OUT1, OUT2, P1, P2, P3, P4, HALT_NOW,
-SHUTDOWN_PENDING, ARMED, DISARMED, TOPUP, HB, `walle-power/1`.
+PWR_BUT, RTC, UART, UART0, `/dev/ttyAMA0`, `serial0`, `ttyAMA10`,
+`dtoverlay`, `uart0-pi5`, `gpio-shutdown`, `gpio-poweroff`,
+`config.txt`, `/boot/firmware/config.txt`, systemd, `systemctl`,
+`TimeoutStopSec`, `DefaultTimeoutStopSec`, `fsck`, `dmesg`, journald,
+SIGKILL, `poweroff`, `sync`, `sudo shutdown -h now`, libgpiod,
+`wall-e.service`, `walle-ups.service`, `walle-ups-wakecheck.service`,
+`walle-power.service`, `bin/walle_ups.py`, `bin/walle_power.py`,
+`bin/walle-ups-shutdown-alarm`, `bin/walle-fast-stop-system.conf`,
+`bin/walle-fast-stop-user.conf`, `bin/install_walle_ups.sh`,
+`chain.json`, `i2c-bus-guard.service`, `/tmp/ups_status.json`, `/debug`,
+`POST /api/power/out`, `controller.py`, `config.py`, `CLAUDE.md`,
+`cmd.is_armed`, `module_alive`, `ignition_off`, `throttled`, ch5,
+e-stop, VESC, VESCs, VESC 6, `75_100_V2`, firmware 6.05, VESC Tool,
+Battery Voltage Regen Cutoff Start/End, Battery Voltage Cutoff
+Start/End, CAN, MCP2515, SPI0, Daly, BMS, BMS output, discharge FET,
+deep-discharge cut, B-, P-, BLE, 13S, 14S, 2S, 18650, Li-ion, LiFePO4,
+LiPo, NTC, OV, XT60, XT90, Molex Micro-Fit 3.0, JST-PH, HTSSOP,
+VQFN-HR, LQFP, SOT-23, 2512, C0G, TVS, SMCJ58A, SMCJ70A, SMBJ18A,
+SMBJ15A, SMBJ58A, Vishay, LT4363, LM5069, IPB072N15N3, BSC160N15NS5,
+BSC098N10NS5, BSC160N10NS3, LM5146-Q1, LM5145, LM5013, TEP 150-4815WI,
+TRACO, TEN 30-4811WIN, TEN 20-4811WIN, RECOM, RP30-4805SFW/N, Mean Well
+RSD-60L-5, Pololu D42V55F5, telecom brick, brick, remote pin, off
+current, trim pin, soft start, TME, DigiKey, Murata, HPQ-12/25-D48NB-C,
+MPQ1500-12V125-L48, PMBus, MFR_VOUT_MAX, dkplnt, LTC4368, 12 V IN,
+Vatrer, IP55, golf-cart converter, DC-DC, potted, hiccup, regen,
+back-EMF, body diode, MOSFET, bus dump clamp, `max_erpm`, KV, F1, F2,
+F3, F4, Flex, PKB4313DPI, Cincon, CHB150W-48S12, eighth brick, half
+brick, quarter brick, baseplate, OVP, OVLO, Mean Well SD-150C-12,
+TPS1HB08-Q1, BTS7008-2EPA, PROFET, TE T9AS1D12-12, Omron G8P, LM61495,
+LM61495-Q1, LMQ61460, TPS25221, TPS2561, USB5744, BQ24610, INA228,
+TL431, SCR, crowbar, bleed, switched bleed, fixed bleed, supervisor,
+TPS3839, TPS3840, high-side switch, HSS, P-FET, N-FET, IRF9640, IDSS,
+Vgs, Vgs(th), Zener, Schottky, gate network, inrush, opto, PV opto,
+photovoltaic opto, VOM1271, phototransistor, Toshiba TLP293, CTR, dark
+current, LED string, 74HC4060, CD4060B, Q14, TPL5110, TPL5111,
+STM32G071, STM32G071CBT6, RP2040, RP2350, MicroPython, TPS7B81-Q1,
+TPS7B69, LDO, 2N7002, BSS138, Littelfuse, LP-JCASE, NANO2, OAK-D Lite,
+OAK, Luxonis, `getUsbSpeed`, USB, USB 3, USB 2, USB-C, USB-A, Type-A,
+VBUS, SuperSpeed, SSTX, SSRX, D+, D-, injector, Arduino, RC, RTK, GPS,
+L1, L5, NTP, TLS, Grok, Grok 4.7, `grok_second_opinion`, Kevin,
+WALL-E, Texas, Witty Pi 5, UUGear, HAT+, StromPi 3, Joy-IT, Geekworm
+X1202, Geekworm UPS_Scap, DFRobot FIT0992, Waveshare UPS HAT (B),
+Waveshare UPS HAT (E), UPS, SunFounder PiPower 5, Sequent, Super
+Watchdog, PiJuice, Sfera Labs, Strato Pi UPS, mjbots, VBCores, ROS,
+AGV, Clearpath Jackal, Husarion ROSbot, Duckietown, Mean Well, eFuse,
+surge stopper, SYS bus, pack-sense lead, main switch, battery side,
+switched side, battery tap, ignition, ignition lead, isolation barrier,
+system ground, Pi power block, ENABLE, HOLD, hold path, grace timer,
+grace window, grace cut, flapping, debounce, heartbeat, watchdog,
+CRC-8, ASCII, firmware, spin, product spin, PCB, four-layer, 2 oz,
+thermal via, conformal coat, creepage, RDS(on), ESR, EMI, PD, Power
+Delivery, Stop mode, ADC, I2C, 3V3, GND, RGB LED, buzzer, FAULT, BATT
+TAP, IGNITION, IGN_OFF, PI_3V3, GRACE_EXPIRED, PI_HALTED, PI_5V_SENSE,
+SHUTDOWN_REQ, OUT1, OUT2, P1, P2, P3, P4, Q1, Q2, Q5, Q6, U1, U2A,
+U2B, U3, STORED, RUNNING, GRACE, HALTED_IGN_ON, GRACE_CUT, RUN,
+RAIL_LOST, RAIL_BACK, USB_FAULT, HALT_NOW, SHUTDOWN_PENDING,
+INPUT_LOST, INPUT_BACK, ARMED, DISARMED, TOPUP, TOPUP_START, TOPUP_END,
+HB, `walle-power/1`.
