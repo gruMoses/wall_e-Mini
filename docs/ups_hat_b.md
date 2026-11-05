@@ -308,6 +308,13 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 
 ## 9. Open items
 
+- Done 2026-11-05 09:47: motor load on the robot stand, 45 s at up to full
+  speed with hard stops (15.5 A drive draw, -12 A regen on one VESC). The
+  watcher stayed `monitoring`, the input read `present` or `unknown` (never
+  `discharge` or `absent`), the pack read 7.48 V to 7.53 V and the battery
+  current -105 mA to +18 mA. EXT5V read 5.17 V to 5.19 V, `throttled=0x0`.
+  Motor load does not cause a false mains loss on the robot buck.
+
 - Done 2026-11-04 13:23-14:04: a real pull on the 7.5 V supply with the new
   rules (table in section 4.3).
 - Done 2026-11-04: the loss count dithered for about 6 min while the pack

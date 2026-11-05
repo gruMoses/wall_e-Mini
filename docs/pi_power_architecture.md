@@ -117,6 +117,20 @@ Set it before a 75 V-class brick goes on the bus. The right VESC has
 battery-level estimate. The two VESCs also read the same bus 1.0 V apart
 (52.5 V and 53.5 V).
 
+Stand test, 2026-11-05 09:47 (wheels off the ground, phone teleop, pack at
+50.7 V on the left VESC, about 3.9 V a cell; every STATUS frame logged with
+`candump`, about 48 Hz a VESC; data on the robot in
+`logs/standtest_20261105/`): full speed (20,300 ERPM), a full reverse step,
+a pivot, stick releases, a deadman stop and a teleop e-stop. The bus stayed
+between 49.1 V and 52.1 V. The highest rise above rest was 0.5 V. Regen
+current reached -12.1 A (left, deadman stop) and -8.4 A (right). The
+drive draw reached 15.5 A on one VESC (pivot). Stops to 0 RPM took 0.53 s
+to 1.01 s; the full reverse took 1.6 s. CAUTION: this is the mild case.
+The wheels were free, so the inertia is small, and the pack was not full,
+so the BMS took the charge. A 48 Hz sample also cannot see a spike shorter
+than about 20 ms. The worst case, a full pack braking a moving robot, is
+not measured. Do not use these numbers to size a converter.
+
 Storage estimate (agent, 20 Ah pack at 50 percent, BMS asleep 0.5 mA, cell
 leakage about 2 percent a month): about 8 months with the converter idling,
 about 12 months with it off. A Daly BMS sleeps only after 3600 s idle.
