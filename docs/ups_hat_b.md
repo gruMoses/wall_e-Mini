@@ -345,6 +345,15 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
 - Found in passing: the OAK enumerates at USB 2 speed (480M) under the
   hub's USB 2 side; the hub's USB 3 side is empty. Nothing in the config
   limits it. Check the OAK-to-hub cable (it must be a USB 3 cable).
+  2026-11-05 14:43: still 480M with the cables Kevin confirmed as USB 3
+  (blue plugs). The kernel journal (kept since 2026-07-10) has no
+  SuperSpeed link for the OAK (03e7) at any time; the only SuperSpeed
+  devices are the hub and a WD drive in July. The hub's USB 3 side links
+  at 5000M through the cut cable, so the fault is on the OAK side: flip
+  the USB-C plug at the camera, then try another USB-C cable. CAUTION:
+  USB 3 radiates noise near 2.4 GHz (the RC receiver, Wi-Fi and the BMS
+  link). After a change to 5000M, check the RC link and re-measure
+  `oak.det_latency_s` (the 15 fps cap was tuned at USB 2).
 - Main-switch pull in the robot, 2026-11-04 17:27: the HAT current jumped
   from −46 mA to −1105 mA, then −1646 mA at 6.34 V within 5 s, and the
   critical rule halted the Pi on one sample (clean: the LED went red, not
@@ -356,6 +365,13 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   Fix: cut the 5 V wire in the Pi-to-hub cable (Kevin is getting a USB 3
   extension to cut). The critical halt's first alarm is now +90 s, not
   +600 s (1aa9621).
+  2026-11-05 about 14:40: the cut cable is in (red wire only; ground, both
+  data pairs and the braid kept). The hub enumerates on both sides (05e3:0610
+  at 480M, 05e3:0626 at 5000M), so it does not need the Pi's 5 V to see the
+  host. No over-current trips that boot, EXT5V 5.18 V, `throttled=0x0`, and
+  the OAK recovered on its own (camera health HEALTHY at 14:42:56). Not
+  done yet: the main-switch pull again, to confirm the HAT now carries only
+  the Pi (expect about −0.6 A, not −1.6 A).
 - The RTK GPS (I2C 0x20) is powered from the Pi's 5 V header pin. The HAT
   feeds that same line, and it stays live while the Pi is halted (only the
   Pi's own rails switch off). The RTK therefore runs, and drains the HAT's
