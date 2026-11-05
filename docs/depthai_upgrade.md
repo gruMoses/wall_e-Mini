@@ -1,6 +1,7 @@
 # depthai upgrade: 3.3.0 to 3.6.1 or later
 
-Status: prepared 2026-11-05, not done. The robot runs depthai 3.3.0. This
+Status: DONE 2026-11-05 17:29. The robot runs depthai 3.6.1 (user
+site-packages). Steps 1 to 7 passed; the results are in section 4. This
 procedure is for Kevin and Claude together, with the robot on the test stand.
 
 ## 1. Why upgrade
@@ -97,8 +98,30 @@ would turn the wrong way, or be saved only by the inverted-mount sign from
 the gravity check. 3.6.1 UNCALIBRATED matches 3.3.0 RAW. 3.6.1 also accepts
 CALIBRATED on the BMI270, which 3.3.0 refused; it is a later option.
 
-Still to do: steps 4 to 8 (wall-e on 3.6.1, the chalk SIGN test, the
-vision checks, the unplug test).
+### Results, 2026-11-05 17:29-17:50 (steps 2 and 4 to 7)
+
+- Step 2: `pip install --user --break-system-packages --no-deps
+  depthai==3.6.1` with wall-e stopped (17:29).
+- Step 4: `OAK device: depthai 3.6.1, USB SUPER, IMU reports
+  ACCELEROMETER_UNCALIBRATED + GYROSCOPE_UNCALIBRATED,
+  DEPTHAI_AUTOCALIBRATION=OFF`. Boot gravity: `+Y points DOWN (ay=-0.99 g)
+  ... yaw_axis_sign=+1`. Gyro bias y -0.61 deg/s (3.3.0: -0.64).
+- Step 5 (sign, by hand, disarmed, on the ground): a right turn of about
+  90 degrees moved the heading 352 to 82 (+90); the turn back moved it 82 to
+  351 (-91). PASS. The chalk magnitude test was not repeated; the frame and
+  the gyro scale did not change (step 3).
+- Step 6: camera HEALTHY, idle `oak.det_latency_s` p50 0.183 s, p90 0.206 s
+  (3.3.0: 0.196 / 0.211), depth 15 fps, no colour-stall restarts.
+- Step 7 (17:33, disarmed, on the stand): Kevin pulled and replugged the
+  camera. wall-e stayed up (`NRestarts=0`, no abort). The session restarted
+  itself and the camera was HEALTHY at 17:34:02, at USB 3, about 7 s after
+  the replug. On 3.3.0 the same unplug aborted wall-e (14:59 the same day).
+- Step 8 (the pin in `requirements.txt`): pending, because a change to that
+  file makes the auto-deploy restart wall-e.
+
+Rollback: stop wall-e, `python3 -m pip install --user
+--break-system-packages --no-deps depthai==3.3.0`, start wall-e. The code
+selects the IMU reports for either version.
 
 ## 5. Visual-inertial odometry (VIO) probe
 
