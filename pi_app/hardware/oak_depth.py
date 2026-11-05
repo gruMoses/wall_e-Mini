@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import marshal  # kept for _build_hand_tracker_script compatibility
 import math
+import os
 import re
 import sys
 import threading
@@ -35,6 +36,38 @@ from pi_app.control.gesture_control import HandData
 from pi_app.hardware.oak_imu_yaw_producer import ImuPacket, ImuYawProducer
 
 logger = logging.getLogger(__name__)
+
+# depthai 3.6+ runs AutoCalibration at pipeline start by default, and it can
+# change the calibration the corridor and person geometry are built on (see
+# "Camera calibration" in CLAUDE.md). Keep it off until it has been evaluated
+# on this unit; set DEPTHAI_AUTOCALIBRATION explicitly to override. Set here,
+# before any depthai import in this process. Older depthai ignores it.
+os.environ.setdefault("DEPTHAI_AUTOCALIBRATION", "OFF")
+
+# depthai 3.6.1 changed the IMU RAW reports: before, RAW was pre-rotated into
+# the Luxonis RDF frame; from 3.6.1 RAW is the sensor's own frame and
+# UNCALIBRATED carries the old RDF behaviour (v3.6.1 release notes). The yaw
+# channel (gyro_y, +Y down) and the boot gravity check in oak_imu assume RDF,
+# so the report is chosen by version to keep RDF on both sides of the upgrade.
+# 3.3.0 has no ACCELEROMETER_UNCALIBRATED, so older versions keep RAW.
+_IMU_UNCALIBRATED_IS_RDF_SINCE = (3, 6, 1)
+
+
+def _depthai_version_tuple(version: str) -> Optional[tuple]:
+    """Return (major, minor, patch) from a depthai version string, or None."""
+    m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", str(version or ""))
+    if m is None:
+        return None
+    return tuple(int(part) for part in m.groups())
+
+
+def imu_report_names(depthai_version: str) -> tuple:
+    """IMU report names (accelerometer, gyroscope) that arrive in the RDF frame."""
+    parsed = _depthai_version_tuple(depthai_version)
+    if parsed is not None and parsed >= _IMU_UNCALIBRATED_IS_RDF_SINCE:
+        return ("ACCELEROMETER_UNCALIBRATED", "GYROSCOPE_UNCALIBRATED")
+    return ("ACCELEROMETER_RAW", "GYROSCOPE_RAW")
+
 
 PERSON_LABEL = 15       # MobileNet-SSD VOC label index for "person"
 YOLO_PERSON_LABEL = 0   # YOLOv8 COCO label index for "person"
@@ -2294,10 +2327,12 @@ class OakDepthReader:
                 with self._lock:
                     self._rgb_always_poll = True
 
-            # IMU node (BMI270: accel + gyro at 100 Hz)
+            # IMU node (BMI270: accel + gyro at 100 Hz), in the RDF frame
+            # on every depthai version (see imu_report_names).
             imu_node = pipeline.create(dai.node.IMU)
-            imu_node.enableIMUSensor(dai.IMUSensor.ACCELEROMETER_RAW, 100)
-            imu_node.enableIMUSensor(dai.IMUSensor.GYROSCOPE_RAW, 100)
+            accel_report, gyro_report = imu_report_names(getattr(dai, "__version__", ""))
+            imu_node.enableIMUSensor(getattr(dai.IMUSensor, accel_report), 100)
+            imu_node.enableIMUSensor(getattr(dai.IMUSensor, gyro_report), 100)
             imu_node.setBatchReportThreshold(1)
             imu_node.setMaxBatchReports(10)
             # Explicit depth: default maxSize=16 overflows under full-vision stalls.
@@ -2367,6 +2402,18 @@ class OakDepthReader:
             # EEPROM; deriving fx from a hand-entered FOV constant is strictly
             # worse and is currently wrong (see get_intrinsics / _intrinsics_for).
             self._load_calibration(pipeline, dai, _use_yolo)
+            # Once per session, at WARNING (INFO is dropped): the facts an
+            # upgrade or a cable change can move without any other sign.
+            try:
+                usb_speed = str(pipeline.getDefaultDevice().getUsbSpeed()).split(".")[-1]
+            except Exception as exc:
+                usb_speed = f"unknown ({exc})"
+            logger.warning(
+                "OAK device: depthai %s, USB %s, IMU reports %s + %s, "
+                "DEPTHAI_AUTOCALIBRATION=%s",
+                getattr(dai, "__version__", "?"), usb_speed, accel_report,
+                gyro_report, os.environ.get("DEPTHAI_AUTOCALIBRATION", "(unset)"),
+            )
 
             self._device_ready.set()
             with self._lock:
