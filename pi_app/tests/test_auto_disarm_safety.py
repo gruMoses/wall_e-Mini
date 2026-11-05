@@ -115,7 +115,9 @@ class TestRearmLatch(unittest.TestCase):
         self.assertFalse(state.is_armed)
         self.assertEqual(events, [])
 
-        state, events = _step(state, CH3_HIGH, 0.30, params)
+        # ch3 must also stay high for arm_high_persist_s (0.2 s) since
+        # 2026-11-05: at 0.3125 s both the debounce and the hold have run out.
+        state, events = _step(state, CH3_HIGH, 0.3125, params)
         self.assertTrue(state.is_armed)
         self.assertEqual(events, [SafetyEvent.ARMED])
         self.assertFalse(state.rearm_requires_switch_cycle)

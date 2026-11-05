@@ -90,7 +90,7 @@ def _make_controller(gesture=None):
         motor_driver=FakeMotor(),
         arm_relay=FakeRelay(),
         shutdown_scheduler=FakeShutdown(),
-        safety_params=SafetyParams(debounce_seconds=0.0),
+        safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
         follow_me=fm,
         gesture_controller=gesture,
     )

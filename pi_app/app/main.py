@@ -650,6 +650,22 @@ def run() -> int:
                     print("\nNetting mute ACTIVE: MANUAL ignores the depth corridor while the netting stays on the lens")
                 elif _nm["event"] == "refused":
                     print(f"\nNetting mute refused: {_nm.get('refusal')}")
+            # RC arm-channel fail-safe (2026-11-05): ch3 sat mid-band while
+            # armed. The controller already wrote the journal warning; mirror
+            # it into the JSON log. This tick's line also carries
+            # ARM_MIDBAND_DISARM in "events".
+            _mb = telem.get("arm_midband_disarm")
+            if isinstance(_mb, dict) and log_fh is not None:
+                try:
+                    log_fh.write(json.dumps({
+                        "type": "event",
+                        "event": "arm_midband_disarm",
+                        **_mb,
+                        "ts": round(time.time(), 3),
+                    }) + "\n")
+                    log_fh.flush()
+                except Exception:
+                    pass
             # OAK vision worker hang (2026-10-08): the reader's health flag
             # says neither its session loop nor its supervisor has ticked for
             # vision_hang_s (or the thread died). Shout in the journal every

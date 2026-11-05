@@ -19,14 +19,19 @@ class TestSafety(unittest.TestCase):
         self.assertFalse(s.is_armed)
         self.assertEqual(events, [])
 
-        # Jump above high threshold -> arm pending, but debounce required (first transition OK since last_transition=0)
+        # Jump above high threshold -> arm pending: ch3 must stay high for
+        # arm_high_persist_s (0.2 s) since 2026-11-05; one frame does not arm.
         s, events = update_safety(s, ch3_us=1900, ch4_us=1000, ch5_us=1000, now_epoch_s=now, params=params)
-        # Debounce uses last_transition_epoch_s; initial 0 allows immediate change
+        self.assertFalse(s.is_armed)
+        self.assertEqual(events, [])
+        # Held high -> arm (debounce: initial last_transition=0 allows it).
+        s, events = update_safety(s, ch3_us=1900, ch4_us=1000, ch5_us=1000, now_epoch_s=now + 0.25, params=params)
         self.assertTrue(s.is_armed)
         self.assertEqual(events, [SafetyEvent.ARMED])
 
-        # Try to disarm immediately within debounce window -> no change
-        s, events = update_safety(s, ch3_us=1000, ch4_us=1000, ch5_us=1000, now_epoch_s=now + 0.1, params=params)
+        # Try to disarm within the debounce window (0.3 s from when ch3
+        # went high, as with the old one-frame arm) -> no change
+        s, events = update_safety(s, ch3_us=1000, ch4_us=1000, ch5_us=1000, now_epoch_s=now + 0.28125, params=params)
         self.assertTrue(s.is_armed)
         self.assertEqual(events, [])
 

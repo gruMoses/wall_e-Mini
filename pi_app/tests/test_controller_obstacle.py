@@ -84,6 +84,9 @@ class TestControllerObstacleAvoidance(unittest.TestCase):
             shutdown_scheduler=shutdown,
             obstacle_avoidance=oa,
             follow_me=fm,
+            # Each test arms with one ARMED_RC tick (setup, not under test);
+            # some pin the monotonic call count, so no extra hold tick.
+            safety_params=SafetyParams(arm_high_persist_s=0.0),
         )
         return ctrl, motor
 
@@ -209,7 +212,7 @@ class TestControllerFollowMe(unittest.TestCase):
         shutdown = FakeShutdown()
         fm_cfg = FollowMeConfig()
         fm = FollowMeController(fm_cfg)
-        params = SafetyParams(debounce_seconds=0.0)
+        params = SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0)
         ctrl = Controller(
             motor_driver=motor,
             arm_relay=relay,

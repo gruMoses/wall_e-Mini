@@ -48,7 +48,8 @@ def _first_cmd(expo, ch1, ch2, bt=None):
     with patch("pi_app.control.controller.config", _cfg(expo)):
         ctrl = Controller(motor_driver=FakeMotor(), arm_relay=FakeRelay(),
                           shutdown_scheduler=FakeShutdown())
-        ctrl.process(ARMED_RC, now_epoch_s=0.5)
+        ctrl.process(ARMED_RC, now_epoch_s=0.25)
+        ctrl.process(ARMED_RC, now_epoch_s=0.5)  # armed: ch3 held high 0.25 s
         rc = replace(ARMED_RC, ch1_us=ch1, ch2_us=ch2)
         cmd, _, telem = ctrl.process(rc, now_epoch_s=1.0, bt_override_bytes=bt)
     return cmd, telem

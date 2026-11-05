@@ -57,8 +57,9 @@ class TestController(unittest.TestCase):
         relay = FakeRelay()
         shutdown = FakeShutdown()
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
-        # Arm
+        # Arm: ch3 held high for arm_high_persist_s (0.2 s)
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
+        c.process(rc, now_epoch_s=0.05)
         cmd, events, _ = c.process(rc, now_epoch_s=0.3)
         self.assertTrue(cmd.is_armed)
         # Send some non-neutral values
@@ -79,8 +80,9 @@ class TestController(unittest.TestCase):
         relay = FakeRelay()
         shutdown = FakeShutdown()
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
-        # Arm first
+        # Arm first: ch3 held high for arm_high_persist_s (0.2 s)
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
+        c.process(rc, now_epoch_s=0.25)
         cmd, events, _ = c.process(rc, now_epoch_s=0.5)
         self.assertTrue(cmd.is_armed)
         # Trigger emergency rising edge
@@ -159,9 +161,10 @@ class TestRCStaleness(unittest.TestCase):
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
 
         now = 100.0
-        # Arm
+        # Arm: ch3 held high for arm_high_persist_s (0.2 s)
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                        last_update_epoch_s=now)
+        c.process(rc, now_epoch_s=now + 0.05)
         cmd, events, _ = c.process(rc, now_epoch_s=now + 0.3)
         self.assertTrue(cmd.is_armed)
 
@@ -185,6 +188,7 @@ class TestRCStaleness(unittest.TestCase):
         now = 100.0
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                        last_update_epoch_s=now)
+        c.process(rc, now_epoch_s=now + 0.05)  # ch3 held high 0.2 s to arm
         cmd, events, telem = c.process(rc, now_epoch_s=now + 0.3)
         self.assertTrue(cmd.is_armed)
         self.assertNotIn(SafetyEvent.RC_STALE, events)
@@ -223,7 +227,7 @@ class TestSlewLimiter(unittest.TestCase):
         motor = FakeMotor()
         relay = FakeRelay()
         shutdown = FakeShutdown()
-        params = SafetyParams(debounce_seconds=0.0)
+        params = SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0)
         c = Controller(
             motor_driver=motor,
             arm_relay=relay,
@@ -323,7 +327,7 @@ class TestControllerPackLowLatch(unittest.TestCase):
             snap_first_command=False,
         )
         test_cfg = replace(default_config, slew_limiter=slew_cfg)
-        params = SafetyParams(debounce_seconds=0.0)
+        params = SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0)
         arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000,
                           ch5_us=1000, last_update_epoch_s=0.0)
         motor = self._FakeVescMotor()
@@ -397,6 +401,7 @@ class TestFollowMeNoTargetRegression(unittest.TestCase):
         # Arm with ch4 low (no person detections fed → no target present)
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                       last_update_epoch_s=100.0)
+        c.process(rc, now_epoch_s=100.25)  # ch3 held high 0.2 s to arm
         cmd, _, _ = c.process(rc, now_epoch_s=100.5)
         self.assertTrue(cmd.is_armed)
         # ch4 rising edge while armed, still no target. Previously raised
@@ -418,7 +423,7 @@ class TestCalibrationSafety(unittest.TestCase):
         relay = FakeRelay()
         shutdown = FakeShutdown()
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
-                       safety_params=SafetyParams(debounce_seconds=0.0))
+                       safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0))
         # Arm
         arm = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                        last_update_epoch_s=100.0)

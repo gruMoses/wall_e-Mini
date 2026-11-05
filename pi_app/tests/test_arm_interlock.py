@@ -78,7 +78,10 @@ class TestArmInterlock(unittest.TestCase):
 
     def test_without_interlock_the_old_behaviour_stays(self):
         ctrl = self._make(startup_interlock=False)
+        # A held high arms (arm_high_persist_s, 0.2 s since 2026-11-05).
         cmd, events, telem = self._tick(ctrl, 0.0)
+        self.assertFalse(cmd.is_armed)
+        cmd, events, telem = self._tick(ctrl, 0.25)
         self.assertTrue(cmd.is_armed)
         self.assertIn(SafetyEvent.ARMED, events)
         self.assertFalse(telem["rearm_requires_switch_cycle"])
@@ -98,8 +101,10 @@ class TestArmInterlock(unittest.TestCase):
             cmd, events, telem = self._tick(ctrl, 31.0, ch3=1000)
             self.assertFalse(cmd.is_armed)
             self.assertFalse(telem["rearm_requires_switch_cycle"])
-            # Switch on again: normal arming.
+            # Switch on again: normal arming once held for arm_high_persist_s.
             cmd, events, telem = self._tick(ctrl, 32.0, ch3=1900)
+            self.assertFalse(cmd.is_armed)
+            cmd, events, telem = self._tick(ctrl, 32.25, ch3=1900)
             self.assertTrue(cmd.is_armed)
             self.assertIn(SafetyEvent.ARMED, events)
         lines = [r.getMessage() for r in captured.records]
@@ -115,6 +120,8 @@ class TestArmInterlock(unittest.TestCase):
         self.assertFalse(cmd.is_armed)
         self.assertFalse(telem["rearm_requires_switch_cycle"])
         cmd, events, _telem = self._tick(ctrl, 0.5, ch3=1900)
+        self.assertFalse(cmd.is_armed)
+        cmd, events, _telem = self._tick(ctrl, 0.75, ch3=1900)
         self.assertTrue(cmd.is_armed)
         self.assertIn(SafetyEvent.ARMED, events)
 

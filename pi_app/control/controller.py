@@ -1681,6 +1681,28 @@ class Controller:
         )
         if latched_before and not self._safety_state.rearm_requires_switch_cycle:
             _logger.warning("Arm latch cleared: arm switch seen OFF")
+        # RC arm-channel fail-safe (2026-11-05): ch3 sat mid-band while armed.
+        midband_disarm: dict | None = None
+        if SafetyEvent.ARM_MIDBAND_DISARM in events:
+            _since = self._safety_state.ch3_midband_since_epoch_s
+            _midband_s = (epoch_now - _since) if _since is not None else None
+            midband_disarm = {
+                "ch3_us": int(rc.ch3_us),
+                "ch4_us": int(rc.ch4_us),
+                "midband_s": round(_midband_s, 3) if _midband_s is not None else None,
+                "mode": self._mode,
+            }
+            _logger.warning(
+                "ARM SWITCH MID-BAND DISARM: ch3 read %d us (between %d and %d) for "
+                "%.2f s while armed in %s. Check the transmitter's CH3/CH4 mix "
+                "(HotRC hybrid/jog mode must be off), then flip the arm switch "
+                "off and on to re-arm",
+                int(rc.ch3_us),
+                int(self._safety_params.arm_low_threshold_us),
+                int(self._safety_params.arm_high_threshold_us),
+                _midband_s if _midband_s is not None else float("nan"),
+                self._mode,
+            )
         if auto_events:
             events = [*auto_events, *events]
         if was_armed and not self._safety_state.is_armed:
@@ -1694,6 +1716,8 @@ class Controller:
         # previously it only appeared in the dict while inhibiting, so nothing
         # downstream could ever log/see the transition (2026-06-13 field bug).
         telemetry: dict = {"charger_inhibit": self._charger_inhibit}
+        if midband_disarm is not None:
+            telemetry["arm_midband_disarm"] = midband_disarm
         self._merge_vision_telemetry(telemetry)
 
         # Calibration early-return — now AFTER update_safety so safety is
@@ -1728,6 +1752,8 @@ class Controller:
                 "is_armed": self._safety_state.is_armed,
                 "emergency_active": self._safety_state.emergency_active,
             }
+            if midband_disarm is not None:
+                cal_telem["arm_midband_disarm"] = midband_disarm
             self._armed_idle_since = None
             self._merge_vision_telemetry(cal_telem)
             self._stamp_auto_disarm_telemetry(cal_telem, mono_now)

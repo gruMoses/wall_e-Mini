@@ -62,7 +62,7 @@ class TestAutoDisarmController(unittest.TestCase):
             motor_driver=self.motor,
             arm_relay=self.relay,
             shutdown_scheduler=self.shutdown,
-            safety_params=SafetyParams(debounce_seconds=0.0),
+            safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
         )
 
     def tearDown(self):

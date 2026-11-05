@@ -107,7 +107,7 @@ class SpyFollowMe(FollowMeController):
 class TestControllerArmsUpTwitch(unittest.TestCase):
     def _make(self, cfg, follow_me=None):
         fake_now = {"t": 0.0}
-        params = SafetyParams(debounce_seconds=0.0)
+        params = SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0)
         motor = FakeMotor()
         with patch("pi_app.control.controller.config", cfg):
             with patch(

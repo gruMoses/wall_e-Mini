@@ -17,6 +17,7 @@ class TestSafetyFollowMe(unittest.TestCase):
     def _params(self, **overrides) -> SafetyParams:
         defaults = dict(
             debounce_seconds=0.0,
+            arm_high_persist_s=0.0,
             follow_me_high_threshold_us=1800,
             follow_me_low_threshold_us=1200,
         )
@@ -126,11 +127,15 @@ class TestSafetyFollowMe(unittest.TestCase):
 
     def test_existing_arm_disarm_still_works(self):
         """Verify normal arm/disarm without ch4 doesn't break."""
-        params = self._params()
+        # Default arm persistence (0.2 s): a held high arms, one frame does not.
+        params = self._params(arm_high_persist_s=SafetyParams().arm_high_persist_s)
         state = SafetyState()
 
         state, events = update_safety(state, ch3_us=1900, ch4_us=CH4_LOW, ch5_us=1000,
                                       now_epoch_s=1.0, params=params)
+        self.assertFalse(state.is_armed)
+        state, events = update_safety(state, ch3_us=1900, ch4_us=CH4_LOW, ch5_us=1000,
+                                      now_epoch_s=1.25, params=params)
         self.assertTrue(state.is_armed)
         self.assertIn(SafetyEvent.ARMED, events)
 

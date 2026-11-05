@@ -695,19 +695,27 @@ class TestControllerChargerInhibit(unittest.TestCase):
     def test_charger_inhibit_blocks_motion(self):
         """When charger inhibit is active, motors must output neutral."""
         ctrl = self.Controller()
-        # Arm the controller via safety channel
-        rc_armed = self._make_rc()
-        # Feed several cycles to arm
-        for _ in range(3):
+        # Arm the controller via safety channel: ch3 held high for
+        # arm_high_persist_s (0.2 s) across several cycles.
+        t0 = time.time()
+        for i in range(3):
+            t = t0 + 0.125 * i
             rc_armed = self.RCInputs(
                 ch1_us=1700, ch2_us=1700, ch3_us=1800,
                 ch4_us=1500, ch5_us=1500,
-                last_update_epoch_s=time.time(),
+                last_update_epoch_s=t,
             )
-            ctrl.process(rc_armed)
+            cmd, _, _ = ctrl.process(rc_armed, now_epoch_s=t)
+        self.assertTrue(cmd.is_armed)
 
         ctrl.set_charger_inhibit(True)
-        cmd, _, telem = ctrl.process(rc_armed)
+        t = t0 + 0.375
+        rc_armed = self.RCInputs(
+            ch1_us=1700, ch2_us=1700, ch3_us=1800,
+            ch4_us=1500, ch5_us=1500,
+            last_update_epoch_s=t,
+        )
+        cmd, _, telem = ctrl.process(rc_armed, now_epoch_s=t)
 
         self.assertEqual(cmd.left_byte, self.NEUTRAL)
         self.assertEqual(cmd.right_byte, self.NEUTRAL)

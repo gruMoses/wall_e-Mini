@@ -126,7 +126,7 @@ class TestControllerStopsForPersonInRadius(unittest.TestCase):
             arm_relay=FakeRelay(),
             shutdown_scheduler=FakeShutdown(),
             obstacle_avoidance=oc,
-            safety_params=SafetyParams(debounce_seconds=0.0),
+            safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
         )
         arm = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
                        last_update_epoch_s=100.0)
