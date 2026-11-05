@@ -138,7 +138,7 @@ about 12 months with it off. A Daly BMS sleeps only after 3600 s idle.
 1. Which converter: a TRACO TEN 30-4811WIN or RECOM RP30-4805SFW/N brick
    (section 4) behind a high-side switch, or wait for the custom board?
 4. Answered 2026-11-04: both are 75_100_V2 on firmware 6.05 (table in
-   section 5). Open: set the regen cutoff near 55.5/57 V on both, and set
+   section 4). Open: set the regen cutoff near 55.5/57 V on both, and set
    `si_battery_cells` to 13 on the right VESC (VESC Tool, Kevin).
 2. Is there a point on the robot where the BMS pack output is available on
    the battery side of the main switch?
