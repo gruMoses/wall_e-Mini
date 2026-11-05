@@ -93,9 +93,29 @@ a full 13S pack (54.6 V; WALL-E's BMS read 54.10 V at 99.4 % that day)
 leaves 2.4 V, and over-voltage is a fault that stops PWM, not a derate.
 Trampa reports a 12S board seeing over 60 V on regen. VESC Tool 6.05 and
 later have "Battery Voltage Regen Cutoff Start/End", off by default
-(1000/1100 V). Setting it near 55.5/57 V is the free first fix. Record
-WALL-E's VESC hardware and firmware with VESC Tool first: nothing in the
-repository or the logs says which they are.
+(1000/1100 V). Setting it near 55.5/57 V is the free first fix.
+
+Measured on WALL-E, 2026-11-04 (read-only CAN query, `tools/vesc_info.py`
+on branch `claude/hopeful-euler-drwd8s`, both VESCs):
+
+| Setting | Left (id 2) | Right (id 1) |
+|---|---|---|
+| Hardware, firmware | 75_100_V2, 6.05 | 75_100_V2, 6.05 |
+| `l_max_vin` (over-voltage fault) | 90 V | 90 V |
+| `l_battery_regen_cut_start` / `_end` | 1000 / 1100 V (off) | 1000 / 1100 V (off) |
+| `l_in_current_min` (regen into the pack) | -40 A | -40 A |
+| `l_battery_cut_start` / `_end` | 40.8 / 36 V | 40.8 / 36 V |
+| `si_battery_cells` | 13 | **12** |
+| `si_battery_ah` | 7 Ah | 7 Ah |
+
+The hardware is 75 V class, so the 57 V fault above does not apply. The
+VESC does not fault until 90 V. CAUTION: a regen spike can therefore hold
+the bus anywhere up to 90 V without a fault. That is above the 75 V
+continuous rating of the option A brick. The regen cutoff is off on both.
+Set it before a 75 V-class brick goes on the bus. The right VESC has
+`si_battery_cells = 12` on a 13S pack; that setting feeds the VESC's own
+battery-level estimate. The two VESCs also read the same bus 1.0 V apart
+(52.5 V and 53.5 V).
 
 Storage estimate (agent, 20 Ah pack at 50 percent, BMS asleep 0.5 mA, cell
 leakage about 2 percent a month): about 8 months with the converter idling,
@@ -117,8 +137,9 @@ about 12 months with it off. A Daly BMS sleeps only after 3600 s idle.
 
 1. Which converter: a TRACO TEN 30-4811WIN or RECOM RP30-4805SFW/N brick
    (section 4) behind a high-side switch, or wait for the custom board?
-4. Which VESC hardware and firmware are on the robot? If the firmware is
-   6.05 or later, set the regen cutoff near 55.5/57 V.
+4. Answered 2026-11-04: both are 75_100_V2 on firmware 6.05 (table in
+   section 5). Open: set the regen cutoff near 55.5/57 V on both, and set
+   `si_battery_cells` to 13 on the right VESC (VESC Tool, Kevin).
 2. Is there a point on the robot where the BMS pack output is available on
    the battery side of the main switch?
 3. Should the robot ever wake on a schedule while stored? Option A cannot,
