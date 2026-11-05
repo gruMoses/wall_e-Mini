@@ -77,6 +77,29 @@ robot disarmed.
 8. Change the pin in `requirements.txt` to the version that passed. Record
    the results in this document.
 
+### Results, 2026-11-05 17:09 (steps 1 and 3, robot at rest on the stand)
+
+`tools/depthai_upgrade_check.py`, wall-e stopped, the 3.6.1 run from the
+staged copy. Both runs: USB SUPER, DEPTHAI_AUTOCALIBRATION=OFF, CAM_A
+fx 456.89 cx 334.95, RESULT PASS.
+
+| depthai | Report | Accelerometer (g) | Gravity | Gyro at rest (deg/s) |
+|---|---|---|---|---|
+| 3.3.0 | RAW (the robot's) | (-0.009, -0.988, -0.046) | -Y | (+0.232, -0.643, +0.127) |
+| 3.3.0 | CALIBRATED | refused: "BMI270 supports only ACCELEROMETER_RAW and/or GYROSCOPE_RAW" | | |
+| 3.6.1 | RAW | (-0.009, +0.988, +0.047) | +Y | (+0.210, +0.598, -0.161) |
+| 3.6.1 | UNCALIBRATED (the robot's) | (-0.009, -0.988, -0.048) | -Y | (+0.218, -0.546, +0.146) |
+| 3.6.1 | CALIBRATED | (-0.009, -0.988, -0.048) | -Y | (+0.227, -0.523, +0.134) |
+
+The 3.6.1 RAW frame has Y and Z reversed against the old RAW (a half turn
+about X), so `gyro_y` changes sign. Without the version gate the heading
+would turn the wrong way, or be saved only by the inverted-mount sign from
+the gravity check. 3.6.1 UNCALIBRATED matches 3.3.0 RAW. 3.6.1 also accepts
+CALIBRATED on the BMI270, which 3.3.0 refused; it is a later option.
+
+Still to do: steps 4 to 8 (wall-e on 3.6.1, the chalk SIGN test, the
+vision checks, the unplug test).
+
 ## 5. Visual-inertial odometry (VIO) probe
 
 `tools/vio_probe.py` runs depthai's `BasaltVIO` node and only logs the pose
