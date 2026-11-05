@@ -108,6 +108,7 @@ always-log-on-event while disarmed (`should_log_tick`,
 - `vesc`: adds `rpm_plausible`, `gate_trips`, `l_temp_c`/`r_temp_c`,
   `l_motor_temp_c`/`r_motor_temp_c`, `l_duty`/`r_duty` (all were already
   computed by `controller.process()` and simply not logged before).
+  It also holds the drive bus fields below (see "VESC bus fields").
 - `gps`: adds `age_s` (seconds since the current fix, monotonic clock;
   `None` when there is no fix this tick).
 - `follow_me`: adds `speed_loop` — `open_loop_byte`, `target_mps`,
@@ -120,6 +121,58 @@ always-log-on-event while disarmed (`should_log_tick`,
   / `heading_offset_frozen` / `heading_offset_refining` keys (the same
   values are in `heading_align.offset_deg` / `.locked` / `.frozen` /
   `.refining` on the same line). `corrected_heading_deg` is unchanged.
+
+### VESC bus fields (2026-11-05, per-tick `vesc` block)
+
+These fields show the drive bus during braking. Regenerative braking pushes
+energy back onto the 13S battery bus (54.6 V maximum). When the BMS charge
+FET is open, the energy has nowhere to go and the bus voltage can rise
+toward the VESC over-voltage fault (90 V). The fields are in the per-tick
+line only. The slow line does not repeat them.
+
+Latest values (one per VESC, `l_` is left and `r_` is right). The control
+loop reads them every 50 ms, so a value can be up to 50 ms old.
+
+| Key | Unit | Meaning |
+|-----|------|---------|
+| `l_bus_v` / `r_bus_v` | V | Bus input voltage that the VESC measures (CAN STATUS_5). |
+| `l_bus_a` / `r_bus_a` | A | Bus input current (CAN STATUS_4). Negative means energy flows into the pack (regen). |
+| `l_motor_a` / `r_motor_a` | A | Motor current (CAN STATUS). The sign is as the VESC reports it. The sign convention is not checked on this robot. |
+
+Peak-hold values. The driver sees every CAN frame (about 48 Hz per VESC),
+so these catch a spike that is shorter than one log line.
+
+| Key | Unit | Meaning |
+|-----|------|---------|
+| `l_bus_v_max` / `r_bus_v_max` | V | Highest bus voltage in any frame since the previous log line. |
+| `l_bus_a_min` / `r_bus_a_min` | A | Lowest bus input current in any frame since the previous log line. A strong regen pulse gives the most negative value. |
+
+Rules for the peak-hold values:
+
+- The window starts at the previous line that the logger wrote. The logger
+  reads the peaks and resets them when it writes a line.
+- Armed lines come at 10 Hz, so the window is 0.1 s. A disarmed heartbeat
+  line comes every 5 s, so its window is longer.
+- The first line after a service start covers the time since the start.
+- A peak is `null` when no frame of that kind arrived in the window.
+- `l_bus_a_min` is the lowest value, not only a negative one. It is
+  positive when the robot did not regenerate in the window.
+
+Rules for the latest values:
+
+- A value is `null` when the VESC never sent that frame, or the last frame
+  is older than 0.5 s, or the VESC telemetry as a whole is stale.
+- The two VESCs measure the same bus. Their voltages can differ by a small
+  ADC offset.
+- Resolution is 0.1 V and 0.1 A (the VESC sends tenths).
+
+Stand test: spin the wheels, release the stick, and read the maximum of
+`l_bus_v_max` and `r_bus_v_max` in the lines after the release. Example
+(`jq` on a run log):
+
+```bash
+jq -c 'select(.vesc) | [.ts_iso, .vesc.l_bus_v_max, .vesc.r_bus_v_max, .vesc.l_bus_a_min, .vesc.r_bus_a_min]' logs/arm_*.log
+```
 
 ### Slow line (`"type": "slow"`)
 

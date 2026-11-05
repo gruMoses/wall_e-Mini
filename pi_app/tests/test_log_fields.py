@@ -114,6 +114,46 @@ class BuildLogObjVescBlockTests(unittest.TestCase):
         self.assertEqual(vesc["l_duty"], 0.31)
         self.assertEqual(vesc["r_duty"], 0.33)
 
+    def test_vesc_block_carries_bus_values_and_peaks(self):
+        telem = {
+            "vesc_left_bus_v": 54.5, "vesc_right_bus_v": 54.6,
+            "vesc_left_bus_a": -6.5, "vesc_right_bus_a": -5.0,
+            "vesc_left_motor_a": -18.2, "vesc_right_motor_a": -17.9,
+        }
+        peaks = {
+            "left_bus_v_max": 61.5, "right_bus_v_max": 60.9,
+            "left_bus_a_min": -12.5, "right_bus_a_min": -11.0,
+        }
+        obj = build_log_obj(**_base_kwargs(telem=telem, vesc_bus_peaks=peaks))
+        vesc = obj["vesc"]
+        self.assertEqual(vesc["l_bus_v"], 54.5)
+        self.assertEqual(vesc["r_bus_v"], 54.6)
+        self.assertEqual(vesc["l_bus_a"], -6.5)
+        self.assertEqual(vesc["r_bus_a"], -5.0)
+        self.assertEqual(vesc["l_motor_a"], -18.2)
+        self.assertEqual(vesc["r_motor_a"], -17.9)
+        self.assertEqual(vesc["l_bus_v_max"], 61.5)
+        self.assertEqual(vesc["r_bus_v_max"], 60.9)
+        self.assertEqual(vesc["l_bus_a_min"], -12.5)
+        self.assertEqual(vesc["r_bus_a_min"], -11.0)
+
+    def test_vesc_bus_keys_present_and_none_without_data(self):
+        """Missing, stale or never-received values log as null, not a dropped key."""
+        obj = build_log_obj(**_base_kwargs(telem={}))
+        vesc = obj["vesc"]
+        for key in ("l_bus_v", "r_bus_v", "l_bus_a", "r_bus_a",
+                    "l_motor_a", "r_motor_a",
+                    "l_bus_v_max", "r_bus_v_max", "l_bus_a_min", "r_bus_a_min"):
+            self.assertIn(key, vesc)
+            self.assertIsNone(vesc[key])
+
+    def test_vesc_bus_peaks_json_serialisable(self):
+        import json
+        peaks = {"left_bus_v_max": 61.5, "right_bus_v_max": None,
+                 "left_bus_a_min": -12.5, "right_bus_a_min": None}
+        obj = build_log_obj(**_base_kwargs(vesc_bus_peaks=peaks))
+        self.assertEqual(json.loads(json.dumps(obj))["vesc"]["l_bus_v_max"], 61.5)
+
 
 class BuildLogObjImuSteeringBlockTests(unittest.TestCase):
     def test_imu_steering_block_carries_new_fields(self):
