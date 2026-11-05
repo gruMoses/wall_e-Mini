@@ -4,7 +4,7 @@ sparkfun-qwiic-icm20948>=1.0.0
 sparkfun-qwiic-ism330dhcx>=1.0.0
 sparkfun-qwiic-mmc5983ma>=1.0.0
 numpy>=1.21
-depthai==3.3.0  # pinned: the robot runs 3.3.0; a newer 3.x changes the IMU RAW frame and turns AutoCalibration on (docs/depthai_upgrade.md)
+depthai==3.6.1  # pinned: the robot runs 3.6.1 since 2026-11-05; the IMU RAW frame and the AutoCalibration default changed in 3.6.1 (docs/depthai_upgrade.md)
 blobconverter>=1.4
 opencv-python-headless>=4.8
 mcap>=1.1

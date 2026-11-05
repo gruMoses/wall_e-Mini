@@ -116,8 +116,7 @@ CALIBRATED on the BMI270, which 3.3.0 refused; it is a later option.
   camera. wall-e stayed up (`NRestarts=0`, no abort). The session restarted
   itself and the camera was HEALTHY at 17:34:02, at USB 3, about 7 s after
   the replug. On 3.3.0 the same unplug aborted wall-e (14:59 the same day).
-- Step 8 (the pin in `requirements.txt`): pending, because a change to that
-  file makes the auto-deploy restart wall-e.
+- Step 8: `requirements.txt` pins `depthai==3.6.1` (2026-11-05).
 
 Rollback: stop wall-e, `python3 -m pip install --user
 --break-system-packages --no-deps depthai==3.3.0`, start wall-e. The code
