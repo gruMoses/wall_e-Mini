@@ -1,0 +1,136 @@
+# Traction battery: BMS and VESC settings
+
+Status: review of 2026-11-05. The "Now" columns are the measured values.
+The "Target" columns are recommendations. Kevin makes each change in the
+phone apps. Nothing in this document is applied by software.
+
+## 1. The pack and the charger
+
+| Item | Value | Source |
+|---|---|---|
+| Chemistry | Li-ion NMC ("Ternary") | Cells read 3.872-3.890 V at about 75 % charge |
+| Series cells | 13 | BMS cell list |
+| Capacity | 7 Ah | Kevin, BMS rated capacity |
+| Charger | XM2703, 54.6 V 4 A (4.20 V/cell) | Label |
+| BMS | JHB-R24TH-V1.3 (24S 40 A hardware), software 70_250317_01T2, Daly-app compatible | Daly app, version page |
+| Internal resistance | about 42 mOhm | Stand test 2026-11-05: 0.5 V rise at 12 A regen |
+
+The cell model is not known. The current targets below assume a typical
+7 Ah 2P pack. Replace them with the cell datasheet values when the model is
+known.
+
+## 2. Findings
+
+1. **The BMS trips at the end of every full charge.** Cell overvoltage
+   protection is 4200 mV and pack overvoltage protection is 54.6 V. Both
+   are equal to the charger target. On 2026-11-03 18:19-19:05 the BMS
+   reported `Cell OVP Trip` for 45 minutes. A trip opens the charge FET.
+   With the charge FET open, regen current has no path into the pack. The
+   bus voltage then rises until the VESC over-voltage fault at 90 V, and
+   speed-mode braking stops.
+2. **The BMS battery type is LTO.** The pack is NMC. The voltage limits were
+   edited by hand, so the label and the limits do not agree. The type can
+   change the state-of-charge curve: the BMS shows 88 % at 3.89 V/cell,
+   which is about 70-75 % for NMC.
+3. **The VESC regen limit is far above the BMS charge trip.** Each VESC
+   allows -40 A of regen (-80 A total). BMS charge over-current protection
+   is 40 A. One hard stop can trip it, which opens the charge FET (finding
+   1).
+4. **The VESC drive limit is above the BMS discharge trip.** Each VESC
+   allows 40 A from the battery (80 A total). BMS discharge over-current
+   protection is 40 A. A stall or a climb can open the discharge FET and
+   cut all power.
+5. **The VESC low-voltage cutoff ends below the BMS cutoff.** VESC battery
+   cutoff is 40.8 V start and 36.0 V end. BMS pack under-voltage protection
+   is 40.0 V. The BMS cuts power before the VESC finishes its soft ramp.
+6. **The regen cutoff is off.** Battery Voltage Regen Cutoff is 1000/1100 V
+   (the FW 6.05 default, which means off) on both VESCs.
+7. **The right VESC reads the bus about 0.9 V high.** The left VESC reads
+   within 0.1 V of the BMS (50.5 V, the sum of the 13 cells). The right VESC
+   read 0.9-1.0 V higher in every sample from 50.5 V to 54.5 V. VESC Tool
+   has no input-voltage calibration that is known to us, so each voltage
+   threshold on the right VESC gets +0.9 V.
+8. **The right VESC is set to 12 series cells.** The pack has 13.
+9. **Cold weather opens the charge FET.** BMS charging low-temperature
+   protection is 1 C. Below it the charge FET opens, and regen braking is
+   lost while driving still works (finding 1). No software guard exists
+   yet.
+
+## 3. BMS settings (Daly app)
+
+CAUTION: Changing the battery type can load a preset and overwrite every
+page. Before the change, keep the screenshots of every page. After the
+change, compare each page with them and set each value again.
+
+CAUTION: Do not raise the overvoltage limits before you measure the charger.
+Measure the charger output at the end of a charge. If it floats above
+54.6 V, keep 4200 mV and get a charger that ends at 54.6 V or lower.
+
+The BMS shares one Bluetooth link with `wall-e.service`. Stop the service
+before the app connects, and start it again after.
+
+| Setting | Now | Target | Reason |
+|---|---|---|---|
+| Battery type | LTO | Ternary | Finding 2 |
+| Cell strings | 13 | 13 | Check after the type change |
+| Rated capacity | 7.0 Ah | 7.0 Ah | Check after the type change |
+| Cell overvoltage protection | 4200 mV | 4250 mV, release about 4150 mV if the app shows it | Finding 1. 4.25 V is the usual NMC trip, 50 mV above the charger |
+| Pack overvoltage protection | 54.6 V | 55.3 V, release about 54.0 V if the app shows it | Finding 1 (13 x 4.25 V) |
+| Cell undervoltage protection | 3000 mV | 3000 mV | Correct |
+| Pack undervoltage protection | 40.0 V | 40.0 V | Correct |
+| Voltage difference protection | 800 mV | 800 mV | Acceptable |
+| Charge over-current protection | 40.0 A | 25 A | Above the VESC regen total (10 A) with margin |
+| Discharge over-current protection | 40.0 A | 40.0 A | Above the VESC drive total (30 A) |
+| Short-circuit trigger | 280 A | 280 A | Hardware protection |
+| Charging temperature | 1-50 C | 1-50 C | Correct for Li-ion; see finding 9 |
+| Discharging temperature | -20-50 C | -20-50 C | Acceptable |
+| Balancing | 4000-4200 mV start/stop, 10 mV, 1.0 A, active | No change | Acceptable |
+| Emergency force start | OFF | OFF | Keep off |
+
+## 4. VESC settings (VESC Tool phone app, both VESCs)
+
+Read the configuration first. Change only these values. Then write it.
+Do not run the motor setup wizard after this: it overwrites the cutoffs.
+The left VESC is CAN id 2 and the right VESC is CAN id 1.
+
+| Setting (VESC Tool name, MCCONF field) | Now | Target left (id 2) | Target right (id 1) | Reason |
+|---|---|---|---|---|
+| Battery Current Max Regen (`l_in_current_min`) | -40 A | -5 A | -5 A | Finding 3. A stop from 1.6 m/s with 70 kg needs about 7 A in total |
+| Battery Current Max (`l_in_current_max`) | 40 A | 15 A | 15 A | Finding 4. 30 A total is under the 40 A BMS trip |
+| Battery Voltage Cutoff Start (`l_battery_cut_start`) | 40.8 V | 44.2 V | 45.1 V | Finding 5 (3.40 V/cell), finding 7 |
+| Battery Voltage Cutoff End (`l_battery_cut_end`) | 36.0 V | 41.6 V | 42.5 V | Finding 5 (3.20 V/cell), finding 7 |
+| Battery Voltage Regen Cutoff Start (`l_battery_regen_cut_start`) | 1000 V | 54.4 V | 55.3 V | Finding 6, finding 7 |
+| Battery Voltage Regen Cutoff End (`l_battery_regen_cut_end`) | 1100 V | 54.9 V | 55.8 V | Ends 0.4 V under the 55.3 V pack trip; the highest cell stays near 4.233 V |
+| Battery Cells Series (`si_battery_cells`) | 13 left, 12 right | 13 | 13 | Finding 8 |
+| Battery Capacity (`si_battery_ah`) | 7 Ah | 7 Ah | 7 Ah | Correct |
+| Maximum Input Voltage (`l_max_vin`) | 90 V | 90 V | 90 V | No change now; a lower fault does not restore braking |
+
+Order: change the VESC settings first. They are safe now, and they keep the
+regen current far under the BMS charge trip. Change the BMS overvoltage
+limits after the charger is measured.
+
+Expected result: at a true 100 % charge the regen ramp is already active,
+so braking is weak until the pack drops below about 54.4 V. That is the
+cost of a full charge. A charger that ends at 4.10-4.15 V/cell removes it.
+
+Read back the VESC values after the change:
+`/home/pi/.venv/bin/python3 tools/vesc_info.py` on the robot (read-only).
+
+## 5. Open items
+
+- Measure the charger at the end of a charge (meter, or leave the robot on
+  during the charge so the BMS voltage is logged).
+- Cell model and datasheet, to set the current limits from the cell rating.
+- A software guard: refuse to arm, or limit speed and deceleration, while
+  the BMS reports the charge FET open, a cell overvoltage trip, or a charge
+  low-temperature condition.
+- Grok review 2026-11-05 (session `01a1ac85-5691-7c90-ad85-46e7244b4b5d`):
+  adopted -5 A regen, the charger check, the preset caution, the
+  cold-weather finding and offsets on both cutoff pairs. Not adopted: a
+  regen ramp that ends at about 54.3 V. With the 55.3 V pack trip, 54.9 V
+  keeps a 0.4 V margin and leaves some braking at a full charge.
+
+## Appendix: Technical Names
+
+BMS, VESC, VESC Tool, Daly, JHB, NMC, Ternary, LTO, Li-ion, FET, MCCONF,
+CAN, Grok, `wall-e.service`, XM2703, regen, Bluetooth, mOhm.
