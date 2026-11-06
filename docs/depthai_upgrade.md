@@ -140,6 +140,37 @@ Runs to do (wall-e stopped, robot moved by hand or on the stand):
 3. A straight push along a tape: the distance against the tape.
 4. The CPU figure that the tool prints, at 30 fps and at 60 fps.
 
+### Results, 2026-11-06 16:44-16:57 (outdoors on gravel, OAK at USB 2)
+
+Kevin pushed the robot by hand. wall-e was stopped. CSV files are in
+`logs/vio_probe_20261106_*.csv` on the robot. The VIO yaw is
+counter-clockwise-positive (world Z up), so a right turn is negative.
+
+| Run | IMU reports | Result |
+|---|---|---|
+| Parked 75 s, 30 fps | UNCALIBRATED | yaw within 0.16 deg, position within 3.4 cm; 27.5 poses/s; 100 % of one core |
+| 90 deg right turn | UNCALIBRATED | FAILED: 6 m of false travel during the turn; yaw reached -105 deg, then wandered to -46 deg with the robot still |
+| 90 deg right turn | RAW | -90.3 deg at the end of the turn, then -90.6 deg for 65 s; 1.1 m position shift (the camera is ahead of the pivot point) |
+| 7 m straight push (tape measure, two markers) | RAW | 6.79 m (-3 %); yaw drift -2.8 deg over the push; steady after the stop |
+| Parked 45 s, 60 fps | RAW | yaw 0.0 deg, position within 3 cm; the dogs ran through the view; about 42 poses/s (USB 2 limit); 127 % of one core |
+
+Findings:
+
+- **BasaltVIO needs the RAW IMU reports on depthai 3.6.1.** RAW is the
+  sensor's own frame, which the EEPROM IMU extrinsics describe. The
+  UNCALIBRATED reports that wall-e uses (the old RDF frame) look correct
+  at rest and fail during rotation. `tools/vio_probe.py` defaults to
+  `--imu-report raw` since 2026-11-06. wall-e's own heading still uses
+  UNCALIBRATED (section 2); do not change that for VIO.
+- 30 fps fits USB 2. At 60 fps USB 2 delivers about 42 poses/s.
+- CPU: 100-156 % of one core at 30 fps (system 27-37 % of four cores at
+  60 fps). Measure the cost again before VIO runs beside wall-e.
+- The surface was gravel, which has much texture. A grass field and
+  netting over the lens are not tested.
+- Not yet compared: VIO against the gyro heading in the same run (the probe
+  logs VIO only), and VIO beside wall-e's own pipeline (one process can use
+  the camera; VIO must move into wall-e's pipeline for that).
+
 ## 6. Open items
 
 - Grok review 2026-11-05 (session `01a1adba`): the boot gravity check in

@@ -25,9 +25,18 @@ Facts and limits:
   * Netting over the lens or a featureless view (grass, sky) can blind it.
   * The OAK allows one process at a time: stop wall-e.service first (robot
     disarmed).
+  * IMU layout (2026-11-06, depthai 3.6.1): BasaltVIO needs the RAW reports,
+    the sensor's own frame that the EEPROM IMU extrinsics describe. With the
+    UNCALIBRATED reports wall-e uses, a parked minute looked fine but a 90
+    degree hand turn diverged (6 m of travel, heading back from -105 to -46).
+    With RAW the same turn read -90.3 and held -90.6 for a minute, and a 7 m
+    push read 6.79 m. So the default here is raw, not wall-e's choice.
+  * USB: capped at USB 2 by default like wall-e (the USB 3 link jams the RTK
+    GPS). 30 fps fits USB 2; at 60 fps USB 2 delivered about 42 poses/s.
 
 Usage (on the robot, wall-e stopped):
-  python3 tools/vio_probe.py --seconds 120 [--fps 30] [--imu-report auto]
+  python3 tools/vio_probe.py --seconds 120 [--fps 30] [--imu-report raw]
+                             [--max-usb-speed HIGH]
 CSV: logs/vio_probe_YYYYmmdd_HHMMSS.csv
 """
 
@@ -47,7 +56,7 @@ sys.path.insert(0, str(REPO))
 # The same default the robot uses (oak_depth sets it before importing depthai).
 os.environ.setdefault("DEPTHAI_AUTOCALIBRATION", "OFF")
 
-from pi_app.hardware.oak_depth import imu_report_names  # noqa: E402
+from pi_app.hardware.oak_depth import imu_report_names, open_pipeline  # noqa: E402
 
 REPORTS = {
     "raw": ("ACCELEROMETER_RAW", "GYROSCOPE_RAW"),
@@ -74,8 +83,12 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=400)
     ap.add_argument("--imu-rate", type=int, default=200, help="IMU rate in Hz (default 200)")
-    ap.add_argument("--imu-report", choices=("auto", "raw", "uncalibrated"), default="auto",
-                    help="IMU report family; auto = the one the robot uses")
+    ap.add_argument("--imu-report", choices=("auto", "raw", "uncalibrated"), default="raw",
+                    help="IMU report family (default raw, what BasaltVIO needs on "
+                         "depthai 3.6.1); auto = the one wall-e uses")
+    ap.add_argument("--max-usb-speed", default="HIGH",
+                    help="depthai UsbSpeed cap: HIGH = USB 2 (default), SUPER = USB 3, "
+                         "'' = depthai default")
     ap.add_argument("--out", type=Path, default=None, help="CSV path")
     args = ap.parse_args()
 
@@ -108,7 +121,7 @@ def main() -> int:
     yaw_unwrapped = 0.0
     next_print = t0 + 1.0
 
-    with open(out, "w", newline="") as fh, dai.Pipeline() as pipeline:
+    with open(out, "w", newline="") as fh, open_pipeline(dai, args.max_usb_speed) as pipeline:
         writer = csv.writer(fh)
         writer.writerow(["t_s", "x_m", "y_m", "z_m", "qx", "qy", "qz", "qw",
                          "yaw_deg", "yaw_from_start_deg", "path_m"])

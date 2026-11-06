@@ -1,12 +1,15 @@
 # Next session: start here
 
-Updated 2026-11-05 (evening). Plan for 2026-11-06, in this order:
+Updated 2026-11-06 (evening): the VIO runs are DONE (`docs/depthai_upgrade.md`
+section 5: works with the RAW IMU reports, 90.6 deg for a 90 deg turn, 6.79 m
+for 7 m). The OAK is capped at USB 2 because USB 3 jams the RTK GPS
+(`docs/ups_hat_b.md`); item 3 below no longer applies at USB 2. Next for VIO:
+log it beside the gyro heading in one run, then decide whether it moves into
+wall-e's pipeline (CPU about one core).
 
-1. VIO runs (Kevin chose tomorrow). Use `tools/vio_probe.py` with wall-e
-   stopped (get Kevin's permission; robot disarmed). Do the four runs in
-   `docs/depthai_upgrade.md` section 5: parked 60 s, a 90 degree right turn
-   on the chalk marks, a taped straight push, and the CPU figure at 30 fps
-   and at 60 fps. The tool logs only; it never commands the motors.
+Plan written 2026-11-05 (evening) for 2026-11-06, in this order:
+
+1. DONE 2026-11-06. VIO runs with `tools/vio_probe.py` (wall-e stopped).
 2. VESC part A in the phone app (`docs/battery_settings.md` section 4, and
    the printed sheet). Not applied yet; a read-back at 15:1x showed the old
    values (-40 A regen, 40 A drive, cutoffs 40.8/36 V, regen cutoff off,
