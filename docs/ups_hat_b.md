@@ -366,6 +366,24 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   pipeline does not need the bandwidth. Kevin's decision, 2026-11-05: keep
   USB 3, it may be needed for more of the camera's capabilities. If the RC
   link drops at range, force USB 2 in the config first.
+  REVERSED 2026-11-06: the USB 3 link jams the RTK GPS. The GPS antenna is
+  within 30 cm of the hub. The GPS went from 10 satellites to 0 at
+  15:05:24 on 2026-11-05, the second the OAK first linked at 5000M, and
+  stayed at 0 for 25 h. Outdoors on 2026-11-06 (Kevin also power-cycled the
+  RTK board once): OAK unplugged, 16 satellites and RTK float; OAK back at
+  USB 3, 6-8 satellites and no RTK within 10 s; after a reboot with the OAK
+  streaming at USB 3, 10-11 satellites while tracking and 0 for 4 min from
+  a fresh start, also with the shield on the cut Pi-to-hub extension
+  repaired with foil. OAK streaming at USB 2: 32-34 satellites, RTK float.
+  The antenna cannot be moved. Decision (Kevin): USB 2 for now.
+  `OakDetectionConfig.max_usb_speed = "HIGH"` caps the link in software, so
+  the plug orientation no longer decides; the startup line shows
+  `USB HIGH (cap HIGH)`. Before a change to `"SUPER"`, shield the hub and
+  the OAK cable, put a metal plate under the antenna, and re-test the
+  satellite count from a fresh GPS start with the camera streaming.
+  CAUTION: a fast unplug and replug of the OAK during a colour-stall
+  watchdog restart hung the vision worker on 3.6.1 (2026-11-06 16:14);
+  the hang detector restarted wall-e once the arm switch was off.
   CAUTION: the unplug for the turn-over made depthai 3.3.0 abort at
   14:59:06 (`Resource deadlock avoided` in `PipelineImpl::wait`, the
   self-join that 3.6.1 fixes). systemd restarted wall-e before the camera

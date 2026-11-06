@@ -79,6 +79,28 @@ def imu_report_names(depthai_version: str, imu_sensor_enum=None) -> tuple:
     return ("ACCELEROMETER_RAW", "GYROSCOPE_RAW")
 
 
+def open_pipeline(dai, max_usb_speed: str = "HIGH"):
+    """Return a dai.Pipeline on a device capped at ``max_usb_speed``.
+
+    ``max_usb_speed`` is a depthai UsbSpeed name ("HIGH" = USB 2, "SUPER" =
+    USB 3). An empty value keeps depthai's default (the cable decides). An
+    unknown name is logged and also keeps the default, so a typo in the
+    config cannot stop the camera. The device opens here, as dai.Pipeline()
+    opens its implicit device, so a missing camera raises from the same call.
+    """
+    name = str(max_usb_speed or "").strip().upper()
+    if not name:
+        return dai.Pipeline()
+    speed = getattr(getattr(dai, "UsbSpeed", None), name, None)
+    if speed is None:
+        logger.warning(
+            "OAK max_usb_speed %r is not a depthai UsbSpeed; using the depthai default",
+            max_usb_speed,
+        )
+        return dai.Pipeline()
+    return dai.Pipeline(dai.Device(speed))
+
+
 PERSON_LABEL = 15       # MobileNet-SSD VOC label index for "person"
 YOLO_PERSON_LABEL = 0   # YOLOv8 COCO label index for "person"
 
@@ -2122,6 +2144,13 @@ class OakDepthReader:
         )
         return True
 
+    def _max_usb_speed(self) -> str:
+        """USB speed cap for the device session (config, else the config default)."""
+        value = getattr(self._det_cfg, "max_usb_speed", None)
+        if value is None:
+            value = OakDetectionConfig.max_usb_speed
+        return str(value or "").strip().upper()
+
     def _run_pipeline_once(self, dai, np) -> bool:
         """Build + open one device session and run the poll loops.
 
@@ -2136,7 +2165,9 @@ class OakDepthReader:
             self._last_supervisor_ts = time.monotonic()
 
         try:
-            pipeline = dai.Pipeline()
+            # USB 2 by default: the USB 3 link jams the RTK GPS (2026-11-06,
+            # OakDetectionConfig.max_usb_speed).
+            pipeline = open_pipeline(dai, self._max_usb_speed())
 
             # Determine model type early — affects stereo and NN config.
             _det_cfg = self._det_cfg
@@ -2421,9 +2452,10 @@ class OakDepthReader:
             except Exception as exc:
                 usb_speed = f"unknown ({exc})"
             logger.warning(
-                "OAK device: depthai %s, USB %s, IMU reports %s + %s, "
+                "OAK device: depthai %s, USB %s (cap %s), IMU reports %s + %s, "
                 "DEPTHAI_AUTOCALIBRATION=%s",
-                getattr(dai, "__version__", "?"), usb_speed, accel_report,
+                getattr(dai, "__version__", "?"), usb_speed,
+                self._max_usb_speed() or "none", accel_report,
                 gyro_report, os.environ.get("DEPTHAI_AUTOCALIBRATION", "(unset)"),
             )
 

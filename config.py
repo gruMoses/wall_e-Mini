@@ -1148,6 +1148,16 @@ class OakDetectionConfig:
     # the next A/B; when > 0 pass fps= to every Camera.requestOutput in the
     # YOLO pipeline (colour NN, colour preview/hand, both mono outputs).
     camera_fps: float = 15.0
+    # 2026-11-06: the OAK's USB 3 (SuperSpeed) link jams the RTK GPS; the
+    # antenna is within 30 cm of the hub. Measured outdoors: camera idle,
+    # 20-23 satellites with RTK float; OAK streaming at USB 3, 10-11
+    # satellites and no RTK, and a GPS that restarts cannot acquire at all
+    # (0 satellites for 4 min, shield on the cut extension repaired). OAK
+    # streaming at USB 2: 32-34 satellites, RTK float. On this cable the plug
+    # orientation picks the speed, so the cap is set here, not by the plug.
+    # "HIGH" = USB 2 (480 Mbit/s), "SUPER" = USB 3, "" = depthai default.
+    # Before "SUPER": re-test the satellite count with the camera streaming.
+    max_usb_speed: str = "HIGH"
     # Today's NeuralNetwork.setNumInferenceThreads value. Reserved for the next A/B.
     nn_inference_threads: int = 2
     # Today's NeuralNetwork.setNumShavesPerInferenceThread value.
