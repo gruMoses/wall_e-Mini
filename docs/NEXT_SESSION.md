@@ -1,5 +1,34 @@
 # Next session: start here
 
+Updated 2026-11-05 (evening). Plan for 2026-11-06, in this order:
+
+1. VIO runs (Kevin chose tomorrow). Use `tools/vio_probe.py` with wall-e
+   stopped (get Kevin's permission; robot disarmed). Do the four runs in
+   `docs/depthai_upgrade.md` section 5: parked 60 s, a 90 degree right turn
+   on the chalk marks, a taped straight push, and the CPU figure at 30 fps
+   and at 60 fps. The tool logs only; it never commands the motors.
+2. VESC part A in the phone app (`docs/battery_settings.md` section 4, and
+   the printed sheet). Not applied yet; a read-back at 15:1x showed the old
+   values (-40 A regen, 40 A drive, cutoffs 40.8/36 V, regen cutoff off,
+   right VESC 12 cells). After Kevin applies it, read both back with
+   `tools/vesc_info.py`.
+3. RC range check with the OAK at USB 3 (2.4 GHz noise): Kevin walks the
+   remote to the far end of the yard; count clamped RC frames and RC-stale
+   events. If the link degrades, force USB 2 in the config first.
+4. The regen stop measurement: the per-tick log now has `l_bus_v`,
+   `l_bus_v_max`, `l_bus_a_min` (and `r_*`). The worst case (BMS charge FET
+   open) needs a cold morning below 1 C or a BMS trip; on 2026-11-05 at
+   17:56 the FET was back on (52.1 V, highest cell 4014 mV).
+5. Kevin's decisions: a failed boot gravity check disables heading hold and
+   waypoint navigation (Grok's advice), and wall-e starts the camera reader
+   when the OAK is missing at startup (`docs/depthai_upgrade.md` section 6).
+
+State at the end of 2026-11-05: depthai 3.6.1 is live (unplug test and
+heading sign test passed, `docs/depthai_upgrade.md`); the OAK links at
+USB 3 (Kevin keeps it); the Pi-to-hub cable has its 5 V wire cut and the
+backfeed is fixed (`docs/ups_hat_b.md`); the BMS cell overvoltage trip is
+4250 mV (Kevin); the RC arm fail-safe is live (3a3a1b2).
+
 Updated 2026-11-02 (evening): the 2026-11-03 east-field test plan is
 `docs/field_test_2026-11-03.md`. The Pi was offline while it was written.
 The test page and the google.com reachability halt are specified there and
