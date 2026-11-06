@@ -900,12 +900,28 @@ class BootCheckTests(unittest.TestCase):
 
     def test_a_pack_pinned_at_the_setpoint_boots_even_at_a_high_current(self):
         # Grok review 01a1a857: a fuller pack on a 7.5 V supply can push over
-        # 400 mA, but the supply pins the node at its setpoint.
-        for v, want in ((7.50, "inconclusive"), (7.47, "inconclusive"), (7.54, "poweroff")):
+        # 400 mA, but the supply pins the node at its setpoint. Only a pack
+        # BELOW the pinned window counts (field 2026-11-06, next test).
+        for v, want in ((7.50, "inconclusive"), (7.47, "inconclusive"), (7.46, "poweroff"),
+                        (7.54, "inconclusive")):
             h = BootCheckHarness([(v, -450.0)] * 11, th=self.S75,
                                  chain={"kind": ups.KIND_HARD, "wakes": 3})
             try:
                 self.assertEqual(h.run(), want, v)
+            finally:
+                h.close()
+
+    def test_field_fresh_cells_above_the_supply_boot_in_a_hard_chain(self):
+        # Field 2026-11-06: Kevin swapped in charged cells during a hard chain.
+        # With main power back they carried the Pi at 7.568 V, -448 mA, and the
+        # wake check powered off 12 times. A halt fires at or under S - 0.30 V,
+        # so a pack above S is not the outage rebounding.
+        for v in (7.568, 7.60, 7.64):
+            h = BootCheckHarness([(v, -448.0)] * 11, th=self.S75,
+                                 chain={"kind": ups.KIND_HARD, "wakes": 12})
+            try:
+                self.assertEqual(h.run(), "inconclusive", v)
+                self.assertEqual(h.actions.calls, [])
             finally:
                 h.close()
 

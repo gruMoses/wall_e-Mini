@@ -108,14 +108,20 @@ boot-check mode  (walle-ups-wakecheck.service, early boot, before basic.target)
                                    a live supply out.
     absent                         power off, +WAKE_S (60 s); opens a chain
     discharge at CHAIN_BAND_MA     power off, +WAKE_S: under the light
-      (-400 mA) or more and NOT    early-boot load the pack rebounds into
-      pinned within PINNED_V       the band while the outage goes on. A
-      (0.03 V) of S, inside any    supply that came back below the pack
-      chain except a simulated     pins V at its setpoint and shares the
-      one                          load (field 2026-11-04: the buck held
+      (-400 mA) or more and more   early-boot load the pack rebounds into
+      than PINNED_V (0.03 V)       the band while the outage goes on. A
+      BELOW S, inside any chain    supply that came back below the pack
+      except a simulated one       pins V at its setpoint and shares the
+                                   load (field 2026-11-04: the buck held
                                    7.496-7.512 V on 23 wakes at -270..-305
                                    mA; a real outage read 7.30-7.35 V at
                                    -567..-600 mA), so it does not count.
+                                   Nor does a pack ABOVE S: a halt fires at
+                                   or under S - 0.30 V, so a rebound stays
+                                   under S; above S means charged cells or
+                                   a supply below the pack (field
+                                   2026-11-06: fresh cells at 7.568 V,
+                                   -448 mA, 12 power-offs in a row).
                                    Booting on doubt is the safe side: run
                                    mode's hard line and floor still halt
     above_supply                   boot, close the chain
@@ -1168,10 +1174,16 @@ def boot_check(sensor, th: Thresholds, actions: SystemActions, rtc: Rtc, state: 
     chain = state.read_chain()
     n = len(valid)
     low_n = sum(1 for s, c in zip(valid, classes) if c != PRESENT and s.batt_v <= th.floor_v)
-    # Band samples where the cells carry most of the boot load, not a share.
+    # Band samples where the cells carry most of the boot load, not a share,
+    # BELOW the supply only. A halt fires at or under S - 0.30 V, so a pack
+    # that rebounds during the outage stays under S. A discharging pack above
+    # S is fuller than the supply: charged cells put in during the chain, or
+    # a supply back below the pack (field 2026-11-06: fresh cells read 7.568 V
+    # at -448 mA on a 7.5 V supply and powered off 12 times). Run mode's hard
+    # line and floor still halt it if the supply is really gone.
     strong_band_n = sum(1 for s, c in zip(valid, classes)
                         if c == DISCHARGE and s.batt_ma <= th.chain_band_ma
-                        and abs(s.batt_v - th.supply_v) > th.pinned_v + 1e-9)
+                        and s.batt_v < th.supply_v - th.pinned_v - 1e-9)
     summary = {
         "n": n, "errors": errors, "implausible": implausible,
         "present": classes.count(PRESENT), "absent": classes.count(ABSENT),

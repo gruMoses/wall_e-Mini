@@ -404,6 +404,25 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   module accepts 3.3 V (VERIFY on its datasheet), move its power to the
   Pi's 3V3 pin, which switches off at the halt. For storage, switch the HAT
   off either way.
+- Wake-check lockout, 2026-11-06 08:42-09:13. Kevin switched main power off
+  to fit new, charged 18650s (hard halt at 6.68 V, -773 mA on the old
+  cells, chain open). After the swap, the 5 V came up slowly and the Pi
+  stayed in standby (solid red) until the power button. With main power
+  back, the fresh cells sat above the 7.5 V supply and carried the Pi:
+  `mains still absent ... discharge 11/11, strong_band 11, chain hard,
+  chain_wakes 12, 7.568 V, -448 mA ... powering off`. The two-sided band
+  rule (|V - S| > 0.03 V) read a pack above the supply as the outage going
+  on. Recovery: Kevin pulled one cell, so the battery leg read about 0 mA
+  (`mains present`, chain closed), then put it back. Fix: the strong-band
+  count is one-sided, V < S - 0.03 V only (a halt fires at or under
+  S - 0.30 V, so a rebounding pack stays under S). Grok second opinion
+  (session `01a1b16d`) agreed, and added: (1) when the pack is above S
+  during a real outage, the Pi now stays up on the cells until run mode's
+  7.2 V line, not on RTC polls; (2) a better test resamples a pack above S
+  after 20-30 s (with mains present V falls to S and the current collapses;
+  without mains it does not). Item (2) is not built.
+- After a cell swap, expect the Pi in standby (solid red): press its power
+  button. A slow 5 V ramp leaves a Pi 5 in standby.
 - Run the pack to the HY2120 cutoff once and confirm that the 5 V drops to
   zero and the Pi boots when mains returns.
 - Kevin plans a custom HAT that can switch its output off after the halt and
