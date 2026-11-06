@@ -1158,6 +1158,17 @@ class OakDetectionConfig:
     # "HIGH" = USB 2 (480 Mbit/s), "SUPER" = USB 3, "" = depthai default.
     # Before "SUPER": re-test the satellite count with the camera streaming.
     max_usb_speed: str = "HIGH"
+    # Log-only visual-inertial odometry (depthai BasaltVIO on the Pi,
+    # 2026-11-06). False = the camera session exactly as before (UNCALIBRATED
+    # IMU reports, no flip, no VIO node). True, on depthai >= 3.6.1 only: the
+    # IMU node requests RAW (BasaltVIO diverges on UNCALIBRATED, see
+    # docs/depthai_upgrade.md section 5) and OakDepthReader._poll_imu negates
+    # y and z so the heading still gets the UNCALIBRATED (RDF) values. VIO
+    # shares the mono outputs (camera_fps) and the 100 Hz IMU, logs to the
+    # "vio" block, and never reaches the controller. After switching it on:
+    # the hand-turn heading sign test, the boot gravity line, and an idle
+    # oak.det_latency_s A/B (camera_fps is load-bearing for latency).
+    vio_enabled: bool = False
     # Today's NeuralNetwork.setNumInferenceThreads value. Reserved for the next A/B.
     nn_inference_threads: int = 2
     # Today's NeuralNetwork.setNumShavesPerInferenceThread value.

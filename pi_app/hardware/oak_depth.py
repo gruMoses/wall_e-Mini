@@ -34,6 +34,7 @@ from config import ObstacleAvoidanceConfig, FollowMeConfig, GestureConfig, OakRe
 from pi_app.control.follow_me import PersonDetection
 from pi_app.control.gesture_control import HandData
 from pi_app.hardware.oak_imu_yaw_producer import ImuPacket, ImuYawProducer
+from pi_app.hardware.vio_track import VioTracker
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,47 @@ def imu_report_names(depthai_version: str, imu_sensor_enum=None) -> tuple:
     if imu_sensor_enum is not None and hasattr(imu_sensor_enum, uncal[0]):
         return uncal
     return ("ACCELEROMETER_RAW", "GYROSCOPE_RAW")
+
+
+# BasaltVIO needs the RAW reports on depthai 3.6.1 (it diverges on
+# UNCALIBRATED: its world comes out upside down). The IMU node has one
+# accelerometer and one gyroscope slot, so with VIO on wall-e requests RAW too
+# and turns it back into the UNCALIBRATED (RDF) values at the one conversion
+# point (_poll_imu): on 3.6.1, UNCALIBRATED = RAW with y and z negated, a half
+# turn about X. Measured on this unit 2026-11-05 at rest: accel UNCALIBRATED
+# (-0.009, -0.988, -0.048) g, RAW (-0.009, +0.988, +0.047); gyro bias
+# UNCALIBRATED (+0.218, -0.546, +0.146) deg/s, RAW (+0.210, +0.598, -0.161).
+# Two independent vectors with X unchanged and the small Z component flipped
+# rule out an axis swap.
+VIO_MIN_DEPTHAI = (3, 6, 1)
+
+
+def imu_session_reports(depthai_version: str, imu_sensor_enum=None, vio: bool = False) -> tuple:
+    """(accelerometer report, gyroscope report, flip_yz) for one camera session.
+
+    ``vio`` is True only when the caller has checked VIO_MIN_DEPTHAI. Then the
+    reports are RAW and ``flip_yz`` tells _poll_imu to negate y and z, so the
+    heading sees the same RDF values as with VIO off.
+    """
+    if vio:
+        return ("ACCELEROMETER_RAW", "GYROSCOPE_RAW", True)
+    accel, gyro = imu_report_names(depthai_version, imu_sensor_enum)
+    return (accel, gyro, False)
+
+
+def vio_decision(vio_enabled: bool, depthai_version: str, dai_node=None,
+                 disabled_reason: Optional[str] = None) -> tuple:
+    """(on, reason) for adding the log-only BasaltVIO node to a session."""
+    if not vio_enabled:
+        return (False, "off")
+    if disabled_reason:
+        return (False, f"disabled: {disabled_reason}")
+    parsed = _depthai_version_tuple(depthai_version)
+    if parsed is None or parsed < VIO_MIN_DEPTHAI:
+        return (False, f"disabled: needs depthai >= 3.6.1 (have {depthai_version or '?'})")
+    if dai_node is not None and not hasattr(dai_node, "BasaltVIO"):
+        return (False, "disabled: depthai has no BasaltVIO node")
+    return (True, "on")
 
 
 def open_pipeline(dai, max_usb_speed: str = "HIGH"):
@@ -1157,6 +1199,16 @@ class OakDepthReader:
         self._rec_cfg = recording_config
         self._gesture_cfg = gesture_config
         self._det_cfg = detection_config
+        # Log-only VIO (OakDetectionConfig.vio_enabled). _imu_flip_yz is set
+        # per session with the IMU report choice (imu_session_reports).
+        self._vio_tracker = VioTracker()
+        self._vio_active = False
+        self._vio_reason = "off"
+        self._vio_disabled_reason: Optional[str] = None
+        self._vio_short_sessions = 0
+        self._vio_errors = 0
+        self._last_vio_error_msg = ""
+        self._imu_flip_yz = False
         # Follow-me refuses a detection stream older than this. Default
         # matches OakDetectionConfig even when no detection config is passed
         # (unit tests, MobileNet-only callers).
@@ -1835,7 +1887,30 @@ class OakDepthReader:
             ),
             "vision_thread_alive": thread_alive,
             "vision_hung": vision_hung,
+            **self._vio_health(now),
         }
+
+    def _vio_health(self, now: float) -> dict:
+        """Log-only VIO fields for get_health (no control authority)."""
+        with self._lock:
+            active = self._vio_active
+            reason = self._vio_reason
+            snap = self._vio_tracker.snapshot(now)
+            errors = self._vio_errors
+            err = self._last_vio_error_msg
+            flip = self._imu_flip_yz
+            disabled = self._vio_disabled_reason
+        if active:
+            age = snap.get("vio_age_s")
+            status = "on" if (age is not None and age <= 2.0) else "stale"
+        elif disabled and bool(getattr(self._det_cfg, "vio_enabled", False)):
+            status = f"disabled: {disabled}"
+        else:
+            status = reason if reason != "on" else "off"
+        out = {"vio_status": status, "imu_flip_yz": flip, "vio_errors": errors,
+               "last_vio_error": err or None}
+        out.update(snap)
+        return out
 
     @property
     def pipeline_dead(self) -> bool:
@@ -2164,6 +2239,7 @@ class OakDepthReader:
         with self._lock:
             self._last_supervisor_ts = time.monotonic()
 
+        vio_attempted = False
         try:
             # USB 2 by default: the USB 3 link jams the RTK GPS (2026-11-06,
             # OakDetectionConfig.max_usb_speed).
@@ -2190,8 +2266,10 @@ class OakDepthReader:
                 # Align depth map to RGB camera so bounding-box spatial positions are correct.
                 stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
             _cam_fps_kw = self._camera_fps_kw()
-            mono_left.requestOutput((640, 400), **_cam_fps_kw).link(stereo.left)
-            mono_right.requestOutput((640, 400), **_cam_fps_kw).link(stereo.right)
+            mono_left_out = mono_left.requestOutput((640, 400), **_cam_fps_kw)
+            mono_right_out = mono_right.requestOutput((640, 400), **_cam_fps_kw)
+            mono_left_out.link(stereo.left)
+            mono_right_out.link(stereo.right)
 
             # Device-side ROI spatial depth for obstacle distance + median depth.
             spatial_calc = pipeline.create(dai.node.SpatialLocationCalculator)
@@ -2371,13 +2449,49 @@ class OakDepthReader:
             # IMU node (BMI270: accel + gyro at 100 Hz), in the RDF frame
             # on every depthai version (see imu_report_names).
             imu_node = pipeline.create(dai.node.IMU)
-            accel_report, gyro_report = imu_report_names(
-                getattr(dai, "__version__", ""), dai.IMUSensor
+            vio_on, vio_reason = vio_decision(
+                bool(getattr(_det_cfg, "vio_enabled", False)),
+                getattr(dai, "__version__", ""),
+                getattr(dai, "node", None),
+                self._vio_disabled_reason,
             )
+            # From here any build or start failure of a VIO session disables
+            # VIO for the next one, including a failure to enable the RAW
+            # reports, so the camera always comes back on today's path.
+            vio_attempted = vio_on
+            accel_report, gyro_report, flip_yz = imu_session_reports(
+                getattr(dai, "__version__", ""), dai.IMUSensor, vio=vio_on
+            )
+            with self._lock:
+                self._imu_flip_yz = flip_yz
             imu_node.enableIMUSensor(getattr(dai.IMUSensor, accel_report), 100)
             imu_node.enableIMUSensor(getattr(dai.IMUSensor, gyro_report), 100)
             imu_node.setBatchReportThreshold(1)
             imu_node.setMaxBatchReports(10)
+            # Log-only BasaltVIO on the Pi, sharing the mono outputs (at
+            # camera_fps) and this IMU. Every input drops instead of blocking,
+            # so a slow or stuck VIO thread cannot back up the mono cameras
+            # that feed StereoDepth (the obstacle corridor and the person stop).
+            vio_q = None
+            if vio_on:
+                try:
+                    vio = pipeline.create(dai.node.BasaltVIO)
+                    vio.setImuUpdateRate(100)
+                    for vio_in, vio_in_size in ((vio.left, 2), (vio.right, 2), (vio.imu, 64)):
+                        vio_in.setBlocking(False)
+                        vio_in.setMaxSize(vio_in_size)
+                    mono_left_out.link(vio.left)
+                    mono_right_out.link(vio.right)
+                    imu_node.out.link(vio.imu)
+                    vio_q = vio.transform.createOutputQueue(maxSize=4, blocking=False)
+                except Exception as exc:
+                    # A node may already be in the graph; if start then fails,
+                    # the except below disables VIO for the next session.
+                    vio_q = None
+                    vio_reason = f"disabled: build failed ({exc})"
+                    with self._lock:
+                        self._vio_disabled_reason = f"build failed ({exc})"
+                    logger.warning("OAK VIO not built (%s); continuing without it", exc)
             # Explicit depth: default maxSize=16 overflows under full-vision stalls.
             # Nonblocking preserves device liveness if the host stalls longer.
             imu_q = imu_node.out.createOutputQueue(
@@ -2452,11 +2566,13 @@ class OakDepthReader:
             except Exception as exc:
                 usb_speed = f"unknown ({exc})"
             logger.warning(
-                "OAK device: depthai %s, USB %s (cap %s), IMU reports %s + %s, "
-                "DEPTHAI_AUTOCALIBRATION=%s",
+                "OAK device: depthai %s, USB %s (cap %s), IMU reports %s + %s%s, "
+                "VIO %s, DEPTHAI_AUTOCALIBRATION=%s",
                 getattr(dai, "__version__", "?"), usb_speed,
-                self._max_usb_speed() or "none", accel_report,
-                gyro_report, os.environ.get("DEPTHAI_AUTOCALIBRATION", "(unset)"),
+                self._max_usb_speed() or "none", accel_report, gyro_report,
+                " (y/z flipped to RDF)" if flip_yz else "",
+                vio_reason,
+                os.environ.get("DEPTHAI_AUTOCALIBRATION", "(unset)"),
             )
 
             self._device_ready.set()
@@ -2471,6 +2587,9 @@ class OakDepthReader:
                 self._imu_yaw_producer.note_pipeline_restart()
                 self._imu_prev_consumed_ts = 0.0
                 self._corridor_persistence.reset()
+                self._vio_tracker.new_session()
+                self._vio_active = vio_q is not None
+                self._vio_reason = vio_reason
 
         except Exception:
             logger.exception("Failed to build/start OAK-D pipeline")
@@ -2478,10 +2597,15 @@ class OakDepthReader:
                 self._pipeline_running = False
                 self._connected = False
                 self._last_pipeline_error_msg = "pipeline_start_failed"
+                if vio_attempted and not self._vio_disabled_reason:
+                    # The camera must come back: the next session runs without VIO.
+                    self._vio_disabled_reason = "session start failed with VIO"
+                    logger.warning("OAK session start failed with VIO; the next session runs without it")
             # Device never became live — report "not connected" so the
             # supervisor backs off without counting a reconnect.
             return False
 
+        vio_session_t0 = time.monotonic()
         try:
             next_imu_poll = time.monotonic()
             period = 1.0 / self._obs_cfg.update_rate_hz
@@ -2532,6 +2656,8 @@ class OakDepthReader:
                     now = time.monotonic()
                 if now - next_imu_poll > (self._imu_poll_interval_s * max_catchup):
                     next_imu_poll = now
+                if vio_q is not None:
+                    self._poll_vio(vio_q)
                 # Chip temperature: a live device call, so cap it at 1 Hz
                 # (matches the slow diagnostics line in pi_app.app.main).
                 if now - self._last_chip_temp_poll_t >= 1.0:
@@ -2577,6 +2703,7 @@ class OakDepthReader:
             except Exception:
                 pass
             self._device = None
+            self._note_vio_session_end(time.monotonic() - vio_session_t0)
             # Drop calibration with the session: a reconnect re-reads it, and a
             # stale handle must never outlive the device it came from.
             with self._lock:
@@ -3628,6 +3755,55 @@ class OakDepthReader:
         elif drain_msg_count >= int(max_sz * IMU_DRAIN_BATCH_LARGE_FRAC):
             m.drain_batch_large_events += 1
 
+    # A VIO session that ends twice in a row within this many seconds
+    # disables VIO until the next process start (the camera comes first).
+    _VIO_SHORT_SESSION_S = 60.0
+    _VIO_SHORT_SESSION_LIMIT = 2
+
+    def _note_vio_session_end(self, duration_s: float) -> None:
+        """Count short VIO sessions; disable VIO after repeated ones."""
+        with self._lock:
+            was_active = self._vio_active
+            self._vio_active = False
+            if not was_active or self._stop_event.is_set():
+                return
+            if duration_s < self._VIO_SHORT_SESSION_S:
+                self._vio_short_sessions += 1
+            else:
+                self._vio_short_sessions = 0
+            if (self._vio_short_sessions >= self._VIO_SHORT_SESSION_LIMIT
+                    and not self._vio_disabled_reason):
+                self._vio_disabled_reason = (
+                    f"{self._vio_short_sessions} sessions in a row ended within "
+                    f"{self._VIO_SHORT_SESSION_S:.0f} s"
+                )
+                logger.warning(
+                    "OAK VIO disabled until restart: %s", self._vio_disabled_reason
+                )
+
+    def _poll_vio(self, vio_q) -> None:
+        """Drain the BasaltVIO pose queue into the log-only tracker."""
+        try:
+            now = time.monotonic()
+            while True:
+                msg = vio_q.tryGet()
+                if msg is None:
+                    break
+                p = msg.getTranslation()
+                q = msg.getQuaternion()
+                with self._lock:
+                    self._vio_tracker.update(
+                        float(p.x), float(p.y), float(p.z),
+                        float(q.qx), float(q.qy), float(q.qz), float(q.qw), now,
+                    )
+        except Exception as e:
+            with self._lock:
+                self._vio_errors += 1
+                self._last_vio_error_msg = self._format_err("poll_vio", e)
+            if self._is_fatal_comm_error(e):
+                raise
+            logger.debug("VIO poll error", exc_info=True)
+
     def _poll_imu(self, imu_q) -> None:
         """Drain IMU queue and integrate every packet into producer free-yaw.
 
@@ -3670,6 +3846,10 @@ class OakDepthReader:
 
             total_packets = len(all_packets)
             now = time.monotonic()
+            # RAW requested for VIO: negate y and z to get the RDF values the
+            # heading uses (imu_session_reports). One sign, one place.
+            with self._lock:
+                f = -1.0 if self._imu_flip_yz else 1.0
             parsed: list[ImuPacket] = []
             for pkt in all_packets:
                 try:
@@ -3683,11 +3863,11 @@ class OakDepthReader:
                             device_ts_s=dev_for_pkt,
                             host_ts_s=now,
                             gx_rads=float(gyro.x),
-                            gy_rads=float(gyro.y),
-                            gz_rads=float(gyro.z),
+                            gy_rads=f * float(gyro.y),
+                            gz_rads=f * float(gyro.z),
                             ax_mss=float(accel.x),
-                            ay_mss=float(accel.y),
-                            az_mss=float(accel.z),
+                            ay_mss=f * float(accel.y),
+                            az_mss=f * float(accel.z),
                         )
                     )
                 except Exception:

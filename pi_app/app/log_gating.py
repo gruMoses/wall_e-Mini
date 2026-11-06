@@ -349,6 +349,34 @@ def animal_log_entries(detections, class_ids) -> list | None:
     return out or None
 
 
+def _vio_block(oak: dict, slow: bool = False):
+    """Log-only VIO fields from OakDepthReader.get_health(); None when off."""
+    if not oak or oak.get("vio_status") in (None, "off"):
+        return None
+    block = {
+        "st": oak.get("vio_status"),
+        "hdg": oak.get("vio_heading_deg"),
+        "x": oak.get("vio_x_m"),
+        "y": oak.get("vio_y_m"),
+        "z": oak.get("vio_z_m"),
+        "path": oak.get("vio_path_m"),
+        "age": oak.get("vio_age_s"),
+        "frame_ok": oak.get("vio_frame_ok"),
+    }
+    if slow:
+        block.update({
+            "session": oak.get("vio_session"),
+            "poses": oak.get("vio_poses"),
+            "hz": oak.get("vio_rate_hz"),
+            "roll": oak.get("vio_roll_deg"),
+            "pitch": oak.get("vio_pitch_deg"),
+            "imu_flip_yz": oak.get("imu_flip_yz"),
+            "errors": oak.get("vio_errors"),
+            "last_error": oak.get("last_vio_error"),
+        })
+    return block
+
+
 def build_log_obj(
     *,
     now_ts: float,
@@ -632,6 +660,10 @@ def build_log_obj(
             "det_seq_stuck_packets": _oak.get("det_seq_stuck_packets") if _oak else None,
             "vision_stale": _oak.get("vision_stale") if _oak else None,
         },
+        # Log-only BasaltVIO (OakDetectionConfig.vio_enabled). heading is the
+        # change since the camera session started, clockwise positive like
+        # imu heading_deg; x/y/z in the VIO world frame (Z up), metres.
+        "vio": _vio_block(_oak),
         "gesture": {
             "hand_detected": _g.get("hand_detected"),
             "hand_span_px": _g.get("hand_span_px"),
@@ -718,6 +750,7 @@ def build_slow_obj(
             "det_seq_stuck_packets": _oak.get("det_seq_stuck_packets"),
             "vision_stale": _oak.get("vision_stale"),
         },
+        "vio": _vio_block(_oak, slow=True),
         "gesture": {
             "hand_poll_enabled": _oak.get("hand_poll_enabled"),
             "hand_poll_ms": _oak.get("hand_poll_ms"),

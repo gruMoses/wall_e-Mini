@@ -174,6 +174,26 @@ Stand test: spin the wheels, release the stick, and read the maximum of
 jq -c 'select(.vesc) | [.ts_iso, .vesc.l_bus_v_max, .vesc.r_bus_v_max, .vesc.l_bus_a_min, .vesc.r_bus_a_min]' logs/arm_*.log
 ```
 
+### VIO fields (2026-11-06, per-tick and slow `vio` block)
+
+Log-only BasaltVIO inside wall-e's camera session. The block is `null` while
+`OakDetectionConfig.vio_enabled` is False (the default). VIO has no control
+authority: nothing reads these fields except the logs and `/api/telemetry`.
+
+| Key | Unit | Meaning |
+|---|---|---|
+| `st` | | `on`, `stale` (no pose for 2 s), or `disabled: <reason>` |
+| `hdg` | deg | VIO heading change since the camera session started, clockwise positive (compare with a change of the IMU `heading_deg`) |
+| `x` / `y` / `z` | m | VIO position in its own world frame (Z up), origin at the session start |
+| `path` | m | Path length since the session start |
+| `age` | s | Age of the newest VIO pose |
+| `frame_ok` | | False when roll or pitch passed 30 deg (a wrong IMU frame puts the VIO world upside down) |
+
+The slow line adds `session`, `poses`, `hz`, `roll`, `pitch`, `imu_flip_yz`
+(True when the IMU node runs RAW and `_poll_imu` negates y and z for the
+heading), `errors` and `last_error`. A new camera session restarts VIO at the
+origin, so compare VIO and gyro changes inside one session.
+
 ### Slow line (`"type": "slow"`)
 
 One line per second, armed or not (`should_write_slow_line`,

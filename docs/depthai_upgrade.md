@@ -171,6 +171,30 @@ Findings:
   logs VIO only), and VIO beside wall-e's own pipeline (one process can use
   the camera; VIO must move into wall-e's pipeline for that).
 
+### VIO inside wall-e (log-only, 2026-11-06)
+
+`OakDetectionConfig.vio_enabled` (default False) adds a BasaltVIO node to
+wall-e's own camera session. It logs to the `vio` block
+(`docs/logging_troubleshooting.md`) and has no control authority.
+
+- The IMU node has one accelerometer slot and one gyroscope slot, so with
+  VIO on wall-e requests RAW and `_poll_imu` negates y and z. On 3.6.1 that
+  gives the UNCALIBRATED (RDF) values the heading uses (the bench numbers
+  in section 4). `BasaltVIO.setImuExtrinsics` cannot do this from Python:
+  `TransformData` has only an empty constructor in the 3.6.1 bindings.
+- VIO shares the 640x400 mono outputs (at `camera_fps`, 15 fps) and the
+  100 Hz IMU. Its inputs drop instead of blocking.
+- Fallbacks: a VIO build failure, or any start failure of a session that
+  tried VIO (including a failure to enable RAW), or two VIO sessions in a
+  row that end within 60 s, disable VIO until the next process start. The
+  next camera session then runs on UNCALIBRATED without VIO.
+- Startup line: `IMU reports ACCELEROMETER_RAW + GYROSCOPE_RAW (y/z flipped
+  to RDF), VIO on`.
+- Before `vio_enabled = True` on the robot: `tools/vio_wall_e_bench.py`
+  with VIO off and on (latency, depth fps, IMU packets/s, gravity sign,
+  CPU); after the switch, the hand-turn heading sign test (section 4, step
+  5) and the boot gravity line.
+
 ## 6. Open items
 
 - Grok review 2026-11-05 (session `01a1adba`): the boot gravity check in
