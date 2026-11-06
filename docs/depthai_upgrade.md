@@ -195,6 +195,32 @@ wall-e's own camera session. It logs to the `vio` block
   CPU); after the switch, the hand-turn heading sign test (section 4, step
   5) and the boot gravity line.
 
+Bench 2026-11-06 17:52-17:55 (`tools/vio_wall_e_bench.py`, robot parked,
+wall-e stopped, OAK at USB 2, 45 s each, first 10 s not counted):
+
+| | VIO off | VIO on |
+|---|---|---|
+| `det_latency_s` p50 / p90 | 0.181 / 0.207 s | 0.209 / 0.237 s |
+| depth fps (median) | 15.0 | **10.0** |
+| detection fps (median) | 15.0 | **12.0** |
+| IMU packets/s into the heading | 99.2 | 99.4 |
+| `ay` (gravity, RDF) | -9.70 m/s^2 | -9.71 m/s^2 |
+| VIO poses/s | - | 11.0 |
+| VIO roll / pitch, frame_ok | - | 0.4 / -2.2 deg, True |
+| process CPU | 49 % of one core | 82 % of one core |
+
+Result: the RAW + y/z flip path is correct (same gravity, same IMU rate,
+the VIO world is level). But VIO takes a third of the depth frames and a
+fifth of the detection frames. **Keep `vio_enabled = False`.** The likely
+cause is the USB 2 link: the two extra 640x400 mono streams (about
+7.7 MB/s) on top of depth, the colour preview and the NN output come close
+to what USB 2 carries through the hub. A second suspect is the shared
+output: a frame held for the slow host transfer is not free for the
+camera's frame pool. Next tries: give VIO its own `requestOutput` at a
+lower size (320x200 is a quarter of the bytes), and check the VIO quality
+at that size with `tools/vio_probe.py --width 320 --height 200` and a hand
+turn.
+
 ## 6. Open items
 
 - Grok review 2026-11-05 (session `01a1adba`): the boot gravity check in
