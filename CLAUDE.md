@@ -14,6 +14,7 @@ different thing from the reconnect watchdog in `docs/wifi_watchdog.md`.
 - Reason: in MANUAL (RC sticks or phone) the operator stops the robot by letting go of the stick. In FOLLOW_ME and WAYPOINT_NAV the operator must take the remote out of a pocket and disarm, which takes much longer.
 - Result: a MANUAL relaxation is acceptable (the creep floor, the MANUAL obstacle curve for netting over the lens). FOLLOW_ME and WAYPOINT_NAV keep every protection.
 - The person/animal hard stop (0.8 m) stays absolute in every mode.
+- Ruled 2026-11-08: the 0.8 m stop zeroes the forward part of the command only. A pivot in place passes through it, in FOLLOW_ME too (log 14:27:40: steer −32 for about 1 s with Kevin 0.3–0.9 m away). Kevin judged that pivot fine. Do not freeze the pivot during the stop without his word.
 - Applied 2026-09-27: Kevin removed the person/animal cap on the MANUAL obstacle curve. It was more cautious than this principle, and it turned the netting relief off whenever the camera saw him near the robot but could not range him through the mesh. Do not add it back without his word.
 
 ## Architecture Overview
