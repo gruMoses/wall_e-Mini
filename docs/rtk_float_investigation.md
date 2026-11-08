@@ -28,9 +28,13 @@ The rover reported RTK float (fix quality 5) and never RTK fixed (4) until 15:27
 
 Kevin drove the robot about 23 m west of its usual parking spot and stopped at 15:07. At 15:27:34, after 20 minutes stationary, the rover reported quality 4 for the first time in any log. It fell back to 5 at 15:27:49, fixed again at 15:34:30, fell to 5 at 15:47:08, and fixed at 15:47:18; it then held 4 with `$GNRMC` mode R, course 324.1, position scatter about 1 cm. Conclusions: the base, the link and the rover can produce a fixed solution; the convergence time (20 minutes against a specification of under 10 seconds) and the drop-outs say the corrections or the carrier-phase quality are marginal, which points at causes 1, 2 and 4 in section 3; the old parking spot never fixed in hours, so it is worse (obstruction, multipath, or LoRa margin) than the new one. The short-baseline test in section 4 and the base checklist in section 5 stay the next steps; the GPS heading aligner can now lock during a straight manual run for the first time.
 
-### 2.2 Fixes happen only near sunset (2026-11-08)
+### 2.2 Fixes happen mostly near sunset (2026-11-08)
 
-The journal (`journalctl -u wall-e | grep fix_quality`) has 32 transitions to quality 4 from 2026-09-19 to 2026-11-08, on 6 days. All of them occur between about 3 hours before and 1 hour after local sunset. None occurs at midday. The fixed share of the time in quality 4 or 5:
+The journal (`journalctl -u wall-e | grep fix_quality`) has 32 transitions to quality 4 from 2026-09-19 to 2026-11-08, on 6 days. All of them occur between about 3 hours before and 1 hour after local sunset. None occurs at midday.
+
+CAUTION: The journal is not complete. Its `fix_quality` lines start at 17:57 CDT on 2026-09-19. Section 2.1 records an earlier fix on that day, at 15:27 CDT: 3 h 55 min before sunset, with the sun at about 47°. The daily PV total for 2026-09-19 was 11.2 kWh, which is a normal sunny day for this array. The position was different (23 m west of the usual parking spot). Thus a fix in strong daylight is possible at some spots. The table below does not include that episode.
+
+The fixed share of the time in quality 4 or 5:
 
 | Time relative to sunset | Fixed | Float | Fixed share | Days |
 |---|---|---|---|---|
@@ -44,14 +48,41 @@ The fix window follows sunset across the dates, not the clock time and not the G
 
 Interpretation: a cause that moves with the sun lowers the carrier-phase quality in daylight. Leading suspect: switching noise from the solar power system, radiated by the panel wiring, which stops when production stops. Grok (session `01a1bd0d-4321-7511-a27f-ffcb05efc136`) objects that the step from 43 % to 82 % at sunset is sharper than the fall of PV output, so heat or solar radio noise can also fit. Sampling bias is possible too: the robot is often stationary in the evening.
 
-Layout (Kevin, 2026-11-08): the base antenna is above the solar equipment. The inverter and charge equipment are in a steel shipping container (conex). The container shields the equipment itself, but not the cables that leave it: the PV string wiring and the AC runs can radiate the switching noise. If the cause is solar noise, the base is the more probable victim (it is closer than the rover). A base with bad observations still sends corrections every second, which agrees with the evidence. Panel location: not recorded yet.
+Layout (Kevin, 2026-11-08): the base antenna is on top of the metal barn roof. The base unit is under it, with a gap, so the sun does not heat it directly. The inverter and charge equipment are in a steel shipping container (conex) below. The PV array is a ground mount, about 20 (unit not stated) from the antenna and the base, lower than both. The container shields the equipment itself, but not the cables that leave it: the PV string wiring to the ground mount can radiate the MPPT switching noise. If the cause is solar noise, the base is the more probable victim (it is closer than the rover). A base with bad observations still sends corrections every second, which agrees with the evidence.
 
-Decisive test (Kevin runs it, clear day, solar noon):
+### 2.3 Stationary rover against PV power (2026-11-07)
 
-1. Park the robot at a spot where it fixed near sunset.
-2. CAUTION: Shut down the inverter with the manufacturer's procedure. Do not open a DC disconnect under full production.
-3. Keep the solar system off for 20–30 minutes. Then turn it on again.
-4. Result: a fix while off and float again after the restart means solar RFI. No change means another cause.
+On 2026-11-07 the robot stood disarmed, wheels at 0 rpm, at one spot from 12:22 to 17:59 (`arm_20261107_121745.log`; the spot is about 72 m east and 8 m south of the 12:17 start position). Corrections arrived the whole time (differential age 1.0 s). PV power is from the dashboard history (`/api/solar/history` on the home-auto Pi, 1-minute samples, 48 hours only).
+
+| Time (CST) | PV power | Rover |
+|---|---|---|
+| 12:20–13:20 | 2.2–2.5 kW | float, 23–30 satellites |
+| 13:30–15:20 | about 600 W (battery full, PV curtailed to the load) | float, 27–35 satellites |
+| 15:30–16:30 | 500 W falling to 120 W | float, 34–39 satellites, HDOP 0.4–0.5 |
+| 16:40 | about 100 W | **fixed** |
+| 16:40–17:58 | 100 W falling to 0 W | fixed, with 4 short drops to float |
+| 17:59 | 0 W | robot moved; the session ended |
+
+Sunset was 17:30. The battery inverter carried about 600 W of AC load all evening while the rover held the fix. Thus the AC side of the inverter is not the noise source. If solar is the cause, the source is the PV side: the MPPT and the PV string wiring.
+
+This day removes two explanations: the robot did not move (no sampling bias), and the spot did not change. It does not separate PV power from sun elevation: both are low at 16:40 (the sun was at about 9°). The step at 13:30 (2.4 kW to 600 W, still float for 3 hours) shows that the noise, if it is the cause, does not scale simply with power. A curtailed MPPT still switches. On 2026-11-08 (overcast, PV 200–400 W at midday) the rover stayed float, so a threshold must be below about 150 W.
+
+Counter-evidence: the 2026-09-19 fix at 15:27 CDT (sections 2.1 and 2.2) occurred on a sunny day, at a different spot. The dashboard keeps only 48 hours of PV power, so the PV power at that time is not known here. Solar Assistant keeps a longer history. If the PV power was high at 15:27 on 2026-09-19, then PV noise is not the full cause: at most it removes the last margin at a marginal spot.
+
+Satellite geometry (multipath from the metal roof) repeats about 4 minutes earlier each day. The journal fix times moved with sunset instead: 2026-09-19 at 16:58 CST, 2026-11-07 at 16:40 CST. A sidereal repeat would have moved them about 3 hours earlier over those 49 days. The two spots are different, so this comparison is weaker than a comparison at one spot. It still argues against fixed multipath geometry as the cause of the window.
+
+Separate observation (2026-11-08): the robot stood disarmed within about 12 m of the 2026-11-07 spot from 13:03 to 14:24, and the corrections stopped (quality 2, differential age 0, 19–24 satellites). They came back at 14:24. At the garage area (about 70 m west) there are no corrections either. The cause (LoRa link, base power, or a base restart) is not known yet. A base restart starts a new survey-in, which changes the reference position.
+
+Second opinion: Grok session `01a1bd64-c194-7123-bf11-03ff1cd48f16` agreed with a PV-only test and supplied the curtailment objection, the off-on-off sequence and the base-power check below.
+
+Decisive test (Kevin runs it, clear day, near solar noon):
+
+1. Park the robot at the 2026-11-07 spot. Do not move it during the test.
+2. Find out where the base gets its power. If it comes from the inverter, the inverter must stay on during the test (step 3 keeps it on).
+3. Stop the PV input and keep the inverter on to supply the load from the battery. CAUTION: Do not open a DC disconnect under load unless it is load-break rated. A DC arc at string voltage does not stop like an AC arc. The safer sequence: disable PV charging in the inverter menu if it has that control. Or let the battery fill (PV then curtails to the load) and open a load-break-rated PV switch.
+4. Keep the PV input off for 20–30 minutes. Then turn it on again. Do the off-on cycle two times.
+5. Result: a fix within a few minutes of PV off, and float within about a minute of PV on, means PV noise. The sun's elevation and the temperature do not change that fast.
+6. If the rover stays float with PV off, restart the rover one time with PV still off (a filter can stay bad after the noise stops). If it is still float, move the base antenna off the roof or run the base on a battery away from the array for one midday hour. That separates roof multipath from inverter noise.
 
 The test is faster and more certain with per-satellite carrier-to-noise density (C/N0) in the log, which the rover driver does not read yet (GSV sentences, possibly in `get_all_gnss()`, register 91). With C/N0, compare the midday value with the value near sunset, and compare satellites near the sun with satellites far from it (solar radio noise).
 
