@@ -28,6 +28,31 @@ The rover reported RTK float (fix quality 5) and never RTK fixed (4) until 15:27
 
 Kevin drove the robot about 23 m west of its usual parking spot and stopped at 15:07. At 15:27:34, after 20 minutes stationary, the rover reported quality 4 for the first time in any log. It fell back to 5 at 15:27:49, fixed again at 15:34:30, fell to 5 at 15:47:08, and fixed at 15:47:18; it then held 4 with `$GNRMC` mode R, course 324.1, position scatter about 1 cm. Conclusions: the base, the link and the rover can produce a fixed solution; the convergence time (20 minutes against a specification of under 10 seconds) and the drop-outs say the corrections or the carrier-phase quality are marginal, which points at causes 1, 2 and 4 in section 3; the old parking spot never fixed in hours, so it is worse (obstruction, multipath, or LoRa margin) than the new one. The short-baseline test in section 4 and the base checklist in section 5 stay the next steps; the GPS heading aligner can now lock during a straight manual run for the first time.
 
+### 2.2 Fixes happen only near sunset (2026-11-08)
+
+The journal (`journalctl -u wall-e | grep fix_quality`) has 32 transitions to quality 4 from 2026-09-19 to 2026-11-08, on 6 days. All of them occur between about 3 hours before and 1 hour after local sunset. None occurs at midday. The fixed share of the time in quality 4 or 5:
+
+| Time relative to sunset | Fixed | Float | Fixed share | Days |
+|---|---|---|---|---|
+| −5 h to −3 h | 0 min | 347 min | 0 % | 5 |
+| −3 h to −2 h | 30 min | 210 min | 12 % | 5 |
+| −2 h to −1 h | 53 min | 229 min | 19 % | 8 |
+| −1 h to 0 h | 147 min | 196 min | 43 % | 7 |
+| 0 h to +1 h | 102 min | 23 min | 82 % | 4 |
+
+The fix window follows sunset across the dates, not the clock time and not the GPS sidereal repeat. Examples: 2026-09-19, fixes 17:58–19:54 CDT, sunset 19:22. 2026-11-07, fixes 16:40–17:59 CST, sunset 17:30. In float, the differential age stays 1.0 s and station id 3335 decodes, with 23–37 satellites. The drive of 2026-11-08, 12:36–14:35, stayed in float the whole time.
+
+Interpretation: a cause that moves with the sun lowers the carrier-phase quality in daylight. Leading suspect: switching noise from the solar power system, radiated by the panel wiring, which stops when production stops. Grok (session `01a1bd0d-4321-7511-a27f-ffcb05efc136`) objects that the step from 43 % to 82 % at sunset is sharper than the fall of PV output, so heat or solar radio noise can also fit. Sampling bias is possible too: the robot is often stationary in the evening.
+
+Decisive test (Kevin runs it, clear day, solar noon):
+
+1. Park the robot at a spot where it fixed near sunset.
+2. CAUTION: Shut down the inverter with the manufacturer's procedure. Do not open a DC disconnect under full production.
+3. Keep the solar system off for 20–30 minutes. Then turn it on again.
+4. Result: a fix while off and float again after the restart means solar RFI. No change means another cause.
+
+The test is faster and more certain with per-satellite carrier-to-noise density (C/N0) in the log, which the rover driver does not read yet (GSV sentences, possibly in `get_all_gnss()`, register 91). With C/N0, compare the midday value with the value near sunset, and compare satellites near the sun with satellites far from it (solar radio noise).
+
 ## 3. Ranked causes
 
 1. HIGH. Incomplete correction epochs on the air. RTCM 1005 is about 20 bytes and keeps the differential age at 1 s by itself, while the MSM observation blocks (about 900 B/s for four constellations at MSM4) are truncated or dropped by a LoRa air rate set for range, not throughput (the LLCC68 goes down to 1.76 kb/s). Confirm with the short-baseline test (section 4) and by decoding the RTCM stream at the base output. Fix: raise the air rate (Emlid recommends about 9 kb/s for RTK), and cut the payload to GPS + Galileo, L1 + L5/E5a, MSM4 at 0.5–1 Hz, station coordinates at 0.1 Hz.
