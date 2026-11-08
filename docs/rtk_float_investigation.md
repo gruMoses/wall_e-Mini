@@ -48,7 +48,7 @@ The fix window follows sunset across the dates, not the clock time and not the G
 
 Interpretation: a cause that moves with the sun lowers the carrier-phase quality in daylight. Leading suspect: switching noise from the solar power system, radiated by the panel wiring, which stops when production stops. Grok (session `01a1bd0d-4321-7511-a27f-ffcb05efc136`) objects that the step from 43 % to 82 % at sunset is sharper than the fall of PV output, so heat or solar radio noise can also fit. Sampling bias is possible too: the robot is often stationary in the evening.
 
-Layout (Kevin, 2026-11-08): the base antenna is on top of the metal barn roof. The base unit is under it, with a gap, so the sun does not heat it directly. The inverter and charge equipment are in a steel shipping container (conex) below. The PV array is a ground mount, about 20 (unit not stated) from the antenna and the base, lower than both. The container shields the equipment itself, but not the cables that leave it: the PV string wiring to the ground mount can radiate the MPPT switching noise. If the cause is solar noise, the base is the more probable victim (it is closer than the rover). A base with bad observations still sends corrections every second, which agrees with the evidence.
+Layout (Kevin, 2026-11-08): the base antenna is on top of the metal barn roof. The base unit is under it, with a gap, so the sun does not heat it directly. The inverter and charge equipment are in a steel shipping container (conex) below. The PV array is a ground mount, about 20 (unit not stated) from the antenna and the base, lower than both. The base gets its power from the container solar system. Thus noise can also reach the base through its supply (conducted), not only through the air. The container battery ran flat on 2026-11-04 (dark 03:29–07:07). That restarted the base and its survey-in, so RTK coordinates recorded before that date (waypoints) can have an offset. The container shields the equipment itself, but not the cables that leave it: the PV string wiring to the ground mount can radiate the MPPT switching noise. If the cause is solar noise, the base is the more probable victim (it is closer than the rover). A base with bad observations still sends corrections every second, which agrees with the evidence.
 
 ### 2.3 Stationary rover against PV power (2026-11-07)
 
@@ -78,11 +78,15 @@ Second opinion: Grok session `01a1bd64-c194-7123-bf11-03ff1cd48f16` agreed with 
 Decisive test (Kevin runs it, clear day, near solar noon):
 
 1. Park the robot at the 2026-11-07 spot. Do not move it during the test.
-2. Find out where the base gets its power. If it comes from the inverter, the inverter must stay on during the test (step 3 keeps it on).
+2. The base gets its power from the container solar system, so the inverter must stay on during the test (step 3 keeps it on).
 3. Stop the PV input and keep the inverter on to supply the load from the battery. CAUTION: Do not open a DC disconnect under load unless it is load-break rated. A DC arc at string voltage does not stop like an AC arc. The safer sequence: disable PV charging in the inverter menu if it has that control. Or let the battery fill (PV then curtails to the load) and open a load-break-rated PV switch.
 4. Keep the PV input off for 20–30 minutes. Then turn it on again. Do the off-on cycle two times.
 5. Result: a fix within a few minutes of PV off, and float within about a minute of PV on, means PV noise. The sun's elevation and the temperature do not change that fast.
 6. If the rover stays float with PV off, restart the rover one time with PV still off (a filter can stay bad after the noise stops). If it is still float, move the base antenna off the roof or run the base on a battery away from the array for one midday hour. That separates roof multipath from inverter noise.
+
+Do not swap the base to a power bank as a first test (Grok session `01a1bd74-8f67-7620-b6d9-b728f30cdc6d`). The swap restarts the base and its survey-in. A boost converter at 5 V is not a quiet supply. A float result removes nothing, because the PV wiring still radiates. The PV-off test covers both the conducted and the radiated path, and the base stays powered.
+
+Recommended monitor (no new GNSS hardware): a listen-only tap on the base serial line, read by a small Wi-Fi board in the container, logged to the house MQTT broker beside `solar_assistant/inverter_1/pv_power/state`. It shows base restarts and survey-in, the RTCM byte rate (the 2026-11-08 gap), and, if the base sends MSM4 or MSM7 messages, the base's per-satellite signal strength. A second fixed rover is the other option. DFRobot sells the rover only in the full kit (KIT0198-US).
 
 The test is faster and more certain with per-satellite carrier-to-noise density (C/N0) in the log, which the rover driver does not read yet (GSV sentences, possibly in `get_all_gnss()`, register 91). With C/N0, compare the midday value with the value near sunset, and compare satellites near the sun with satellites far from it (solar radio noise).
 
