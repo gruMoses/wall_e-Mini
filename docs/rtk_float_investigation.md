@@ -44,6 +44,8 @@ The fix window follows sunset across the dates, not the clock time and not the G
 
 Interpretation: a cause that moves with the sun lowers the carrier-phase quality in daylight. Leading suspect: switching noise from the solar power system, radiated by the panel wiring, which stops when production stops. Grok (session `01a1bd0d-4321-7511-a27f-ffcb05efc136`) objects that the step from 43 % to 82 % at sunset is sharper than the fall of PV output, so heat or solar radio noise can also fit. Sampling bias is possible too: the robot is often stationary in the evening.
 
+Layout (Kevin, 2026-11-08): the base antenna is above the solar equipment. The inverter and charge equipment are in a steel shipping container (conex). The container shields the equipment itself, but not the cables that leave it: the PV string wiring and the AC runs can radiate the switching noise. If the cause is solar noise, the base is the more probable victim (it is closer than the rover). A base with bad observations still sends corrections every second, which agrees with the evidence. Panel location: not recorded yet.
+
 Decisive test (Kevin runs it, clear day, solar noon):
 
 1. Park the robot at a spot where it fixed near sunset.
