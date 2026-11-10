@@ -49,6 +49,7 @@ try:
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
     from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted
+    from pi_app.app.imu_stall import ImuStallMonitor, imu_status_text
     from pi_app.app.phone_override import fresh_override_bytes
     from pi_app.control.netting_mute import near_share, detection_drops_mute
     from config import config
@@ -82,6 +83,7 @@ except ModuleNotFoundError:
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
     from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted  # type: ignore
+    from pi_app.app.imu_stall import ImuStallMonitor, imu_status_text  # type: ignore
     from pi_app.app.phone_override import fresh_override_bytes  # type: ignore
     from pi_app.control.netting_mute import near_share, detection_drops_mute  # type: ignore
     from config import config  # type: ignore
@@ -541,6 +543,11 @@ def run() -> int:
         # so an NTP step cannot move it.
         last_imu_heading_deg = None
         last_imu_yaw_rate_dps = None
+        # IMU stall events for the JSON log (2026-11-06: 38.8 h of a dead
+        # IMU stream with no event). See pi_app/app/imu_stall.py.
+        imu_stall_mon = ImuStallMonitor(
+            event_s=float(getattr(_det_cfg_for_hang, "imu_stall_event_s", 5.0) or 5.0),
+        )
         if oak_reader is not None:
             try:
                 maybe_getter = getattr(oak_reader, "get_imu_metrics", None)
@@ -1016,13 +1023,22 @@ def run() -> int:
                 imu_dt_ms = int(round((imu_update_ts - prev_imu_ts) * 1000))
             prev_imu_ts = imu_update_ts
             # Suppress BT extrema debug output to keep CLI clean
-            # Prepare concise IMU info (heading → target)
-            if imu_status and imu_status.get('is_available'):
-                imu_info = f"IMU {imu_status['heading_deg']:.0f}°→{imu_status['target_heading_deg']:.0f}°"
-            elif imu_status:
-                imu_info = "IMU OFFLINE"
-            else:
-                imu_info = "IMU DISABLED"
+            # Prepare concise IMU info (heading → target), or the stale
+            # state: a dead IMU stream must not print a normal "IMU 0°→0°".
+            imu_info = imu_status_text(imu_status, oak_camera_health)
+            # IMU stall / watchdog restart / fault / recovery JSON events.
+            for _imu_ev in imu_stall_mon.update(time.monotonic(), oak_camera_health):
+                if log_fh is not None:
+                    try:
+                        log_fh.write(json.dumps({
+                            "type": "event",
+                            **_imu_ev,
+                            "is_armed": bool(cmd.is_armed),
+                            "ts": round(time.time(), 3),
+                        }) + "\n")
+                        log_fh.flush()
+                    except Exception:
+                        pass
 
             # Minimal console heartbeat with incoming RC info
             src = "BT" if bt_override is not None else "RC"

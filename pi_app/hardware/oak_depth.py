@@ -34,6 +34,9 @@ from config import ObstacleAvoidanceConfig, FollowMeConfig, GestureConfig, OakRe
 from pi_app.control.follow_me import PersonDetection
 from pi_app.control.gesture_control import HandData
 from pi_app.hardware.oak_imu_yaw_producer import ImuPacket, ImuYawProducer
+# OakImuReader's stale age, so health "imu_stale" means what the heading
+# reader means (oak_imu imports oak_depth only for type checking).
+from pi_app.hardware.oak_imu import _STALE_AGE_S as _IMU_STALE_AGE_S
 from pi_app.hardware.vio_track import VioTracker
 
 logger = logging.getLogger(__name__)
@@ -1833,6 +1836,8 @@ class OakDepthReader:
             color_stall_fault = bool(self._color_stall_fault)
             imu_stall_restarts = self._imu_stall_restart_count
             imu_stall_fault = bool(self._imu_stall_fault)
+            imu_watchdog = bool(self._imu_watchdog_enabled)
+            imu_sample_ts = self._imu_state.timestamp
             supervisor_ts = self._last_supervisor_ts
             thread = self._thread
             vision_iter_samples = list(self._vision_iter_samples)
@@ -1949,6 +1954,17 @@ class OakDepthReader:
             "color_stall_fault": color_stall_fault,
             "imu_stall_restarts": imu_stall_restarts,
             "imu_stall_fault": imu_stall_fault,
+            # Age of the newest IMU sample, the same age get_imu_data()
+            # hands OakImuReader; stale past its 0.5 s stale age (then the
+            # heading is frozen). None / True before the first sample. Not
+            # part of is_stale: that stays the vision health.
+            "imu_age_s": (
+                round(now - imu_sample_ts, 3) if imu_sample_ts else None
+            ),
+            "imu_stale": (
+                (not imu_sample_ts) or (now - imu_sample_ts) > _IMU_STALE_AGE_S
+            ),
+            "imu_watchdog": imu_watchdog,
             "vision_worker_age_s": (
                 round(worker_age_s, 3) if worker_age_s != float("inf") else None
             ),

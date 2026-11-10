@@ -1248,6 +1248,12 @@ class OakDetectionConfig:
     # is stale too, the whole device is stalled: that is the reconnect and
     # stale-depth path, not an IMU-only stall.
     imu_stall_depth_fresh_s: float = 1.5
+    # An IMU stale this long is an "oak_imu_stall" event in the JSON log
+    # (pi_app/app/imu_stall.py). Longer than every self-recovering drop of
+    # the 10-22..10-24 run (each under ~4.4 s, one every ~4.4 s for 40 h,
+    # which would otherwise write ~20,000 events a day), and half of
+    # imu_stall_restart_s, so the stall is marked before the restart.
+    imu_stall_event_s: float = 5.0
     # The IMU watchdog shares the colour watchdog's budget: at most
     # color_stall_max_restarts session restarts by EITHER watchdog inside
     # color_stall_window_s, so the two cannot multiply each other's

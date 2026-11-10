@@ -59,6 +59,12 @@ _DUPLICATE_RATE_FRESHNESS_S = 0.20
 _MAX_INTEGRATE_DT_S = 0.15
 # Treat device timestamps within this epsilon as identical.
 _TS_EPS_S = 1e-9
+# While a stale episode lasts, repeat the journal WARNING this often.
+_STALE_REMIND_S = 60.0
+# Log the end of a stale episode only when it lasted this long. The
+# reader logs no other end line, so before this the length of a drop was
+# never recorded.
+_STALE_RESUME_LOG_S = 2.0
 
 
 class OakImuReader:
@@ -174,8 +180,11 @@ class OakImuReader:
         self._count_producer_packets: int = 0
         self._count_generation_change: int = 0
         self._count_cum_reset: int = 0
-        # One WARNING per stale episode, not per read (30 Hz would flood).
+        # One WARNING per stale episode, not per read (30 Hz would flood),
+        # repeated every _STALE_REMIND_S while it lasts.
         self._stale_episode_logged: bool = False
+        self._stale_episode_start_s: float = 0.0
+        self._stale_last_log_s: float = 0.0
         self._last_zupt_active: bool = False
         self._last_stationary: bool = False
 
@@ -1129,16 +1138,36 @@ class OakImuReader:
             # cannot see. Log once per stale episode (WARNING — the app installs
             # no handler, so INFO would be dropped).
             self._last_yaw_rate_world_dps = 0.0
+            now = time.monotonic()
             if not self._stale_episode_logged:
                 self._stale_episode_logged = True
+                self._stale_episode_start_s = now
+                self._stale_last_log_s = now
                 logger.warning(
                     "OAK IMU samples stale (age=%.3fs > %.3fs): heading frozen, "
                     "yaw rate reported as 0 until samples resume",
                     age_s,
                     self._stale_age_s,
                 )
+            elif now - self._stale_last_log_s >= _STALE_REMIND_S:
+                # 2026-11-06: one line, then 38.8 h of silence. Keep shouting.
+                self._stale_last_log_s = now
+                logger.warning(
+                    "OAK IMU samples still stale after %.0f s (age=%.1fs): "
+                    "heading frozen, yaw rate reported as 0",
+                    now - self._stale_episode_start_s,
+                    age_s,
+                )
             self._blend_attitude(roll_acc, pitch_acc)
             return 0.0
+        if self._stale_episode_logged:
+            stale_for_s = time.monotonic() - self._stale_episode_start_s
+            # Only long episodes: short drops can come every few seconds
+            # (2026-10-22..24), and their onset line is already there.
+            if stale_for_s >= _STALE_RESUME_LOG_S:
+                logger.warning(
+                    "OAK IMU samples resumed after %.1f s stale", stale_for_s
+                )
         self._stale_episode_logged = False
 
         if self._last_cum_y is None or self._last_yaw_generation is None:
