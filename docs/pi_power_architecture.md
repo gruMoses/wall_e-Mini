@@ -221,6 +221,8 @@ Software consequences:
 2. Drain and charge control: measure the cell current with no input and the output off (microamperes are necessary, not milliamperes). Confirm that GPIO 16 holds the cells near 3.8 V through reboots and halts. Confirm a boot with the cells at about 3.3 V.
 3. Full load at 50 C to 55 C on the cells only (Pi 5, NVMe, and each device that the Pi feeds): `vcgencmd pmic_read_adc` shows `EXT5V_V` at 4.9 V or more and there is no undervoltage flag. Record the cell temperature during a charge.
 
+4. Hub power from the board (Kevin's idea, 2026-11-10). The X1202 has two USB Type-A sockets and two 2-pin connectors that are 5 V outputs ("two USB sockets for 5V power output"; no current rating is given). Its USB Type-C socket is an input only. Feed the hub's power input from one Type-A socket, and keep the Pi-to-hub data cable with its 5 V wire cut. Confirm: (a) the sockets go off when the board cuts the Pi's power after a halt, or the hub and the OAK drain the cells while the robot is parked; (b) the voltage at the hub stays at 4.9 V or more with the OAK streaming; (c) the total stays under the board's 5 A. If it passes, the hub's separate supply from the main pack can be removed, and the OAK stays powered during a halt, so the camera teardown is clean.
+
 Also check first: the mechanical stack (the X1202 goes under the Pi; find out where the NVMe board is), and the RTK fix quality with the board in operation.
 
 ### 7.3 If option F fails on the bench
