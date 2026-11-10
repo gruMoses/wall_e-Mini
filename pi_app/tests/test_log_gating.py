@@ -173,3 +173,29 @@ def test_cleanup_preserves_recent_bulk_logs(tmp_path):
 
     assert recent_arm.exists()
     assert recent_pid_csv.exists()
+
+
+# --- armed: an event is never lost to the 10 Hz gate -------------------------
+
+def test_armed_event_forces_write_inside_interval():
+    t = 100.0
+    last_log_ts = t - (LOG_INTERVAL_S / 4.0)  # gate alone would skip
+    assert _tick(True, t, last_log_ts) is False
+    assert _tick(True, t, last_log_ts, has_event=True) is True
+
+
+def test_armed_30hz_loop_every_event_tick_is_written():
+    # 30 Hz ticks, one event on tick 7 (not a 10 Hz boundary): it must be
+    # written, and quiet ticks keep the 10 Hz cadence.
+    last_log_ts = 0.0
+    written = []
+    for i in range(1, 61):
+        now = i / 30.0
+        ev = i == 7
+        if _tick(True, now, last_log_ts, has_event=ev):
+            written.append(i)
+            last_log_ts = now
+        elif ev:
+            raise AssertionError("event tick was not written")
+    assert 7 in written
+    assert len(written) <= 24  # ~20 interval lines + event, not 60

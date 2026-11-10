@@ -25,9 +25,11 @@ def should_log_tick(
 ) -> bool:
     """Decide whether the main loop should write a telemetry line this tick.
 
-    Armed: full-rate gate only (``log_interval_s``, historically 10 Hz) --
-    unchanged from the original always-on behavior, so armed-state logs stay
-    identical in content and cadence to before this change.
+    Armed: full-rate gate (``log_interval_s``, historically 10 Hz), plus any
+    tick with a non-empty ``events`` list always logs (2026-11-10: events on
+    gated-out ticks were lost). Worst case is one line per control tick (~30 Hz)
+    if events fired every tick; they are edge-triggered, so in practice a few
+    extra lines per session.
 
     Disarmed: low-rate heartbeat gate (``heartbeat_s``) so idle telemetry
     doesn't flood the disk, UNLESS this tick carries a meaningful event --
@@ -36,6 +38,11 @@ def should_log_tick(
     immediately regardless of heartbeat timing.
     """
     if is_armed:
+        # An event is edge-triggered and lives in this tick's ``events`` list
+        # only; the next tick starts empty. A tick that the 10 Hz gate skips
+        # would lose it (ARMED, FOLLOW_ME_ENTERED/EXITED), so it forces a line.
+        if has_event:
+            return True
         return (now_ts - last_log_ts) >= log_interval_s
     if has_event or charger_inhibit_changed or emergency_active or mode_changed:
         return True
