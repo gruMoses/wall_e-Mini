@@ -532,11 +532,11 @@ _NAV_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="setting-group">
         <label>Cruise Speed <span class="setting-val" id="speedVal">@@CRUISE_SPEED@@</span></label>
-        <input type="range" id="speedSlider" min="10" max="80" value="@@CRUISE_SPEED@@" oninput="document.getElementById('speedVal').textContent=this.value; refreshRouteSummary()">
+        <input type="range" id="speedSlider" min="@@SPEED_MIN@@" max="@@SPEED_MAX@@" value="@@CRUISE_SPEED@@" oninput="document.getElementById('speedVal').textContent=this.value; refreshRouteSummary()">
       </div>
       <div class="setting-group">
         <label>Arrival Radius <span class="setting-val" id="radiusVal">@@ARRIVAL_RADIUS@@ m</span></label>
-        <input type="range" id="radiusSlider" min="0.3" max="3.0" step="0.1" value="@@ARRIVAL_RADIUS@@" oninput="document.getElementById('radiusVal').textContent=parseFloat(this.value).toFixed(1)+' m'">
+        <input type="range" id="radiusSlider" min="@@RADIUS_MIN@@" max="@@RADIUS_MAX@@" step="0.1" value="@@ARRIVAL_RADIUS@@" oninput="document.getElementById('radiusVal').textContent=parseFloat(this.value).toFixed(1)+' m'">
       </div>
     </div>
   </div>
@@ -2387,9 +2387,87 @@ initMap();
 </html>"""
 
 
-# Slider limits in _NAV_HTML (speedSlider / radiusSlider min and max). Keep in sync.
+# The ONE definition of the cruise-speed and arrival-radius limits. The page
+# takes the slider min/max from these (placeholders in _NAV_HTML, filled by
+# _render_nav_html) and /api/nav/start and /api/nav/go clamp to them, so the
+# server never accepts a value the sliders cannot offer.
 _SPEED_SLIDER_RANGE = (10, 80)
 _RADIUS_SLIDER_RANGE = (0.3, 3.0)
+
+
+def _parse_nav_params(data):
+    """Validate the client's ``cruise_speed`` / ``arrival_radius``.
+
+    Returns ``(speed_byte, radius_m, error)``. A missing key yields ``None``
+    for that value (the caller keeps the config default, unchanged). A present
+    value must be a finite number: a speed of 0 or less (0 asks for no motion,
+    a negative value reverses) or a radius of 0 or less is refused, and
+    anything else is clamped to the slider range. A request for speed 0 is
+    refused, not raised to the slider minimum: the robot must not move when
+    the client asked for no motion. ``error`` is a message for an HTTP 400,
+    or ``None``.
+    """
+    if not isinstance(data, dict):
+        return None, None, "the request body must be a JSON object"
+
+    def _num(key):
+        v = data.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            return None, f"{key} must be a finite number"
+        return float(v), None
+
+    speed = radius = None
+    if data.get("cruise_speed") is not None:
+        v, err = _num("cruise_speed")
+        if err:
+            return None, None, err
+        if v <= 0:
+            return None, None, "cruise_speed must be positive"
+        lo, hi = _SPEED_SLIDER_RANGE
+        speed = int(min(hi, max(lo, v)))
+    if data.get("arrival_radius") is not None:
+        v, err = _num("arrival_radius")
+        if err:
+            return None, None, err
+        if v <= 0:
+            return None, None, "arrival_radius must be positive"
+        lo, hi = _RADIUS_SLIDER_RANGE
+        radius = min(hi, max(lo, v))
+    return speed, radius, None
+
+
+def _start_mission(controller, nav, waypoints, cruise_speed, arrival_radius):
+    """Install a mission and enter WAYPOINT_NAV. Returns a block reason or None.
+
+    The order matters. The activation gate is checked BEFORE anything is
+    written, so a refused request leaves a running mission, its route and its
+    speed exactly as they were. Before 2026-11-10 the route was replaced
+    first, so a request that came back 409 had already retargeted a live
+    mission.
+
+    If the gate closes between that check and the activation, or anything
+    raises, the whole mission state (route, progress, speed, radius) is put
+    back from a snapshot, so that request also changes nothing. The mode is
+    not touched here: ``activate_waypoint_nav`` sets it only on success.
+    A control tick that lands between the write and the restore can see the
+    new route for that one tick; the web thread and the control loop share
+    the navigator without a lock (as before this change).
+    """
+    blocked = controller.waypoint_nav_activation_blocked()
+    if blocked is not None:
+        return blocked
+    snapshot = nav.snapshot_mission()
+    try:
+        nav._cfg.cruise_speed_byte = int(cruise_speed)
+        nav._cfg.arrival_radius_m = float(arrival_radius)
+        nav.set_waypoints(waypoints)
+        blocked = controller.activate_waypoint_nav()
+    except Exception:
+        nav.restore_mission(snapshot)
+        raise
+    if blocked is not None:
+        nav.restore_mission(snapshot)
+    return blocked
 
 
 def _render_nav_html() -> str:
@@ -2410,6 +2488,10 @@ def _render_nav_html() -> str:
         _NAV_HTML
         .replace("@@CRUISE_SPEED@@", str(speed))
         .replace("@@ARRIVAL_RADIUS@@", f"{radius:.1f}")
+        .replace("@@SPEED_MIN@@", str(lo_s))
+        .replace("@@SPEED_MAX@@", str(hi_s))
+        .replace("@@RADIUS_MIN@@", str(lo_r))
+        .replace("@@RADIUS_MAX@@", str(hi_r))
     )
 
 
@@ -2530,10 +2612,17 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
         if _teleop_estopped():
             return _json_resp({"ok": False, "error": "teleop session e-stop latched"}, 409)
 
-        data = request.get_json(force=True)
+        data = request.get_json(force=True) or {}
+        cruise_speed, arrival_radius, param_err = _parse_nav_params(data)
+        if param_err:
+            return _json_resp({"ok": False, "error": param_err}, 400)
         wp_list = data.get("waypoints", [])
-        cruise_speed = data.get("cruise_speed", config.waypoint_nav.cruise_speed_byte)
-        arrival_radius = data.get("arrival_radius", config.waypoint_nav.arrival_radius_m)
+        if not isinstance(wp_list, list):
+            return _json_resp({"ok": False, "error": "waypoints must be a list"}, 400)
+        if cruise_speed is None:
+            cruise_speed = config.waypoint_nav.cruise_speed_byte
+        if arrival_radius is None:
+            arrival_radius = config.waypoint_nav.arrival_radius_m
 
         if len(wp_list) < 1:
             return _json_resp({"ok": False, "error": "need at least 1 waypoint"}, 400)
@@ -2562,10 +2651,9 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
             if nav is None:
                 return _json_resp({"ok": False, "error": "waypoint nav not initialized"}, 503)
 
-            nav._cfg.cruise_speed_byte = int(cruise_speed)
-            nav._cfg.arrival_radius_m = float(arrival_radius)
-            nav.set_waypoints(gps_waypoints)
-            block_reason = controller.activate_waypoint_nav()
+            block_reason = _start_mission(
+                controller, nav, gps_waypoints, cruise_speed, arrival_radius
+            )
             if block_reason is not None:
                 return _json_resp({
                     "ok": False,
@@ -2690,8 +2778,13 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
             return _json_resp({"ok": False, "error": "teleop session e-stop latched"}, 409)
 
         data = request.get_json(force=True) or {}
-        cruise_speed = int(data.get("cruise_speed", config.waypoint_nav.cruise_speed_byte))
-        arrival_radius = float(data.get("arrival_radius", config.waypoint_nav.arrival_radius_m))
+        cruise_speed, arrival_radius, param_err = _parse_nav_params(data)
+        if param_err:
+            return _json_resp({"ok": False, "error": param_err}, 400)
+        if cruise_speed is None:
+            cruise_speed = int(config.waypoint_nav.cruise_speed_byte)
+        if arrival_radius is None:
+            arrival_radius = float(config.waypoint_nav.arrival_radius_m)
 
         _DIRECTION_BEARING = {
             "north":     0.0,
@@ -2746,10 +2839,13 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
             if nav is None:
                 return _json_resp({"ok": False, "error": "waypoint nav not initialized"}, 503)
 
-            nav._cfg.cruise_speed_byte = cruise_speed
-            nav._cfg.arrival_radius_m = arrival_radius
-            nav.set_waypoints([Waypoint(lat=target_lat, lon=target_lon, name="GO")])
-            block_reason = controller.activate_waypoint_nav()
+            block_reason = _start_mission(
+                controller,
+                nav,
+                [Waypoint(lat=target_lat, lon=target_lon, name="GO")],
+                cruise_speed,
+                arrival_radius,
+            )
             if block_reason is not None:
                 return _json_resp({
                     "ok": False,

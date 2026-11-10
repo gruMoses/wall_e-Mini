@@ -200,6 +200,36 @@ class WaypointNavController:
         self._completed = False
         self._state = NavState.IDLE
 
+    def snapshot_mission(self) -> tuple:
+        """Return everything a start request changes, for ``restore_mission``.
+
+        A start request writes the cruise speed, the arrival radius and the
+        route (``set_waypoints`` also resets the progress). If the request is
+        then refused, the caller puts this snapshot back so that a refused
+        request changes nothing, also for a mission that is running.
+        If you add mission state to this class, add it here too.
+        """
+        return (
+            list(self._waypoints),
+            self._index,
+            self._completed,
+            self._state,
+            self._cfg.cruise_speed_byte,
+            self._cfg.arrival_radius_m,
+        )
+
+    def restore_mission(self, snapshot: tuple) -> None:
+        """Put back a ``snapshot_mission`` result."""
+        (
+            waypoints,
+            self._index,
+            self._completed,
+            self._state,
+            self._cfg.cruise_speed_byte,
+            self._cfg.arrival_radius_m,
+        ) = snapshot
+        self._waypoints = list(waypoints)
+
     def compute(
         self,
         lat: float,
