@@ -137,7 +137,9 @@ These paths did not run. The 55 armed logs on the robot have 3,309 ticks with `p
 - GPS odometry gets a new position one time each second and holds it between fixes. It accepts each fix of quality 1 or better. A change of fix quality moved the position 1.3 to 2.1 m while the robot was parked.
 - Camera odometry (VIO) is in no drive log, because `OakDetectionConfig.vio_enabled` is False. The probe files of 2026-11-06 are on the robot (`logs/vio_probe_20261106_*.csv`).
 
-### 8.4 Recommendation (Kevin has not decided)
+### 8.4 Recommendation (APPLIED 2026-11-10)
+
+APPLIED 2026-11-10: Kevin said "Yes, turn it off". `FollowMeConfig.trail_follow_enabled` is False in `config.py`. Checks before the push: the full test suite gave the same result as before (1,880 passed, and the one known failure on the Mac for `flask-sock`); a replay of 2,309 real follow-me frames from three drives gave the same motor bytes with the switch on and off; Grok reviewed the diff (session `01a1c719-b3ab-7b62-a30f-534496344ff6`: safe, no item to correct). Grok's notes: if the person was near the centre of the frame when the target was lost (`|_last_target_x|` 0.05 or less), the robot stays still for the 3 s instead of a pivot; the status shows `SEARCH_ROTATE` during that time. The repair of `GpsOdometry` stays open. The text of the recommendation follows.
 
 Set `trail_follow_enabled` to False until `GpsOdometry` is repaired, has tests, and has a field test. With the switch off, the trail and the two odometry objects are not made. FOLLOW_ME then uses direct pursuit, which is the only mode in the logs. A lost target then gives a pivot with zero forward motion toward the last camera position of the person, until 3 s after the last valid detection, then a stop.
 

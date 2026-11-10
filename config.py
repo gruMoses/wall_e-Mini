@@ -770,7 +770,20 @@ class FollowMeConfig:
     lost_steer_bias_gain: float = 3.0
 
     # Trail-following Pure Pursuit (breadcrumb path instead of direct pursuit)
-    trail_follow_enabled: bool = True
+    # OFF since 2026-11-10 (Kevin's decision). GpsOdometry keeps a math-angle
+    # heading, but its camera_to_world and PurePursuitController use the
+    # clockwise dead-reckoning frame, so trail pursuit steers the wrong way
+    # after a pivot. Its heading is also the boot-relative gyro, not true
+    # north (docs/status_audit_2026-11-10.md, section 8). GPS odometry is
+    # selected whenever the GPS has a fix, so this hit trail pursuit beyond
+    # 5.2 m, blind trail pursuit after a lost target, and the search-pivot
+    # direction. None of those ran in any armed log up to 2026-11-08.
+    # With False, the trail, both odometry objects and pure pursuit are not
+    # built: FOLLOW_ME is direct pursuit only, and a lost target gets the
+    # zero-forward search pivot toward the last camera position, then a stop.
+    # Do NOT set True again before GpsOdometry is repaired, has frame tests,
+    # and has a field test.
+    trail_follow_enabled: bool = False
     trail_speed_scale_mps_per_byte: float = 0.0100  # 0.0075 calibrated on gravel via RTK GPS at max_erpm 15000 (2026-03-28), scaled 4/3 for 20000 on 2026-09-19 — re-calibrate
     trail_max_points: int = 100
     trail_min_spacing_m: float = 0.3
