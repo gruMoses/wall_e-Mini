@@ -987,6 +987,22 @@ class WaypointNavConfig:
     pivot_yaw_min: float = 0.18            # floor so the tracks keep moving near the window
     pivot_full_error_deg: float = 90.0     # error at which the pivot reaches pivot_yaw_cmd
     motor_deadband_byte: int = 12          # minimum byte offset to overcome motor deadband
+    # Heading guard (2026-11-10 status audit, item 3). A run whose heading
+    # is older than this leaves WAYPOINT_NAV, and activation is refused.
+    # Age = time since the compensator's last good IMU read plus the age of
+    # the sample that read returned. 0.5 s matches OakImuReader's
+    # _STALE_AGE_S: past it the reader freezes the heading, so a pivot
+    # would turn with an unchanged heading error.
+    heading_stale_s: float = 0.5
+    # ALIGN (pivot in place) gives up after this long in one ALIGN episode
+    # and leaves WAYPOINT_NAV. From the pivot rates: the field pivot was
+    # ~74 deg/s at yaw 0.5, so ~52 deg/s at pivot_yaw_cmd 0.35 and ~27 deg/s
+    # at the pivot_yaw_min 0.18 floor. The worst case, 180 deg, is ~1.7 s
+    # (180->90 at full pivot) + ~1.2 s (proportional, 90->46 deg) + ~1.3 s
+    # (floor, 46->12 deg) = ~4.1 s. 10 s is ~2.4x that, and still covers a
+    # pivot at half those rates on grass (~8.2 s). Time paused for stale or
+    # untrusted GPS inside ALIGN counts too.
+    align_timeout_s: float = 10.0
 
 
 @dataclass(frozen=True)

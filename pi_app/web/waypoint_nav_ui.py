@@ -2533,6 +2533,20 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
                 "before starting waypoint navigation"
             ),
             "waypoint_nav_unavailable": "Waypoint navigation is not available",
+            # Refusals added with the heading guard (2026-11-10).
+            "gps_state_unknown": (
+                "No GPS reading yet — wait for the GPS before starting "
+                "waypoint navigation"
+            ),
+            "gps_stale": "The GPS reading is too old — check the GPS and try again",
+            "heading_unavailable": (
+                "No heading source — the camera IMU is not available, so "
+                "waypoint navigation cannot start"
+            ),
+            "heading_stale": (
+                "The heading is not updating — the camera IMU is stale, so "
+                "waypoint navigation cannot start"
+            ),
         }
         return messages.get(reason, reason)
 

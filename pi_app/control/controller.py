@@ -194,6 +194,11 @@ class Controller:
         self._straight_latched = False
         self._imu_frame_check_ts: float = 0.0
         self._imu_frame_marker: Optional[tuple[int, int]] = None
+        # WAYPOINT_NAV ALIGN timeout: monotonic start of the current ALIGN
+        # episode and the waypoint index it belongs to (None outside ALIGN).
+        # Compared against process()'s mono_now, so no time.monotonic() here.
+        self._wp_align_since: Optional[float] = None
+        self._wp_align_index: Optional[int] = None
         self._straight_disengage_deadline = 0.0
 
         # Obstacle avoidance, Follow Me, Waypoint Nav, and Gesture control
@@ -752,21 +757,61 @@ class Controller:
     def in_calibration_mode(self) -> bool:
         return self._calibration_mode
 
-    def waypoint_nav_activation_blocked(self) -> Optional[str]:
-        """Return a machine-readable reason if waypoint nav must not start."""
-        nav = self._waypoint_nav
-        gps = self._gps_reading
-        if nav is not None and gps is not None and not nav.accepts_fix_quality(gps.fix_quality):
-            return "gps_quality_not_trusted"
+    def _waypoint_heading_problem(self, mono_now: float) -> Optional[str]:
+        """Why the waypoint heading cannot be trusted now, or None.
 
+        Shared by activation and by the in-run guard. ``heading_unavailable``:
+        alignment is required but there is no IMU compensator.
+        ``heading_alignment_not_locked``: the GPS heading lock is required and
+        absent (never locked, or dropped by _check_imu_frame_continuity).
+        ``heading_stale``: the compensator's heading is older than
+        ``waypoint_nav.heading_stale_s``, or its age is unknown (fail closed).
+        """
         aligner = self._gps_heading_aligner
-        if aligner is None or not aligner.enabled:
-            return None
-        if self._imu_compensator is None or gps is None:
-            return None
-        if aligner.locked:
-            return None
-        return "heading_alignment_not_locked"
+        needs_lock = aligner is not None and bool(aligner.enabled)
+        imu = self._imu_compensator
+        if imu is None:
+            return "heading_unavailable" if needs_lock else None
+        if needs_lock and not aligner.locked:
+            return "heading_alignment_not_locked"
+        limit = float(getattr(config.waypoint_nav, "heading_stale_s", 0.5))
+        age_fn = getattr(imu, "heading_age_s", None)
+        if not callable(age_fn):
+            return "heading_stale"
+        try:
+            age = float(age_fn(mono_now))
+        except Exception:
+            return "heading_stale"
+        if not math.isfinite(age) or age < 0.0 or age > limit:
+            return "heading_stale"
+        return None
+
+    def waypoint_nav_activation_blocked(self) -> Optional[str]:
+        """Return a machine-readable reason if waypoint nav must not start.
+
+        Refused, not skipped, when the GPS state is unknown (2026-11-10): no
+        reading yet (for example right after a restart) or a reading older
+        than the nav's stale timeout. Then the fix quality must be trusted
+        (exactly RTK fixed, quality 4, by default) and the heading reference
+        valid (_waypoint_heading_problem).
+        """
+        nav = self._waypoint_nav
+        if nav is None:
+            return "waypoint_nav_unavailable"
+        gps = self._gps_reading
+        if gps is None:
+            return "gps_state_unknown"
+        now = time.monotonic()
+        stale_s = float(getattr(getattr(nav, "_cfg", None), "stale_timeout_s", 3.0))
+        try:
+            gps_age = now - float(gps.timestamp)
+        except (TypeError, ValueError):
+            return "gps_stale"
+        if not math.isfinite(gps_age) or gps_age < 0.0 or gps_age > stale_s:
+            return "gps_stale"
+        if not nav.accepts_fix_quality(gps.fix_quality):
+            return "gps_quality_not_trusted"
+        return self._waypoint_heading_problem(now)
 
     def activate_waypoint_nav(self) -> Optional[str]:
         """Enter WAYPOINT_NAV mode (call from UI / CLI).
@@ -777,9 +822,68 @@ class Controller:
         if blocked is not None:
             return blocked
         if self._waypoint_nav is not None and not self._waypoint_nav.completed:
+            self._wp_align_since = None
+            self._wp_align_index = None
             self._mode = "WAYPOINT_NAV"
             return None
         return "waypoint_nav_unavailable"
+
+    def _leave_waypoint_nav_if_unsafe(self, telemetry: dict, mono_now: float) -> None:
+        """Drop WAYPOINT_NAV on this tick when the run cannot continue safely.
+
+        Checked every tick before any command is computed (the activation
+        checks alone did not cover a run in progress):
+        ``heading_lock_lost`` (the GPS heading lock dropped mid-run, e.g. an
+        OAK reconnect made _check_imu_frame_continuity reset the offset),
+        ``heading_unavailable`` / ``heading_stale`` (no fresh heading), and
+        ``align_timeout`` (one ALIGN episode lasted longer than
+        ``waypoint_nav.align_timeout_s``).
+
+        Same exit as the other WAYPOINT_NAV exits (completion, stop, disarm)
+        and as the follow-me vision-stale exit: mode MANUAL, so this tick's
+        target is the sticks and the slew limiter ramps to it at the MANUAL
+        rates. The slew is NOT bypassed. The route and index are kept, like
+        the other exits; a new start goes through activation again.
+        """
+        if self._mode != "WAYPOINT_NAV":
+            self._wp_align_since = None
+            self._wp_align_index = None
+            return
+        reason = self._waypoint_heading_problem(mono_now)
+        if reason == "heading_alignment_not_locked":
+            reason = "heading_lock_lost"
+        if reason is None and self._wp_align_since is not None:
+            timeout_s = float(getattr(config.waypoint_nav, "align_timeout_s", 10.0))
+            if timeout_s > 0.0 and (mono_now - self._wp_align_since) > timeout_s:
+                reason = "align_timeout"
+        if reason is None:
+            return
+        align_s = (
+            mono_now - self._wp_align_since if self._wp_align_since is not None else None
+        )
+        self._mode = "MANUAL"
+        self._wp_align_since = None
+        self._wp_align_index = None
+        telemetry["waypoint_nav_exit_reason"] = reason
+        _logger.warning(
+            "WAYPOINT_NAV stopped: %s%s; the sticks have control",
+            reason,
+            f" (ALIGN for {align_s:.1f} s)" if reason == "align_timeout" and align_s is not None else "",
+        )
+
+    def _track_waypoint_align(self, nav_state_value: str, wp_index: int, mono_now: float) -> None:
+        """Start, keep, or clear the ALIGN episode timer from this tick's state.
+
+        A new episode starts on entry to ALIGN and on a new waypoint index
+        (an intermediate arrival goes straight to ALIGN for the next one).
+        """
+        if nav_state_value != NavState.ALIGN.value:
+            self._wp_align_since = None
+            self._wp_align_index = None
+            return
+        if self._wp_align_since is None or self._wp_align_index != wp_index:
+            self._wp_align_since = mono_now
+            self._wp_align_index = wp_index
 
     def deactivate_waypoint_nav(self) -> None:
         """Return to MANUAL mode from waypoint nav."""
@@ -922,7 +1026,9 @@ class Controller:
             return float(slewc.waypoint_nav_accel_bps), float(slewc.waypoint_nav_decel_bps)
         return float(slewc.manual_accel_bps), float(slewc.manual_decel_bps)
 
-    def _compute_waypoint_autonomy_command(self, telemetry: dict) -> tuple[AutonomyCommand, bool, bool]:
+    def _compute_waypoint_autonomy_command(
+        self, telemetry: dict, mono_now: float
+    ) -> tuple[AutonomyCommand, bool, bool]:
         left = right = self.NEUTRAL
         wp_pivot_active = False
         wp_in_align = False
@@ -973,6 +1079,7 @@ class Controller:
                 wp_pivot_active = True
 
         nav_st = self._waypoint_nav.get_status()
+        self._track_waypoint_align(nav_st.state, nav_st.waypoint_index, mono_now)
         telemetry["wp_index"] = nav_st.waypoint_index
         telemetry["wp_total"] = nav_st.waypoint_total
         telemetry["wp_name"] = nav_st.waypoint_name
@@ -1873,6 +1980,9 @@ class Controller:
         # Stale vision leaves FOLLOW_ME before any command is computed, so
         # this tick takes the MANUAL (stick) path.
         self._leave_follow_me_if_vision_stale(telemetry, mono_now)
+        # Same for WAYPOINT_NAV when its heading reference is lost or stale,
+        # or ALIGN has run too long (2026-11-10 status audit, item 3).
+        self._leave_waypoint_nav_if_unsafe(telemetry, mono_now)
 
         # Command computation
         telemetry["mode"] = self._mode
@@ -1895,7 +2005,7 @@ class Controller:
         # Linear RC stick bytes (before expo); None outside RC tank drive.
         rc_stick_linear: tuple[int, int] | None = None
         if self._mode == "WAYPOINT_NAV" and self._waypoint_nav is not None:
-            autonomy_cmd, wp_pivot_active, wp_in_align = self._compute_waypoint_autonomy_command(telemetry)
+            autonomy_cmd, wp_pivot_active, wp_in_align = self._compute_waypoint_autonomy_command(telemetry, mono_now)
             left = autonomy_cmd.left_byte
             right = autonomy_cmd.right_byte
             steering_input = autonomy_cmd.steering_input

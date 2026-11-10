@@ -43,6 +43,10 @@ class FakeImu:
     def get_heading_deg(self):
         return self._heading
 
+    def heading_age_s(self, now_s=None):
+        # Fresh heading (the WAYPOINT_NAV heading guard reads this).
+        return 0.0
+
     def get_status(self):
         return MagicMock(heading_deg=self._heading, yaw_rate_dps=0.0)
 
@@ -285,14 +289,18 @@ class TestWaypointNavActivationGate(unittest.TestCase):
         self.assertEqual(ctrl.activate_waypoint_nav(), "gps_quality_not_trusted")
         self.assertEqual(ctrl._mode, "MANUAL")
 
-    def test_allows_when_gps_stack_absent(self):
+    def test_refuses_when_gps_state_unknown(self):
+        # 2026-11-10: was test_allows_when_gps_stack_absent. With no GPS
+        # reading (e.g. right after a restart) the fix-quality and lock
+        # checks used to be skipped and activation allowed. Now refused.
         aligner = GpsHeadingAligner(GpsHeadingAlignConfig(enabled=True))
         ctrl = _make_controller(
             aligner=aligner,
             imu=None,
             waypoint_nav=self._nav(),
         )
-        self.assertIsNone(ctrl.activate_waypoint_nav())
+        self.assertEqual(ctrl.activate_waypoint_nav(), "gps_state_unknown")
+        self.assertEqual(ctrl._mode, "MANUAL")
 
 
 class TestHeadingAlignTelemetry(unittest.TestCase):

@@ -8,6 +8,7 @@ This module implements a PID controller that uses IMU data to:
 """
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
@@ -141,6 +142,10 @@ class ImuSteeringCompensator:
         # "IMU steering enabled" is never printed over a dead IMU.
         self.init_error: Optional[str] = None
         self._last_recovery_attempt_s: Optional[float] = None
+        # Age of the IMU sample returned by the last good read (the reader's
+        # 'sample_age_s'; OakImuReader reports it). None when the reader does
+        # not report one. Read by heading_age_s().
+        self._last_sample_age_s: Optional[float] = None
 
         # Initialize IMU if provided
         if self.imu_reader is not None:
@@ -174,6 +179,7 @@ class ImuSteeringCompensator:
                 self.state.is_calibrated = True
                 self.state.is_available = True
                 self.state.last_update_time = time.monotonic()
+                self._note_sample_age(data)
                 self.init_error = None
 
         except Exception as exc:
@@ -210,6 +216,7 @@ class ImuSteeringCompensator:
                 self.state.is_available = True
                 self.state.error_count = 0
                 self.state.last_update_time = now
+                self._note_sample_age(data)
             self.init_error = None
             logger.warning("IMU steering recovered: reads are succeeding again")
             return True
@@ -250,6 +257,7 @@ class ImuSteeringCompensator:
                     self.state.roll_deg = data['roll_deg']
                     self.state.pitch_deg = data['pitch_deg']
                     self.state.last_update_time = time.monotonic()
+                    self._note_sample_age(data)
                     # Reset error counter after a successful read
                     self.state.error_count = 0
             
@@ -402,6 +410,38 @@ class ImuSteeringCompensator:
                 saturated=self._last_saturated,
             )
     
+    def _note_sample_age(self, data) -> None:
+        """Remember the sample age the reader reported with this read."""
+        age = data.get("sample_age_s") if isinstance(data, dict) else None
+        if isinstance(age, bool) or not isinstance(age, (int, float)):
+            self._last_sample_age_s = None
+        else:
+            self._last_sample_age_s = float(age)
+
+    def heading_age_s(self, now_s: Optional[float] = None) -> float:
+        """How old the heading is, in seconds, on the monotonic clock.
+
+        Time since the last good IMU read plus the age of the sample that
+        read returned (when the reader reports one). ``inf`` when the IMU
+        is not available, was never read, or any part is negative or not
+        finite. Read by the WAYPOINT_NAV heading guard in the controller.
+        """
+        now = time.monotonic() if now_s is None else float(now_s)
+        with self.lock:
+            available = bool(self.state.is_available)
+            last = float(self.state.last_update_time)
+            sample_age = self._last_sample_age_s
+        if not available or last <= 0.0:
+            return float("inf")
+        age = now - last
+        if sample_age is not None:
+            age += sample_age
+            if not math.isfinite(sample_age) or sample_age < 0.0:
+                return float("inf")
+        if not math.isfinite(age) or age < 0.0:
+            return float("inf")
+        return age
+
     def get_heading_deg(self) -> float:
         """Read IMU and return current heading without running PID.
 
@@ -425,6 +465,7 @@ class ImuSteeringCompensator:
                     self.state.roll_deg = data.get('roll_deg', self.state.roll_deg)
                     self.state.pitch_deg = data.get('pitch_deg', self.state.pitch_deg)
                     self.state.last_update_time = time.monotonic()
+                    self._note_sample_age(data)
                     self.state.error_count = 0
             except Exception:
                 self.state.error_count += 1
