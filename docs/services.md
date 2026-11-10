@@ -11,7 +11,7 @@ This project is commonly run through systemd services on the Pi.
   Refer to "Phone Command File and Bluetooth SPP" below.
 - `walle-ups.service`: UPS watcher for the Waveshare UPS HAT (B). It runs as
   root (`bin/walle_ups.py run`). It halts the Pi when mains has been absent for
-  5 seconds. Before the halt, it arms the RTC alarm, so the Pi wakes to check
+  5 seconds. A sample counts as absent only while the pack discharges and reads below the supply setpoint minus 0.30 V (7.20 V), so a pack above that line holds the Pi up first. Before the halt, it arms the RTC alarm, so the Pi wakes to check
   the mains again.
 - `walle-ups-wakecheck.service`: early-boot oneshot. It powers the Pi off
   again if mains is still absent.

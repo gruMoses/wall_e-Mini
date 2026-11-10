@@ -34,7 +34,7 @@ before the robot is used, or the Pi stays off.
 
 | Option | Storage drain | Hold-up | Catch |
 |---|---|---|---|
-| A. Gated tap on the main pack (recommended) | Converter off-current plus BMS: about a year on 20 Ah | The main pack | Needs a 75 to 100 V module and a hardware force-off timer (section 4) |
+| A. Gated tap on the main pack (recommended) | Converter off-current plus BMS: about a year on 20 Ah (CORRECTION: the pack is 7 Ah, refer to `docs/battery_settings.md`; the storage times here are about one third as long.) | The main pack | Needs a 75 to 100 V module and a hardware force-off timer (section 4) |
 | B. Witty Pi 5 on the switched rail plus supercaps | None from the pack | About 20 s of supercap at 15 W | Under the 30 s stop cap; supercap ESR is worse in the cold; timer-based cut |
 | C. Latch circuit plus a small buffer | Zero after the latch opens | The buffer | DIY; output capacitance can re-latch it |
 | D. Today: HAT (B) plus RTC polling | Hours to days of polling | 2S 18650 | Drains in storage; cannot cut its output |
@@ -133,7 +133,7 @@ not measured. Do not use these numbers to size a converter.
 
 Storage estimate (agent, 20 Ah pack at 50 percent, BMS asleep 0.5 mA, cell
 leakage about 2 percent a month): about 8 months with the converter idling,
-about 12 months with it off. A Daly BMS sleeps only after 3600 s idle.
+about 12 months with it off. (CORRECTION: the pack is 7 Ah, refer to `docs/battery_settings.md`; the storage times here are about one third as long.) A Daly BMS sleeps only after 3600 s idle.
 
 ## 5. Recommendation
 

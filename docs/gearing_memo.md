@@ -1,5 +1,7 @@
 # Drivetrain Gearing Analysis — Follow-Me Jerkiness
 
+NOTE 2026-11-10: this memo uses older numbers (40 kg, `max_erpm` 15000, a 39 V cutoff). The robot now has `max_erpm` 20000 and weighs about 70 kg (not verified).
+
 > Note (2026-11-03): `max_erpm` is 20000 since 2026-09-19 (1.6 m/s top speed in
 > every mode). The figures below were computed with the 15000 ceiling of the
 > time and are kept as written.

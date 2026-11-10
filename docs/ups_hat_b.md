@@ -49,7 +49,7 @@ The charge limit is the buck setpoint. There is no code for it.
   Kevin, 2026-11-04, after first choosing 7.6 V). Use a supply with a
   current limit (CC/CV), 2 A or more. Do not go below 7.2 V.
 - The balancers only work near 4.2 V per cell. Every few months, set the
-  buck to 8.4 V for a few hours, let the current taper, then return to 7.6 V.
+  buck to 8.4 V for a few hours, let the current taper, then return to 7.5 V.
 - Tell the watcher the setpoint: `--supply-v` in `bin/walle-ups.service` and
   `bin/walle-ups-wakecheck.service` (7.5 with the robot supply, 8.4 on the
   bench brick). Then run the install script (section 6). The loss rules
@@ -112,8 +112,8 @@ The halt:
    `critical` or `simulated`);
 2. sends SIGKILL to `wall-e.service` and stops it (its camera teardown can
    take 90 s, and the RTC alarm must not fire during the shutdown);
-3. arms the RTC alarm and checks the read-back: `+90 s`, `+600 s` after a
-   critical halt, at least `+300 s` if `wall-e` is still stopping. It also
+3. arms the RTC alarm and checks the read-back: `+90 s` after every halt
+   (`1aa9621`), at least `+300 s` if `wall-e` is still stopping. It also
    writes the seconds and the uptime to `/run/walle-ups/arm`. The shutdown
    hook `bin/walle-ups-shutdown-alarm` (installed in
    `/usr/lib/systemd/system-shutdown/`) arms the alarm again in the last
@@ -138,7 +138,7 @@ for 2.5 s. It has no history, so it cannot see an edge.
     load. A present supply holds the pack at S, so this cannot lock a live
     supply out;
   - `absent`: power off, alarm `+60 s`;
-  - `discharge` at −400 mA or more, and not within 0.03 V of the setpoint,
+  - `discharge` at −400 mA or more, and below the setpoint by more than 0.03 V (one-sided since 2026-11-06),
     inside any chain except a simulated one: power off, `+60 s` (under the
     light early-boot load the pack rebounds into the band, and the outage is
     still going). A supply that came back below the pack pins the voltage at
@@ -439,6 +439,7 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   7.2 V line, not on RTC polls; (2) a better test resamples a pack above S
   after 20-30 s (with mains present V falls to S and the current collapses;
   without mains it does not). Item (2) is not built.
+- Flat pack and no start, 2026-11-08 to 2026-11-10. Kevin switched main power off on 2026-11-08 at 19:33. The pack fell at once from the 7.5 V float to 6.848 V at -840 mA (about 0.8 Ω, not better than the old cells). The watcher declared a hard loss at 19:33:27 and the halt was clean. Six poll wakes followed (19:35:16 to 19:41:31). Each one read `low 11/11` and powered off again, and the pack fell from 6.732 V to 6.420 V, about 0.06 V for each wake. The seventh wake (alarm at 19:42:31) did not complete: the pack was flat about 9 minutes after the switch-off, the 5 V dropped, and the RTC lost its time. The next boot needed no ext4 recovery. On 2026-11-10 Kevin switched main power on at about 08:30. The Pi stayed in standby until he pressed its power button at 10:30. The boot check then read `present 11/11`, 7.528 V, -22 mA. Conclusions: (1) with these cells, a deliberate power-off of more than some minutes ends in a flat pack; (2) after a flat pack the Pi does not start by itself when main power returns, so press its power button; (3) possible cause, not proven: one weak cell or an unbalanced pair, because the voltage fell about 0.3 V for about 30 mAh. The HY2213 balancers act only near 4.2 V for each cell, so a 7.5 V float never balances the pack. Next check (Kevin): measure each cell with a multimeter. A difference of more than about 0.1 V points at an unbalanced pair. If the two cells are equal, suspect the holder contacts and the HAT's battery path.
 - After a cell swap, expect the Pi in standby (solid red): press its power
   button. A slow 5 V ramp leaves a Pi 5 in standby.
 - Run the pack to the HY2120 cutoff once and confirm that the 5 V drops to

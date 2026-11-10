@@ -1,6 +1,6 @@
 # Design: "pump to back up"
 
-Status: design APPROVED by Kevin, 2026-09-24 (section 10). Not implemented. Step 1 of section 9 (log only) is next.
+Status: design APPROVED by Kevin, 2026-09-24 (section 10). Step 1 of section 9 (log only) is built on branch `fm-pump` (`dfbda57`). It is not merged and not deployed, and the branch is far behind `main`.
 This document uses Simplified Technical English (ASD-STE100) as far as is reasonably possible. The appendix lists the technical names.
 
 ## 1. Purpose

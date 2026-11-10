@@ -103,9 +103,9 @@ The test is faster and more certain with per-satellite carrier-to-noise density 
 4. MEDIUM. Rover carrier-phase quality: GNSS antenna without a ground plane, multipath from the robot, broadband noise from the Pi, the VESCs and the BMS radio in the same enclosure. Satellite count and HDOP cannot show this. Confirm with the short-baseline test with the compute powered down.
 5. MEDIUM. Base antenna sky view and multipath (metal roof, eaves). Confirm with the base's own NMEA on its UART and a sky photo.
 6. LOW. Message set gaps (no 1230 with GLONASS MSM; infrequent 1005), MSM7 versus MSM4, receiver mode, or firmware. Confirm by decoding the RTCM stream.
-7. RULED OUT. Driver decode (the raw GGA agrees with register 19). Packet loss at the parking spot (119/120 epochs on time). USB 3 interference (the OAK runs at USB 2).
+7. RULED OUT. Driver decode (the raw GGA agrees with register 19). Packet loss at the parking spot (119/120 epochs on time). USB 3 interference (the OAK runs at USB 2). CORRECTION 2026-11-06: at USB 3 the OAK does jam the RTK GPS (10 to 11 satellites and no RTK, against 32 to 34 with float at USB 2). The OAK is capped at USB 2 since then.
 
-The gates stay as they are: `WaypointNavConfig.min_rtk_quality = 4` and the aligner's `== 4` check are correct. Float is decimetre-to-metre accuracy and must not establish heading lock. Consequence: the GPS heading aligner has never locked, so the robot has run on gyro-only heading with no north reference since at least July.
+The gates stay as they are: `WaypointNavConfig.min_rtk_quality = 4` and the aligner's `== 4` check are correct. Float is decimetre-to-metre accuracy and must not establish heading lock. Consequence: the GPS heading aligner has never locked, so the robot has run on gyro-only heading with no north reference since at least July. CORRECTION: the aligner has locked since then, first in the evening of 2026-09-19, when a waypoint run also succeeded. The heading is gyro-only whenever RTK is not fixed.
 
 ## 4. Decisive test: short baseline
 
@@ -132,7 +132,7 @@ WARNING: This test moves the robot. Kevin does it, and says when he starts.
 ## 6. Software changes (in progress, branch fable-follow-fixes)
 
 - Log every fix-quality transition at WARNING with UTC, satellites, HDOP, differential age and station id.
-- Parse UTC and geoid separation from the bytes already read; read course and speed over ground from the RMC sentence (registers 83/84) and log them; do not feed them into control yet.
+- Parse UTC and geoid separation from the bytes already read; read course and speed over ground from the RMC sentence (registers 83/84) and log them; do not feed them into control yet. DONE: the items are in `main`. `cog_deg` and `sog_mps` feed `GpsHeadingAligner.update_cog()` in `pi_app/control/controller.py`.
 - Publish low-quality epochs instead of discarding them, so a fix loss is visible.
 - Poll at 5 Hz and dedupe on the UTC second (the 1 Hz poll aliases against the 1 Hz output).
 - Verify the LoRa-mode register instead of writing it blind; log at WARNING.

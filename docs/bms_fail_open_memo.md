@@ -36,6 +36,8 @@ post-arm grace window, it also forces neutral via the same call. That path is
 fail-*closed* by construction (unreachable BMS can't fake `True` either) —
 out of scope here, but on the same wire.
 
+CORRECTION 2026-11-10: this path is not fail-closed. On a link failure `pi_app/hardware/bms.py` keeps the last polled `discharge_fet_on`, and `pi_app/app/main.py` reads it with no staleness check. If the last poll said True, the guard is silent for the whole outage.
+
 **RC/web e-stops, independent of all of the above.** `charger_inhibit`
 enforcement is gated behind `is_armed`, but arm/disarm/e-stop are computed
 earlier in `process()` and never read BMS state:
@@ -98,7 +100,7 @@ codebase that already shipped one single-signal false positive). The UPS
 **not verified to be electrically tied to the pack charger** — it's the Pi's
 own 5V UPS rail, a separate power path per `docs/ups_shutdown_bench_test.md`
 and `docs/ups_detect_only_test.md`. Using it without confirming the two plugs
-are physically ganged risks a confidently-wrong signal, worse than none.
+are physically ganged risks a confidently-wrong signal, worse than none. OBSOLETE: the UPSPlus HAT was retired on 2026-11-03 and these files no longer exist.
 
 **(d) Fail-open + loud banner on link-loss-cleared-inhibit.** No control-flow
 change: `is_charging()` + `get_state().connected` already distinguish

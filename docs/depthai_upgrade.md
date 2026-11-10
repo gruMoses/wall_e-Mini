@@ -27,7 +27,7 @@ procedure is for Kevin and Claude together, with the robot on the test stand.
 Source: the depthai v3.6.1 release notes and the 3.6.1 `IMUSensor` stubs.
 3.3.0 has no `ACCELEROMETER_UNCALIBRATED`, so 3.3.0 must keep `RAW`.
 
-`requirements.txt` pins `depthai==3.3.0`. `bin/auto_deploy.sh` does not run
+`requirements.txt` pins `depthai==3.6.1` (3.3.0 before 2026-11-05). `bin/auto_deploy.sh` does not run
 `pip install`, so the pin does not change the robot by itself.
 
 ## 3. Startup line to look for
@@ -37,6 +37,8 @@ Each OAK session logs one line at WARNING level:
 ```
 OAK device: depthai 3.3.0, USB SUPER, IMU reports ACCELEROMETER_RAW + GYROSCOPE_RAW, DEPTHAI_AUTOCALIBRATION=OFF
 ```
+
+This example is from before the upgrade. Today the line shows depthai 3.6.1 and `USB HIGH (cap HIGH)`.
 
 Read it with `sudo journalctl -u wall-e -b | grep "OAK device"`.
 

@@ -4,7 +4,7 @@ Date: 2026-09-19. Device: OAK-D Lite (RVC2), depthai 3.3.0, Python 3.11 on the P
 
 ## 0. Update 2026-11-05 (research agent, after the OAK reached USB 3)
 
-The OAK now links at USB 3 (5000M). Idle detection latency did not change
+The OAK now links at USB 3 (5000M). CORRECTION 2026-11-06: the OAK is capped at USB 2 (`OakDetectionConfig.max_usb_speed = "HIGH"`), because the USB 3 link jams the RTK GPS. Idle detection latency did not change
 (p50 0.196 s), so the current pipeline does not need the bandwidth. USB 3
 matters for 1080p and larger RGB to the host, 60 fps stereo for VIO, and
 raw multi-stream capture. Items marked V were checked against the source;
@@ -76,7 +76,7 @@ Status values: USED = used correctly; UNUSED = available and not used; MISUSED =
 | IMU extrinsics (`getImuToCameraExtrinsics`) | UNUSED | high | small | yes | Read and log the matrix at boot beside the intrinsics line. Derive the yaw axis from it. Fall back to the pinned axis with a loud log. VERIFY. |
 | On-device fusion (ROTATION_VECTOR) | N/A | – | – | no | Do not try it. Record the "No" in CLAUDE.md. |
 | `getChipTemperature()` | UNUSED | medium | small | yes | Log the average temperature in the IMU metrics each health tick. Later, index the bias estimate by temperature. |
-| Device diagnostics: `getConnectedIMU`, `getIMUFirmwareVersion`, `getUsbSpeed`, memory usage | UNUSED | medium | small | no | Log once per device session at WARNING. USB2 vs USB3 changes what the pipeline can carry. |
+| Device diagnostics: `getConnectedIMU`, `getIMUFirmwareVersion`, `getUsbSpeed`, memory usage | USED (logged once for each session) | medium | small | no | Log once per device session at WARNING. USB2 vs USB3 changes what the pipeline can carry. |
 | FeatureTracker (camera-aided yaw) | UNUSED | medium | large | yes | Prototype after the calibrated-report change. It costs shaves that YOLO and stereo share. |
 | YOLO through NN Archive + `DetectionNetwork` | MISUSED (raw blob, host NMS) | high | medium | no | Convert the model with the Luxonis tool. Then `SpatialDetectionNetwork` gives per-box depth on the device and `ObjectTracker` gives track ids on the device. This removes the host NMS, the host depth-ROI median and the host tracklet layer. |
 | `SpatialDetectionNetwork` for person distance | UNUSED | medium | medium | no | Blocked by the NN Archive change. Do it after. |

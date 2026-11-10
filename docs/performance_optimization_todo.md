@@ -71,7 +71,7 @@ Scope: Single source of truth for active engineering work and prioritized enhanc
 - [ ] RTK GPS hardening
   - reconnection/backoff, quality transition handling, startup convergence policy
 - [x] **GPS COG heading alignment** *(software complete; field validation pending)*
-  - RTK COG offset lock, disarm reset, waypoint nav gate, telemetry — see `docs/gps_heading_alignment.md`
+  - RTK COG offset lock, disarm reset, waypoint nav gate, telemetry — see `docs/gps_heading_alignment.md` (CORRECTION: the lock is kept across a disarm since 2026-09-19.)
 
 ### P4 (Longer Horizon)
 

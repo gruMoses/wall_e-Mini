@@ -1,5 +1,7 @@
 # East-field test — 2026-11-03
 
+Status 2026-11-10 (Kevin): this plan is still wanted, but not now. Nothing in it is built: there is no `/tests` page, no reachability halt and no test routine in the code.
+
 Handoff written 2026-11-02 18:55 America/Denver (CST), revised the same
 evening after a pass over the web UI, the map, the heading path, the
 reconnect watchdog, and the docs that disagree with the code. The Pi was
@@ -24,7 +26,7 @@ He has a full day. His part is power, placement, and one tap per routine.
    Cycle the RC arm switch off, then on. The startup interlock stays set
    until ch3 has been seen low. If ch1–ch4 sit at a dead 1500 while ch5
    still moves, the receiver leads are the problem described in
-   `docs/NEXT_SESSION.md` (2026-10-09, still open). The phone cannot arm
+   `docs/NEXT_SESSION.md` (2026-10-09, still open). RESOLVED 2026-11-05: it was the HotRC CH3/CH4 hybrid mode on the transmitter (refer to CLAUDE.md, "Arming"). The phone cannot arm
    the robot. Fix that before driving out.
 2. Drive the robot with the RC transmitter, or with `/drive` once it is
    armed, into the largest cleared area, just east of the barn and east

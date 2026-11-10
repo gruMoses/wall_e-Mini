@@ -209,6 +209,7 @@ if `flask-sock` is unavailable. The deadman is watchdog-enforced either way.
   forces neutral unless RC-armed) and the 600 ms freshness window, but it is a
   real unauthenticated motor-command surface. Left intact (not in scope to
   change); flagged here for tranche 3.
+  CORRECTION: these two endpoints are retired. They return 410 Gone since 2026-07-05 (commit `387a1bf`, `pi_app/web/oak_viewer.py`).
 
 ## Dependencies
 
@@ -383,4 +384,4 @@ Token-gated. Returns the latest JPEG (`Content-Type: image/jpeg`, 200) or:
 
 - **Tranche 3 (hardening):** real auth (per-device tokens / session cookies)
   closing the `WALL_E_TELEOP_TOKEN`-unset gap and the unauthenticated
-  `/api/teleop`; rate limiting; TLS/`wss`; optional single-active-driver lock.
+  `/api/teleop`; rate limiting; TLS/`wss`; optional single-active-driver lock. (DONE, refer to the section above.)

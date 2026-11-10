@@ -19,6 +19,8 @@ low. Two devices share bus 1: the RTK GPS co-processor (address 0x20) and
 the UPS HAT (B). Both devices went dark for 17 hours. A human power-cycled
 the robot to clear the fault.
 
+CORRECTION: on 2026-09-25 the UPS was the UPSPlus HAT and its watcher was `upsplus-power.service`. Both were retired on 2026-11-03. The guard now watches `walle-ups.service`.
+
 The UPS daemon (`walle-ups.service`) logged an I2C read error every 10
 seconds during the fault. Its status file (`/tmp/ups_status.json`) went
 stale. Nothing on the Pi 5 cleared the stuck bus on its own. The Pi 5
@@ -120,7 +122,7 @@ connection a running program already had open on that bus, regardless of
 whether the bus recovery itself succeeded.
 
 - **The UPS daemon** (`walle-ups.service`) opens its connection once,
-  at startup. It never reopens that connection on its own. So this guard
+  at startup. It never reopens that connection on its own. CORRECTION: `bin/walle_ups.py` reopens its bus handle after 10 consecutive errors. The guard's restart is a second layer. So this guard
   restarts that service -- unless you pass `--no-restart-ups` -- after
   ANY bus recovery attempt (success or failure) and after any self-heal
   that had to rebind the driver, as soon as the driver is bound again.

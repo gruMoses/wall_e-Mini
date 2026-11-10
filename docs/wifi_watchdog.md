@@ -59,6 +59,8 @@ CAUTION: The auto-deploy does not restart this service. After a change to `bin/w
 
 ## 5. NM profile settings
 
+SUPERSEDED 2026-10-04: the `wwr outdoor` profile exists and passed the `GATEWAY_OK` test, and `preconfigured` now has `auth-retries` −1. This section is history.
+
 Set these on each Wi-Fi profile:
 
 | Setting | Value | Reason |
@@ -77,6 +79,8 @@ sudo nmcli connection modify preconfigured connection.auth-retries -1
 The `preconfigured` profile has `802-11-wireless.band a` (5 GHz only). No record gives the reason. The 2.4 GHz radios of WHITE ROCK ROAD have a longer range.
 
 ## 6. Add the fallback profile `wwr outdoor`
+
+DONE 2026-10-04.
 
 Kevin types the password. The agent does not.
 

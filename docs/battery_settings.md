@@ -69,6 +69,8 @@ Measure the charger output at the end of a charge. If it floats above
 The BMS shares one Bluetooth link with `wall-e.service`. Stop the service
 before the app connects, and start it again after.
 
+UPDATE 2026-11-10 (Kevin): every BMS target in this table is applied. The "Now" column shows the values of 2026-11-05. The release values were not confirmed.
+
 | Setting | Now | Target | Reason |
 |---|---|---|---|
 | Battery type | LTO | Ternary | Finding 2 |
@@ -92,6 +94,8 @@ before the app connects, and start it again after.
 Read the configuration first. Change only these values. Then write it.
 Do not run the motor setup wizard after this: it overwrites the cutoffs.
 The left VESC is CAN id 2 and the right VESC is CAN id 1.
+
+UPDATE 2026-11-10 (Kevin): the VESC targets (part A) are not applied yet.
 
 | Setting (VESC Tool name, MCCONF field) | Now | Target left (id 2) | Target right (id 1) | Reason |
 |---|---|---|---|---|
