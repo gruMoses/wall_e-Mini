@@ -389,7 +389,7 @@ class TestFollowMeUsesOneValidFrame(unittest.TestCase):
         fm.update_pose(10.0, 126, 126, 1.0)
         lat, lon = _ne_to_latlon(0.0, 0.0)
         fm.update_gps(lat, lon, 5, 1.0)
-        self.assertIs(fm._pick_odometry(), fm._odometry)
+        self.assertIs(fm._tick_odometry(), fm._odometry)
         self.assertEqual(fm._odom_source, "dead_reckon")
 
     def test_gps_source_offers_nothing_until_reference_known(self):
@@ -397,27 +397,27 @@ class TestFollowMeUsesOneValidFrame(unittest.TestCase):
         fm.update_pose(10.0, 126, 126, 1.0)
         lat, lon = _ne_to_latlon(0.0, 0.0)
         fm.update_gps(lat, lon, 5, 1.0)
-        self.assertIsNone(fm._pick_odometry())
+        self.assertIsNone(fm._tick_odometry())
         self.assertEqual(fm._odom_source, "none")
 
     def test_stale_heading_offers_nothing(self):
         fm = self._fm()
         fm.update_pose(0.0, 160, 160, 1.0, heading_valid=False)
-        self.assertIsNone(fm._pick_odometry())
+        self.assertIsNone(fm._tick_odometry())
 
     def test_frame_change_clears_the_trail(self):
         fm = self._fm()
         fm.update_pose(10.0, 126, 126, 1.0)
-        odom = fm._pick_odometry()
+        odom = fm._tick_odometry()
         self.assertIsNotNone(odom)
         fm._trail.add_point(1.0, 0.0, 1.0)
         fm._trail.add_point(2.0, 0.0, 1.1)
         self.assertEqual(fm._trail.length, 2)
-        self.assertIs(fm._pick_odometry(), odom)
+        self.assertIs(fm._tick_odometry(), odom)
         self.assertEqual(fm._trail.length, 2, "same frame: trail kept")
         fm.update_pose(0.0, 126, 126, 1.2, heading_valid=False)
         fm.update_pose(200.0, 126, 126, 1.3)
-        self.assertIs(fm._pick_odometry(), odom)
+        self.assertIs(fm._tick_odometry(), odom)
         self.assertEqual(fm._trail.length, 0, "new frame: old points discarded")
 
     def test_flag_off_builds_no_odometry(self):
@@ -425,8 +425,84 @@ class TestFollowMeUsesOneValidFrame(unittest.TestCase):
         self.assertFalse(fm.uses_odometry)
         fm.update_pose(10.0, 160, 160, 1.0)
         fm.update_pose(10.0, 160, 160, 1.1, heading_valid=False)
-        self.assertIsNone(fm._pick_odometry())
+        self.assertIsNone(fm._tick_odometry())
 
+
+
+class TestStatusIsReadOnly(unittest.TestCase):
+    """get_status() runs on telemetry/SSE threads between control ticks; it
+    must never clear the trail or reset pure pursuit (review 2026-11-10)."""
+
+    def _fm(self):
+        fm = FollowMeController(FollowMeConfig(trail_follow_enabled=True))
+        fm.update_pose(10.0, 126, 126, 1.0)
+        fm._tick_odometry()
+        for i in range(5):
+            fm._trail.add_point(0.5 * (i + 1), 0.0, 1.0 + 0.1 * i)
+        fm._pursuit._last_closest_idx = 3
+        return fm
+
+    def _snapshot(self, fm):
+        return ([(p.x, p.y) for p in fm._trail.get_trail()],
+                fm._pursuit.last_closest_idx, fm._odom_source,
+                fm._trail_frame_key, fm._trail_frame_resets)
+
+    def test_many_status_reads_between_ticks_change_nothing(self):
+        fm = self._fm()
+        before = self._snapshot(fm)
+        for _ in range(50):
+            fm.get_status(now=1.5)
+        self.assertEqual(self._snapshot(fm), before)
+
+    def test_status_after_a_frame_change_does_not_clear(self):
+        fm = self._fm()
+        fm.update_pose(0.0, 126, 126, 1.6, heading_valid=False)
+        fm.update_pose(200.0, 126, 126, 1.7)   # new frame epoch, no tick yet
+        before = self._snapshot(fm)
+        for _ in range(50):
+            fm.get_status(now=1.7)
+        self.assertEqual(self._snapshot(fm), before)
+        self.assertEqual(fm._trail.length, 5)
+        # the control tick still clears on the real frame change
+        fm._tick_odometry()
+        self.assertEqual(fm._trail.length, 0)
+        self.assertEqual(fm._pursuit.last_closest_idx, 0)
+        self.assertEqual(fm._trail_frame_resets, before[4] + 1)
+
+    def test_status_reports_pose_without_ticking(self):
+        fm = self._fm()
+        st = fm.get_status(now=1.5)
+        self.assertIsNotNone(st.get("robot_pose"))
+
+
+class TestUnknownOdometrySource(unittest.TestCase):
+    def test_unknown_source_is_rejected(self):
+        with self.assertRaises(ValueError):
+            FollowMeController(FollowMeConfig(trail_follow_enabled=True,
+                                              trail_odometry_source="vio"))
+
+    def test_known_sources_accepted(self):
+        for src in ("dead_reckon", "gps"):
+            FollowMeController(FollowMeConfig(trail_follow_enabled=True,
+                                              trail_odometry_source=src))
+
+
+class TestRecorderOverlayMapping(unittest.TestCase):
+    """oak_recorder._world_to_pixel follows the frame contract (+y right)."""
+
+    def test_right_of_robot_draws_right_of_centre(self):
+        from pi_app.hardware.oak_recorder import _world_to_pixel
+        intr = (456.89, 456.89, 334.95, 240.0)
+        for deg in (0.0, 90.0, 225.0):
+            th = math.radians(deg)
+            with self.subTest(heading=deg):
+                pose = RobotPose(3.0, -2.0, th, 0.0)
+                for right_m, side in ((1.0, 1), (-1.0, -1)):
+                    wx = pose.x + 4.0 * forward_unit(th)[0] + right_m * right_unit(th)[0]
+                    wy = pose.y + 4.0 * forward_unit(th)[1] + right_m * right_unit(th)[1]
+                    px, _ = _world_to_pixel(wx, wy, pose.x, pose.y, th, 640, 480,
+                                            camera_height_m=0.497, intrinsics=intr)
+                    self.assertEqual(math.copysign(1, px - intr[2]), side)
 
 class TestRobotPoseUnchanged(unittest.TestCase):
     def test_robot_pose_fields(self):

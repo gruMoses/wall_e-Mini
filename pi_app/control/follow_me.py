@@ -1430,6 +1430,11 @@ class FollowMeController:
         # Which odometry builds the trail ("dead_reckon" or "gps"), and the
         # (source, frame_epoch) the current trail points were recorded in.
         self._odom_choice: str = str(getattr(config, "trail_odometry_source", "dead_reckon"))
+        if self._odom_choice not in ("dead_reckon", "gps"):
+            raise ValueError(
+                f"FollowMeConfig.trail_odometry_source={self._odom_choice!r}: "
+                "must be 'dead_reckon' or 'gps'"
+            )
         self._trail_frame_key: tuple[str, int] | None = None
         self._trail_frame_resets: int = 0
         self._last_mode_switch_time: float = 0.0
@@ -1666,7 +1671,7 @@ class FollowMeController:
         if (self._trail_enabled and self._trail is not None
                 and self._tracker.fresh_raw_x_norm is not None and target_present
                 and getattr(target, "depth_known", True)):
-            odom = self._pick_odometry()
+            odom = self._tick_odometry()
             if odom is not None:
                 wx, wy = odom.camera_to_world(target.x_m, target.depth_m)
                 self._last_target_world_x = wx
@@ -2058,8 +2063,19 @@ class FollowMeController:
         """
         self._is_armed = bool(is_armed)
 
-    def _pick_odometry(self):
-        """Return the trail odometry, or None while it offers no valid pose.
+    def _peek_odometry(self):
+        """Read-only view for get_status(): the selected odometry if its pose
+        is valid, else None. No side effect on the trail, pure pursuit,
+        ``_odom_source`` or the frame-epoch memory (status readers run on
+        other threads and between control ticks)."""
+        odom = self._gps_odom if self._odom_choice == "gps" else self._odometry
+        if odom is None or not odom.pose_valid:
+            return None
+        return odom
+
+    def _tick_odometry(self):
+        """CONTROL TICK ONLY (compute path). Return the trail odometry, or
+        None while it offers no valid pose. Never call from get_status().
 
         One source only (``FollowMeConfig.trail_odometry_source``): the two
         sources have different world frames, so switching between them per
@@ -2110,7 +2126,7 @@ class FollowMeController:
         direct pursuit otherwise.
         """
         self._last_x_err_norm = None  # trail path never populates this; direct path overwrites below
-        odom = self._pick_odometry()
+        odom = self._tick_odometry()
         mode_dwell_s = float(self._cfg.mode_switch_dwell_s)
 
         if (
@@ -2311,7 +2327,7 @@ class FollowMeController:
 
         if self._last_valid_time > 0.0:
             trail_max_s = float(self._cfg.lost_target_trail_pursuit_max_s)
-            odom = self._pick_odometry()
+            odom = self._tick_odometry()
 
             # ── Blind trail pursuit ──────────────────────────────────────────
             if (
@@ -2647,7 +2663,7 @@ class FollowMeController:
 
         # Lookahead distance from robot
         lookahead_dist_m = 0.0
-        odom = self._pick_odometry()
+        odom = self._peek_odometry()  # read-only: status must not touch the trail
         if odom is not None and (self._pursuit_lookahead_x != 0.0
                                   or self._pursuit_lookahead_y != 0.0):
             pose = odom.pose
@@ -2764,7 +2780,7 @@ class FollowMeController:
                     or self._pursuit_lookahead_y != 0.0)
                 else None
             )
-            odom = self._pick_odometry()
+            odom = self._peek_odometry()
             if odom is not None:
                 pose = odom.pose
                 status["odom_x"] = round(pose.x, 3)
