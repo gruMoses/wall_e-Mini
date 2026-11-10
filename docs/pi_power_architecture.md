@@ -223,6 +223,8 @@ Software consequences:
 
 4. Hub power from the board (Kevin's idea, 2026-11-10). The X1202 has two USB Type-A sockets and two 2-pin connectors that are 5 V outputs ("two USB sockets for 5V power output"; no current rating is given). Its USB Type-C socket is an input only. Feed the hub's power input from one Type-A socket, and keep the Pi-to-hub data cable with its 5 V wire cut. Confirm: (a) the sockets go off when the board cuts the Pi's power after a halt, or the hub and the OAK drain the cells while the robot is parked; (b) the voltage at the hub stays at 4.9 V or more with the OAK streaming; (c) the total stays under the board's 5 A. If it passes, the hub's separate supply from the main pack can be removed, and the OAK stays powered during a halt, so the camera teardown is clean.
 
+   Variant without the hub (Kevin, 2026-11-10, for USB 3; refer to the "REVIEW 2026-11-10" entry in `docs/ups_hat_b.md`). The OAK cable goes to a USB 3 port of the Pi through the extension that has its 5 V wire cut. The camera end of that wire goes to one of the 2-pin 5 V outputs, through a fuse of approximately 2 A. The Pi end stays open. The Arduino goes directly to a port of the Pi. Checks (a), (b) and (c) apply to the camera in place of the hub. Then set `OakDetectionConfig.max_usb_speed` to `"SUPER"` and do the GPS test outdoors from a fresh GPS start with the camera streaming.
+
 Also check first: the mechanical stack (the X1202 goes under the Pi; find out where the NVMe board is), and the RTK fix quality with the board in operation.
 
 ### 7.3 If option F fails on the bench

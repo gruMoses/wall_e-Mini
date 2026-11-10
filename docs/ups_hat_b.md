@@ -412,6 +412,23 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
      fix is already rare at USB 2.
   The robot must be outdoors for each test (indoors on 2026-11-10 at 13:15
   it had 13 satellites and no corrections).
+  KEVIN, 2026-11-10 (after the review): item 1 is withdrawn. USB 3 does
+  not need a task. Room for larger streams is sufficient reason, and the
+  GPS result is the only gate. Kevin: the repair on the cut extension
+  closes the shield fully and it touches the original shield, so that
+  cable is not the first suspect (item 2). Kevin's plan: remove the hub
+  from the USB 3 path. The OAK cable goes to a USB 3 port of the Pi
+  through the cut extension. The camera end of the cut 5 V wire goes to a
+  5 V output of the UPS board, through a fuse of approximately 2 A. The
+  Pi end of that wire stays open. The Arduino goes directly to a port of
+  the Pi. Do this with the X1202, not with the UPS HAT (B): the camera
+  load on the HAT (B) cells is the condition of 2026-11-04 (6.34 V).
+  NOTE: USB 3 does not increase the depth resolution or the detection
+  resolution. The stereo sensors give 640x480 at most (640x400 in use),
+  and the detector runs in the camera at 640x352. USB 3 permits more raw
+  streams and larger raw streams to the Pi at the same time: VIO together
+  with depth, and colour frames larger than 640x480 for the host (the
+  colour sensor is 13 MP; the hand detector gets 640x480 today).
   CAUTION: a fast unplug and replug of the OAK during a colour-stall
   watchdog restart hung the vision worker on 3.6.1 (2026-11-06 16:14);
   the hang detector restarted wall-e once the arm switch was off.
