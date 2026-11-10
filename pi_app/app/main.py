@@ -52,6 +52,7 @@ try:
     from pi_app.app.imu_stall import ImuStallMonitor, imu_status_text
     from pi_app.app.phone_override import fresh_override_bytes
     from pi_app.control.netting_mute import near_share, detection_drops_mute
+    from pi_app.control.person_stop_hold import NeutralTimer, rc_link_live
     from config import config
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -86,6 +87,7 @@ except ModuleNotFoundError:
     from pi_app.app.imu_stall import ImuStallMonitor, imu_status_text  # type: ignore
     from pi_app.app.phone_override import fresh_override_bytes  # type: ignore
     from pi_app.control.netting_mute import near_share, detection_drops_mute  # type: ignore
+    from pi_app.control.person_stop_hold import NeutralTimer, rc_link_live  # type: ignore
     from config import config  # type: ignore
 
 
@@ -541,6 +543,11 @@ def run() -> int:
         # RC age for the restart gate is on the MONOTONIC clock: the RC
         # reader stamps each frame with time.monotonic() (last_update_mono_s),
         # so an NTP step cannot move it.
+        _person_hold_neutral = NeutralTimer(
+            band_byte=float(getattr(config.obstacle_avoidance, "person_stop_hold_neutral_band_byte", 6.0)),
+            hold_s=float(getattr(config.obstacle_avoidance, "person_stop_hold_neutral_hold_s", 0.25)),
+        )
+        _person_hold_input_err_logged = False
         last_imu_heading_deg = None
         last_imu_yaw_rate_dps = None
         # IMU stall events for the JSON log (2026-11-06: 38.8 h of a dead
@@ -658,6 +665,40 @@ def run() -> int:
                     print("\nNetting mute ACTIVE: MANUAL ignores the depth corridor while the netting stays on the lens")
                 elif _nm["event"] == "refused":
                     print(f"\nNetting mute refused: {_nm.get('refusal')}")
+            # Person-stop hold (pi_app/control/person_stop_hold.py). Levels
+            # for the vision worker, written every tick:
+            # - release: the arm switch OFF on a live RC link. Not "disarmed":
+            #   a 1 s RC dropout also disarms with the switch still up.
+            # - autonomous: the mode is not MANUAL (missing = autonomous).
+            # - forward_neutral: MANUAL and both commanded tracks (RC or
+            #   phone, before the obstacle layer) inside the band for
+            #   person_stop_hold_neutral_hold_s; missing = not neutral.
+            # If this block fails, the reader goes strict after
+            # person_stop_hold_levels_max_age_s (it logs that at WARNING).
+            if oak_reader is not None:
+                try:
+                    _hold_now = time.monotonic()
+                    _rc_live = rc_link_live(rc.last_update_mono_s, _hold_now, RC_STALE_TIMEOUT_S)
+                    _neutral = _person_hold_neutral.update(
+                        _hold_now,
+                        telem.get("mode") == "MANUAL",
+                        telem.get("drive_cmd_left"),
+                        telem.get("drive_cmd_right"),
+                    )
+                    oak_reader.set_person_stop_hold_inputs(
+                        release=(
+                            _rc_live
+                            and not cmd.is_armed
+                            and rc.ch3_us <= controller.arm_low_threshold_us
+                        ),
+                        autonomous=telem.get("mode", "") != "MANUAL",
+                        forward_neutral=_neutral,
+                    )
+                    telem["person_stop_hold"] = oak_reader.get_person_stop_hold()
+                except Exception as _e:
+                    if not _person_hold_input_err_logged:
+                        print(f"\nPerson stop hold inputs failed (reader goes strict): {_e!r}")
+                        _person_hold_input_err_logged = True
             # RC arm-channel fail-safe (2026-11-05): ch3 sat mid-band while
             # armed. The controller already wrote the journal warning; mirror
             # it into the JSON log. This tick's line also carries

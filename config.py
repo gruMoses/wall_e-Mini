@@ -426,6 +426,100 @@ class ObstacleAvoidanceConfig:
     # depth_status is not "ok" and whose bbox width >= this forces the hard
     # stop exactly like z < safety_stop_radius_m. 0.0 disables.
     safety_stop_bbox_width: float = 0.40
+    # Person/animal stop HOLD (pi_app/control/person_stop_hold.py; the full
+    # rules are in its docstring). The stop above had no memory: inside
+    # ~0.4 m the box is clipped by the frame edge, the depth sample fails,
+    # the corridor sees past the person, and one such frame released it
+    # (2026-11-08 14:27:40, FOLLOW_ME, ~0.66 s with Kevin 0.3-0.9 m away; the
+    # clipped box sampled the background at 2.6-2.7 m). The hold keeps
+    # distance 0.0 after a trigger in FOLLOW_ME / WAYPOINT_NAV until the
+    # object that caused it (one "chain") is seen beyond the release range,
+    # the arm switch is off (live RC), or, after a drop to MANUAL, the stick
+    # is let go. No timer releases it. Forward only: pivots and reverse pass.
+    # A second object near the chain, a lost chain or two candidates make
+    # the hold operator-only (accepted). False restores the stateless stop.
+    person_stop_hold_enabled: bool = True
+    # False: no hold ENGAGES in MANUAL; the stop there stays as it was.
+    # Kevin's rule of 2026-09-27 (human input can carry a little extra risk;
+    # the operator stops the robot by letting go of the stick), and the
+    # netting: mesh over the lens reads a wall at 0.45 m and never shows
+    # clear, so a MANUAL hold would need an arm-switch cycle each time the
+    # camera sees Kevin close. A hold carried into MANUAL from an autonomous
+    # mode stays applied until no drive command is given for
+    # person_stop_hold_neutral_hold_s. Do NOT set True without Kevin's word.
+    person_stop_hold_in_manual: bool = False
+    # 0.2 m beyond safety_stop_radius_m, so range noise at the radius
+    # cannot chatter the hold. After a release the stateless 0.8 m stop
+    # still acts on every poll; FOLLOW_ME commands no forward inside 1.4 m.
+    person_stop_hold_release_m: float = 1.0
+    # 5 fresh polls = ~0.33 s at 15 fps. On 2026-11-08 14:27:40.6 YOLO lost
+    # the side-clipped operator for 2 logged frames (~0.2 s) while the
+    # corridor read 2.9-4.7 m.
+    person_stop_hold_release_polls: int = 5
+    # A person inside min_depth_mm gives invalid pixels, so the corridor is
+    # accepted as clear only with this much valid support (8 percent, the
+    # corridor's own floor, is too low). 2026-11-08 14:27: open-field
+    # FOLLOW_ME read 0.5-18 percent, the clear yard after the stop 43-73.
+    person_stop_hold_min_valid_pct: float = 20.0
+    # A box within this of the left or right frame edge counts as clipped:
+    # its range is never trusted (2026-11-08: "ok" 2.72 m at x1 = 0.001) and
+    # its area is only a lower bound. YOLO clamps a clipped edge to 0 or 1;
+    # on the 2026-11-07/08 drives the clipped sequences read 0.000-0.011.
+    # 0.05 (32 px) is ~4x that and costs 41 of ~3,100 logged "ok" sightings
+    # at >= 1.0 m (those 0.02-0.05 from an edge).
+    person_stop_hold_edge_margin: float = 0.05
+    # The chain (the object that caused the hold) continues on a box of the
+    # same group (person / animal; YOLO calls one goat horse, sheep or cow)
+    # seen at most this long after its last sighting and within this
+    # normalized centre-x distance. The gap covers the 0.12-0.35 s detection
+    # gaps of the 2026-09-20 runs with margin; the gate covers a full-rate
+    # pivot (32 bytes x ~0.7 deg/s per byte = ~22 deg/s, 13 deg = 0.19 of
+    # the frame in 0.6 s) plus a walking person. Past the gap the chain is
+    # lost and the hold becomes operator-only.
+    person_stop_hold_chain_gap_s: float = 0.6
+    person_stop_hold_chain_gate: float = 0.30
+    # The chain is resolved after this many fresh polls IN A ROW with its
+    # own box seen beyond (~0.2 s at 15 fps), never on one box.
+    person_stop_hold_resolve_polls: int = 3
+    # Plausibility of a box continuing the chain (pi_app/control/
+    # person_stop_hold.py, PersonStopHold._plausible). Between two trusted
+    # ranges |dz| <= speed * dt + margin; from the implied reference (no
+    # trusted range yet: the stop radius) z <= 0.8 + speed * dt + margin.
+    # The apparent area may shrink or grow only as 1/z^2 allows over that
+    # reach, times/divided by area_factor for YOLO box jitter. Speed: a
+    # walk is ~1.4 m/s and neither autonomous mode reverses during a hold.
+    # Logs 2026-11-07/08 (three drives, 2,198 pairs of consecutive
+    # single-object trusted sightings <= 0.6 s apart): max |dz| - 1.5 * dt
+    # = +0.002 m (p99.9 -0.010), so the 0.25 m margin is all range-noise
+    # headroom; with these numbers no pair failed the area test, and the
+    # worst pair needed an area factor of 1.07 (1.5 used). Rejected by
+    # these bounds (the named review cases): 2.0 m 0.6 s after a measured
+    # 0.5 m (reach 1.15 m), a carry-in 2.8 m 1.0 s after a 0.5 m or an
+    # unmeasured seed (reach 1.75 m; 2.25 / 2.55 m).
+    person_stop_hold_plausible_speed_mps: float = 1.5
+    person_stop_hold_plausible_margin_m: float = 0.25
+    person_stop_hold_plausible_area_factor: float = 1.5
+    # Carry-in: the first poll in FOLLOW_ME / WAYPOINT_NAV engages the hold
+    # when the last stateless trigger (any mode) is at most this old. The
+    # mode level reaches the vision thread up to one control tick (33 ms) +
+    # one depth poll (67 ms) late; 1.0 s also covers a start with a person
+    # already blind-close whose trigger flickers with the detection gaps
+    # (<= 0.35 s). Short so a MANUAL trigger minutes before a start (Kevin
+    # beside the robot) does not block it. The carried-in box keeps its
+    # REAL sighting time; this is also its continuation gap.
+    person_stop_hold_carry_in_s: float = 1.0
+    # The control loop writes the hold's levels every tick (30 Hz). Older
+    # than this, the reader assumes autonomous, no operator release and the
+    # stick not neutral, and logs it once at WARNING.
+    person_stop_hold_levels_max_age_s: float = 1.0
+    # MANUAL "stick let go" for a hold carried into MANUAL: BOTH commanded
+    # tracks (before the obstacle layer, RC or phone) within this many bytes
+    # of neutral (6 bytes = ~25 us of stick, the auto-disarm deadband) ...
+    person_stop_hold_neutral_band_byte: float = 6.0
+    # ... continuously for this long. Reverse or a pivot is a drive command.
+    # A stick swept from forward to reverse crosses the band in one or two
+    # 33 ms ticks; 0.25 s (~8 ticks) needs a real let-go.
+    person_stop_hold_neutral_hold_s: float = 0.25
 
 
 @dataclass(frozen=True)

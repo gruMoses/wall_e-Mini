@@ -2298,6 +2298,12 @@ class Controller:
         # a forward-biased curve (the "left-hand circles" bug).
         obstacle_scale = 1.0
         is_forward_motion = (left + right) > 2 * CENTER_OUTPUT_VALUE
+        # This tick's commanded track bytes BEFORE the obstacle layer: in
+        # MANUAL the operator's RC or phone command. The person-stop hold
+        # releases a hold carried into MANUAL only after both stay neutral
+        # (main.py; absent on early-return ticks = unknown = not neutral).
+        telemetry["drive_cmd_left"] = int(left)
+        telemetry["drive_cmd_right"] = int(right)
         # Netting mute ticks every tick so it drops on disarm / mode change
         # even when there is no depth reading.
         _nm_dist, _nm_share = self._netting_mute_inputs()

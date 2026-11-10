@@ -33,6 +33,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 from config import ObstacleAvoidanceConfig, FollowMeConfig, GestureConfig, OakRecordingConfig, OakDetectionConfig
 from pi_app.control.follow_me import PersonDetection
 from pi_app.control.gesture_control import HandData
+from pi_app.control.person_stop_hold import PersonStopHold, PersonStopHoldSnapshot
 from pi_app.hardware.oak_imu_yaw_producer import ImuPacket, ImuYawProducer
 # OakImuReader's stale age, so health "imu_stale" means what the heading
 # reader means (oak_imu imports oak_depth only for type checking).
@@ -1259,6 +1260,42 @@ class OakDepthReader:
         self._corridor_persistence = _CorridorPersistence(
             int(getattr(obstacle_config, "corridor_persistence_polls", 2))
         )
+        # Person/animal stop memory (pi_app/control/person_stop_hold.py).
+        # The hold object, _person_hold_seen_det_ts and the warn-once flags
+        # are written ONLY by the vision worker in _poll_depth. The snapshot
+        # (vision writer) and the control-loop levels (one writer:
+        # set_person_stop_hold_inputs) cross threads under self._lock.
+        oc = obstacle_config
+        self._person_hold_enabled = bool(getattr(oc, "person_stop_hold_enabled", False))
+        self._person_hold = PersonStopHold(
+            release_distance_m=float(getattr(oc, "person_stop_hold_release_m", 1.0)),
+            release_polls=int(getattr(oc, "person_stop_hold_release_polls", 5)),
+            min_valid_pct=float(getattr(oc, "person_stop_hold_min_valid_pct", 20.0)),
+            edge_margin=float(getattr(oc, "person_stop_hold_edge_margin", 0.05)),
+            in_manual=bool(getattr(oc, "person_stop_hold_in_manual", False)),
+            carry_in_s=float(getattr(oc, "person_stop_hold_carry_in_s", 1.0)),
+            chain_gap_s=float(getattr(oc, "person_stop_hold_chain_gap_s", 0.6)),
+            chain_gate=float(getattr(oc, "person_stop_hold_chain_gate", 0.30)),
+            resolve_polls=int(getattr(oc, "person_stop_hold_resolve_polls", 3)),
+            stop_radius_m=float(getattr(oc, "safety_stop_radius_m", 0.8)),
+            plausible_speed_mps=float(getattr(oc, "person_stop_hold_plausible_speed_mps", 1.5)),
+            plausible_margin_m=float(getattr(oc, "person_stop_hold_plausible_margin_m", 0.25)),
+            plausible_area_factor=float(getattr(oc, "person_stop_hold_plausible_area_factor", 1.5)),
+        )
+        self._person_hold_levels_max_age_s = float(
+            getattr(oc, "person_stop_hold_levels_max_age_s", 1.0)
+        )
+        self._person_hold_snapshot = PersonStopHoldSnapshot()
+        # Control-loop levels. Until the first write, and whenever they are
+        # older than _person_hold_levels_max_age_s, the worker uses the strict
+        # values: autonomous True, release False, forward neutral False.
+        self._person_hold_release_req = False
+        self._person_hold_autonomous = True
+        self._person_hold_fwd_neutral = False
+        self._person_hold_levels_ts: float | None = None
+        self._person_hold_levels_warned = False  # vision worker only
+        self._person_hold_error_logged = False   # vision worker only
+        self._person_hold_seen_det_ts: float | None = None
         self._det_state = _DetectionState(persons=[])
         self._all_dets_state = _AllDetsState(detections=[])
         self._rgb_state = _RgbState()
@@ -1458,6 +1495,29 @@ class OakDepthReader:
         with self._lock:
             age = time.monotonic() - self._depth_state.timestamp
             return self._depth_state.min_distance_m, age
+
+    def get_person_stop_hold(self) -> dict:
+        """Person/animal stop hold as of the last depth poll. Thread-safe."""
+        with self._lock:
+            return self._person_hold_snapshot.as_dict()
+
+    def set_person_stop_hold_inputs(self, release: bool, autonomous: bool,
+                                    forward_neutral: bool = False) -> None:
+        """Control-loop inputs to the person-stop hold, written every tick.
+
+        ``release``: the arm switch reads off with a live RC link.
+        ``autonomous``: the mode is not MANUAL. ``forward_neutral``: MANUAL
+        and no drive command for the neutral hold time (False when unknown).
+        Levels, not queued events. The vision worker reads them at its next
+        depth poll; if they are older than
+        ``person_stop_hold_levels_max_age_s`` it uses the strict values.
+        Thread-safe; the control loop is the only writer.
+        """
+        with self._lock:
+            self._person_hold_release_req = bool(release)
+            self._person_hold_autonomous = bool(autonomous)
+            self._person_hold_fwd_neutral = bool(forward_neutral)
+            self._person_hold_levels_ts = time.monotonic()
 
     def get_person_detections(self) -> list[PersonDetection]:
         """Return latest person detections. Thread-safe."""
@@ -3275,6 +3335,9 @@ class OakDepthReader:
             # estimate (k-th smallest with a min pixel floor), not a raw 5th
             # percentile. See _corridor_near_distance_mm.
             corridor_p5_mm = float("inf")
+            # The near distance BEFORE persistence (max of the last polls):
+            # the person-stop hold releases on the cautious reading.
+            corridor_raw_mm = float("inf")
             corridor_rejected = False
             # Density and support use the pixels BEFORE the speckle filter:
             # dropping speckle must never turn a measurable corridor into a
@@ -3331,6 +3394,7 @@ class OakDepthReader:
                     else:
                         # Persistence BEFORE the YOLO safety-tier override so a
                         # stop-tier detection stays immediate.
+                        corridor_raw_mm = float(near_mm)
                         corridor_p5_mm = self._corridor_persistence.update(near_mm)
 
             if corridor_rejected:
@@ -3344,6 +3408,13 @@ class OakDepthReader:
             safety_stop_bbox_width = float(getattr(self._obs_cfg, "safety_stop_bbox_width", 0.0))
             with self._lock:
                 all_dets = list(self._all_dets_state.detections)
+                det_fresh_ts = self._det_fresh_ts
+                hold_levels = (
+                    self._person_hold_release_req,
+                    self._person_hold_autonomous,
+                    self._person_hold_fwd_neutral,
+                    self._person_hold_levels_ts,
+                )
             effective_min_mm, _stop_det = self._apply_safety_tier_override(
                 all_dets, corridor_p5_mm, safety_stop_radius,
                 safety_stop_bbox_width=safety_stop_bbox_width,
@@ -3352,6 +3423,12 @@ class OakDepthReader:
                 logger.info(
                     "Safety STOP: %s at %.2fm (< %.1fm radius)",
                     _stop_det.label_name, _stop_det.z_m, safety_stop_radius,
+                )
+            if self._person_hold_enabled:
+                effective_min_mm = self._update_person_stop_hold(
+                    effective_min_mm, _stop_det, all_dets, det_fresh_ts,
+                    hold_levels, corridor_raw_mm, corridor_rejected,
+                    corridor_valid_pct, safety_stop_radius, safety_stop_bbox_width,
                 )
 
             if effective_min_mm == float("inf"):
@@ -3446,6 +3523,111 @@ class OakDepthReader:
             return "slow"
         return "log"
 
+    def _update_person_stop_hold(self, effective_min_mm: float, stop_det, all_dets,
+                                 det_fresh_ts, levels, corridor_raw_mm: float,
+                                 corridor_rejected: bool, corridor_valid_pct: float,
+                                 safety_stop_radius: float,
+                                 safety_stop_bbox_width: float) -> float:
+        """Run the person-stop hold for one depth poll (vision worker only).
+
+        Returns the effective distance: 0.0 while the hold is applied, else
+        ``effective_min_mm`` unchanged (the stateless stop acts as before).
+        The evidence counts only on a poll whose detection packet refreshed
+        the stream clock since the previous poll and is not older than
+        ``vision_stale_s``: a frozen list never releases the hold.
+        ``levels`` is (release, autonomous, forward_neutral, written_ts)
+        from set_person_stop_hold_inputs; stale or missing levels fail
+        strict. No exception leaves this method: on one it logs once at
+        WARNING and returns 0.0 when the hold was active or this poll
+        triggered (an operator release still ends the hold), else the
+        stateless value. See pi_app/control/person_stop_hold.py.
+        """
+        now = time.monotonic()
+        hold = self._person_hold
+        was_active = hold.active
+        release_ok = False   # the operator release, once the levels are judged
+        try:
+            release_req, autonomous, fwd_neutral, levels_ts = levels
+            levels_age = None if levels_ts is None else now - levels_ts
+            if levels_age is None or levels_age > self._person_hold_levels_max_age_s:
+                if not self._person_hold_levels_warned:
+                    logger.warning(
+                        "Person stop hold: control-loop levels %s; assuming autonomous, "
+                        "no operator release, stick not neutral",
+                        "never written" if levels_age is None else "%.1f s old" % levels_age,
+                    )
+                    self._person_hold_levels_warned = True
+                release_req, autonomous, fwd_neutral = False, True, False
+            elif self._person_hold_levels_warned:
+                logger.warning("Person stop hold: control-loop levels fresh again")
+                self._person_hold_levels_warned = False
+            release_ok = release_req is True
+            fresh = (
+                det_fresh_ts is not None
+                and det_fresh_ts != self._person_hold_seen_det_ts
+                and (now - det_fresh_ts) <= self._vision_stale_s
+            )
+            if fresh:
+                self._person_hold_seen_det_ts = det_fresh_ts
+            # Every stop-tier box that alone forces the stateless stop, by
+            # the canonical rule (the override returns only the first).
+            trigger_dets = [
+                d for d in all_dets
+                if getattr(d, "safety_tier", "") == "stop"
+                and self._apply_safety_tier_override(
+                    [d], float("inf"), safety_stop_radius,
+                    safety_stop_bbox_width=safety_stop_bbox_width)[1] is not None
+            ] if stop_det is not None else []
+            before = hold.snapshot()
+            held = hold.update(
+                now=now,
+                triggered=stop_det is not None,
+                detections=all_dets,
+                fresh_detections=fresh,
+                corridor_mm=corridor_raw_mm,
+                corridor_rejected=corridor_rejected,
+                corridor_valid_pct=corridor_valid_pct,
+                stop_det=stop_det,
+                trigger_dets=trigger_dets,
+                operator_release=release_req,
+                autonomous=autonomous,
+                forward_neutral=fwd_neutral,
+            )
+            snap = hold.snapshot()
+        except Exception as e:  # noqa: BLE001 - the stateless stop must survive
+            if not self._person_hold_error_logged:
+                logger.warning("Person stop hold update failed (holding): %r", e)
+                self._person_hold_error_logged = True
+            try:
+                if release_ok:
+                    hold.force_release("operator")
+                    was_active = False
+                with self._lock:
+                    self._person_hold_snapshot = hold.snapshot()
+            except Exception:
+                pass
+            return 0.0 if (was_active or stop_det is not None) else effective_min_mm
+        with self._lock:
+            self._person_hold_snapshot = snap
+        # WARNING level: the app installs no logging handler, so INFO is
+        # dropped from the journal. Edges only.
+        if held and not was_active:
+            logger.warning(
+                "Person stop HOLD engaged (%s): %s %s%s",
+                snap.reason, snap.chain or "?",
+                getattr(stop_det, "depth_status", "") if stop_det is not None else "",
+                (" OPERATOR-ONLY (%s)" % snap.operator_only_reason) if snap.operator_only else "",
+            )
+        elif held and snap.operator_only and not before.operator_only:
+            logger.warning(
+                "Person stop HOLD operator-only (%s): ends only with the arm switch off, "
+                "a FOLLOW_ME toggle, or stop then GO on the waypoint page",
+                snap.operator_only_reason,
+            )
+        if was_active and not held:
+            logger.warning("Person stop HOLD released: %s", snap.reason)
+        return 0.0 if held else effective_min_mm
+
     @staticmethod
     def _apply_safety_tier_override(detections, corridor_p5_mm: float,
                                     safety_stop_radius_m: float,
@@ -3468,6 +3650,8 @@ class OakDepthReader:
         so it flows through get_min_distance() ->
         ObstacleAvoidanceController.compute_throttle_scale(); 0.0 mm yields
         throttle scale 0.0 (full stop). This is the single, canonical stop tier.
+        It has no memory; _update_person_stop_hold (2026-11-10) keeps the
+        stop after a trigger until positive evidence or the operator.
 
         Returns (effective_min_mm, stop_det) where ``stop_det`` is the detection
         that forced the hard stop, else ``None``.

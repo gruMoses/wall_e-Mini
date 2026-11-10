@@ -482,6 +482,11 @@ def build_log_obj(
             "corridor_near_px": getattr(oak_depth_stats, "corridor_near_px", None) if oak_depth_stats else None,
             "corridor_speckle_px": getattr(oak_depth_stats, "corridor_speckle_px", None) if oak_depth_stats else None,
             "corridor_speckle_fallback": getattr(oak_depth_stats, "corridor_speckle_fallback", None) if oak_depth_stats else None,
+            # Person-stop hold (pi_app/control/person_stop_hold.py), as of
+            # the last depth poll: active, reason, evidence_polls,
+            # operator_only (+ reason), chain, chain_present, beyond_streak,
+            # resolved, manual_carry.
+            "person_stop_hold": telem.get("person_stop_hold"),
         }),
         "follow_me": round1({
             "tracking": telem.get("follow_me_tracking"),
