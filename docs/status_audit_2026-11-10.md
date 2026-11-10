@@ -37,7 +37,7 @@ Lower priority, also open:
 - Blind trail pursuit keeps a forward floor of 5 bytes for a maximum of 3 s (`pi_app/control/follow_me.py`).
 - These web endpoints have no authentication and no local-only check: `/api/follow_me`, `/api/follow_me/params`, `/api/nav/*`, `/api/manual/netting_mute`.
 - A push that changes `bin/` restarts `wall-e` but does not reinstall the root services. Those services run from the checkout, so the new code starts at their next restart or at the next boot.
-- Possible defect, not verified: follow-me trail pursuit on GPS odometry. `pi_app/control/gps_odometry.py` keeps the heading as a math angle (0 = east, counter-clockwise positive). `pi_app/control/pure_pursuit.py` expects a clockwise heading with +y to the right. A trail point on the left can give a right steer. It did not run in the logs of 2026-11-04, 2026-11-06 and 2026-11-08: all follow-me ticks were `pursuit_mode` `direct`, with `odom_source` `gps`. Write a test before you trust trail mode.
+- CONFIRMED later on 2026-11-10, refer to section 8: the defect below is real, and it has three users in FOLLOW_ME. The first text of this item follows. Possible defect, not verified: follow-me trail pursuit on GPS odometry. `pi_app/control/gps_odometry.py` keeps the heading as a math angle (0 = east, counter-clockwise positive). `pi_app/control/pure_pursuit.py` expects a clockwise heading with +y to the right. A trail point on the left can give a right steer. It did not run in the logs of 2026-11-04, 2026-11-06 and 2026-11-08: all follow-me ticks were `pursuit_mode` `direct`, with `odom_source` `gps`. Write a test before you trust trail mode.
 
 ## 3. The pack-low latch
 
@@ -106,6 +106,47 @@ Not corrected, because the text is in a code file and a push of a code file rest
 
 Housekeeping: the worktrees and branches in `docs/NEXT_SESSION.md`, section 4, item 8 (2026-11-10 note) have all their content in `main`. Remove them only with Kevin's approval.
 
-## 8. Technical Names
+## 8. Odometry on the drives of 2026-11-06 to 2026-11-08 (added 2026-11-10)
 
-Grok, VESC, BMS, Daly, OAK, RTK, GPS, IMU, UPS, HAT, RTC, NTP, I2C, RC, PV, FOLLOW_ME, WAYPOINT_NAV, MANUAL, ALIGN, `wall-e`, `main`, `flask-sock`, FET, e-stop, slew limiter, latch, taper, sag, worktree, endpoint, clamp, standby, multimeter, pivot, corridor, backstop.
+Kevin asked how the odometry worked on the last drives. One read-only agent examined the armed logs from 2026-11-04 to 2026-11-08. The main claims were then checked against the code and the logs. Nothing was changed on the robot or in the code.
+
+The drives: 2026-11-06 17:21, 2026-11-07 12:17 and 17:59, 2026-11-08 12:36, 12:41 and 14:25 (MANUAL and FOLLOW_ME, no WAYPOINT_NAV, 80 to 130 m each). 2026-11-04 was a stand test: the wheels turned, but the GPS position stayed in 0.2 m.
+
+### 8.1 Defect, confirmed: GPS odometry has the wrong frame for its users
+
+- `GpsOdometry` (`pi_app/control/gps_odometry.py`) keeps the heading as a math angle (0 = east, counter-clockwise positive). Its `camera_to_world` and `PurePursuitController.compute` (`pi_app/control/pure_pursuit.py`) use `(-sin, cos)` as the vector to the right of the robot. In a math-angle frame that vector points to the left.
+- Check with the classes of the repository: put a trail point 3 m ahead and 1 m to the right, then pivot the robot 30 degrees to the right. The point is then to the left. Dead-reckoning odometry gives a steer of −1.8 bytes (left, correct). GPS odometry gives +6.6 bytes (right, the wrong direction). A pivot to the left is wrong also.
+- `update_gyro` writes the gyro heading into the heading on each tick. Thus the course-over-ground correction in `update_gps` stays for one tick only. In the logs, `odom_theta_deg` is equal to 90 minus `imu.heading_deg` (median difference 0.00 degrees). The gyro heading is relative to the orientation at boot. The agent measured 59 to 78 degrees between that frame and the GPS track on these drives (not checked again). The positions are true GPS positions, so the heading and the positions do not agree.
+- No test covers `GpsOdometry`. The file has not changed since 2026-03-15.
+
+### 8.2 The users of that frame
+
+FOLLOW_ME is an autonomous mode. `_pick_odometry` selects GPS odometry when the GPS has a fix of quality 1 or better, thus always outdoors.
+
+1. Trail pursuit, when the person is more than 5.2 m ahead (`direct_pursuit_distance_m` 4.0, multiplied by 1.3).
+2. Blind trail pursuit, for a maximum of 3 s after the target is lost: forward motion, with a steer limit of 32 bytes (approximately 22 degrees for each second).
+3. The search pivot after that. It takes its direction from the trail tangent in the same frame.
+
+These paths did not run. The 55 armed logs on the robot have 3,309 ticks with `pursuit_mode` `direct` and no tick with `trail` or `search`. On the follow-me drives the target distance was 3.0 m at most, and the target was not lost for longer than 0.13 s. Thus the defect has had no effect in the field. It also means that trail following has no field validation after the heading sign correction of 2026-09-19.
+
+### 8.3 Other findings
+
+- Wheel speed is approximately 20 to 25 percent more than the GPS ground speed on straight segments (medians 1.19 to 1.26 for each drive, RTK float, both speeds above 0.8 m/s). The comment at `trail_speed_scale_mps_per_byte` in `config.py` records the same difference from March. Slip and a scale error are not separated. If it is a scale error, the top speed of "1.61 m/s" is approximately 1.3 m/s on the ground. The follow-me speed loop uses the wheel speed as the true speed.
+- The GPS heading lock did not engage on any drive (`heading_align.locked` is false on each row). It needs RTK fixed while the robot moves. RTK fixed occurred only while the robot was parked (2026-11-07).
+- The agent measured a change of approximately 15 degrees between the gyro heading and the GPS course in 108 minutes on 2026-11-08. The scatter at RTK float is approximately 20 degrees for each point, so this number is weak.
+- GPS odometry gets a new position one time each second and holds it between fixes. It accepts each fix of quality 1 or better. A change of fix quality moved the position 1.3 to 2.1 m while the robot was parked.
+- Camera odometry (VIO) is in no drive log, because `OakDetectionConfig.vio_enabled` is False. The probe files of 2026-11-06 are on the robot (`logs/vio_probe_20261106_*.csv`).
+
+### 8.4 Recommendation (Kevin has not decided)
+
+Set `trail_follow_enabled` to False until `GpsOdometry` is repaired, has tests, and has a field test. With the switch off, the trail and the two odometry objects are not made. FOLLOW_ME then uses direct pursuit, which is the only mode in the logs. A lost target then gives a pivot with zero forward motion toward the last camera position of the person, until 3 s after the last valid detection, then a stop.
+
+Grok (session `01a1c70b-2a64-7190-838b-976e2fbe3992`) agrees with this step. It rejects dead-reckoning odometry as the interim step, because that turns on a forward path that has no field validation. Its caution: the search direction must not come from GPS odometry. The code agrees with that when the switch is off (`_trail` is None, so the search uses `_last_target_x`).
+
+Proposed position in section 2: second, after the person stop. The trigger is a usual event: the operator goes out of view, or gets more than 5.2 m ahead. This is a motion change. It needs a Grok review of the diff and Kevin's approval before the push, and the push restarts `wall-e`.
+
+The cheapest test for the wheel scale, the gyro drift and the heading lock together: one straight MANUAL run of approximately 20 m along a tape at RTK fixed.
+
+## 9. Technical Names
+
+odometry, dead reckoning, pure pursuit, trail pursuit, math angle, course over ground, eRPM, VIO, Grok, VESC, BMS, Daly, OAK, RTK, GPS, IMU, UPS, HAT, RTC, NTP, I2C, RC, PV, FOLLOW_ME, WAYPOINT_NAV, MANUAL, ALIGN, `wall-e`, `main`, `flask-sock`, FET, e-stop, slew limiter, latch, taper, sag, worktree, endpoint, clamp, standby, multimeter, pivot, corridor, backstop.
