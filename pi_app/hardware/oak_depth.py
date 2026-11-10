@@ -431,6 +431,21 @@ def _color_stall_check(
     if cfg is not None:
         restart_s = float(getattr(cfg, "color_stall_restart_s", 5.0))
         warmup_s = float(getattr(cfg, "color_stall_warmup_s", 10.0))
+    return _stream_stall_check(now, session_start_ts, fresh_ts, restart_s, warmup_s)
+
+
+def _stream_stall_check(
+    now: float,
+    session_start_ts: float,
+    fresh_ts: float | None,
+    restart_s: float,
+    warmup_s: float,
+) -> tuple[bool, float]:
+    """Shared stall rule of the colour and IMU watchdogs.
+
+    See ``_color_stall_check``: ``restart_s <= 0`` disables; the reference
+    is ``max(fresh_ts or 0.0, session_start_ts + warmup_s)``.
+    """
     if fresh_ts:
         stalled_for_s = now - fresh_ts
     else:
@@ -439,6 +454,27 @@ def _color_stall_check(
         return False, stalled_for_s
     reference = max(fresh_ts or 0.0, session_start_ts + warmup_s)
     return (now - reference) >= restart_s, stalled_for_s
+
+
+def _imu_stall_check(
+    now: float,
+    session_start_ts: float,
+    msg_ts: float | None,
+    cfg,
+) -> tuple[bool, float]:
+    """Decide whether an IMU-stream stall should end the OAK session.
+
+    Same rule as ``_color_stall_check``, with ``imu_stall_restart_s`` and
+    ``imu_stall_warmup_s``. ``msg_ts`` is the last IMU message of THIS
+    session. Depth freshness, the "never delivered" case and the budget are
+    decided by the reader (``OakDepthReader._imu_stall_after_poll``).
+    """
+    restart_s = 10.0
+    warmup_s = 10.0
+    if cfg is not None:
+        restart_s = float(getattr(cfg, "imu_stall_restart_s", 10.0))
+        warmup_s = float(getattr(cfg, "imu_stall_warmup_s", 10.0))
+    return _stream_stall_check(now, session_start_ts, msg_ts, restart_s, warmup_s)
 
 
 def vision_loop_sleep_s(period: float, elapsed: float, deadline_flag: bool) -> float:
@@ -1344,6 +1380,23 @@ class OakDepthReader:
         self._color_stall_restart_times: list[float] = []
         self._color_stall_restart_count: int = 0
         self._color_stall_fault: bool = False
+        # IMU stall watchdog (2026-11-06 19:34:37, the IMU stream stopped
+        # with depth and detections live). Off until a heading consumer
+        # (OakImuReader) asks for it: nobody needs a camera restart for an
+        # IMU that no one reads. _imu_msg_ts is the last IMU message with
+        # packets in any session (None = the IMU never delivered since this
+        # reader started); _imu_session_msg_ts is the same for the current
+        # session only. Restarts share the colour watchdog's budget (see
+        # _watchdog_restarts_in_window_locked). The fault latches when the
+        # budget is full and clears on the next IMU message after it.
+        self._imu_watchdog_enabled: bool = False
+        self._imu_msg_ts: float | None = None
+        self._imu_session_msg_ts: float | None = None
+        self._imu_stall_restart_times: list[float] = []
+        self._imu_stall_restart_count: int = 0
+        self._imu_stall_fault: bool = False
+        self._imu_stall_fault_ts: float = 0.0
+        self._imu_never_seen_logged: bool = False
         # Supervisor heartbeat (2026-10-08): stamped by _run_pipeline around
         # each session attempt and backoff, so get_health() can tell a
         # device-absent wait (supervisor ticking) from a worker thread that
@@ -1596,6 +1649,16 @@ class OakDepthReader:
         with self._lock:
             self._imu_yaw_producer.set_nmni(enabled, threshold_dps)
 
+    def set_imu_watchdog_enabled(self, enabled: bool) -> None:
+        """Turn the IMU stall watchdog on or off.
+
+        ``OakImuReader`` turns it on when it is built on this reader: the
+        OAK IMU is then the heading source, so a dead IMU stream is worth a
+        session rebuild. Without a heading consumer the watchdog stays off.
+        """
+        with self._lock:
+            self._imu_watchdog_enabled = bool(enabled)
+
     def set_motion_witness(self, still: bool) -> None:
         """Forward a wheels-stopped witness to the IMU yaw producer.
 
@@ -1768,6 +1831,8 @@ class OakDepthReader:
             vision_stale_s = self._vision_stale_s
             color_stall_restarts = self._color_stall_restart_count
             color_stall_fault = bool(self._color_stall_fault)
+            imu_stall_restarts = self._imu_stall_restart_count
+            imu_stall_fault = bool(self._imu_stall_fault)
             supervisor_ts = self._last_supervisor_ts
             thread = self._thread
             vision_iter_samples = list(self._vision_iter_samples)
@@ -1882,6 +1947,8 @@ class OakDepthReader:
             "vision_stale": vision_stale,
             "color_stall_restarts": color_stall_restarts,
             "color_stall_fault": color_stall_fault,
+            "imu_stall_restarts": imu_stall_restarts,
+            "imu_stall_fault": imu_stall_fault,
             "vision_worker_age_s": (
                 round(worker_age_s, 3) if worker_age_s != float("inf") else None
             ),
@@ -2190,18 +2257,15 @@ class OakDepthReader:
             depth_age_s = float("inf")
 
         with self._lock:
-            cutoff = now - window_s
-            self._color_stall_restart_times = [
-                t for t in self._color_stall_restart_times if t >= cutoff
-            ]
-            in_window = len(self._color_stall_restart_times)
+            # Shared with the IMU watchdog: either cause counts.
+            in_window = self._watchdog_restarts_in_window_locked(now, window_s)
             if in_window >= max_restarts:
                 self._color_stall_fault = True
                 latched = True
             else:
                 self._color_stall_restart_times.append(now)
                 self._color_stall_restart_count += 1
-                in_window = len(self._color_stall_restart_times)
+                in_window += 1
                 self._last_pipeline_error_msg = "color_stall"
                 latched = False
         if latched:
@@ -2213,6 +2277,118 @@ class OakDepthReader:
             return False
         logger.warning(
             "OAK colour stream stalled: no fresh NN packet for %.1f s "
+            "(depth age %.1f s); restarting the OAK session "
+            "(%d in the last %.0f min)",
+            stalled_for_s, depth_age_s, in_window, window_s / 60.0,
+        )
+        return True
+
+    def _watchdog_restarts_in_window_locked(self, now: float, window_s: float) -> int:
+        """Prune both watchdogs' restart stamps; return how many are in the window.
+
+        Caller holds the lock. One budget for the colour and the IMU
+        watchdog (OakDetectionConfig.color_stall_max_restarts per
+        color_stall_window_s): a session restart costs the same depth and
+        detection outage whatever caused it, and two separate budgets
+        would let one watchdog's restarts add to the other's.
+        """
+        cutoff = now - window_s
+        self._color_stall_restart_times = [
+            t for t in self._color_stall_restart_times if t >= cutoff
+        ]
+        self._imu_stall_restart_times = [
+            t for t in self._imu_stall_restart_times if t >= cutoff
+        ]
+        return len(self._color_stall_restart_times) + len(self._imu_stall_restart_times)
+
+    def _imu_stall_after_poll(self, now: float, session_start_ts: float) -> bool:
+        """Apply the IMU stall watchdog after the IMU poll of one loop pass.
+
+        Returns True when the session loop should exit so the supervisor
+        rebuilds the device (the colour watchdog's exit path: break, then
+        the session's one ``finally`` teardown). Never True when:
+
+        * the watchdog is off (no heading consumer, or
+          ``imu_stall_restart_s <= 0``) or ``stop()`` was requested;
+        * the IMU has never delivered a message since this reader started.
+          A camera whose IMU never worked is not helped by rebuilds, and
+          each one costs seconds of depth: warn once, report it in health,
+          and leave the session alone;
+        * depth is not fresh (``imu_stall_depth_fresh_s``): then the whole
+          device is stalled, which is not an IMU-only stall;
+        * the fault is latched (the shared budget was full).
+
+        A session that has not delivered an IMU message yet, after the IMU
+        worked in an earlier session, restarts at warm-up + restart time;
+        the shared budget bounds that.
+        """
+        if self._stop_event.is_set():
+            return False
+        cfg = self._det_cfg
+        with self._lock:
+            enabled = self._imu_watchdog_enabled
+            session_msg_ts = self._imu_session_msg_ts
+            any_msg_ts = self._imu_msg_ts
+            fault = self._imu_stall_fault
+            fault_ts = self._imu_stall_fault_ts
+            depth_recv_ts = self._last_depth_recv_ts
+        if not enabled:
+            return False
+        # Fresh data clears the latch: any IMU message after it was set.
+        # The restart history stays, so a flap cannot reset the cap.
+        if fault and any_msg_ts is not None and any_msg_ts > fault_ts:
+            with self._lock:
+                self._imu_stall_fault = False
+            logger.warning("OAK IMU stream recovered after a stall fault")
+            return False
+        restart_now, stalled_for_s = _imu_stall_check(
+            now, session_start_ts, session_msg_ts, cfg,
+        )
+        if not restart_now or fault:
+            return False
+        if any_msg_ts is None:
+            if not self._imu_never_seen_logged:
+                self._imu_never_seen_logged = True
+                logger.warning(
+                    "OAK IMU has delivered no message since start (%.1f s into "
+                    "this session); the IMU watchdog does not restart the "
+                    "session for an IMU that never worked",
+                    stalled_for_s,
+                )
+            return False
+        depth_age_s = (now - depth_recv_ts) if depth_recv_ts > 0.0 else float("inf")
+        depth_fresh_s = 1.5
+        window_s = 900.0
+        max_restarts = 3
+        if cfg is not None:
+            depth_fresh_s = float(getattr(cfg, "imu_stall_depth_fresh_s", 1.5))
+            window_s = float(getattr(cfg, "color_stall_window_s", 900.0))
+            max_restarts = int(getattr(cfg, "color_stall_max_restarts", 3))
+        if depth_age_s > depth_fresh_s:
+            return False
+
+        with self._lock:
+            in_window = self._watchdog_restarts_in_window_locked(now, window_s)
+            if in_window >= max_restarts:
+                self._imu_stall_fault = True
+                self._imu_stall_fault_ts = now
+                latched = True
+            else:
+                self._imu_stall_restart_times.append(now)
+                self._imu_stall_restart_count += 1
+                in_window += 1
+                self._last_pipeline_error_msg = "imu_stall"
+                latched = False
+        if latched:
+            logger.error(
+                "OAK IMU stream still stalled after %d session restarts in "
+                "%.0f min; IMU auto-restart disabled (heading stays stale; "
+                "restart the service to retry)",
+                in_window, window_s / 60.0,
+            )
+            return False
+        logger.warning(
+            "OAK IMU stream stalled: no IMU message for %.1f s "
             "(depth age %.1f s); restarting the OAK session "
             "(%d in the last %.0f min)",
             stalled_for_s, depth_age_s, in_window, window_s / 60.0,
@@ -2586,6 +2762,8 @@ class OakDepthReader:
                 # without jumping cumulative free-yaw.
                 self._imu_yaw_producer.note_pipeline_restart()
                 self._imu_prev_consumed_ts = 0.0
+                # The IMU watchdog counts this session's messages only.
+                self._imu_session_msg_ts = None
                 self._corridor_persistence.reset()
                 self._vio_tracker.new_session()
                 self._vio_active = vio_q is not None
@@ -2656,6 +2834,11 @@ class OakDepthReader:
                     now = time.monotonic()
                 if now - next_imu_poll > (self._imu_poll_interval_s * max_catchup):
                     next_imu_poll = now
+                # 2026-11-06: the IMU stream can stop alone. Checked after
+                # the IMU poll, so a loop that was itself delayed drains the
+                # backlog before the age is judged.
+                if self._imu_stall_after_poll(time.monotonic(), session_start_ts):
+                    break
                 if vio_q is not None:
                     self._poll_vio(vio_q)
                 # Chip temperature: a live device call, so cap it at 1 Hz
@@ -3846,6 +4029,10 @@ class OakDepthReader:
 
             total_packets = len(all_packets)
             now = time.monotonic()
+            # IMU stall watchdog witness: a message that carried packets.
+            with self._lock:
+                self._imu_msg_ts = now
+                self._imu_session_msg_ts = now
             # RAW requested for VIO: negate y and z to get the RDF values the
             # heading uses (imu_session_reports). One sign, one place.
             with self._lock:

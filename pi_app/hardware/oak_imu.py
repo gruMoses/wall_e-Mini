@@ -183,6 +183,13 @@ class OakImuReader:
         # calibrate_gyro; calibrate temporarily clears it so bias estimation
         # cannot be circular if the host snapshot is integrate-path corrected.
         self._sync_producer_config()
+        # This reader makes the OAK IMU a heading source, so a dead IMU
+        # stream is worth a camera session rebuild (2026-11-06: the stream
+        # stopped for 38.8 h with depth live). See
+        # OakDepthReader._imu_stall_after_poll.
+        enable_watchdog = getattr(self._oak, "set_imu_watchdog_enabled", None)
+        if callable(enable_watchdog):
+            enable_watchdog(True)
 
     def _push_producer_nmni(self, enabled: bool, threshold_dps: float) -> None:
         setter = getattr(self._oak, "set_imu_nmni", None)

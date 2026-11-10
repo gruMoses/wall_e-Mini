@@ -1224,6 +1224,36 @@ class OakDetectionConfig:
     # refusing the stale stream. Restart the service to try again.
     color_stall_max_restarts: int = 3
     color_stall_window_s: float = 900.0
+    # IMU stall watchdog. 2026-11-06 19:34:37: the BMI270 stream stopped
+    # reaching the Pi in a healthy session, with no error. Depth (10-15 fps)
+    # and detections (15 fps) kept running, so nothing ended the session,
+    # and the heading stayed frozen for 38.8 h (two drives on 11-07) until
+    # an unrelated colour-stall rebuild on 11-08 10:21:56 brought it back in
+    # the same process. End the session when no IMU message has arrived for
+    # imu_stall_restart_s while depth is fresh and the session is past
+    # imu_stall_warmup_s, and let the supervisor rebuild it.
+    # Why 10 s: the journal (2026-09-19..11-08) has 32,739 "IMU samples
+    # stale" episodes that recovered by themselves. In 32,517 of the 32,591
+    # same-process pairs the next episode started within 10 s, so each of
+    # those drops was shorter than that; the 10-22..10-24 run, depth fresh,
+    # dropped every ~4.4 s for 40 h, so each drop was shorter than 4.4 s.
+    # 10 s is more than twice that (a rebuild costs ~8 s of depth and
+    # detections), and it catches a dead stream in seconds instead of days.
+    # 0 disables the watchdog.
+    imu_stall_restart_s: float = 10.0
+    # No IMU restart in the first seconds of a session (same as the colour
+    # watchdog; the first IMU message of a session arrives within ~3.4 s).
+    imu_stall_warmup_s: float = 10.0
+    # The IMU watchdog acts only while depth is newer than this. When depth
+    # is stale too, the whole device is stalled: that is the reconnect and
+    # stale-depth path, not an IMU-only stall.
+    imu_stall_depth_fresh_s: float = 1.5
+    # The IMU watchdog shares the colour watchdog's budget: at most
+    # color_stall_max_restarts session restarts by EITHER watchdog inside
+    # color_stall_window_s, so the two cannot multiply each other's
+    # restarts. Past that the watchdog that wanted the restart latches its
+    # own fault (color_stall_fault / imu_stall_fault) until its stream
+    # delivers again.
     # Vision worker hang (2026-10-04 13:41 -> 2026-10-08 17:36). After a USB
     # hub glitch the colour-stall watchdog's third restart called
     # pipeline.stop() and depthai's teardown never returned. The worker
