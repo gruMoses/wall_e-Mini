@@ -381,6 +381,37 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   `USB HIGH (cap HIGH)`. Before a change to `"SUPER"`, shield the hub and
   the OAK cable, put a metal plate under the antenna, and re-test the
   satellite count from a fresh GPS start with the camera streaming.
+  REVIEW 2026-11-10 (Kevin asked if that list is still correct; Grok
+  session `01a1c6e2-4b2b-7d51-b0a9-071c8070b968` agrees with the order
+  below). Measured that day with the OAK at USB 2: the hub's USB 3 side
+  (`2-1`, 05e3:0626) is in runtime suspend, and it was active for 0.2 s
+  only since the boot. Thus the good GPS result at USB 2 does not clear
+  one part and does not blame one part: the Pi-to-hub link, the hub and
+  the OAK cable are all quiet together. Recommended order, not decided:
+  1. Find out if USB 3 has a task. The only known task is VIO at the same
+     time as depth. Bench VIO at 320x200 at USB 2 first. If depth stays
+     at 15 fps, USB 3 is not necessary now.
+  2. Replace the cut Pi-to-hub extension before each USB 3 test. Its
+     shield was opened, and a foil patch is not a shield. Use a cable that
+     is not cut and put tape on the 5 V contact of the plug, or close the
+     braid fully (copper tape, soldered around the cable).
+  3. Find the part that radiates before you shield. Test A: the Pi-to-hub
+     link awake with the OAK at USB 2. CAUTION: link power management
+     (`usb3_hardware_lpm_u1` and `_u2`) is enabled, so `power/control=on`
+     alone possibly does not keep the link active; this is not verified.
+     Test B: the OAK directly on a USB 3 port of the Pi, without the hub.
+  4. Repair that part: a short cable with a full shield, a hub with a
+     metal body or no hub in the USB 3 path. A clip-on ferrite near the
+     antenna is cheap, but its effect above 1 GHz is small.
+  5. The metal plate under the antenna is good for RTK at USB 2 also. It
+     stops noise from below only, not from the side.
+  6. Foil around a cable has almost no effect if it is not bonded to the
+     two plug shells. The foil repair of 2026-11-06 changed nothing.
+  7. Pass test: one fresh GPS start and the RTK fix behaviour during a
+     session. The satellite count alone is not sufficient, because an RTK
+     fix is already rare at USB 2.
+  The robot must be outdoors for each test (indoors on 2026-11-10 at 13:15
+  it had 13 satellites and no corrections).
   CAUTION: a fast unplug and replug of the OAK during a colour-stall
   watchdog restart hung the vision worker on 3.6.1 (2026-11-06 16:14);
   the hang detector restarted wall-e once the arm switch was off.
@@ -457,4 +488,5 @@ EEPROM, `POWER_OFF_ON_HALT`, `WAKE_ON_GPIO`, `rpi-eeprom-config`, GPIO3,
 `/var/lib/walle-ups`, `events.jsonl`, `loss.json`, `nohalt`, `above_supply`,
 `--supply-v`, `--edge-s`, `--detect-only`, `chain.json`, `/run/walle-ups/grace`,
 `above_supply`, `discharge`, CLOCK_BOOTTIME, NTP, CC/CV, buck, 18650, 2S, I2C, ssh, `journalctl`,
+runtime suspend, `power/control`, `usb3_hardware_lpm_u1`, VIO, ferrite, braid, Grok,
 Kevin.
