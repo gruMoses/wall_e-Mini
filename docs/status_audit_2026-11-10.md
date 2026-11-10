@@ -20,6 +20,8 @@ No code changed. This commit corrects stale statements in the documents only (se
 
 Each fix is a motion-safety change. Get a Grok safety review and Kevin's approval before each push. Do not put two of them in one push. The order below is the result of a Grok second opinion (session `01a1c63a-1c96-7360-8abe-8b1e259b1a72`), which moved item 2 up and put item 3 before item 4.
 
+STATUS 2026-11-10 17:00: items 2, 3, 4 and 5 are corrected and deployed (section 9). Item 1 is in work: three versions failed the safety review, and a simpler design is in work (section 9.4). Items 6, 7 and 8 are open. A new gap came from the logs of 2026-11-07: the IMU stream can stop without a fault (section 9.3).
+
 1. **The person stop releases at close range.** `_apply_safety_tier_override` in `pi_app/hardware/oak_depth.py` is calculated again at each depth poll and has no memory. Below about 0.4 m the person box is cut by the frame edge and the depth sample is not valid (`no_support`, `far_veto` or `ambiguous`). The backstop for a detection without depth needs a box width of 0.40 or more (`safety_stop_bbox_width`). The corridor ignores pixels at or below 350 mm, so it sees past the person. Result: one bad frame releases the stop. Evidence: 2026-11-08 14:27:40, FOLLOW_ME, the stop was off for about 0.6 s with Kevin at 0.3 to 0.9 m. Direction for the fix: hold the stop after a close stop-tier detection, and release it only when the depth shows a clear corridor or on an operator action. A release on a timer alone repeats the fault. NOTE: Kevin ruled that the pivot during the stop is acceptable. That ruling does not include this release.
 2. **The waypoint API accepts any speed.** `/api/nav/start` and `/api/nav/go` in `pi_app/web/waypoint_nav_ui.py` write the client values `cruise_speed` and `arrival_radius` into `nav._cfg` with no limit and no authentication. A value of 127 is full speed. A negative value reverses. The values stay for later missions. Fix: clamp to the range of the sliders and refuse a negative speed.
 3. **WAYPOINT_NAV does not protect its heading.** (a) An OAK reconnect during a run makes `_check_imu_frame_continuity` reset the GPS heading offset to 0. The run continues in the raw gyro frame, because the lock is checked only at activation. (b) `waypoint_nav_activation_blocked` skips the fix-quality check and the lock check when no GPS reading exists yet, for example directly after a restart. (c) ALIGN has no timeout, and nothing checks that the heading is fresh.
@@ -149,6 +151,48 @@ Proposed position in section 2: second, after the person stop. The trigger is a 
 
 The cheapest test for the wheel scale, the gyro drift and the heading lock together: one straight MANUAL run of approximately 20 m along a tape at RTK fixed.
 
-## 9. Technical Names
+## 9. Corrections of 2026-11-10 (afternoon)
 
-odometry, dead reckoning, pure pursuit, trail pursuit, math angle, course over ground, eRPM, VIO, Grok, VESC, BMS, Daly, OAK, RTK, GPS, IMU, UPS, HAT, RTC, NTP, I2C, RC, PV, FOLLOW_ME, WAYPOINT_NAV, MANUAL, ALIGN, `wall-e`, `main`, `flask-sock`, FET, e-stop, slew limiter, latch, taper, sag, worktree, endpoint, clamp, standby, multimeter, pivot, corridor, backstop.
+Kevin said that there were tokens to use. Agents prepared the corrections in separate worktrees. Each correction got a review, a Grok safety review and the full test suite. Kevin approved the push of the five corrections in 9.1.
+
+### 9.1 Deployed
+
+Each commit was pushed alone. The next commit was pushed only after the robot had the previous one (ancestry check, service active, no traceback in the journal).
+
+| Commit | On the robot | Change |
+|---|---|---|
+| `2ebdace` | 16:25 | Log: while armed, a tick with an event always writes a line. Before, events on ticks that the 10 Hz gate skipped were lost. |
+| `eea14b5` | 16:30 | Item 2. `/api/nav/start` and `/api/nav/go` clamp the speed to 10–80 and the radius to 0.3–3.0, and refuse a speed of 0 or less. The Grok review found one more defect: the routes replaced the route before they asked the gate, so a refused start changed a mission in progress. Now the gate is asked first, and a late refusal restores the mission (`snapshot_mission`). Grok sessions `01a1c759`, `01a1c760` (not safe), `01a1c765` (safe). |
+| `cd6c9ee` | 16:35 | Item 5. The RC reader stamps each frame with the monotonic clock (`last_update_mono_s`). The phone override file has the monotonic stamp and the boot ID, because `/tmp` can keep a command from an earlier boot. Grok session `01a1c778`. |
+| `8bfbfb5` | 16:40 | Item 3. The start is refused with no GPS reading, a stale reading, no heading, a stale heading (0.5 s) or no lock. Each tick of a run checks the heading, and one ALIGN episode stops after 10 s. Grok session `01a1c779`. |
+| `949c0b4` | 16:55 | Item 4. WAYPOINT_NAV leaves on a stale detection stream, as FOLLOW_ME does. Same Grok session. |
+
+Checks on the robot: the waypoint page shows the 10–80 range, a negative speed gets HTTP 400, and a start indoors is refused (`gps_quality_not_trusted`).
+
+### 9.2 Not verified
+
+- Arming with the transmitter on. Commit `cd6c9ee` changes the RC path, and the transmitter was off during the deploys. Test an arm and a disarm before the next drive.
+- A loss of the heading lock, a stale heading or a colour stall during a real waypoint run.
+- The measured IMU sample age was 0.142 s at most on two drives, against the 0.5 s limit. A waypoint run with a higher load is not measured.
+
+### 9.3 New gap: the IMU stream can stop without a fault
+
+- On 2026-11-06 at 19:34:37 the OAK IMU stream stopped in a healthy session (process start 17:54:30). Depth and detections continued, the reconnect count stayed at 0, and the IMU queue counters did not change again. The journal had one line: `OAK IMU samples stale (age=0.511s > 0.500s): heading frozen`.
+- The heading stayed frozen for 38.8 h. The two drives of 2026-11-07 had `integrate_status` `stale` and a heading of 0.000 on each tick (968 ticks with motion). The heading hold gave no correction, because the heading and the target were the same. If the stream stops during a turn, the hold keeps a constant correction of 35 bytes at most.
+- A colour-stall session rebuild on 2026-11-08 at 10:21:56 brought the IMU back in the same process. The cause in the camera is not known.
+- Shorter stale episodes that recovered are in the journal on other days (most on 2026-10-22 to 2026-10-24, approximately one each 4.4 s).
+- Correction prepared, NOT deployed, on branch `worktree-agent-a6021d967ebe5529c` (three commits on top of `949c0b4`): `75fa792` rebuilds the session when no IMU message arrives for 10 s with fresh depth (one restart budget for the colour watchdog and the IMU watchdog: 3 in 15 min, then a latched `imu_stall_fault`); `f3c117b` gives no heading-hold correction from a stale heading and captures the target one time on recovery; `cfbd06f` adds `imu_age_s` and `imu_stale` to the health data, a journal line each minute, a status-line text and JSON events. Grok sessions `01a1c798` and `01a1c79a`: safe, no item to correct. It needs Kevin's approval.
+
+### 9.4 Item 1, the person stop hold: in work
+
+- Three versions failed the Grok safety review (sessions `01a1c76a`, `01a1c783`, `01a1c79d`). The first version released on a corridor reading after an inset box, ended at an automatic change to MANUAL, and lost a trigger at a mode change. The later versions followed objects in a list, and the list let a different object release the hold; it also had no limit on its size.
+- Rulings kept from the review: no new hold in MANUAL by default (`person_stop_hold_in_manual` False). Reason: with the netting over the lens the corridor does not show clear, so a MANUAL hold would stay until the arm switch is cycled each time the camera sees Kevin near the robot. A hold that is active at a change to MANUAL stays until the sticks are at neutral for 0.25 s. A trigger in the last 1.0 s engages the hold at the start of an autonomous mode.
+- Design in work (2026-11-10 16:45): the hold follows only the object that caused the stop. It releases only when that object is seen beyond 1.0 m. A second object near it, a loss of more than 0.6 s, or two candidates make the hold stay until an operator action (arm switch, FOLLOW_ME off and on, or stop and GO on the waypoint page).
+
+### 9.5 GPS odometry repair: prepared, not deployed
+
+Branch `worktree-agent-a51d633112c7c0737`. One frame contract for the two odometry classes and each user, dead reckoning as the default source of the trail, and tests. With `trail_follow_enabled` False the motor commands are the same as on `main` (2,309 replay frames; Grok session `01a1c77e`). It needs a rebase on `main`. The field checklist in the agent's report applies before the switch goes on: a stall check for dead reckoning, a straight run on a tape, pursuit beyond 5.2 m and a lost target in an empty area.
+
+## 10. Technical Names
+
+boot ID, monotonic clock, worktree, odometry, dead reckoning, pure pursuit, trail pursuit, math angle, course over ground, eRPM, VIO, Grok, VESC, BMS, Daly, OAK, RTK, GPS, IMU, UPS, HAT, RTC, NTP, I2C, RC, PV, FOLLOW_ME, WAYPOINT_NAV, MANUAL, ALIGN, `wall-e`, `main`, `flask-sock`, FET, e-stop, slew limiter, latch, taper, sag, worktree, endpoint, clamp, standby, multimeter, pivot, corridor, backstop.
