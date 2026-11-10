@@ -4,6 +4,10 @@ Status: decision draft, 2026-11-04. Research by three agents (off-the-shelf
 boards, how robot builders do it, an always-on tap from the main pack) and a
 Grok second opinion (session 01a1a8bd). Nothing is bought.
 
+UPDATE 2026-11-10: read section 7 first. It proposes a bought UPS board
+behind the switched-side converter (option F) in place of the custom
+board. Kevin has not decided.
+
 ## 1. The problem
 
 WALL-E can sit switched off for months. The Waveshare UPS HAT (B) cannot
@@ -158,6 +162,75 @@ about 12 months with it off. (CORRECTION: the pack is 7 Ah, refer to `docs/batte
    the battery side of the main switch?
 3. Should the robot ever wake on a schedule while stored? Option A cannot,
    because nothing has 5 V while it is off.
+
+## 7. Review, 2026-11-10: a bought UPS board behind the switched converter (option F)
+
+Status: proposal. Nothing is bought. Kevin decides. The recommendation is to bench-test this option before any more work on the custom board (`docs/power_module_spec.md`).
+
+Kevin, 2026-11-10: "We shouldn't have to build our own." "Other people are using robots that are Pi-powered." His conditions for a bought part:
+
+- The Pi must not wake up to look for power.
+- No cells that must stay at 100 percent for balancing. A lower charge state is better.
+- One cell is sufficient. An alternative is a supercapacitor with only the energy for a clean shutdown.
+
+Finding: section 8 of the spec rejected each bought board because of its input range (18 V or 30 V maximum). That limit does not apply behind a converter, and the robot already has an adjustable buck on the switched side of the main switch. The polling is a fault of the Waveshare UPS HAT (B) only: it cannot see its input and cannot switch its output off.
+
+### 7.1 Option F
+
+A Geekworm X1202 (about 49 USD, price not verified) replaces the HAT (B). The switched-side converter feeds it with about 12 V.
+
+- Main switch off: the 12 V goes away. The board supplies the Pi from its cells. A script sees GPIO 6 low for about 10 s and halts the Pi. The board then switches its output off. Nothing takes current from the main pack.
+- Main switch on: the 12 V comes back. The board starts the Pi. There is no polling and no button.
+
+Facts from the vendor pages (`wiki.geekworm.com/X1202`, `wiki.geekworm.com/X1202_Hardware`, read 2026-11-10):
+
+| Item | Value |
+|---|---|
+| Input | 6 V to 18 V DC, 3 A or more (5.5 x 2.1 mm jack or a 2-pin connector) |
+| Output | 5.1 V, 5 A maximum, through pogo pins under the Pi 5 |
+| Cells | four 18650 positions, cells not included, charge to 4.23 V, charge current to about 3 A |
+| Start | "Auto power-on when power is applied or restored" |
+| Stop | "Automatically cuts off power when the Pi is shut down"; with no Pi 5 found it shuts down in 3 s |
+| Power loss signal | GPIO 6: low = input failed, high = input good |
+| Charge control | GPIO 16: high = charge disabled, low = charge enabled |
+| Fuel gauge | MAX17040 on I2C bus 1, address 0x36 |
+
+Not verified:
+
+- The X1202 cells are in parallel. The X1200 page says that its two positions are in parallel, and the X1202 LED thresholds (3.4 V to 4.2 V) are single-cell voltages. No X1202 page states it.
+- Operation with less than four cells.
+- The standby drain from the cells with the output off.
+- What occurs when the input comes back while a shutdown is in progress.
+- A charge temperature limit. None was found.
+- One marketplace review says that an X1202 damaged two Pi 5 boards. No primary source confirms it.
+
+How option F answers Kevin's conditions: cells in parallel need no balancing, so they do not need a full charge. A script can set GPIO 16 high to hold the cells near 60 percent. One or two cells are sufficient if the board accepts that.
+
+On the robot (checked 2026-11-10): GPIO 6 and GPIO 16 are not in use. CAN uses SPI0 and GPIO 25. The fuel gauge shares I2C bus 1 with the RTK GPS (0x20).
+
+Software consequences:
+
+- A short script replaces `bin/walle_ups.py`. Remove `walle-ups.service` and `walle-ups-wakecheck.service`, or the old halt logic works against the new board.
+- GPIO 16 is driven only while Linux runs. The script must fail to "charge disabled": on an I2C error, and above about 45 C.
+- `i2c-bus-guard.service` uses the UPS status file as its witness for a good bus. It needs a new witness.
+- The ch5 e-stop halts the Pi with the input still present. Find out on the bench how the board starts the Pi again after that.
+
+### 7.2 Bench tests before the board goes on the robot
+
+1. Power cycles, 20 or more: switch off (GPIO 6 falls, the Pi halts, the 5 V goes to 0 V); switch on (the Pi boots with no button); and the race: switch on again 2 s, 10 s and 30 s into a shutdown. The Pi must boot each time.
+2. Drain and charge control: measure the cell current with no input and the output off (microamperes are necessary, not milliamperes). Confirm that GPIO 16 holds the cells near 3.8 V through reboots and halts. Confirm a boot with the cells at about 3.3 V.
+3. Full load at 50 C to 55 C on the cells only (Pi 5, NVMe, and each device that the Pi feeds): `vcgencmd pmic_read_adc` shows `EXT5V_V` at 4.9 V or more and there is no undervoltage flag. Record the cell temperature during a charge.
+
+Also check first: the mechanical stack (the X1202 goes under the Pi; find out where the NVMe board is), and the RTK fix quality with the board in operation.
+
+### 7.3 If option F fails on the bench
+
+- Option A in its minimum form: a converter with an enable input on the battery side of the main switch, held on by "switched side alive OR the Pi's 3V3", a halt script, the Pi's hardware watchdog, and a bleed on the 5 V rail. The main pack is the only battery. This is a small quantity of hand-wired parts at pack voltage, not a PCB. Its costs: the regen overvoltage conditions of the spec (3.2a) apply, and a BMS cut is a hard cut for the Pi.
+- Supercapacitors: 2 x 100 F in series give about 670 J down to 1.5 V. A 60 s halt at 6 W needs about 425 J with the converter loss. The halt must then be short: `wall-e.service` permits 90 s today, and a supercapacitor design needs a kill after about 5 s and about 15 s in total. Few bought boards of this type operate a Pi 5 and start it automatically (the Geekworm UPS Scap was out of stock and does not state it). Use 2.5 V for each cell in the heat.
+
+### 7.4 Second opinions
+
+Grok timed out after 900 s on this question. An independent Opus review agreed with option F and against the custom board ("215 USD and 31 risks to replace a 49 USD board"). It added the race test, the fail-safe for GPIO 16, the heat check, the mechanical check and the retirement of the old watcher. A research agent ranked the minimum option A first and warned that a UPS board "keeps the small-battery design that currently fails"; the answer to that warning is that the present failure comes from the HAT (B)'s missing input sense and output switch, which the X1202 has.
 
 ## Sources
 

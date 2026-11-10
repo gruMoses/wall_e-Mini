@@ -1,5 +1,10 @@
 # Pi 5 power module: hardware design specification
 
+REVIEW NOTE, 2026-11-10. Kevin: "We shouldn't have to build our own." A
+bought UPS board behind the switched-side converter is proposed in its
+place (`docs/pi_power_architecture.md`, section 7). Kevin has not decided.
+Do not order parts for this board before he does.
+
 Revision note, 2026-11-04 (option A). This revision follows option A of
 `docs/pi_power_architecture.md`. That document is the decision document.
 If the two documents disagree, it wins. The Pi now gets 5.1 V from an
