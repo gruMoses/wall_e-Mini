@@ -811,6 +811,10 @@ class Controller:
             return "gps_stale"
         if not nav.accepts_fix_quality(gps.fix_quality):
             return "gps_quality_not_trusted"
+        # Same entry rule as FOLLOW_ME: no autonomous start on a stale
+        # detection stream (the person stop would be blind).
+        if self._vision_is_stale():
+            return "vision_stale"
         return self._waypoint_heading_problem(now)
 
     def activate_waypoint_nav(self) -> Optional[str]:
@@ -837,7 +841,13 @@ class Controller:
         OAK reconnect made _check_imu_frame_continuity reset the offset),
         ``heading_unavailable`` / ``heading_stale`` (no fresh heading), and
         ``align_timeout`` (one ALIGN episode lasted longer than
-        ``waypoint_nav.align_timeout_s``).
+        ``waypoint_nav.align_timeout_s``), and ``vision_stale`` (the
+        detection stream is older than ``OakDetectionConfig.vision_stale_s``,
+        the same freshness source and limit as the FOLLOW_ME exit; a
+        repeated NN sequence number does not refresh it). The stored
+        detection list is NOT cleared: a stale close person must still
+        force the stop. The gate is inactive when no freshness getter is
+        set, as for FOLLOW_ME.
 
         Same exit as the other WAYPOINT_NAV exits (completion, stop, disarm)
         and as the follow-me vision-stale exit: mode MANUAL, so this tick's
@@ -849,7 +859,9 @@ class Controller:
             self._wp_align_since = None
             self._wp_align_index = None
             return
-        reason = self._waypoint_heading_problem(mono_now)
+        reason = "vision_stale" if self._vision_is_stale() else None
+        if reason is None:
+            reason = self._waypoint_heading_problem(mono_now)
         if reason == "heading_alignment_not_locked":
             reason = "heading_lock_lost"
         if reason is None and self._wp_align_since is not None:
@@ -1980,8 +1992,9 @@ class Controller:
         # Stale vision leaves FOLLOW_ME before any command is computed, so
         # this tick takes the MANUAL (stick) path.
         self._leave_follow_me_if_vision_stale(telemetry, mono_now)
-        # Same for WAYPOINT_NAV when its heading reference is lost or stale,
-        # or ALIGN has run too long (2026-11-10 status audit, item 3).
+        # Same for WAYPOINT_NAV on a stale detection stream, when its heading
+        # reference is lost or stale, or ALIGN has run too long (2026-11-10
+        # status audit, items 3 and 4).
         self._leave_waypoint_nav_if_unsafe(telemetry, mono_now)
 
         # Command computation

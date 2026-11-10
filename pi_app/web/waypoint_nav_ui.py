@@ -2547,6 +2547,10 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
                 "The heading is not updating — the camera IMU is stale, so "
                 "waypoint navigation cannot start"
             ),
+            "vision_stale": (
+                "The camera's detections are not updating — the person stop "
+                "would be blind, so waypoint navigation cannot start"
+            ),
         }
         return messages.get(reason, reason)
 
