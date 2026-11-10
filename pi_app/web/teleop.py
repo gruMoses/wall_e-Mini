@@ -60,6 +60,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+from pi_app.app import phone_override as _phone_override
 from pi_app.control.mapping import CENTER_OUTPUT_VALUE
 from pi_app.io.bt_proto import floats_to_bytes
 
@@ -564,6 +565,12 @@ class FileCommandSink:
             json.dumps({
                 "left_byte": int(left_byte),
                 "right_byte": int(right_byte),
+                # main.py judges freshness on the monotonic stamp and the
+                # boot ID (pi_app/app/phone_override.py); the epoch is for
+                # people. The boot ID stops a command left in /tmp from an
+                # earlier boot from looking fresh at the same uptime.
+                "last_update_mono_s": time.monotonic(),
+                "boot_id": _phone_override.BOOT_ID,
                 "last_update_epoch_s": time.time(),
             }),
             encoding="utf-8",

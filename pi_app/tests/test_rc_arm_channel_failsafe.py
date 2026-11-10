@@ -475,12 +475,16 @@ def ctrl():
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=_Shutdown())
 
         def step(t, ch3, ch4=CH4_LOW, epoch=None):
-            """t: monotonic; epoch: wall clock (RC stamp and now_epoch_s)."""
+            """t: monotonic (also the RC frame stamp); epoch: wall clock (now_epoch_s).
+
+            Since 2026-11-10 the RC reader stamps frames with time.monotonic(),
+            so a wall-clock step moves only now_epoch_s, never the RC age.
+            """
             clock["t"] = t
             e = t if epoch is None else epoch
             rc = RCInputs(
                 ch1_us=1500, ch2_us=1500, ch3_us=ch3, ch4_us=ch4, ch5_us=CH5_LOW,
-                last_update_epoch_s=e,
+                last_update_mono_s=t,
             )
             return c.process(rc, now_epoch_s=e)
 

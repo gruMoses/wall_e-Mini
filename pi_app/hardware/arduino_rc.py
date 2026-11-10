@@ -48,7 +48,11 @@ class RCState:
     ch3_us: int = CENTER_PULSE_WIDTH_US
     ch4_us: int = CENTER_PULSE_WIDTH_US
     ch5_us: int = CENTER_PULSE_WIDTH_US
-    last_update_epoch_s: float = 0.0
+    # time.monotonic() when this frame was read; 0.0 = no frame yet. The
+    # staleness checks compare it with time.monotonic(). Never the wall
+    # clock: the Pi's clock steps at boot (RTC reset, then NTP), and a
+    # backward step made a dead link look fresh.
+    last_update_mono_s: float = 0.0
 
     def as_tuple(self) -> Tuple[int, int, int, int, int]:
         return (self.ch1_us, self.ch2_us, self.ch3_us, self.ch4_us, self.ch5_us)
@@ -277,14 +281,14 @@ class ArduinoRCReader:
                         self._last_valid[idx] = value
                     sanitized[idx] = _apply_deadband(sanitized[idx])
 
-                now = time.time()
+                now = time.monotonic()
                 self._state = RCState(
                     ch1_us=sanitized[0],
                     ch2_us=sanitized[1],
                     ch3_us=sanitized[2],
                     ch4_us=sanitized[3],
                     ch5_us=sanitized[4],
-                    last_update_epoch_s=now,
+                    last_update_mono_s=now,
                 )
                 consecutive_errors = 0
             except (serial.SerialException, OSError):

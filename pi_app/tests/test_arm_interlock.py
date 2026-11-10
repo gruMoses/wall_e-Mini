@@ -68,7 +68,7 @@ class TestArmInterlock(unittest.TestCase):
         self.clock["t"] = float(t)
         rc = RCInputs(
             ch1_us=1500, ch2_us=1500, ch3_us=ch3, ch4_us=1000, ch5_us=1000,
-            last_update_epoch_s=float(t if rc_time is None else rc_time),
+            last_update_mono_s=float(t if rc_time is None else rc_time),
         )
         return ctrl.process(rc, now_epoch_s=float(t))
 

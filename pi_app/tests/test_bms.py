@@ -689,7 +689,7 @@ class TestControllerChargerInhibit(unittest.TestCase):
         return self.RCInputs(
             ch1_us=ch1, ch2_us=ch2, ch3_us=1800,
             ch4_us=1500, ch5_us=1500,
-            last_update_epoch_s=time.time(),
+            last_update_mono_s=time.monotonic(),
         )
 
     def test_charger_inhibit_blocks_motion(self):
@@ -705,7 +705,7 @@ class TestControllerChargerInhibit(unittest.TestCase):
             rc_armed = self.RCInputs(
                 ch1_us=1700, ch2_us=1700, ch3_us=1800,
                 ch4_us=1500, ch5_us=1500,
-                last_update_epoch_s=time.time(),
+                last_update_mono_s=time.monotonic(),
             )
             cmd, _, _ = ctrl.process(rc_armed)
         self.assertTrue(cmd.is_armed)

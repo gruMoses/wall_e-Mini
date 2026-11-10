@@ -90,7 +90,7 @@ def _down(ts):
 def _arm_rc(ch3=1900, ch4=1000, ch5=1000):
     return RCInputs(
         ch1_us=1500, ch2_us=1500, ch3_us=ch3, ch4_us=ch4, ch5_us=ch5,
-        last_update_epoch_s=0.0,
+        last_update_mono_s=0.0,
     )
 
 
@@ -562,7 +562,7 @@ def replace_rc(rc, **kwargs):
         ch3_us=kwargs.get("ch3_us", rc.ch3_us),
         ch4_us=kwargs.get("ch4_us", rc.ch4_us),
         ch5_us=kwargs.get("ch5_us", rc.ch5_us),
-        last_update_epoch_s=kwargs.get("last_update_epoch_s", rc.last_update_epoch_s),
+        last_update_mono_s=kwargs.get("last_update_mono_s", rc.last_update_mono_s),
     )
 
 
@@ -694,7 +694,7 @@ class TestTwitchContinue(TestControllerArmsUpTwitch):
 
     def test_rc_stale_cancels_and_does_not_resume(self):
         c, _, clock, cfg, rc = self._start()
-        stale = replace_rc(rc, last_update_epoch_s=0.05)
+        stale = replace_rc(rc, last_update_mono_s=0.05)
         cmd, _, telem = self._process(
             c, cfg, clock, 1.2, stale, pose=_pose(ts=1.1),
         )
@@ -705,7 +705,7 @@ class TestTwitchContinue(TestControllerArmsUpTwitch):
         self.assertEqual(state["twitch_cancel_reason"], "rc_stale")
         self.assertFalse(state["twitch_active"])
         self.assertFalse(state["latched"])
-        fresh = replace_rc(rc, last_update_epoch_s=1.3)
+        fresh = replace_rc(rc, last_update_mono_s=1.3)
         cmd, _, telem = self._process(
             c, cfg, clock, 1.3, fresh, pose=_pose(ts=1.1),
         )

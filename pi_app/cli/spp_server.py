@@ -14,10 +14,12 @@ from pathlib import Path
 try:
     from pi_app.io.bt_proto import parse_cmd2, accept_cmd2, parse_v1, floats_to_bytes
     from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT
+    from pi_app.app import phone_override as _phone_override
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[2]))
     from pi_app.io.bt_proto import parse_cmd2, accept_cmd2, parse_v1, floats_to_bytes  # type: ignore
     from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT  # type: ignore
+    from pi_app.app import phone_override as _phone_override  # type: ignore
 
 SPP_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 
@@ -53,7 +55,8 @@ def control_output_enabled() -> bool:
 
 def write_control_override(left_byte: int, right_byte: int, *,
                            path: str = SHARED_OVERRIDE_PATH,
-                           now=time.time) -> bool:
+                           now=time.time,
+                           now_mono=time.monotonic) -> bool:
     """Write the shared motor-override file consumed by ``main.py``.
 
     Returns ``True`` if the file was written. Returns ``False`` — writing
@@ -68,6 +71,11 @@ def write_control_override(left_byte: int, right_byte: int, *,
             json.dump({
                 "left_byte": int(left_byte),
                 "right_byte": int(right_byte),
+                # main.py judges freshness on the monotonic stamp and the
+                # boot ID (pi_app/app/phone_override.py); the epoch is for
+                # people.
+                "last_update_mono_s": now_mono(),
+                "boot_id": _phone_override.BOOT_ID,
                 "last_update_epoch_s": now(),
             }, sf)
         return True

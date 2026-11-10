@@ -167,7 +167,7 @@ def main() -> int:
             while not stop_flag["value"]:
                 s = rc.get_state()
                 # RC freshness guard.
-                age_s = time.time() - s.last_update_epoch_s if s.last_update_epoch_s > 0 else 999.0
+                age_s = time.monotonic() - s.last_update_mono_s if s.last_update_mono_s > 0 else 999.0
                 if age_s > 1.0:
                     print(f"ABORT: RC stale ({age_s:.2f}s).")
                     aborted = True

@@ -347,7 +347,7 @@ class FakeShutdown:
 
 def _rc(ch3=1900):
     return RCInputs(ch1_us=1800, ch2_us=1800, ch3_us=ch3, ch4_us=1000, ch5_us=1000,
-                    last_update_epoch_s=time.time())
+                    last_update_mono_s=time.monotonic())
 
 
 class TestControllerWiring(unittest.TestCase):
@@ -368,7 +368,7 @@ class TestControllerWiring(unittest.TestCase):
                 clock["t"] += 1.0 / 30.0
                 ctrl.set_obstacle_data(dist, age, near_share=share)
                 ctrl.set_detection_present(det)
-                _cmd, _ev, telem = ctrl.process(replace(_rc(ch3), last_update_epoch_s=time.time()))
+                _cmd, _ev, telem = ctrl.process(replace(_rc(ch3), last_update_mono_s=time.monotonic()))
                 return telem
 
             t = tick()

@@ -41,7 +41,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         while should_run:
             state = reader.get_state()
-            age_s = time.time() - state.last_update_epoch_s if state.last_update_epoch_s else float("inf")
+            age_s = time.monotonic() - state.last_update_mono_s if state.last_update_mono_s else float("inf")
             stale = age_s > 1.0
             status = "STALE" if stale else "OK   "
             print(

@@ -52,6 +52,24 @@ def _vision_fail_closed() -> dict:
     }
 
 
+def _rc_age_and_staleness(stamp_mono_s: float, mono_now: float) -> tuple[float, bool]:
+    """Return (age_s, stale) for an RC frame stamp on the monotonic clock.
+
+    A stamp of exactly 0.0 is "no frame yet": age 0, not stale (unchanged
+    contract). Otherwise a negative or non-finite age is stale, as is an
+    age above RC_STALE_TIMEOUT_S.
+    """
+    if stamp_mono_s == 0.0:
+        return 0.0, False
+    try:
+        age = float(mono_now) - float(stamp_mono_s)
+    except (TypeError, ValueError):
+        return float("nan"), True
+    if not math.isfinite(age) or age < 0.0:
+        return age, True
+    return age, age > RC_STALE_TIMEOUT_S
+
+
 @dataclass(frozen=True)
 class RCInputs:
     ch1_us: int
@@ -59,7 +77,10 @@ class RCInputs:
     ch3_us: int
     ch4_us: int
     ch5_us: int
-    last_update_epoch_s: float
+    # time.monotonic() when the reader got this frame; 0.0 = no frame yet.
+    # The RC-stale watchdog in process() compares it with time.monotonic(),
+    # never with the wall clock (the Pi's clock steps at boot).
+    last_update_mono_s: float
 
 
 class MotorDriver(Protocol):
@@ -1644,9 +1665,13 @@ class Controller:
         if self._imu_compensator is not None:
             self._imu_compensator.get_heading_deg()
 
-        # RC staleness watchdog: if no RC update for >1s, force disarm
-        rc_age = epoch_now - rc.last_update_epoch_s if rc.last_update_epoch_s > 0.0 else 0.0
-        if rc_age > RC_STALE_TIMEOUT_S:
+        # RC staleness watchdog: if no RC update for >1s, force disarm.
+        # Monotonic clock end to end: the reader stamps frames with
+        # time.monotonic(). The wall clock steps at boot on this Pi (RTC
+        # reset, then NTP), and a backward step made a dead link look fresh.
+        # 0.0 means no frame yet (sticks centred, ch3 mid: cannot arm).
+        rc_age, rc_is_stale = _rc_age_and_staleness(rc.last_update_mono_s, mono_now)
+        if rc_is_stale:
             self._motor.stop()
             self._reset_slew_state(mono_now)
             self._relay.set_armed(False)
@@ -1671,7 +1696,11 @@ class Controller:
             )
             self._last_follow_me_emitted_forward_byte = None
             self._twitch_early_exit(mono_now, "rc_stale")
-            rc_telem = {"mode": "MANUAL", "rc_stale": True, "rc_age_s": rc_age}
+            rc_telem = {
+                "mode": "MANUAL",
+                "rc_stale": True,
+                "rc_age_s": rc_age if math.isfinite(rc_age) else None,
+            }
             self._merge_vision_telemetry(rc_telem)
             self._stamp_auto_disarm_telemetry(rc_telem, mono_now)
             self._end_vision_tick()

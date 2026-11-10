@@ -34,13 +34,13 @@ class FakeShutdown:
 
 
 NEUTRAL_RC = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000,
-                       last_update_epoch_s=0.0)
+                       last_update_mono_s=0.0)
 ARMED_RC = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                     last_update_epoch_s=0.0)
+                     last_update_mono_s=0.0)
 FWD_RC = RCInputs(ch1_us=2000, ch2_us=2000, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                   last_update_epoch_s=0.0)
+                   last_update_mono_s=0.0)
 REV_RC = RCInputs(ch1_us=1000, ch2_us=1000, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                   last_update_epoch_s=0.0)
+                   last_update_mono_s=0.0)
 
 
 class TestScaleTowardNeutral(unittest.TestCase):
@@ -235,12 +235,12 @@ class TestControllerFollowMe(unittest.TestCase):
         controller (correctly) blocks FOLLOW_ME entry (no_target safety rule).
         """
         arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                          last_update_epoch_s=0.0)
+                          last_update_mono_s=0.0)
         ctrl.process(arm_rc, now_epoch_s=t)
         # Register a target so _follow_me_target_present() returns True.
         ctrl.set_person_detections([self._FAKE_TARGET])
         fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1900, ch5_us=1000,
-                         last_update_epoch_s=0.0)
+                         last_update_mono_s=0.0)
         ctrl.process(fm_rc, now_epoch_s=t + 0.1)
         return t + 0.2
 
@@ -258,11 +258,11 @@ class TestControllerFollowMe(unittest.TestCase):
         ctrl, motor = self._make_controller()
         # Arm, but do NOT register any person detection.
         arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                          last_update_epoch_s=0.0)
+                          last_update_mono_s=0.0)
         ctrl.process(arm_rc, now_epoch_s=10.0)
         # Flip ch4 high with no target present.
         fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1900, ch5_us=1000,
-                         last_update_epoch_s=0.0)
+                         last_update_mono_s=0.0)
         _, _, telem = ctrl.process(fm_rc, now_epoch_s=10.1)
         self.assertEqual(ctrl._mode, "MANUAL",
                          "FOLLOW_ME entry must be blocked when no target is present")
@@ -276,7 +276,7 @@ class TestControllerFollowMe(unittest.TestCase):
 
         # Ch4 low -> exit Follow Me
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                      last_update_epoch_s=0.0)
+                      last_update_mono_s=0.0)
         cmd, events, _ = ctrl.process(rc, now_epoch_s=t)
         self.assertEqual(ctrl._mode, "MANUAL")
         self.assertIn(SafetyEvent.FOLLOW_ME_EXITED, events)
@@ -288,7 +288,7 @@ class TestControllerFollowMe(unittest.TestCase):
 
         # Disarm (ch3 low) while ch4 high -> exit Follow Me
         disarm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1900, ch5_us=1000,
-                             last_update_epoch_s=0.0)
+                             last_update_mono_s=0.0)
         cmd, events, _ = ctrl.process(disarm_rc, now_epoch_s=t)
         self.assertEqual(ctrl._mode, "MANUAL")
         self.assertIn(SafetyEvent.FOLLOW_ME_EXITED, events)
@@ -312,7 +312,7 @@ class TestControllerFollowMe(unittest.TestCase):
             ])
 
             armed_fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900,
-                                    ch4_us=1900, ch5_us=1000, last_update_epoch_s=0.0)
+                                    ch4_us=1900, ch5_us=1000, last_update_mono_s=0.0)
             cmd, _, telem = ctrl.process(armed_fm_rc, now_epoch_s=t)
         self.assertEqual(telem["mode"], "FOLLOW_ME")
         self.assertGreater(cmd.left_byte, 126)
@@ -324,7 +324,7 @@ class TestControllerFollowMe(unittest.TestCase):
 
         ctrl.set_person_detections([])
         armed_fm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900,
-                                ch4_us=1900, ch5_us=1000, last_update_epoch_s=0.0)
+                                ch4_us=1900, ch5_us=1000, last_update_mono_s=0.0)
         cmd, _, _ = ctrl.process(armed_fm_rc, now_epoch_s=t)
         self.assertEqual(cmd.left_byte, 126)
         self.assertEqual(cmd.right_byte, 126)

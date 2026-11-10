@@ -13,6 +13,7 @@ These cover:
     within the radius.
 """
 
+import time
 import unittest
 
 from pi_app.control.controller import (
@@ -129,7 +130,7 @@ class TestControllerStopsForPersonInRadius(unittest.TestCase):
             safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
         )
         arm = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                       last_update_epoch_s=100.0)
+                       last_update_mono_s=time.monotonic())
         c.process(arm, now_epoch_s=100.0)
         return c, motor
 
@@ -140,7 +141,7 @@ class TestControllerStopsForPersonInRadius(unittest.TestCase):
             [FakeDet("stop", 0.5)], corridor_p5_mm=INF, safety_stop_radius_m=0.8)
         c.set_obstacle_data(eff_mm / 1000.0, 0.0)  # 0.0 m, fresh
         fwd = RCInputs(ch1_us=2000, ch2_us=2000, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                       last_update_epoch_s=100.0)
+                       last_update_mono_s=time.monotonic())
         cmd, events, telem = c.process(fwd, now_epoch_s=100.1)
         self.assertEqual(cmd.left_byte, CENTER_OUTPUT_VALUE)
         self.assertEqual(cmd.right_byte, CENTER_OUTPUT_VALUE)
@@ -150,7 +151,7 @@ class TestControllerStopsForPersonInRadius(unittest.TestCase):
         c, motor = self._armed_controller_with_obstacle()
         c.set_obstacle_data(5.0, 0.0)  # clear, fresh
         fwd = RCInputs(ch1_us=2000, ch2_us=2000, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                       last_update_epoch_s=100.0)
+                       last_update_mono_s=time.monotonic())
         cmd, events, telem = c.process(fwd, now_epoch_s=100.1)
         self.assertGreater(cmd.left_byte, CENTER_OUTPUT_VALUE)
         self.assertGreater(cmd.right_byte, CENTER_OUTPUT_VALUE)

@@ -21,6 +21,7 @@ import time
 
 import pytest
 
+from pi_app.app.phone_override import fresh_override_bytes
 from pi_app.cli import spp_server
 from pi_app.cli.spp_server import (
     SPP_CONTROL_ENV_VAR,
@@ -30,21 +31,22 @@ from pi_app.cli.spp_server import (
 
 
 def _read_bt_override(path, *, now=None):
-    """Mirror the freshness read in ``pi_app/app/main.py`` (lines 479-488).
+    """Run the freshness read that ``pi_app/app/main.py`` runs.
 
     Returns ``(left_byte, right_byte)`` if the override file exists and is
-    fresh within 600 ms, else ``None`` — exactly what the main control loop
-    would pass as ``bt_override`` into ``controller.process``.
+    fresh within 600 ms on the MONOTONIC clock, else ``None`` — exactly what
+    the main control loop would pass as ``bt_override`` into
+    ``controller.process``. Since 2026-11-10 this calls the real helper
+    (``pi_app.app.phone_override``) instead of a copy of an epoch check.
     """
-    now = now if now is not None else time.time()
+    now = now if now is not None else time.monotonic()
     try:
         with open(path, "r", encoding="utf-8") as sf:
             data = json.load(sf)
     except Exception:
         return None
-    if now - data["last_update_epoch_s"] <= 0.6:
-        return (data["left_byte"], data["right_byte"])
-    return None
+    override, _age = fresh_override_bytes(data, now)
+    return override
 
 
 @pytest.fixture(autouse=True)
@@ -135,6 +137,7 @@ def test_write_enabled_produces_consumable_override(monkeypatch, tmp_path):
     assert data["left_byte"] == 120
     assert data["right_byte"] == 140
     assert isinstance(data["last_update_epoch_s"], (int, float))
+    assert isinstance(data["last_update_mono_s"], (int, float))
 
     # And a fresh enabled write IS seen by the main.py-style reader.
     assert _read_bt_override(str(ov)) == (120, 140)
@@ -145,11 +148,15 @@ def test_write_enabled_uses_injected_clock(monkeypatch, tmp_path):
     monkeypatch.setenv(SPP_CONTROL_ENV_VAR, "1")
     ov = tmp_path / "wall_e_bt_latest.json"
 
-    write_control_override(120, 140, path=str(ov), now=lambda: 1000.0)
+    write_control_override(120, 140, path=str(ov), now=lambda: 1000.0,
+                           now_mono=lambda: 50.0)
     data = json.loads(ov.read_text())
     assert data["last_update_epoch_s"] == 1000.0
+    assert data["last_update_mono_s"] == 50.0
+    # Freshness is judged on the monotonic stamp only.
+    assert _read_bt_override(str(ov), now=50.5) == (120, 140)
     # Stale timestamp => main.py would drop it (age > 0.6 s).
-    assert _read_bt_override(str(ov), now=1000.7) is None
+    assert _read_bt_override(str(ov), now=50.7) is None
 
 
 # --------------------------------------------------------------------------

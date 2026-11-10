@@ -80,7 +80,7 @@ def _rc(ch1: int, ch2: int) -> RCInputs:
     # ch3 high = armed, ch4 low = MANUAL.
     return RCInputs(
         ch1_us=ch1, ch2_us=ch2, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-        last_update_epoch_s=time.time(),
+        last_update_mono_s=time.monotonic(),
     )
 
 
@@ -111,7 +111,7 @@ class TestManualHeadingHoldRetarget(unittest.TestCase):
 
             def tick(ch1, ch2):
                 clock["t"] += TICK_S
-                _, _, telem = ctrl.process(replace(_rc(ch1, ch2), last_update_epoch_s=time.time()))
+                _, _, telem = ctrl.process(replace(_rc(ch1, ch2), last_update_mono_s=time.monotonic()))
                 return telem
 
             # 1) Straight at 284 deg: the hold locks 284.

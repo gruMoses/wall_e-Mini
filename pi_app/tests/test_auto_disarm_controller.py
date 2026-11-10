@@ -76,7 +76,7 @@ class TestAutoDisarmController(unittest.TestCase):
             ch3_us=ch3,
             ch4_us=ch4,
             ch5_us=ch5,
-            last_update_epoch_s=float(t),
+            last_update_mono_s=float(t),
         )
         return self.controller.process(rc, now_epoch_s=float(t), bt_override_bytes=bt)
 
@@ -308,7 +308,7 @@ class TestAutoDisarmController(unittest.TestCase):
         self.clock["t"] = 610.0
         stale = RCInputs(
             ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-            last_update_epoch_s=600.0,
+            last_update_mono_s=600.0,
         )
         cmd, events, telem = self.controller.process(stale, now_epoch_s=610.0)
         self.assertIn(SafetyEvent.RC_STALE, events)

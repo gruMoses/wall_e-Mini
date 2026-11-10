@@ -36,7 +36,7 @@ class FakeShutdown:
 
 
 ARMED_RC = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                    last_update_epoch_s=0.0)
+                    last_update_mono_s=0.0)
 
 
 def _cfg(expo):

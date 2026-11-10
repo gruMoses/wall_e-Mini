@@ -39,7 +39,7 @@ def _arm_rc(now: float | None = None) -> RCInputs:
         ch1_us=1500, ch2_us=1500,
         ch3_us=1750,  # arm channel
         ch4_us=1500, ch5_us=1500,
-        last_update_epoch_s=now if now is not None else time.time(),
+        last_update_mono_s=now if now is not None else time.monotonic(),
     )
 
 

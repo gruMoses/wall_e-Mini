@@ -58,20 +58,20 @@ class FakeImu:
 
 ARMED_RC = RCInputs(
     ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-    last_update_epoch_s=0.0,
+    last_update_mono_s=0.0,
 )
 DISARM_RC = RCInputs(
     ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000,
-    last_update_epoch_s=0.0,
+    last_update_mono_s=0.0,
 )
 
 
 def _fresh_armed_rc() -> RCInputs:
-    return replace(ARMED_RC, last_update_epoch_s=time.time())
+    return replace(ARMED_RC, last_update_mono_s=time.monotonic())
 
 
 def _fresh_disarm_rc() -> RCInputs:
-    return replace(DISARM_RC, last_update_epoch_s=time.time())
+    return replace(DISARM_RC, last_update_mono_s=time.monotonic())
 
 
 def _make_controller(*, aligner=None, imu=None, waypoint_nav=None):
@@ -130,7 +130,7 @@ class TestHeadingAlignLockPersistence(unittest.TestCase):
         ctrl = _make_controller(aligner=aligner, imu=FakeImu())
         ctrl._gps_reading = _gps()
         ctrl._safety_state.is_armed = True
-        stale_rc = replace(_fresh_armed_rc(), last_update_epoch_s=time.time() - 5.0)
+        stale_rc = replace(_fresh_armed_rc(), last_update_mono_s=time.monotonic() - 5.0)
 
         _, events, _ = ctrl.process(stale_rc)
         self.assertIn(SafetyEvent.RC_STALE, events)

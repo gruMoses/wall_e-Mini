@@ -44,7 +44,7 @@ class TestController(unittest.TestCase):
         relay = FakeRelay()
         shutdown = FakeShutdown()
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown)
-        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000, last_update_mono_s=0.0)
         cmd, events, _ = c.process(rc, now_epoch_s=0.0)
         self.assertEqual(cmd.left_byte, 126)
         self.assertEqual(cmd.right_byte, 126)
@@ -60,7 +60,7 @@ class TestController(unittest.TestCase):
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
                        safety_params=SafetyParams(arm_high_persist_s=0.0))
         # Arm
-        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_mono_s=0.0)
         cmd, events, _ = c.process(rc, now_epoch_s=0.3)
         self.assertTrue(cmd.is_armed)
         # Send some non-neutral values
@@ -70,7 +70,7 @@ class TestController(unittest.TestCase):
             ch3_us=1900,
             ch4_us=1000,
             ch5_us=1000,
-            last_update_epoch_s=0.0,
+            last_update_mono_s=0.0,
         )
         cmd, events, _ = c.process(rc, now_epoch_s=0.6)
         self.assertEqual(motor.commands[-1], (MAX_OUTPUT, MIN_OUTPUT))
@@ -84,11 +84,11 @@ class TestController(unittest.TestCase):
         c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
                        safety_params=SafetyParams(arm_high_persist_s=0.0))
         # Arm first
-        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_mono_s=0.0)
         cmd, events, _ = c.process(rc, now_epoch_s=0.5)
         self.assertTrue(cmd.is_armed)
         # Trigger emergency rising edge
-        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1500, ch4_us=1000, ch5_us=1900, last_update_epoch_s=0.0)
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1500, ch4_us=1000, ch5_us=1900, last_update_mono_s=0.0)
         cmd, events, _ = c.process(rc, now_epoch_s=0.6)
         self.assertIn(SafetyEvent.EMERGENCY_TRIGGERED, events)
         self.assertFalse(cmd.is_armed)
@@ -117,7 +117,7 @@ class TestControllerTelemetryAdditions(unittest.TestCase):
 
     def test_gps_age_s_none_without_reading(self):
         c = Controller(motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown())
-        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000, last_update_mono_s=0.0)
         _, _, telem = c.process(rc, now_epoch_s=0.0)
         self.assertIsNone(telem.get("gps_age_s"))
 
@@ -131,7 +131,7 @@ class TestControllerTelemetryAdditions(unittest.TestCase):
         )
         c.set_gps_reading(reading)
         time.sleep(0.05)
-        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0)
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000, last_update_mono_s=0.0)
         _, _, telem = c.process(rc, now_epoch_s=0.0)
         age = telem.get("gps_age_s")
         self.assertIsNotNone(age)
@@ -156,47 +156,102 @@ class TestControllerTelemetryAdditions(unittest.TestCase):
 
 
 class TestRCStaleness(unittest.TestCase):
-    def test_stale_rc_forces_disarm_and_neutral(self):
+    """RC-stale watchdog on the monotonic clock (2026-11-10).
+
+    The RC reader stamps each frame with time.monotonic() and process()
+    compares it with time.monotonic(). The wall clock (now_epoch_s) must not
+    move the RC age: this Pi's clock steps at boot (RTC reset, then NTP).
+    """
+
+    def setUp(self):
+        self.clock = {"t": 1000.0}
+        self._mono = patch(
+            "pi_app.control.controller.time.monotonic",
+            side_effect=lambda: self.clock["t"],
+        )
+        self._mono.start()
+        self.addCleanup(self._mono.stop)
+
+    def _armed(self):
         motor = FakeMotor()
-        relay = FakeRelay()
-        shutdown = FakeShutdown()
         # One-tick arm as setup (arm timing is in test_rc_arm_channel_failsafe).
-        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
+        c = Controller(motor_driver=motor, arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown(),
                        safety_params=SafetyParams(arm_high_persist_s=0.0))
-
-        now = 100.0
-        # Arm
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                       last_update_epoch_s=now)
-        cmd, events, _ = c.process(rc, now_epoch_s=now + 0.3)
+                      last_update_mono_s=self.clock["t"])
+        cmd, _, _ = c.process(rc, now_epoch_s=5000.0)
         self.assertTrue(cmd.is_armed)
+        return c, motor
 
-        # Now time advances but last_update_epoch_s stays stale
-        stale_now = now + 0.3 + RC_STALE_TIMEOUT_S + 0.5
-        rc_stale = RCInputs(ch1_us=2100, ch2_us=2100, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                             last_update_epoch_s=now)
-        cmd, events, telem = c.process(rc_stale, now_epoch_s=stale_now)
+    def _rc(self, stamp, ch1=2100, ch2=2100):
+        return RCInputs(ch1_us=ch1, ch2_us=ch2, ch3_us=1900, ch4_us=1000, ch5_us=1000,
+                        last_update_mono_s=stamp)
+
+    def _assert_stale(self, cmd, events, telem):
         self.assertFalse(cmd.is_armed)
         self.assertEqual(cmd.left_byte, CENTER_OUTPUT_VALUE)
         self.assertEqual(cmd.right_byte, CENTER_OUTPUT_VALUE)
         self.assertIn(SafetyEvent.RC_STALE, events)
         self.assertTrue(telem.get("rc_stale"))
 
-    def test_fresh_rc_is_not_stale(self):
-        motor = FakeMotor()
-        relay = FakeRelay()
-        shutdown = FakeShutdown()
-        # One-tick arm as setup (arm timing is in test_rc_arm_channel_failsafe).
-        c = Controller(motor_driver=motor, arm_relay=relay, shutdown_scheduler=shutdown,
-                       safety_params=SafetyParams(arm_high_persist_s=0.0))
+    def test_stale_rc_forces_disarm_and_neutral(self):
+        c, motor = self._armed()
+        stamp = self.clock["t"]
+        self.clock["t"] += RC_STALE_TIMEOUT_S + 0.5
+        cmd, events, telem = c.process(self._rc(stamp), now_epoch_s=5000.0 + RC_STALE_TIMEOUT_S + 0.5)
+        self._assert_stale(cmd, events, telem)
+        self.assertAlmostEqual(telem["rc_age_s"], RC_STALE_TIMEOUT_S + 0.5)
 
-        now = 100.0
-        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                       last_update_epoch_s=now)
-        cmd, events, telem = c.process(rc, now_epoch_s=now + 0.3)
+    def test_fresh_rc_is_not_stale(self):
+        c, motor = self._armed()
+        self.clock["t"] += 0.3
+        cmd, events, telem = c.process(self._rc(self.clock["t"] - 0.3, 1500, 1500), now_epoch_s=5000.3)
         self.assertTrue(cmd.is_armed)
         self.assertNotIn(SafetyEvent.RC_STALE, events)
         self.assertFalse(telem.get("rc_stale", False))
+
+    def test_wall_clock_step_back_does_not_freshen_a_dead_link(self):
+        # Old code: rc_age = epoch_now - stamp, so a backward NTP step made
+        # a dead link look fresh. The wall clock now plays no part.
+        c, motor = self._armed()
+        stamp = self.clock["t"]
+        self.clock["t"] += 5.0  # 5 s with no frame
+        # The wall clock stepped back so that it reads only 0.2 s past the
+        # stamp: the epoch arithmetic would call this link fresh.
+        cmd, events, telem = c.process(self._rc(stamp), now_epoch_s=stamp + 0.2)
+        self._assert_stale(cmd, events, telem)
+
+    def test_wall_clock_step_forward_does_not_stale_a_live_link(self):
+        c, motor = self._armed()
+        self.clock["t"] += 0.05
+        cmd, events, telem = c.process(self._rc(self.clock["t"], 1500, 1500), now_epoch_s=self.clock["t"] + 3600.0)
+        self.assertTrue(cmd.is_armed)
+        self.assertNotIn(SafetyEvent.RC_STALE, events)
+
+    def test_negative_age_is_stale(self):
+        # A stamp in the future of this clock cannot be a real frame.
+        c, motor = self._armed()
+        cmd, events, telem = c.process(self._rc(self.clock["t"] + 2.0), now_epoch_s=self.clock["t"])
+        self._assert_stale(cmd, events, telem)
+
+    def test_non_finite_stamp_is_stale(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(stamp=bad):
+                c, motor = self._armed()
+                cmd, events, telem = c.process(self._rc(bad), now_epoch_s=5000.0)
+                self._assert_stale(cmd, events, telem)
+                self.assertIsNone(telem["rc_age_s"])
+
+    def test_no_frame_yet_is_not_stale_and_cannot_arm(self):
+        # 0.0 is the reader's "no frame yet" default (sticks centred, ch3
+        # mid). Unchanged contract: not RC_STALE, and it cannot arm.
+        c = Controller(motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown(),
+                       safety_params=SafetyParams(arm_high_persist_s=0.0))
+        rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1500, ch4_us=1500, ch5_us=1500,
+                      last_update_mono_s=0.0)
+        cmd, events, telem = c.process(rc, now_epoch_s=5000.0)
+        self.assertNotIn(SafetyEvent.RC_STALE, events)
+        self.assertFalse(cmd.is_armed)
 
     def test_stale_rc_still_refreshes_imu_heading(self):
         c = Controller(
@@ -212,13 +267,11 @@ class TestRCStaleness(unittest.TestCase):
             ch3_us=1000,
             ch4_us=1000,
             ch5_us=1000,
-            last_update_epoch_s=100.0,
+            last_update_mono_s=self.clock["t"],
         )
+        self.clock["t"] += RC_STALE_TIMEOUT_S + 0.5
 
-        cmd, events, telem = c.process(
-            rc,
-            now_epoch_s=100.0 + RC_STALE_TIMEOUT_S + 0.5,
-        )
+        cmd, events, telem = c.process(rc, now_epoch_s=100.0)
 
         imu.get_heading_deg.assert_called_once_with()
         self.assertFalse(cmd.is_armed)
@@ -250,7 +303,7 @@ class TestSlewLimiter(unittest.TestCase):
         )
         test_cfg = replace(default_config, slew_limiter=slew_cfg)
         arm_rc = RCInputs(
-            ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0
+            ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_mono_s=0.0
         )
         with patch("pi_app.control.controller.config", test_cfg):
             with patch("pi_app.control.controller.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2, 0.3]):
@@ -279,7 +332,7 @@ class TestSlewLimiter(unittest.TestCase):
         )
         test_cfg = replace(default_config, slew_limiter=slew_cfg)
         arm_rc = RCInputs(
-            ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_epoch_s=0.0
+            ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000, last_update_mono_s=0.0
         )
         with patch("pi_app.control.controller.config", test_cfg):
             with patch("pi_app.control.controller.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2, 0.3]):
@@ -333,7 +386,7 @@ class TestControllerPackLowLatch(unittest.TestCase):
         test_cfg = replace(default_config, slew_limiter=slew_cfg)
         params = SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0)
         arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000,
-                          ch5_us=1000, last_update_epoch_s=0.0)
+                          ch5_us=1000, last_update_mono_s=0.0)
         motor = self._FakeVescMotor()
         # Controlled virtual clock (robust to however many monotonic() calls
         # each tick makes, unlike a fixed side_effect list).
@@ -387,7 +440,7 @@ class TestControllerPackLowLatch(unittest.TestCase):
         c = Controller(motor_driver=FakeMotor(), arm_relay=FakeRelay(),
                        shutdown_scheduler=FakeShutdown())
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000,
-                      ch5_us=1000, last_update_epoch_s=0.0)
+                      ch5_us=1000, last_update_mono_s=0.0)
         _, _, telem = c.process(rc, now_epoch_s=0.3)
         self.assertIn("vesc_pack_low_latched", telem)
         self.assertFalse(telem["vesc_pack_low_latched"])
@@ -423,7 +476,7 @@ class TestControllerVescBusTelemetry(unittest.TestCase):
         c = Controller(motor_driver=motor, arm_relay=FakeRelay(),
                        shutdown_scheduler=FakeShutdown())
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000,
-                      ch5_us=1000, last_update_epoch_s=0.0)
+                      ch5_us=1000, last_update_mono_s=0.0)
         _, _, telem = c.process(rc, now_epoch_s=0.3)
         return telem
 
@@ -465,13 +518,13 @@ class TestFollowMeNoTargetRegression(unittest.TestCase):
                        safety_params=SafetyParams(arm_high_persist_s=0.0))
         # Arm with ch4 low (no person detections fed → no target present)
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                      last_update_epoch_s=100.0)
+                      last_update_mono_s=time.monotonic())
         cmd, _, _ = c.process(rc, now_epoch_s=100.5)
         self.assertTrue(cmd.is_armed)
         # ch4 rising edge while armed, still no target. Previously raised
         # UnboundLocalError because `telemetry` was referenced before assignment.
         rc2 = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1900, ch5_us=1000,
-                       last_update_epoch_s=100.0)
+                       last_update_mono_s=time.monotonic())
         cmd2, events, telem = c.process(rc2, now_epoch_s=100.6)  # must not raise
         self.assertIn(SafetyEvent.FOLLOW_ME_ENTERED, events)
         self.assertEqual(telem.get("follow_me_activation_blocked"), "no_target")
@@ -490,7 +543,7 @@ class TestCalibrationSafety(unittest.TestCase):
                        safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0))
         # Arm
         arm = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                       last_update_epoch_s=100.0)
+                       last_update_mono_s=time.monotonic())
         c.process(arm, now_epoch_s=100.0)
         self.assertTrue(c.is_armed)
         c.enter_calibration_mode()
@@ -499,7 +552,7 @@ class TestCalibrationSafety(unittest.TestCase):
     def test_estop_during_calibration_disarms_stops_and_schedules_shutdown(self):
         c, motor, relay, shutdown = self._armed_calibration_controller()
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1900,
-                      last_update_epoch_s=100.0)
+                      last_update_mono_s=time.monotonic())
         cmd, events, telem = c.process(rc, now_epoch_s=100.1)
         self.assertIn(SafetyEvent.EMERGENCY_TRIGGERED, events)
         self.assertFalse(c.is_armed)
@@ -513,7 +566,7 @@ class TestCalibrationSafety(unittest.TestCase):
         c, motor, relay, shutdown = self._armed_calibration_controller()
         stops_before = motor.stops
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000, ch5_us=1000,
-                      last_update_epoch_s=100.0)  # ch3 low = disarm
+                      last_update_mono_s=time.monotonic())  # ch3 low = disarm
         cmd, events, telem = c.process(rc, now_epoch_s=100.1)
         self.assertFalse(c.is_armed)
         self.assertGreater(motor.stops, stops_before)
@@ -524,7 +577,7 @@ class TestCalibrationSafety(unittest.TestCase):
         c, motor, relay, shutdown = self._armed_calibration_controller()
         stops_before = motor.stops
         rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000, ch5_us=1000,
-                      last_update_epoch_s=100.0)
+                      last_update_mono_s=time.monotonic())
         cmd, events, telem = c.process(rc, now_epoch_s=100.1)
         self.assertTrue(c.is_armed)
         self.assertEqual(motor.stops, stops_before)

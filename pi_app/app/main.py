@@ -49,6 +49,7 @@ try:
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
     from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted
+    from pi_app.app.phone_override import fresh_override_bytes
     from pi_app.control.netting_mute import near_share, detection_drops_mute
     from config import config
 except ModuleNotFoundError:
@@ -81,6 +82,7 @@ except ModuleNotFoundError:
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
     from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted  # type: ignore
+    from pi_app.app.phone_override import fresh_override_bytes  # type: ignore
     from pi_app.control.netting_mute import near_share, detection_drops_mute  # type: ignore
     from config import config  # type: ignore
 
@@ -534,12 +536,9 @@ def run() -> int:
             max_restarts=int(getattr(_det_cfg_for_hang, "vision_hang_restart_budget", 3) or 0),
             window_s=float(getattr(_det_cfg_for_hang, "vision_hang_restart_window_s", 3600.0) or 0.0),
         )
-        # RC age for the restart gate on the MONOTONIC clock: the RC reader
-        # stamps frames with time.time(), and an NTP step during a short
-        # dropout could make an epoch age jump past the "transmitter off"
-        # threshold. Track when the frame stamp last changed instead.
-        _rc_seen_epoch = 0.0
-        _rc_seen_mono: float | None = None
+        # RC age for the restart gate is on the MONOTONIC clock: the RC
+        # reader stamps each frame with time.monotonic() (last_update_mono_s),
+        # so an NTP step cannot move it.
         last_imu_heading_deg = None
         last_imu_yaw_rate_dps = None
         if oak_reader is not None:
@@ -566,7 +565,7 @@ def run() -> int:
                 ch3_us=s.ch3_us,
                 ch4_us=s.ch4_us,
                 ch5_us=s.ch5_us,
-                last_update_epoch_s=s.last_update_epoch_s,
+                last_update_mono_s=s.last_update_mono_s,
             )
             # Prefer fresh BT over RC using timestamp freshness
             # Read from shared file written by standalone SPP server
@@ -582,9 +581,11 @@ def run() -> int:
                             bt_cached_data = json.load(sf)
                         bt_cached_mtime_ns = mtime_ns
                 if bt_cached_data is not None:
-                    bt_age = time.time() - bt_cached_data["last_update_epoch_s"]
-                    if bt_age <= 0.6:  # Fresh BT command within 600ms
-                        bt_override = (bt_cached_data["left_byte"], bt_cached_data["right_byte"])
+                    # Fresh within 600 ms on the monotonic clock; a missing,
+                    # non-finite or negative age is stale (phone_override.py).
+                    bt_override, bt_age = fresh_override_bytes(
+                        bt_cached_data, time.monotonic()
+                    )
             except Exception:
                 pass  # No BT data available, use RC instead
             # Feed OAK-D Lite data to controller
@@ -674,12 +675,10 @@ def run() -> int:
             # armed robot keeps running: MANUAL stays at the stale-depth
             # floor and the autonomous modes are already halted by the stale
             # depth, so the restart waits for the disarm.
-            if rc.last_update_epoch_s > 0.0 and rc.last_update_epoch_s != _rc_seen_epoch:
-                _rc_seen_epoch = rc.last_update_epoch_s
-                _rc_seen_mono = time.monotonic()
             if isinstance(oak_camera_health, dict):
                 _rc_age_s = (
-                    (time.monotonic() - _rc_seen_mono) if _rc_seen_mono is not None else None
+                    (time.monotonic() - rc.last_update_mono_s)
+                    if rc.last_update_mono_s > 0.0 else None
                 )
                 _may_restart, _restart_gate = restart_permitted(
                     is_armed=bool(cmd.is_armed),
