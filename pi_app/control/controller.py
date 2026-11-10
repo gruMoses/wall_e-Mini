@@ -2620,6 +2620,9 @@ class Controller:
                 'is_calibrated': status.is_calibrated,
                 'error_count': status.error_count,
                 'saturated': status.saturated,
+                # The reader's heading is frozen on old samples; the hold
+                # applies no correction (ImuSteeringCompensator.update).
+                'heading_stale': status.heading_stale,
             }
             # OakImuReader (and future readers) may expose get_health() with
             # sample-identity / axis / scale diagnostics for field chalk tests.

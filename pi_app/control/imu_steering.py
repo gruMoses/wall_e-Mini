@@ -100,6 +100,28 @@ class ImuSteeringState:
     # gate for the integral term). Surfaced to telemetry so a saturated loop
     # is visible without cross-referencing correction_raw vs max_correction.
     saturated: bool = False
+    # True while the reader reports its heading stale (see
+    # _reading_is_stale). No correction is computed from it then.
+    heading_stale: bool = False
+
+
+def _reading_is_stale(data) -> bool:
+    """True when a read() result says its heading is frozen on old data.
+
+    OakImuReader reports ``integrate_status`` "stale" when its newest sample
+    is older than its stale age (0.5 s): it then freezes the heading and
+    reports a yaw rate of 0. An infinite ``sample_age_s`` means no sample
+    has ever arrived. A reader without these fields (the external I2C
+    ImuReader) is never treated as stale here.
+    """
+    if not isinstance(data, dict):
+        return False
+    if data.get("integrate_status") == "stale":
+        return True
+    age = data.get("sample_age_s")
+    if isinstance(age, bool) or not isinstance(age, (int, float)):
+        return False
+    return not math.isfinite(float(age))
 
 
 class ImuSteeringCompensator:
@@ -146,6 +168,9 @@ class ImuSteeringCompensator:
         # 'sample_age_s'; OakImuReader reports it). None when the reader does
         # not report one. Read by heading_age_s().
         self._last_sample_age_s: Optional[float] = None
+        # Stale-heading episodes (2026-11-06: the OAK IMU stream stopped for
+        # 38.8 h and the hold kept steering from the frozen heading).
+        self._stale_episodes: int = 0
 
         # Initialize IMU if provided
         if self.imu_reader is not None:
@@ -290,6 +315,15 @@ class ImuSteeringCompensator:
 
             self.state.last_steering_input = steering_input
 
+            # A stale heading is frozen on old data (2026-11-06: 38.8 h). A
+            # correction from it is a constant push that nothing can null,
+            # up to max_correction. Return none; _note_sample_age re-captures
+            # the target when fresh samples resume.
+            if self.state.heading_stale:
+                with self.lock:
+                    self._last_pid = {k: 0.0 for k in self._last_pid}
+                return None
+
             # Compute compensation only when near neutral steering
             if is_neutral:
                 # If a dwell was requested, lock heading after dwell time passes
@@ -408,15 +442,43 @@ class ImuSteeringCompensator:
                 is_available=self.state.is_available,
                 error_count=self.state.error_count,
                 saturated=self._last_saturated,
+                heading_stale=self.state.heading_stale,
             )
     
     def _note_sample_age(self, data) -> None:
-        """Remember the sample age the reader reported with this read."""
+        """Remember the sample age the reader reported with this read.
+
+        Also tracks stale-heading episodes. Every read path calls this right
+        after it stores the new heading (caller holds the lock), so the
+        stale -> fresh edge is seen by whichever call reads first.
+
+        While stale, nothing computed from the frozen heading is kept: the
+        integral, the D-term filter and the anti-windup flag are cleared.
+        On the first fresh read after a stale episode the hold target is
+        captured once from the current heading, the same capture the hold
+        does on a return to neutral. The heading may have moved while it was
+        frozen (rotation the IMU never delivered), and a camera session
+        rebuild bumps the yaw generation, so the old target would turn into
+        a step. Never re-applied on later ticks.
+        """
         age = data.get("sample_age_s") if isinstance(data, dict) else None
         if isinstance(age, bool) or not isinstance(age, (int, float)):
             self._last_sample_age_s = None
         else:
             self._last_sample_age_s = float(age)
+        stale = _reading_is_stale(data)
+        was_stale = self.state.heading_stale
+        if stale or was_stale:
+            self.state.integral_error = 0.0
+            self._yaw_rate_ema = None
+            self._last_saturated = False
+        # No journal line here: OakImuReader already warns at each stale
+        # episode, and short drops can come every few seconds (2026-10-22).
+        if stale and not was_stale:
+            self._stale_episodes += 1
+        elif was_stale and not stale:
+            self.state.target_heading_deg = self.state.heading_deg
+        self.state.heading_stale = stale
 
     def heading_age_s(self, now_s: Optional[float] = None) -> float:
         """How old the heading is, in seconds, on the monotonic clock.
