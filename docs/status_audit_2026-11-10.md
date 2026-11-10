@@ -20,7 +20,7 @@ No code changed. This commit corrects stale statements in the documents only (se
 
 Each fix is a motion-safety change. Get a Grok safety review and Kevin's approval before each push. Do not put two of them in one push. The order below is the result of a Grok second opinion (session `01a1c63a-1c96-7360-8abe-8b1e259b1a72`), which moved item 2 up and put item 3 before item 4.
 
-STATUS 2026-11-10 17:20: items 2, 3, 4 and 5 are corrected and deployed (section 9). Item 1 is in work: four versions failed the safety review (section 9.4). Items 6, 7 and 8 are open. A new gap came from the logs of 2026-11-07: the IMU stream can stop without a fault; its correction is deployed (section 9.3).
+STATUS 2026-11-10 18:00: items 1, 2, 3, 4 and 5 are corrected and deployed (section 9; item 1 at 17:50, after four versions failed the safety review, section 9.4). Items 6, 7 and 8 are open. A new gap came from the logs of 2026-11-07: the IMU stream can stop without a fault; its correction is deployed (section 9.3).
 
 1. **The person stop releases at close range.** `_apply_safety_tier_override` in `pi_app/hardware/oak_depth.py` is calculated again at each depth poll and has no memory. Below about 0.4 m the person box is cut by the frame edge and the depth sample is not valid (`no_support`, `far_veto` or `ambiguous`). The backstop for a detection without depth needs a box width of 0.40 or more (`safety_stop_bbox_width`). The corridor ignores pixels at or below 350 mm, so it sees past the person. Result: one bad frame releases the stop. Evidence: 2026-11-08 14:27:40, FOLLOW_ME, the stop was off for about 0.6 s with Kevin at 0.3 to 0.9 m. Direction for the fix: hold the stop after a close stop-tier detection, and release it only when the depth shows a clear corridor or on an operator action. A release on a timer alone repeats the fault. NOTE: Kevin ruled that the pivot during the stop is acceptable. That ruling does not include this release.
 2. **The waypoint API accepts any speed.** `/api/nav/start` and `/api/nav/go` in `pi_app/web/waypoint_nav_ui.py` write the client values `cruise_speed` and `arrival_radius` into `nav._cfg` with no limit and no authentication. A value of 127 is full speed. A negative value reverses. The values stay for later missions. Fix: clamp to the range of the sliders and refuse a negative speed.
@@ -184,11 +184,31 @@ Checks on the robot: the waypoint page shows the 10–80 range, a negative speed
 - Correction DEPLOYED on 2026-11-10 with Kevin's approval, one commit for each push: `185f239` (on the robot at 17:05) rebuilds the session when no IMU message arrives for 10 s with fresh depth (one restart budget for the colour watchdog and the IMU watchdog: 3 in 15 min, then a latched `imu_stall_fault`); `67b3f04` (17:10) gives no heading-hold correction from a stale heading and captures the target one time on recovery; `07cbc74` (17:15) adds `imu_age_s`, `imu_stale` and `imu_watchdog` to the health data, a journal line each minute, a status-line text (`IMU STALE`) and JSON events (`oak_imu_stall`, `oak_imu_stall_restart`, `oak_imu_stall_fault`, `oak_imu_recovered`). Grok sessions `01a1c798` and `01a1c79a`: safe, no item to correct. Checks on the robot: no IMU restart after the warm-up, and `/api/telemetry` shows `camera_health.imu_age_s` 0.068, `imu_stale` False, `imu_watchdog` True.
 - Not verified, because only a real stall shows it: that a session rebuild brings a dead IMU stream back (one case, 2026-11-08), the rebuild time, MANUAL at the 10 percent floor during the rebuild, and the depthai teardown on this restart path. The journal now has a "resumed after N s" line for stale episodes of 2 s or more; use it to check the 10 s limit.
 
-### 9.4 Item 1, the person stop hold: in work
+### 9.4 Item 1, the person stop hold: deployed at 17:50
+
+DEPLOYED 2026-11-10 17:50 with Kevin's approval: commit `c999b0a` (`pi_app/control/person_stop_hold.py`, wiring in `oak_depth.py`, `main.py` and `controller.py`, config values `person_stop_hold_*`). The fifth Grok review (session `01a1c7ce`) found it safe. The full suite passed on the commit (2,093 tests, and the one known failure on the Mac).
+
+How it works, in FOLLOW_ME and WAYPOINT_NAV:
+
+- A stop trigger engages the hold. A trigger in the last 1.0 s also engages it at the start of an autonomous mode. While the hold is active the obstacle distance is 0.0, so the forward part of the command is zero; pivots and reverse pass.
+- The hold follows one object, the one that caused the stop (the chain). On each poll with a fresh detection packet, a box continues the chain only if it is the one candidate: same group (person or animal), centre within 0.30 of the frame width, seen in 0.6 s, and plausible in range (1.5 m/s and 0.25 m) and in area. One box in the same place (0.10) continues the chain with a different label (YOLO called the operator "horse" at close range).
+- Release by evidence: the chain's own box seen beyond 1.0 m (range "ok", 0.05 from the left and right edge) on 3 polls, then 5 polls in sequence with each stop-tier box in view seen beyond. The corridor is not evidence (on 2026-11-08 it read 2.9 to 4.7 m with Kevin at 0.3 to 0.9 m).
+- The hold becomes operator-only, until it ends, when the chain is lost for more than 0.6 s, when two boxes are candidates, when a second object is not seen beyond on 2 polls, when a far box is in the chain's place while the chain is missing, or when a second object triggers the stop.
+- The operator ends a hold with the arm switch off (live RC link), with FOLLOW_ME off and on, or with stop and GO on the waypoint page. A hold that is active at a change to MANUAL (also the automatic exit on stale vision) stays until the two commanded tracks are at neutral for 0.25 s.
+- MANUAL has no new hold by default (`person_stop_hold_in_manual` False). Do not set it to True without Kevin's word.
+- If the control loop does not write its levels for 1 s, the reader uses the strict values and writes one WARNING. At each start the journal shows `levels never written` and then `levels fresh again`; that is normal.
+
+Replay of three drives (log lines at 10 Hz as polls): three holds, all in FOLLOW_ME. The hold of 2026-11-08 14:27:39.9 covers the 0.66 s gap; it became operator-only (a second trigger box at 14:27:41) and ended when Kevin left FOLLOW_ME. The other two released on the object seen beyond; the start of following was 0.3 to 0.7 s later than before.
+
+Checks on the robot after the deploy: no traceback, the hold state is in the JSON log (`obstacle.person_stop_hold`, inactive), detection latency p50 0.196 s and depth 14.5 fps (the same as the runs before it).
+
+Not verified: the hold on the robot with a person (it needs a supervised FOLLOW_ME test: step inside 0.8 m, step to the side, walk away), the timing at 15 polls each second, and how frequently the hold becomes operator-only in the yard. The journal lines `Person stop HOLD engaged`, `released` and `operator-only (reason)` and the log field show each case.
+
+History of the reviews:
 
 - Three versions failed the Grok safety review (sessions `01a1c76a`, `01a1c783`, `01a1c79d`). The first version released on a corridor reading after an inset box, ended at an automatic change to MANUAL, and lost a trigger at a mode change. The later versions followed objects in a list, and the list let a different object release the hold; it also had no limit on its size.
 - Rulings kept from the review: no new hold in MANUAL by default (`person_stop_hold_in_manual` False). Reason: with the netting over the lens the corridor does not show clear, so a MANUAL hold would stay until the arm switch is cycled each time the camera sees Kevin near the robot. A hold that is active at a change to MANUAL stays until the sticks are at neutral for 0.25 s. A trigger in the last 1.0 s engages the hold at the start of an autonomous mode.
-- Design in work (2026-11-10 16:45): the hold follows only the object that caused the stop. It releases only when that object is seen beyond 1.0 m. A second object near it, a loss of more than 0.6 s, or two candidates make the hold stay until an operator action (arm switch, FOLLOW_ME off and on, or stop and GO on the waypoint page).
+- The fourth version (one chain, no list; session `01a1c7bd`) still released on a clear corridor after the object was seen beyond and then left the view. A person can come back inside 0.8 m in that time with no detection. The deployed version has no corridor release in the autonomous modes.
 
 ### 9.5 GPS odometry repair: prepared, not deployed
 
