@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .odometry import forward_unit
+
 
 @dataclass(frozen=True)
 class TrailPoint:
@@ -93,8 +95,8 @@ class TrailManager:
         O(k) popleft loop instead of O(n) list rebuild: old and consumed points
         are always at the front of the chronologically-ordered deque.
         """
-        heading_x = math.cos(robot_theta)
-        heading_y = math.sin(robot_theta)
+        # Forward vector per the odometry.py frame contract (theta CW-positive).
+        heading_x, heading_y = forward_unit(robot_theta)
         max_age = now - self._config.max_age_s
         consume_r = self._config.consume_radius_m
 
@@ -152,7 +154,8 @@ class TrailManager:
         """Compute curvature at each trail point using the three-point circle method.
 
         Returns a list of curvature values (same length as trail).
-        First and last points get curvature 0.0.
+        First and last points get curvature 0.0. In the odometry.py frame
+        contract (+y is clockwise of +x) a positive value is a RIGHT turn.
         """
         n = len(trail)
         if n < 3:

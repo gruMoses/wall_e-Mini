@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from .odometry import RobotPose
+from .odometry import RobotPose, world_to_body
 from .trail import TrailPoint
 
 
@@ -107,12 +107,9 @@ class PurePursuitController:
 
         trail_remaining = len(trail) - lookahead_idx
 
-        # Transform lookahead point to robot-local frame
-        dx = lookahead_x - pose.x
-        dy = lookahead_y - pose.y
-        c, s = math.cos(pose.theta), math.sin(pose.theta)
-        local_x = dx * c + dy * s
-        local_y = -dx * s + dy * c
+        # Lookahead point in the robot frame (odometry.py frame contract):
+        # local_x forward, local_y to the RIGHT, so kappa > 0 = steer right.
+        local_x, local_y = world_to_body(pose, lookahead_x, lookahead_y)
 
         dist_sq = local_x * local_x + local_y * local_y
         if dist_sq < 0.01 * 0.01:

@@ -275,12 +275,11 @@ def _world_to_pixel(
 
     Returns (px, py) or None if behind camera / off-screen.
     """
-    dx = wx - robot_x
-    dy = wy - robot_y
-    cos_t = math.cos(robot_theta)
-    sin_t = math.sin(robot_theta)
-    z_cam = dx * cos_t + dy * sin_t      # forward distance
-    x_cam = dx * sin_t - dy * cos_t      # rightward offset
+    # Frame contract of pi_app/control/odometry.py (theta clockwise-positive,
+    # +y clockwise of +x). Until 2026-11-10 this used (sin, -cos) as "right",
+    # which is LEFT in that frame, so trail points were drawn mirrored.
+    from pi_app.control.odometry import RobotPose, world_to_body
+    z_cam, x_cam = world_to_body(RobotPose(robot_x, robot_y, robot_theta, 0.0), wx, wy)
     if z_cam < 0.15:
         return None
     fx, fy, cx, cy = _resolve_intrinsics(intrinsics, img_w, img_h)

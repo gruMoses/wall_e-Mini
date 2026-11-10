@@ -51,9 +51,14 @@ class TestResolveIntrinsics(unittest.TestCase):
 
 
 class TestWorldToPixelUsesSuppliedIntrinsics(unittest.TestCase):
-    """Project a point 1 m right at 5 m ahead; robot at origin facing +x."""
+    """Project a point 1 m right at 5 m ahead; robot at origin facing +x.
 
-    ARGS = dict(wx=5.0, wy=-1.0, robot_x=0.0, robot_y=0.0, robot_theta=0.0,
+    "Right" is +y: the odometry frame contract (pi_app/control/odometry.py)
+    puts +y 90 deg clockwise of +x. Before 2026-11-10 the overlay used the
+    counter-clockwise convention and this point was written as wy=-1.0.
+    """
+
+    ARGS = dict(wx=5.0, wy=1.0, robot_x=0.0, robot_y=0.0, robot_theta=0.0,
                 img_w=640, img_h=480, camera_height_m=0.497)
 
     def test_uses_measured_focal_length_and_principal_point(self):

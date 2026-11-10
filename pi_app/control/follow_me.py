@@ -36,7 +36,7 @@ from config import FollowMeConfig
 from pi_app.control.mapping import CENTER_OUTPUT_VALUE, MAX_OUTPUT, MIN_OUTPUT
 from pi_app.control.drive_math import skid_steer_mix
 from pi_app.control.gps_odometry import GpsOdometry, GpsOdometryConfig
-from pi_app.control.odometry import DeadReckonOdometry
+from pi_app.control.odometry import DeadReckonOdometry, right_unit, world_to_body
 from pi_app.control.pure_pursuit import PurePursuitController, PursuitConfig
 from pi_app.control.trail import TrailConfig, TrailManager
 
@@ -1208,33 +1208,24 @@ def _trail_tangent_steer_sign(tdx: float, tdy: float, theta: float) -> float:
     search rotation in ``_handle_lost_target``).
 
     Positive means "steer right" (``SteeringLayer``'s convention: positive
-    steer offset = turn right). ``(tdx, tdy)`` is the trail's world-frame
-    direction vector — trail points are recorded via
-    ``DeadReckonOdometry.camera_to_world``, so they share its world frame.
-    ``theta`` is the robot's heading in radians, CW-positive (heading_deg
-    increases on a RIGHT turn — see ``OakImuReader.read``'s canonical
-    convention).
+    steer offset = turn right). ``(tdx, tdy)`` is the trail's direction in the
+    world frame of the odometry that recorded the trail points, and ``theta``
+    that odometry's heading. Both odometry classes obey the one frame
+    contract in ``pi_app/control/odometry.py`` (theta clockwise-positive,
+    ``+y`` clockwise of ``+x``), so the dot product with ``right_unit(theta)``
+    -- the same vector ``camera_to_world`` multiplies ``x_cam`` by -- measures
+    directly how much of the tangent points to the robot's right.
 
-    ``(-sin(theta), cos(theta))`` is the world-frame direction the robot's
-    forward vector points after a further +90 deg of heading — i.e.
-    PHYSICALLY RIGHT, because increasing heading is a right turn. This is the
-    exact vector ``camera_to_world`` multiplies its ``x_cam`` argument by, so
-    a trail tangent's dot product with it directly measures "how much of the
-    tangent points right" — no sign flip needed to go from that dot product
-    to a right-positive steer sign.
-
-    2026-09-19 bug this replaced: this formula was written when heading was
-    CCW-positive (before the "Show the heading state honestly in the UI"
-    fix), when ``(-sin, cos)`` pointed LEFT and the caller negated the dot
-    product to turn "points left" into "steer right = positive". The heading
-    fix flipped what ``(-sin, cos)`` physically means (see
-    ``DeadReckonOdometry.camera_to_world``) without this site being updated:
-    a real trail tangent confirmed to go right via ``camera_to_world`` (x_cam
-    increasing over successive trail points) produced a NEGATIVE (left)
-    steer. Do not reintroduce a negation here — see
-    ``pi_app/tests/test_trail_search_steer_sign.py``.
+    History: 2026-09-19 this site negated the dot product (written for an old
+    counter-clockwise heading) and steered left for a rightward trail; until
+    2026-11-10 ``GpsOdometry`` kept a counter-clockwise math angle, so the same
+    formula was wrong whenever GPS odometry was selected. Do not add a
+    negation here; fix the frame in the odometry class. See
+    ``pi_app/tests/test_trail_search_steer_sign.py`` and
+    ``pi_app/tests/test_odometry_frame_contract.py``.
     """
-    return -tdx * math.sin(theta) + tdy * math.cos(theta)
+    rx, ry = right_unit(theta)
+    return tdx * rx + tdy * ry
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1451,6 +1442,7 @@ class FollowMeController:
                 cog_min_speed_mps=config.gps_cog_min_speed_mps,
                 heading_alpha=config.gps_heading_alpha,
                 cog_min_delta_m=config.gps_cog_min_delta_m,
+                speed_scale_mps_per_byte=config.trail_speed_scale_mps_per_byte,
             ))
             self._trail = TrailManager(TrailConfig(
                 max_trail_points=config.trail_max_points,
@@ -1498,7 +1490,7 @@ class FollowMeController:
         if self._odometry is not None:
             self._odometry.update(heading_deg, motor_l, motor_r, timestamp)
         if self._gps_odom is not None:
-            self._gps_odom.update_gyro(heading_deg, timestamp)
+            self._gps_odom.update_motion(heading_deg, motor_l, motor_r, timestamp)
 
     def update_gps(
         self,
@@ -2052,10 +2044,10 @@ class FollowMeController:
 
     def _pick_odometry(self):
         """Return the best available odometry source (GPS preferred)."""
-        if self._gps_odom is not None and self._gps_odom.has_fix:
+        if self._gps_odom is not None and self._gps_odom.pose_valid:
             self._odom_source = "gps"
             return self._gps_odom
-        if self._odometry is not None:
+        if self._odometry is not None and self._odometry.pose_valid:
             self._odom_source = "dead_reckon"
             return self._odometry
         self._odom_source = "none"
@@ -2342,11 +2334,8 @@ class FollowMeController:
                     ) < 3.0
 
                     if cmd is not None:
-                        dx_lk = cmd.lookahead_x - pose.x
-                        dy_lk = cmd.lookahead_y - pose.y
-                        fwd_x = math.cos(pose.theta)
-                        fwd_y = math.sin(pose.theta)
-                        lookahead_behind = (dx_lk * fwd_x + dy_lk * fwd_y) < 0
+                        ahead_m, _ = world_to_body(pose, cmd.lookahead_x, cmd.lookahead_y)
+                        lookahead_behind = ahead_m < 0
                         if cmd.trail_remaining <= 5:
                             _log.debug(
                                 "trail_remaining=%d (pose=(%.2f,%.2f))",

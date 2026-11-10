@@ -974,8 +974,14 @@ function drawTrailCanvas(d) {
   try {
     var W = trailCanvas.width, H = trailCanvas.height;
     trailCtx.fillStyle = '#1a1a2e'; trailCtx.fillRect(0, 0, W, H);
-    var pts = d.trail_points_xy || [];
-    var ox = d.robot_pose_x, oy = d.robot_pose_y, otheta = d.robot_pose_theta;
+    /* Odometry frame contract (pi_app/control/odometry.py): +y is 90 deg
+       CLOCKWISE of +x and theta is clockwise-positive. Draw +x up and +y to
+       the right, so a right turn looks like a right turn. Below, canvas
+       "x" = world y and canvas "y" = world x. */
+    var rawPts = d.trail_points_xy || [];
+    var pts = [];
+    for (var k = 0; k < rawPts.length; k++) pts.push([rawPts[k][1], rawPts[k][0]]);
+    var ox = d.robot_pose_y, oy = d.robot_pose_x, otheta = d.robot_pose_theta;
     if (ox == null || oy == null) {
       trailCtx.fillStyle = '#555'; trailCtx.font = '12px sans-serif';
       trailCtx.textAlign = 'center'; trailCtx.fillText('No odometry', W / 2, H / 2);
@@ -983,7 +989,8 @@ function drawTrailCanvas(d) {
     }
     var allX = [ox], allY = [oy];
     for (var i = 0; i < pts.length; i++) { allX.push(pts[i][0]); allY.push(pts[i][1]); }
-    var la = d.lookahead_point_xy;
+    var laRaw = d.lookahead_point_xy;
+    var la = laRaw ? [laRaw[1], laRaw[0]] : null;
     if (la) { allX.push(la[0]); allY.push(la[1]); }
     var minX = Math.min.apply(null, allX), maxX = Math.max.apply(null, allX);
     var minY = Math.min.apply(null, allY), maxY = Math.max.apply(null, allY);
@@ -1037,9 +1044,11 @@ function drawTrailCanvas(d) {
 
     /* robot arrow */
     var rpx = tx(ox), rpy = ty(oy);
-    var theta = otheta != null ? -otheta : 0;
+    /* Arrow drawn pointing up (+x); canvas rotation is clockwise-positive
+       on screen, the same sense as theta. */
+    var theta = otheta != null ? otheta : 0;
     trailCtx.save(); trailCtx.translate(rpx, rpy);
-    trailCtx.rotate(theta - Math.PI / 2);
+    trailCtx.rotate(theta);
     trailCtx.beginPath();
     trailCtx.moveTo(0, -10); trailCtx.lineTo(-6, 6); trailCtx.lineTo(6, 6);
     trailCtx.closePath(); trailCtx.fillStyle = '#fff'; trailCtx.fill();
