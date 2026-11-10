@@ -878,7 +878,23 @@ class FollowMeConfig:
     # Do NOT set True again before GpsOdometry is repaired, has frame tests,
     # and has a field test.
     trail_follow_enabled: bool = False
-    trail_speed_scale_mps_per_byte: float = 0.0100  # 0.0075 calibrated on gravel via RTK GPS at max_erpm 15000 (2026-03-28), scaled 4/3 for 20000 on 2026-09-19 — re-calibrate
+    # m/s per motor byte above neutral (trail odometry, pure-pursuit lookahead).
+    # 0.0075 calibrated on gravel via RTK GPS at max_erpm 15000 (2026-03-28),
+    # scaled 4/3 for 20000 on 2026-09-19. Checked 2026-11-10 against the GPS
+    # track on 30 s windows of the 2026-11-06/08 drives (RTK float): best fit
+    # 0.0100-0.0105, per-drive fits 0.0095-0.0109, so 0.0100 stands. (The VESC
+    # eRPM speed, not this byte scale, reads 20-25 % above GPS.)
+    trail_speed_scale_mps_per_byte: float = 0.0100
+    # Which odometry builds the follow-me trail: "dead_reckon" (gyro heading +
+    # motor-byte speed, boot-relative frame) or "gps" (GPS fix + gyro with a
+    # course-over-ground offset, true north-east frame). One source only: the
+    # frames differ. "dead_reckon" since 2026-11-10: on 30 s windows of the
+    # 2026-11-06/08 drives its end-to-end error was 0.85 m median (5 % of the
+    # path); GPS odometry instead carries 1.8-2.1 m steps at every fix-quality
+    # change, a 1 Hz position, and no pose at all until a straight forward
+    # run has taught it the heading offset. Both obey the frame contract in
+    # pi_app/control/odometry.py.
+    trail_odometry_source: str = "dead_reckon"
     trail_max_points: int = 100
     trail_min_spacing_m: float = 0.3
     trail_max_age_s: float = 30.0

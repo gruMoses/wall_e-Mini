@@ -1117,20 +1117,58 @@ class Controller:
             wp_in_align,
         )
 
+    # OakImuReader integrate_status values for which the heading did not
+    # follow the robot this read (no live samples, or an integration hole).
+    _ODOM_BAD_IMU_STATUS = frozenset({"stale", "init", "gap_freeze", "regressed", "restart"})
+
+    def _imu_heading_valid_for_odometry(self, read_ok: bool) -> bool:
+        """Whether the heading just read may drive the follow-me trail odometry.
+
+        Only consulted when the trail is built (``FollowMeController
+        .uses_odometry``). On 2026-11-07 the OAK IMU was stale for two whole
+        drives and the heading read a constant 0.000.
+        """
+        if not read_ok or self._imu_compensator is None:
+            return False
+        try:
+            st = self._imu_compensator.get_status()
+            if not st.is_available:
+                return False
+        except Exception:
+            return False
+        reader = getattr(self._imu_compensator, "imu_reader", None)
+        health_fn = getattr(reader, "get_health", None) if reader is not None else None
+        if callable(health_fn):
+            try:
+                health = health_fn()
+            except Exception:
+                return False
+            if isinstance(health, dict):
+                return health.get("integrate_status") not in self._ODOM_BAD_IMU_STATUS
+        return True
+
     def _compute_follow_me_autonomy_command(self, telemetry: dict, mono_now: float) -> AutonomyCommand:
         left = right = self.NEUTRAL
         heading = 0.0
+        heading_read_ok = False
         if self._imu_compensator is not None:
             try:
                 heading = self._imu_compensator.get_heading_deg()
                 self._last_imu_update = mono_now
+                heading_read_ok = True
             except Exception:
                 pass
         if self._follow_me is not None:
             self._follow_me.set_arm_state(self._safety_state.is_armed)
-            self._follow_me.update_pose(
-                heading, self._slew_last_left, self._slew_last_right, mono_now
-            )
+            if getattr(self._follow_me, "uses_odometry", False):
+                self._follow_me.update_pose(
+                    heading, self._slew_last_left, self._slew_last_right, mono_now,
+                    heading_valid=self._imu_heading_valid_for_odometry(heading_read_ok),
+                )
+            else:
+                self._follow_me.update_pose(
+                    heading, self._slew_last_left, self._slew_last_right, mono_now
+                )
             if self._gps_reading is not None:
                 self._follow_me.update_gps(
                     self._gps_reading.latitude,

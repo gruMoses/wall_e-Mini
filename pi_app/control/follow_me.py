@@ -1427,6 +1427,11 @@ class FollowMeController:
         self._curvature_at_lookahead: float = 0.0
         self._speed_limited: bool = False
         self._odom_source: str = "none"
+        # Which odometry builds the trail ("dead_reckon" or "gps"), and the
+        # (source, frame_epoch) the current trail points were recorded in.
+        self._odom_choice: str = str(getattr(config, "trail_odometry_source", "dead_reckon"))
+        self._trail_frame_key: tuple[str, int] | None = None
+        self._trail_frame_resets: int = 0
         self._last_mode_switch_time: float = 0.0
         # Trail exhaustion hysteresis (Fix 5) and one-shot extrapolation flag (Fix 4)
         self._trail_exhausted_count: int = 0
@@ -1476,21 +1481,32 @@ class FollowMeController:
 
     # ── Public API: odometry feeds ───────────────────────────────────────────
 
+    @property
+    def uses_odometry(self) -> bool:
+        """True when the trail (and so the odometry) is built."""
+        return self._trail_enabled
+
     def update_pose(
         self,
         heading_deg: float,
         motor_l: int,
         motor_r: int,
         timestamp: float,
+        heading_valid: bool = True,
     ) -> None:
-        """Feed IMU heading and actual motor commands for dead-reckoning odometry.
+        """Feed IMU heading and actual motor commands for the trail odometry.
 
-        Called by controller.py every cycle before compute().
+        ``heading_valid`` False means the IMU heading is not live (stale or
+        absent reader): the odometry then offers no pose, and the next live
+        heading starts a new frame. Called by controller.py every cycle
+        before compute().
         """
         if self._odometry is not None:
-            self._odometry.update(heading_deg, motor_l, motor_r, timestamp)
+            self._odometry.update(heading_deg, motor_l, motor_r, timestamp,
+                                  heading_valid=heading_valid)
         if self._gps_odom is not None:
-            self._gps_odom.update_motion(heading_deg, motor_l, motor_r, timestamp)
+            self._gps_odom.update_motion(heading_deg, motor_l, motor_r, timestamp,
+                                         heading_valid=heading_valid)
 
     def update_gps(
         self,
@@ -2043,15 +2059,42 @@ class FollowMeController:
         self._is_armed = bool(is_armed)
 
     def _pick_odometry(self):
-        """Return the best available odometry source (GPS preferred)."""
-        if self._gps_odom is not None and self._gps_odom.pose_valid:
-            self._odom_source = "gps"
-            return self._gps_odom
-        if self._odometry is not None and self._odometry.pose_valid:
-            self._odom_source = "dead_reckon"
-            return self._odometry
-        self._odom_source = "none"
-        return None
+        """Return the trail odometry, or None while it offers no valid pose.
+
+        One source only (``FollowMeConfig.trail_odometry_source``): the two
+        sources have different world frames, so switching between them per
+        tick (the old "GPS whenever it has a fix") would mix trail points from
+        two frames. When the source's frame epoch differs from the one the
+        trail was recorded in, the trail and pure-pursuit state are cleared
+        before the pose is used.
+        """
+        if self._odom_choice == "gps":
+            odom, name = self._gps_odom, "gps"
+        else:
+            odom, name = self._odometry, "dead_reckon"
+        if odom is None or not odom.pose_valid:
+            self._odom_source = "none"
+            return None
+        self._odom_source = name
+        key = (name, odom.frame_epoch)
+        if key != self._trail_frame_key:
+            if self._trail_frame_key is not None:
+                self._trail_frame_resets += 1
+                _log.debug("trail cleared: odometry frame %s -> %s",
+                           self._trail_frame_key, key)
+            self._trail_frame_key = key
+            if self._trail is not None:
+                self._trail.clear()
+            if self._pursuit is not None:
+                self._pursuit.reset()
+            self._trail_length = 0
+            self._trail_distance_m = 0.0
+            self._trail_exhausted_count = 0
+            self._last_target_world_x = None
+            self._last_target_world_y = None
+            self._pursuit_lookahead_x = 0.0
+            self._pursuit_lookahead_y = 0.0
+        return odom
 
     def _compute_steering(
         self,
@@ -2470,8 +2513,9 @@ class FollowMeController:
         self._trail_total_points_added = 0
         if self._odometry is not None:
             self._odometry.reset()
-        if self._gps_odom is not None:
-            self._gps_odom.reset()
+        # GpsOdometry is NOT reset here: its gyro-to-true heading offset stays
+        # valid while the gyro frame continues, and relearning it needs a
+        # straight run. The trail was cleared above, which is what matters.
         self._last_emitted_steer = 0.0
         self._last_x_err_norm = None
         self._last_slew_capped_steer = 0.0
@@ -2691,6 +2735,8 @@ class FollowMeController:
             status["follow_me_target_world_x"] = self._last_target_world_x
             status["follow_me_target_world_y"] = self._last_target_world_y
             status["odom_source"] = self._odom_source
+            status["odom_choice"] = self._odom_choice
+            status["trail_frame_resets"] = self._trail_frame_resets
             status["trail_exhausted_count"] = self._trail_exhausted_count
             if self._pursuit is not None:
                 status["trail_last_closest_idx"] = self._pursuit._last_closest_idx
@@ -2733,6 +2779,8 @@ class FollowMeController:
                 status["robot_pose"] = None
             if self._gps_odom is not None:
                 status["gps_speed_mps"] = round(self._gps_odom.speed_mps, 2)
+                status["gps_heading_reference_known"] = self._gps_odom.heading_reference_known
+                status["gps_heading_offset_deg"] = round(self._gps_odom.heading_offset_deg, 1)
         else:
             status["trail_points_xy"] = []
             status["lookahead_point_xy"] = None

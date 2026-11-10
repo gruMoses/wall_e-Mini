@@ -380,6 +380,54 @@ class TestNoPoseBeforeTheReferenceIsKnown(unittest.TestCase):
                          "the gyro frame may have moved; relearn the offset")
 
 
+class TestFollowMeUsesOneValidFrame(unittest.TestCase):
+    def _fm(self, **kw) -> FollowMeController:
+        return FollowMeController(FollowMeConfig(trail_follow_enabled=True, **kw))
+
+    def test_default_source_is_dead_reckon_even_with_gps_fix(self):
+        fm = self._fm()
+        fm.update_pose(10.0, 126, 126, 1.0)
+        lat, lon = _ne_to_latlon(0.0, 0.0)
+        fm.update_gps(lat, lon, 5, 1.0)
+        self.assertIs(fm._pick_odometry(), fm._odometry)
+        self.assertEqual(fm._odom_source, "dead_reckon")
+
+    def test_gps_source_offers_nothing_until_reference_known(self):
+        fm = self._fm(trail_odometry_source="gps")
+        fm.update_pose(10.0, 126, 126, 1.0)
+        lat, lon = _ne_to_latlon(0.0, 0.0)
+        fm.update_gps(lat, lon, 5, 1.0)
+        self.assertIsNone(fm._pick_odometry())
+        self.assertEqual(fm._odom_source, "none")
+
+    def test_stale_heading_offers_nothing(self):
+        fm = self._fm()
+        fm.update_pose(0.0, 160, 160, 1.0, heading_valid=False)
+        self.assertIsNone(fm._pick_odometry())
+
+    def test_frame_change_clears_the_trail(self):
+        fm = self._fm()
+        fm.update_pose(10.0, 126, 126, 1.0)
+        odom = fm._pick_odometry()
+        self.assertIsNotNone(odom)
+        fm._trail.add_point(1.0, 0.0, 1.0)
+        fm._trail.add_point(2.0, 0.0, 1.1)
+        self.assertEqual(fm._trail.length, 2)
+        self.assertIs(fm._pick_odometry(), odom)
+        self.assertEqual(fm._trail.length, 2, "same frame: trail kept")
+        fm.update_pose(0.0, 126, 126, 1.2, heading_valid=False)
+        fm.update_pose(200.0, 126, 126, 1.3)
+        self.assertIs(fm._pick_odometry(), odom)
+        self.assertEqual(fm._trail.length, 0, "new frame: old points discarded")
+
+    def test_flag_off_builds_no_odometry(self):
+        fm = FollowMeController(FollowMeConfig(trail_follow_enabled=False))
+        self.assertFalse(fm.uses_odometry)
+        fm.update_pose(10.0, 160, 160, 1.0)
+        fm.update_pose(10.0, 160, 160, 1.1, heading_valid=False)
+        self.assertIsNone(fm._pick_odometry())
+
+
 class TestRobotPoseUnchanged(unittest.TestCase):
     def test_robot_pose_fields(self):
         p = RobotPose(1.0, 2.0, 0.5, 3.0)
