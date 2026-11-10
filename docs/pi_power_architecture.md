@@ -6,7 +6,7 @@ Grok second opinion (session 01a1a8bd). Nothing is bought.
 
 UPDATE 2026-11-10: read section 7 first. It proposes a bought UPS board
 behind the switched-side converter (option F) in place of the custom
-board. Kevin has not decided.
+board. Kevin orders one for a bench test.
 
 ## 1. The problem
 
@@ -165,7 +165,7 @@ about 12 months with it off. (CORRECTION: the pack is 7 Ah, refer to `docs/batte
 
 ## 7. Review, 2026-11-10: a bought UPS board behind the switched converter (option F)
 
-Status: proposal. Nothing is bought. Kevin decides. The recommendation is to bench-test this option before any more work on the custom board (`docs/power_module_spec.md`).
+Status: Kevin decided on 2026-11-10 to order one X1202 for the bench tests in 7.2. Kevin buys it. No more work on the custom board (`docs/power_module_spec.md`) until the bench result is known.
 
 Kevin, 2026-11-10: "We shouldn't have to build our own." "Other people are using robots that are Pi-powered." His conditions for a bought part:
 
