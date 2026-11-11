@@ -75,6 +75,10 @@ class _Cfg:
     voltage_shutdown_threshold_v: float = 22.4
     voltage_shutdown_delay_s: float = 30.0
     voltage_shutdown_floor_v: float = 15.0
+    # 0.0 keeps these legacy band tests' "one out-of-band sample resets the
+    # countdown" timing. The real 2.0 s grace (VescConfig) is covered in
+    # test_pack_low_latch.py with a fake clock.
+    pack_low_sustain_grace_s: float = 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -171,11 +171,34 @@ class TestThresholdAndDelay(_Base):
         self.hold(d, 40.0, 44.0, 44.0)
         self.assertFalse(d.get_pack_low_latched())
 
-    def test_a_short_dip_resets_the_countdown(self):
+    def test_one_bad_frame_pauses_but_does_not_restart_the_countdown(self):
+        # Grok round 1: one disagreeing / stale / above-threshold frame at
+        # 29 s used to restart the full 30 s.
+        for bad in ((43.0, 44.6), (44.5, 44.5)):
+            d = self.make()
+            self.volts(d, 43.0, 43.0)
+            self.hold(d, 29.0, 43.0, 43.0)
+            self.hold(d, 0.1, *bad)
+            self.assertFalse(d.get_pack_low_latched())   # never latches on it
+            self.hold(d, 1.2, 43.0, 43.0)
+            self.assertTrue(d.get_pack_low_latched(), bad)
+
+    def test_alternating_untrusted_frames_still_latch(self):
+        d = self.make()
+        self.volts(d, 43.0, 43.0)
+        for i in range(320):                 # 32 s, every other frame disagrees
+            self.clock.t += 0.1
+            if i % 2:
+                self.volts(d, 43.0, 44.8)
+            else:
+                self.volts(d, 43.0, 43.0)
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_a_real_recovery_resets_the_countdown(self):
         d = self.make()
         self.volts(d, 43.0, 43.0)
         self.hold(d, 20.0, 43.0, 43.0)
-        self.hold(d, 0.5, 44.5, 44.5)       # back above the threshold
+        self.hold(d, 2.5, 44.5, 44.5)       # back above the threshold > grace
         self.hold(d, 20.0, 43.0, 43.0)
         self.assertFalse(d.get_pack_low_latched())
 
@@ -284,13 +307,61 @@ class TestReleaseRules(_Base):
         self.hold(d, 1.5, 43.8, 43.8)
         self.assertTrue(d.get_pack_low_latched())
 
-    def test_rearm_below_44_relatches_at_once(self):
+    def test_rearm_below_44_gets_a_fresh_window_manual_only(self):
+        # A latch must never need a restart (Grok round 1): the disarm gives a
+        # new countdown, but only MANUAL may drive until the pack recovers.
         d = self.make()
         self.latch_by_voltage(d, 43.5)
         d.set_drive_context(armed=False, manual=True)
         self.assertFalse(d.get_pack_low_latched())
-        self.hold(d, 0.1, 43.5, 43.5)
-        self.assertTrue(d.get_pack_low_latched())        # still below: re-latched
+        d.set_drive_context(armed=True, manual=True)
+        self.hold(d, 1.0, 43.5, 43.5)
+        self.assertFalse(d.get_pack_low_latched())
+        self.assertTrue(d.get_pack_guard_status()["post_latch"])
+        d.set_tracks(200, 200)
+        self.assertGreater(self.last_pair()[0], 0)        # MANUAL drives
+        d.set_drive_context(armed=True, manual=False)    # FOLLOW_ME entered
+        for _ in range(12):
+            self.clock.t += 0.1
+            d.set_tracks(200, 200)
+        self.assertEqual(self.last_pair(), (0, 0))       # autonomous ramps to 0
+        d.set_drive_context(armed=True, manual=True)
+        self.hold(d, 29.5, 43.5, 43.5)
+        self.assertTrue(d.get_pack_low_latched())        # new 30 s ran out
+
+    def test_disarm_restarts_the_cell_count(self):
+        d = self.make()
+        d.set_bms_cell_reading(3.25, poll_id=1, age_s=1.0)
+        d.set_bms_cell_reading(3.25, poll_id=2, age_s=1.0)
+        self.assertTrue(d.get_pack_low_latched())
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        d.set_bms_cell_reading(3.25, poll_id=3, age_s=1.0)
+        self.assertFalse(d.get_pack_low_latched())       # needs two polls again
+        d.set_bms_cell_reading(3.25, poll_id=4, age_s=1.0)
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_stop_does_not_count_as_zero_throttle(self):
+        # Charger inhibit and disarm call stop(); that is a forced zero, not
+        # the operator centring the sticks.
+        d = self.make()
+        self.latch_by_voltage(d)
+        d.set_tracks(200, 200)
+        d.stop()
+        self.hold(d, 1.0, 47.0, 47.0)
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_set_tracks_after_stop_cannot_climb_during_ramp(self):
+        d = self.make()
+        d.set_tracks(254, 254)
+        d._trigger_low_voltage_shutdown(43.0)
+        self.clock.t += 0.1
+        d.set_tracks(254, 254)
+        self.assertGreater(self.last_pair()[0], 0)        # ramp running
+        d.stop()
+        self.clock.t += 0.05
+        d.set_tracks(254, 254)
+        self.assertEqual(self.last_pair(), (0, 0))
 
     def test_bms_cell_latch_not_released_by_voltage(self):
         d = self.make()
@@ -318,6 +389,13 @@ class TestBmsCellTrigger(_Base):
         self.assertTrue(d.get_pack_low_latched())
         self.assertEqual(d.get_pack_guard_status()["reason"], "bms_cell")
         self.assertTrue(any("bms_cell" in m for m in cm.output))
+
+    def test_a_stale_gap_breaks_consecutive(self):
+        d = self.make()
+        d.set_bms_cell_reading(3.25, poll_id=1, age_s=1.0)
+        d.set_bms_cell_reading(3.25, poll_id=1, age_s=30.0)      # link went dark
+        d.set_bms_cell_reading(3.25, poll_id=2, age_s=1.0)
+        self.assertFalse(d.get_pack_low_latched())
 
     def test_a_good_poll_resets_the_count(self):
         d = self.make()
@@ -415,7 +493,12 @@ class TestLimpHome(_Base):
         self.hold(d, 0.5, 44.5, 44.5)
         d.set_drive_context(armed=False, manual=True)
         d.set_drive_context(armed=True, manual=True)
-        self.assertFalse(d.get_pack_guard_status()["limp_active"])
+        st = d.get_pack_guard_status()
+        self.assertFalse(st["limp_active"])
+        self.assertTrue(st["post_latch"])                # MANUAL-only session
+        d.set_tracks(254, 254)
+        full = VescCanDriver._byte_to_rpm(254, MAX_ERPM)
+        self.assertEqual(self.last_pair(), (full, full))  # no speed cap
 
 
 class TestTelemetrySurface(_Base):

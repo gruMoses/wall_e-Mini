@@ -64,6 +64,7 @@ _PACK_DEFAULTS = {
     "pack_voltage_max_age_s": 0.5,
     "pack_voltage_max_disagree_v": 1.5,
     "pack_low_release_hysteresis_v": 2.0,
+    "pack_low_sustain_grace_s": 2.0,
     "pack_low_ramp_s": 1.0,
     "pack_low_limp_enabled": False,
     "pack_low_limp_max_byte_offset": 32,
@@ -174,7 +175,10 @@ class VescTelemetry:
     # than pack_voltage_max_disagree_v) / "no_data" (never evaluated).
     pack_voltage_state: str = "no_data"
     pack_voltage_trusted: bool = False
-    # True while the limp-home state is active (pack_low_limp_enabled only).
+    # True from the disarm that clears a latch until the pack recovers
+    # (threshold + hysteresis, zero throttle): MANUAL only in that session.
+    pack_post_latch_active: bool = False
+    # True while that session also limps (pack_low_limp_enabled only).
     pack_limp_active: bool = False
 
 
@@ -194,6 +198,11 @@ class VescCanDriver:
         self._cfg = vesc_cfg
         self._bus = None  # Lazy-init python-can Bus
         self._bus_lock = threading.Lock()
+        # Orders motor commands: held across "decide RPM" + "CAN write" in
+        # set_tracks()/stop() and around the RX thread's own RPM 0, so the last
+        # frame on the bus is always the latest decision. Lock order:
+        # _tx_lock -> _telem_lock / _bus_lock (never the reverse).
+        self._tx_lock = threading.Lock()
 
         # Telemetry state — read/write only under _telem_lock
         self._telem_lock = threading.Lock()
@@ -210,13 +219,20 @@ class VescCanDriver:
         #     below-floor "pack switched off" log).
         #   Shared, read and written ONLY under _telem_lock:
         #     _low_voltage_since    start of the trusted in-band sustain
-        #                           (RX thread writes; disarm/limp entry on the
-        #                           control thread resets it)
+        #                           (RX thread writes; a disarm on the control
+        #                           thread resets it)
+        #     _out_of_band_since    first sample of the current run of samples
+        #                           that are NOT trusted-in-band (RX thread; a
+        #                           disarm resets it). The countdown resets only
+        #                           after pack_low_sustain_grace_s of them.
         #     _pack_low_reasons     set of latch reasons; latched = non-empty
         #                           (RX thread: voltage trip/release; control
         #                           thread: BMS cell trip, disarm clear)
         #     _pack_v_used / _pack_v_state  last evaluation (RX thread)
-        #     _pack_limp_active     (control thread on disarm; RX on release)
+        #     _post_latch_active    post-latch session: MANUAL only, plus limp
+        #                           when enabled (control thread sets it on the
+        #                           disarm that clears a latch; RX thread ends
+        #                           it on recovery)
         #     _ctx_armed / _ctx_manual      drive context (control thread)
         #     _req_neutral, _last_out_rpm, _last_tracks_mono, _ramp_*
         #                           (control thread in set_tracks()/stop(); the
@@ -226,11 +242,12 @@ class VescCanDriver:
         # _pack_low_latched is a property over _pack_low_reasons (kept for the
         # existing tests and callers).
         self._low_voltage_since: Optional[float] = None
+        self._out_of_band_since: Optional[float] = None
         self._pack_low_reasons: set = set()
         self._below_floor_active: bool = False
         self._pack_v_used: Optional[float] = None
         self._pack_v_state: str = "no_data"
-        self._pack_limp_active: bool = False
+        self._post_latch_active: bool = False
         self._ctx_armed: Optional[bool] = None
         self._ctx_manual: bool = True
         self._req_neutral: bool = True
@@ -289,13 +306,20 @@ class VescCanDriver:
         logger.info("VESC CAN RX thread started (left_id=%d right_id=%d)", self._left_id, self._right_id)
 
     def stop(self) -> None:
-        """Command both motors to zero RPM without stopping telemetry RX."""
-        with self._telem_lock:
-            self._last_out_rpm = [0, 0]
-            self._req_neutral = True
-            self._last_tracks_mono = time.monotonic()
-        self._send_rpm(self._left_id, 0)
-        self._send_rpm(self._right_id, 0)
+        """Command both motors to zero RPM without stopping telemetry RX.
+
+        A stop is a forced zero, not the operator's zero throttle: it does not
+        set _req_neutral (so a charger-inhibit or disarm stop cannot release
+        the latch), and it collapses any running ramp envelope to zero so the
+        next set_tracks() cannot climb back to the pre-stop speed.
+        """
+        with self._tx_lock:
+            with self._telem_lock:
+                self._last_out_rpm = [0, 0]
+                self._ramp_env = [0, 0]
+                self._last_tracks_mono = time.monotonic()
+            self._send_rpm(self._left_id, 0)
+            self._send_rpm(self._right_id, 0)
         with self._telem_lock:
             self._send_fail_consecutive = 0
 
@@ -313,74 +337,86 @@ class VescCanDriver:
     # MotorDriver API
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _limp_on_locked(self) -> bool:
+        """Limp floors and speed cap apply (caller holds _telem_lock)."""
+        return self._post_latch_active and bool(self._pcfg("pack_low_limp_enabled"))
+
     def set_tracks(self, left_byte: int, right_byte: int) -> None:
         """Send one drive command (control thread, every tick).
 
         The pack-low latch is enforced here, the last gate before the CAN bus:
-          * latched, or limp active outside MANUAL -> each track ramps from the
-            RPM it had when the gate closed to zero over pack_low_ramp_s. The
-            requested RPM still passes when it is closer to zero (a stop is
-            never delayed), and a track never reverses or speeds up again.
-          * limp active in MANUAL -> RPM capped at pack_low_limp_max_byte_offset.
+          * latched, or the post-latch session outside MANUAL -> each track
+            ramps from the RPM it had when the gate closed to zero over
+            pack_low_ramp_s. The requested RPM still passes when it is closer
+            to zero (a stop is never delayed), and a track never reverses or
+            speeds up again while the gate stays closed.
+          * limp (post-latch session with pack_low_limp_enabled) in MANUAL ->
+            RPM capped at pack_low_limp_max_byte_offset.
         Called at ~30 Hz, so the ramp also refreshes the VESC ~1 s timeout.
+        _tx_lock keeps the decision and the CAN write together, so an RX-thread
+        RPM 0 can never be overtaken by an older, larger command.
         """
-        now = time.monotonic()
         req = [
             self._byte_to_rpm(left_byte, self._max_rpm),
             self._byte_to_rpm(right_byte, self._max_rpm),
         ]
         ramp_s = float(self._pcfg("pack_low_ramp_s"))
-        with self._telem_lock:
-            self._last_tracks_mono = now
-            self._req_neutral = req[0] == 0 and req[1] == 0
-            gate = bool(self._pack_low_reasons) or (
-                self._pack_limp_active and not self._ctx_manual
-            )
-            if gate:
-                if self._ramp_start_s is None:
-                    self._ramp_start_s = now
-                    for i in (0, 1):
-                        last = int(self._last_out_rpm[i])
-                        self._ramp_env0[i] = abs(last)
-                        self._ramp_env[i] = abs(last)
-                        self._ramp_sign[i] = (last > 0) - (last < 0)
-                if ramp_s > 0.0:
-                    frac = max(0.0, 1.0 - (now - self._ramp_start_s) / ramp_s)
-                else:
-                    frac = 0.0
-                out = [0, 0]
-                for i in (0, 1):
-                    env = min(self._ramp_env[i], int(self._ramp_env0[i] * frac))
-                    sign = self._ramp_sign[i]
-                    if sign > 0:
-                        o = max(0, min(req[i], env))
-                    elif sign < 0:
-                        o = min(0, max(req[i], -env))
+        with self._tx_lock:
+            now = time.monotonic()
+            with self._telem_lock:
+                self._last_tracks_mono = now
+                self._req_neutral = req[0] == 0 and req[1] == 0
+                gate = bool(self._pack_low_reasons) or (
+                    self._post_latch_active and not self._ctx_manual
+                )
+                if gate:
+                    if self._ramp_start_s is None:
+                        self._ramp_start_s = now
+                        for i in (0, 1):
+                            last = int(self._last_out_rpm[i])
+                            self._ramp_env0[i] = abs(last)
+                            self._ramp_env[i] = abs(last)
+                            self._ramp_sign[i] = (last > 0) - (last < 0)
+                    if ramp_s > 0.0:
+                        frac = max(0.0, 1.0 - (now - self._ramp_start_s) / ramp_s)
                     else:
-                        o = 0
-                    self._ramp_env[i] = abs(o)
-                    out[i] = o
-            else:
-                self._ramp_start_s = None
-                out = list(req)
-                if self._pack_limp_active:
-                    cap = abs(self._byte_to_rpm(
-                        CENTER_OUTPUT_VALUE + int(self._pcfg("pack_low_limp_max_byte_offset")),
-                        self._max_rpm,
-                    ))
-                    out = [max(-cap, min(cap, o)) for o in out]
-            self._last_out_rpm = list(out)
-        self._send_rpm(self._left_id, out[0])
-        self._send_rpm(self._right_id, out[1])
+                        frac = 0.0
+                    out = [0, 0]
+                    for i in (0, 1):
+                        env = min(self._ramp_env[i], int(self._ramp_env0[i] * frac))
+                        sign = self._ramp_sign[i]
+                        if sign > 0:
+                            o = max(0, min(req[i], env))
+                        elif sign < 0:
+                            o = min(0, max(req[i], -env))
+                        else:
+                            o = 0
+                        self._ramp_env[i] = abs(o)
+                        out[i] = o
+                else:
+                    self._ramp_start_s = None
+                    out = list(req)
+                    if self._limp_on_locked():
+                        cap = abs(self._byte_to_rpm(
+                            CENTER_OUTPUT_VALUE + int(self._pcfg("pack_low_limp_max_byte_offset")),
+                            self._max_rpm,
+                        ))
+                        out = [max(-cap, min(cap, o)) for o in out]
+                self._last_out_rpm = list(out)
+            self._send_rpm(self._left_id, out[0])
+            self._send_rpm(self._right_id, out[1])
 
     def set_drive_context(self, armed: bool, manual: bool) -> None:
         """Control thread, every tick: arm state and whether the mode is MANUAL.
 
         The armed -> disarmed edge clears every latch reason (the operator's
-        deliberate act). When pack_low_limp_enabled and a latch was cleared,
-        the limp state starts. The voltage sustain timer is NOT reset without
-        limp, so a pack still below the threshold re-latches on the next
-        evaluation (within one CAN frame).
+        deliberate act; a latch must never need a restart). It also restarts
+        the voltage countdown and the BMS cell count, and starts the
+        POST-LATCH session: MANUAL only (autonomous modes ramp to zero) until
+        the trusted pack is back at threshold + hysteresis with zero throttle.
+        With pack_low_limp_enabled the session also caps the speed and uses
+        the limp floors; without it the next MANUAL drive gets a fresh
+        voltage_shutdown_delay_s below the 44 V threshold before it latches.
         """
         armed = bool(armed)
         manual = bool(manual)
@@ -393,24 +429,28 @@ class VescCanDriver:
                 cleared = ",".join(sorted(self._pack_low_reasons))
                 self._pack_low_reasons = set()
                 self._ramp_start_s = None
-                limp_now = bool(self._pcfg("pack_low_limp_enabled"))
-                if limp_now and not self._pack_limp_active:
-                    self._pack_limp_active = True
-                    # New thresholds: the 44 V timer must not count toward the
-                    # limp floor, and the cell count restarts on the new floor.
-                    self._low_voltage_since = None
-                    self._bms_low_count = 0
+                self._low_voltage_since = None
+                self._out_of_band_since = None
+                self._bms_low_count = 0
+                self._post_latch_active = True
+                if self._limp_on_locked():
                     msgs.append((
                         "VESC: pack-low latch (%s) cleared by disarm; LIMP HOME active: "
-                        "MANUAL only, speed cap %d bytes, floors %.1f V / cell %.2f V",
+                        "MANUAL only, speed cap %d bytes, floors %.1f V / cell %.2f V "
+                        "(pack %s V, %s)",
                         (cleared, int(self._pcfg("pack_low_limp_max_byte_offset")),
                          float(self._pcfg("pack_low_limp_floor_v")),
-                         float(self._pcfg("bms_cell_limp_floor_v"))),
+                         float(self._pcfg("bms_cell_limp_floor_v")),
+                         self._fmt_v(self._pack_v_used), self._pack_v_state),
                     ))
                 else:
                     msgs.append((
-                        "VESC: pack-low latch (%s) cleared by disarm (pack %s V, %s)",
-                        (cleared, self._fmt_v(self._pack_v_used), self._pack_v_state),
+                        "VESC: pack-low latch (%s) cleared by disarm; MANUAL only until the "
+                        "pack is back at %.1f V; a new countdown starts (pack %s V, %s)",
+                        (cleared,
+                         float(self._cfg.voltage_shutdown_threshold_v)
+                         + float(self._pcfg("pack_low_release_hysteresis_v")) if self._cfg else 0.0,
+                         self._fmt_v(self._pack_v_used), self._pack_v_state),
                     ))
         for fmt, args in msgs:
             logger.warning(fmt, *args)
@@ -450,11 +490,16 @@ class VescCanDriver:
             else:
                 self._bms_cell_state = "stale"
             self._bms_cell_v = float(cell_min_v) if cell_min_v is not None else None
-            if not fresh or poll_id is None or poll_id == self._bms_last_poll_id:
+            if not fresh:
+                # A gap (dark link, old or implausible sample) breaks the run:
+                # "consecutive" means consecutive FRESH polls.
+                self._bms_low_count = 0
+                return
+            if poll_id is None or poll_id == self._bms_last_poll_id:
                 return
             self._bms_last_poll_id = poll_id
             limit = float(self._pcfg(
-                "bms_cell_limp_floor_v" if self._pack_limp_active else "bms_cell_low_trip_v"
+                "bms_cell_limp_floor_v" if self._limp_on_locked() else "bms_cell_low_trip_v"
             ))
             if float(cell_min_v) <= limit:
                 self._bms_low_count += 1
@@ -495,7 +540,8 @@ class VescCanDriver:
                 "voltage_v": self._pack_v_used,
                 "voltage_state": self._pack_v_state,
                 "trusted": self._pack_v_state.startswith("trusted"),
-                "limp_active": self._pack_limp_active,
+                "post_latch": self._post_latch_active,   # MANUAL only until recovery
+                "limp_active": self._limp_on_locked(),
                 "ramp_active": self._ramp_start_s is not None,
                 "low_since_s": (
                     round(time.monotonic() - self._low_voltage_since, 1)
@@ -589,7 +635,8 @@ class VescCanDriver:
             telem.pack_low_reason = ",".join(sorted(self._pack_low_reasons)) or None
             telem.pack_voltage_state = self._pack_v_state
             telem.pack_voltage_trusted = self._pack_v_state.startswith("trusted")
-            telem.pack_limp_active = self._pack_limp_active
+            telem.pack_limp_active = self._limp_on_locked()
+            telem.pack_post_latch_active = self._post_latch_active
         # Thread liveness is independent of _telem_lock (it's a plain
         # threading.Thread reference, not telemetry state).
         _rx_thread = self._rx_thread
@@ -850,34 +897,44 @@ class VescCanDriver:
 
         MOTOR-CUTOFF watchdog. It does NOT shut the Pi down: the Pi runs on its
         own UPS. Regimes on the TRUSTED pack voltage V (floor <= threshold):
-          * untrusted (stale / disagree) -> no latch, no release, sustain
-                                     timer reset; WARNING once per episode.
-          * V < floor              -> pack switched off / garbage. Stop motors,
-                                     log once, cancel the countdown, no latch.
-          * floor <= V < threshold -> start/continue the sustain timer; after
-                                     the delay, latch (set_tracks() ramps to 0).
-          * V >= threshold         -> reset the timer.
+          * untrusted (stale / disagree) -> no latch, no release; WARNING once
+                                     per episode.
+          * V < floor              -> pack switched off / garbage. Stop motors
+                                     once, log once, no latch.
+          * floor <= V < threshold -> start/continue the sustain countdown;
+                                     after the delay, latch (set_tracks() ramps
+                                     the tracks to 0).
+          * V >= threshold         -> out of band.
+        Every sample that is not trusted-in-band PAUSES the countdown; it
+        resets after pack_low_sustain_grace_s of such samples in a row.
         Release of a voltage reason: V >= voltage_shutdown_threshold_v +
         pack_low_release_hysteresis_v AND zero commanded throttle AND MANUAL
         (autonomous modes release only by a disarm). The same condition ends
-        the limp state. While limp is active the threshold and delay are
-        pack_low_limp_floor_v / pack_low_limp_delay_s.
+        the post-latch session. With limp on, that session uses
+        pack_low_limp_floor_v / pack_low_limp_delay_s instead.
+        Runs under _tx_lock so its own RPM 0 is ordered with set_tracks().
         """
         if self._cfg is None:
             return
+        with self._tx_lock:
+            self._check_voltage_locked_tx()
+
+    def _check_voltage_locked_tx(self) -> None:
+        """Body of _check_voltage_shutdown(); the caller holds _tx_lock."""
         now = time.monotonic()
         voltage, state, lv, rv = self._read_pack_voltage(now)
 
         base_threshold = float(self._cfg.voltage_shutdown_threshold_v)
         floor = float(self._cfg.voltage_shutdown_floor_v)
         release_v = base_threshold + float(self._pcfg("pack_low_release_hysteresis_v"))
+        grace = float(self._pcfg("pack_low_sustain_grace_s"))
         msgs = []   # (level, fmt, args), logged after the lock is released
         send_zero = False
         with self._telem_lock:
             prev_state = self._pack_v_state
             self._pack_v_state = state
             self._pack_v_used = voltage
-            limp = self._pack_limp_active
+            limp = self._limp_on_locked()
             if limp:
                 threshold = float(self._pcfg("pack_low_limp_floor_v"))
                 delay = float(self._pcfg("pack_low_limp_delay_s"))
@@ -885,10 +942,8 @@ class VescCanDriver:
                 threshold = base_threshold
                 delay = float(self._cfg.voltage_shutdown_delay_s)
 
+            # ── Trust edges (WARNING once per episode) ────────────────────────
             if voltage is None:
-                # Untrusted: never latch or release on it; the countdown
-                # restarts from the next trusted reading.
-                self._low_voltage_since = None
                 if prev_state != state:
                     msgs.append((logging.WARNING,
                                  "VESC: pack voltage UNTRUSTED (%s: left %s V, right %s V, "
@@ -896,72 +951,88 @@ class VescCanDriver:
                                  (state, self._fmt_v(lv), self._fmt_v(rv),
                                   float(self._pcfg("pack_voltage_max_age_s")),
                                   float(self._pcfg("pack_voltage_max_disagree_v")))))
-            else:
-                if prev_state in ("stale", "disagree"):
-                    msgs.append((logging.WARNING,
-                                 "VESC: pack voltage trusted again (%s, %.1f V)", (state, voltage)))
-                if voltage < floor:
-                    self._low_voltage_since = None
-                    if not self._below_floor_active:
-                        self._below_floor_active = True
-                        send_zero = True
-                        self._last_out_rpm = [0, 0]
-                        msgs.append((logging.WARNING,
-                                     "VESC: pack voltage %.1fV below plausibility floor %.1fV — "
-                                     "treating as pack switched off, NOT shutting down",
-                                     (voltage, floor)))
-                else:
-                    self._below_floor_active = False
-                    if voltage < threshold:
-                        if self._low_voltage_since is None:
-                            self._low_voltage_since = now
-                            msgs.append((logging.WARNING,
-                                         "VESC: pack voltage %.1fV below %s %.1fV (left %s, right %s) — "
-                                         "pack-low latch in %.0fs if sustained",
-                                         (voltage, "limp floor" if limp else "threshold", threshold,
-                                          self._fmt_v(lv), self._fmt_v(rv), delay)))
-                        elif now - self._low_voltage_since >= delay:
-                            reason = _REASON_LIMP_FLOOR if limp else _REASON_PACK_V
-                            if reason not in self._pack_low_reasons:
-                                was = bool(self._pack_low_reasons)
-                                self._pack_low_reasons.add(reason)
-                                if not was and now - self._last_tracks_mono > _CONTROL_SILENT_S:
-                                    # Nobody is driving (control loop silent):
-                                    # no ramp to run, so zero the motors here.
-                                    send_zero = True
-                                    self._last_out_rpm = [0, 0]
-                                msgs.append((logging.WARNING,
-                                             "VESC: pack-low latch ENGAGED (%s): pack %.1fV < %.1fV for "
-                                             "%.0fs (left %s, right %s, %s); ramping motors to zero over "
-                                             "%.1fs; release at >= %.1fV with zero throttle in MANUAL, "
-                                             "or a disarm",
-                                             (reason, voltage, threshold, delay, self._fmt_v(lv),
-                                              self._fmt_v(rv), state,
-                                              float(self._pcfg("pack_low_ramp_s")), release_v)))
-                    else:
-                        if self._low_voltage_since is not None:
-                            msgs.append((logging.INFO,
-                                         "VESC: voltage recovered to %.1fV — low-voltage timer cleared",
-                                         (voltage,)))
-                        self._low_voltage_since = None
+            elif prev_state in ("stale", "disagree"):
+                msgs.append((logging.WARNING,
+                             "VESC: pack voltage trusted again (%s, %.1f V)", (state, voltage)))
 
-                    if voltage >= release_v and self._req_neutral and self._ctx_manual:
-                        voltage_reasons = self._pack_low_reasons & _VOLTAGE_REASONS
-                        if voltage_reasons:
-                            self._pack_low_reasons -= voltage_reasons
-                            msgs.append((logging.WARNING,
-                                         "VESC: pack voltage recovered to %.1fV (>= %.1fV, zero throttle) "
-                                         "— pack-low latch (%s) released%s",
-                                         (voltage, release_v, ",".join(sorted(voltage_reasons)),
-                                          ("; still latched: " + ",".join(sorted(self._pack_low_reasons)))
-                                          if self._pack_low_reasons else "")))
-                        if self._pack_limp_active:
-                            self._pack_limp_active = False
-                            self._low_voltage_since = None
-                            msgs.append((logging.WARNING,
-                                         "VESC: pack voltage %.1fV >= %.1fV with zero throttle — "
-                                         "limp home ended",
-                                         (voltage, release_v)))
+            # ── Below the plausibility floor: pack switched off ───────────────
+            if voltage is not None and voltage < floor:
+                if not self._below_floor_active:
+                    self._below_floor_active = True
+                    send_zero = True
+                    self._last_out_rpm = [0, 0]
+                    self._ramp_env = [0, 0]
+                    msgs.append((logging.WARNING,
+                                 "VESC: pack voltage %.1fV below plausibility floor %.1fV — "
+                                 "treating as pack switched off, NOT shutting down",
+                                 (voltage, floor)))
+            elif voltage is not None:
+                self._below_floor_active = False
+
+            # ── Sustain countdown ─────────────────────────────────────────────
+            # Only a TRUSTED in-band sample starts, advances or completes it.
+            # Any other sample (untrusted, below floor, at/above threshold)
+            # PAUSES it; it resets only after pack_low_sustain_grace_s of such
+            # samples in a row, so one noisy or disagreeing frame at 29 s cannot
+            # restart the full delay (and cannot latch either).
+            in_band = voltage is not None and floor <= voltage < threshold
+            if in_band:
+                self._out_of_band_since = None
+                if self._low_voltage_since is None:
+                    self._low_voltage_since = now
+                    msgs.append((logging.WARNING,
+                                 "VESC: pack voltage %.1fV below %s %.1fV (left %s, right %s) — "
+                                 "pack-low latch in %.0fs if sustained",
+                                 (voltage, "limp floor" if limp else "threshold", threshold,
+                                  self._fmt_v(lv), self._fmt_v(rv), delay)))
+                elif now - self._low_voltage_since >= delay:
+                    reason = _REASON_LIMP_FLOOR if limp else _REASON_PACK_V
+                    if reason not in self._pack_low_reasons:
+                        was = bool(self._pack_low_reasons)
+                        self._pack_low_reasons.add(reason)
+                        if not was and now - self._last_tracks_mono > _CONTROL_SILENT_S:
+                            # Nobody is driving (control loop silent): no ramp
+                            # to run, so zero the motors here.
+                            send_zero = True
+                            self._last_out_rpm = [0, 0]
+                        msgs.append((logging.WARNING,
+                                     "VESC: pack-low latch ENGAGED (%s): pack %.1fV < %.1fV for "
+                                     "%.0fs (left %s, right %s, %s); ramping motors to zero over "
+                                     "%.1fs; release at >= %.1fV with zero throttle in MANUAL, "
+                                     "or a disarm",
+                                     (reason, voltage, threshold, delay, self._fmt_v(lv),
+                                      self._fmt_v(rv), state,
+                                      float(self._pcfg("pack_low_ramp_s")), release_v)))
+            else:
+                if self._out_of_band_since is None:
+                    self._out_of_band_since = now
+                if (self._low_voltage_since is not None
+                        and now - self._out_of_band_since >= grace):
+                    msgs.append((logging.INFO,
+                                 "VESC: pack voltage out of the low band for %.1fs (%s, %s V) — "
+                                 "low-voltage countdown cleared",
+                                 (now - self._out_of_band_since, state, self._fmt_v(voltage))))
+                    self._low_voltage_since = None
+
+            # ── Release (trusted only) ────────────────────────────────────────
+            if (voltage is not None and voltage >= release_v
+                    and self._req_neutral and self._ctx_manual):
+                voltage_reasons = self._pack_low_reasons & _VOLTAGE_REASONS
+                if voltage_reasons:
+                    self._pack_low_reasons -= voltage_reasons
+                    msgs.append((logging.WARNING,
+                                 "VESC: pack voltage recovered to %.1fV (>= %.1fV, zero throttle) "
+                                 "— pack-low latch (%s) released%s",
+                                 (voltage, release_v, ",".join(sorted(voltage_reasons)),
+                                  ("; still latched: " + ",".join(sorted(self._pack_low_reasons)))
+                                  if self._pack_low_reasons else "")))
+                if self._post_latch_active and not self._pack_low_reasons:
+                    self._post_latch_active = False
+                    self._low_voltage_since = None
+                    msgs.append((logging.WARNING,
+                                 "VESC: pack voltage %.1fV >= %.1fV with zero throttle — "
+                                 "post-latch session (MANUAL only%s) ended",
+                                 (voltage, release_v, ", limp home" if limp else "")))
         for level, fmt, args in msgs:
             logger.log(level, fmt, *args)
         if send_zero:
@@ -975,23 +1046,24 @@ class VescCanDriver:
         set_tracks() ramps to zero while latched. Motors are zeroed here only
         when the control thread is silent (nothing to ramp).
         """
-        send_zero = False
-        with self._telem_lock:
-            already = bool(self._pack_low_reasons)
-            self._pack_low_reasons.add(_REASON_PACK_V)
-            if not already and time.monotonic() - self._last_tracks_mono > _CONTROL_SILENT_S:
-                send_zero = True
-                self._last_out_rpm = [0, 0]
-        if not already:
-            logger.warning(
-                "VESC: pack-low latch ENGAGED (pack_voltage): %.1fV < %.1fV for %.0fs",
-                voltage,
-                self._cfg.voltage_shutdown_threshold_v,  # type: ignore[union-attr]
-                self._cfg.voltage_shutdown_delay_s,      # type: ignore[union-attr]
-            )
-        if send_zero:
-            self._send_rpm(self._left_id, 0)
-            self._send_rpm(self._right_id, 0)
+        with self._tx_lock:
+            send_zero = False
+            with self._telem_lock:
+                already = bool(self._pack_low_reasons)
+                self._pack_low_reasons.add(_REASON_PACK_V)
+                if not already and time.monotonic() - self._last_tracks_mono > _CONTROL_SILENT_S:
+                    send_zero = True
+                    self._last_out_rpm = [0, 0]
+            if not already:
+                logger.warning(
+                    "VESC: pack-low latch ENGAGED (pack_voltage): %.1fV < %.1fV for %.0fs",
+                    voltage,
+                    self._cfg.voltage_shutdown_threshold_v,  # type: ignore[union-attr]
+                    self._cfg.voltage_shutdown_delay_s,      # type: ignore[union-attr]
+                )
+            if send_zero:
+                self._send_rpm(self._left_id, 0)
+                self._send_rpm(self._right_id, 0)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Internal helpers

@@ -263,6 +263,13 @@ class VescConfig:
     # voltage used is the MINIMUM of the fresh readings (the low reader is the
     # left one, within 0.1 V of the BMS).
     pack_voltage_max_disagree_v: float = 1.5
+    # The sustain countdown PAUSES on a sample that is not trusted and in the
+    # band (a disagreeing frame, a stale gap, a reading at or above the
+    # threshold) and resets only after this many seconds of such samples in a
+    # row. Without it one noisy frame at 29 s restarts the full 30 s, and a
+    # pack hovering at the threshold under load could never latch. 2 s is
+    # about 100 frames per VESC: a real recovery, not noise.
+    pack_low_sustain_grace_s: float = 2.0
     # Release: the trusted pack voltage at or above threshold + this, with zero
     # commanded throttle on both tracks, in MANUAL. 2.0 V (46.0 V) is the old
     # anti-chatter band, kept (audit section 3, item 3). A disarm also releases.
@@ -273,12 +280,15 @@ class VescConfig:
     # timeout. A requested stop (stick to neutral, person stop) still goes to
     # zero at once: the ramp only limits how much speed is KEPT.
     pack_low_ramp_s: float = 1.0
-    # Limp home after a deliberate re-arm (default OFF; Kevin decides). When on,
-    # the disarm that clears a pack-low latch starts a limp state: MANUAL only
-    # (FOLLOW_ME / WAYPOINT_NAV ramp to zero), speed capped at
-    # pack_low_limp_max_byte_offset, and the 44 V / 3.30 V triggers are replaced
-    # by the floors below. Limp ends when the trusted pack is back at
-    # threshold + hysteresis with zero throttle, or on a service restart.
+    # The disarm that clears a pack-low latch ALWAYS starts a post-latch
+    # session: MANUAL only (FOLLOW_ME / WAYPOINT_NAV ramp to zero), a fresh
+    # countdown, a fresh cell count. It ends when the trusted pack is back at
+    # threshold + hysteresis with zero throttle (or on a service restart).
+    # Without limp, MANUAL drives at full speed and latches again after
+    # voltage_shutdown_delay_s below 44 V. Limp home (default OFF; Kevin
+    # decides) adds to that session: speed capped at
+    # pack_low_limp_max_byte_offset, and the 44 V / 3.30 V triggers replaced by
+    # the floors below.
     pack_low_limp_enabled: bool = False
     # 32 bytes of 128 = 0.40 m/s at max_erpm 20000 (walking pace). At that
     # speed the pack current is about 10 A, so the sag is about 0.7 V.
