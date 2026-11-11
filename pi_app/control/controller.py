@@ -918,6 +918,19 @@ class Controller:
         self._slew_initialized = False
         self._slew_seen_non_neutral = False
 
+    def _hold_slew_at_neutral(self, now_s: float) -> None:
+        """Pin the slew at neutral during an armed stop that hands control back.
+
+        Like ``_reset_slew_state``, but the release must ramp from neutral at
+        the mode's rates, not snap. ``snap_first_command`` passes the first
+        non-neutral command unramped while ``_slew_seen_non_neutral`` is
+        False, so a reset during an armed stop made the release send the
+        held stick in one tick (2026-11-05 09:31:19: charger inhibit
+        released with the stick at full reverse, 126 -> 0).
+        """
+        self._reset_slew_state(now_s)
+        self._slew_seen_non_neutral = True
+
     def _on_armed_session_ended(self) -> None:
         """An armed session ended (disarm, RC stale, e-stop).
 
@@ -2399,7 +2412,8 @@ class Controller:
             # is already True here (set unconditionally above from self._charger_inhibit).
             left = right = CENTER_OUTPUT_VALUE
             self._motor.stop()
-            self._reset_slew_state(mono_now)
+            # Release ramps from neutral (no snap to a held stick).
+            self._hold_slew_at_neutral(mono_now)
             telemetry["slew_out_left"] = left
             telemetry["slew_out_right"] = right
             telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
@@ -2411,10 +2425,10 @@ class Controller:
             # the latch too — otherwise the slew state keeps ramping toward the
             # commanded value while latched, and the moment the latch clears at
             # ~41V the fully-ramped command would be emitted instantly (full-
-            # speed lurch). Resetting slew here makes release ramp from neutral.
+            # speed lurch). Holding slew at neutral makes release ramp from neutral.
             left = right = CENTER_OUTPUT_VALUE
             self._motor.stop()
-            self._reset_slew_state(mono_now)
+            self._hold_slew_at_neutral(mono_now)
             telemetry["slew_out_left"] = left
             telemetry["slew_out_right"] = right
             telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
@@ -2456,9 +2470,10 @@ class Controller:
                     left = left_in
                     right = right_in
                     self._slew_initialized = True
-                    self._slew_seen_non_neutral = (
-                        left != CENTER_OUTPUT_VALUE or right != CENTER_OUTPUT_VALUE
-                    )
+                    # The stop itself is immediate (bypass). Its release must
+                    # ramp from here, not snap: a False flag would let
+                    # snap_first_command pass the held stick in one tick.
+                    self._slew_seen_non_neutral = True
                     self._slew_last_update = mono_now
                     self._slew_last_left = left
                     self._slew_last_right = right

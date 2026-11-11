@@ -446,6 +446,150 @@ class TestControllerPackLowLatch(unittest.TestCase):
         self.assertFalse(telem["vesc_pack_low_latched"])
 
 
+class TestSlewRampAfterArmedStopRelease(unittest.TestCase):
+    """An armed stop that hands control back must ramp, never snap.
+
+    2026-11-05 09:31:19.72 (arm_20261105_093117.log): the charger inhibit
+    released with the stick at full reverse and the next tick sent 0, 0.
+    Root cause: the stop called _reset_slew_state(), which clears
+    _slew_seen_non_neutral, and snap_first_command (True in production)
+    passes the first non-neutral command unramped. These tests use the
+    PRODUCTION slew config (snap_first_command=True); the older pack-low
+    test sets it False, which is why it never saw the snap.
+    """
+
+    class _Motor(FakeMotor):
+        def __init__(self):
+            super().__init__()
+            self.pack_low_latched = False
+
+        def get_telemetry(self):
+            latched = self.pack_low_latched
+
+            class _T:
+                left_rpm = 0
+                right_rpm = 0
+                pack_low_latched = latched
+            return _T()
+
+    ACCEL = float(default_config.slew_limiter.manual_accel_bps)
+    DT = 0.1
+
+    def _rc(self, now, ch=1500):
+        return RCInputs(ch1_us=ch, ch2_us=ch, ch3_us=1900, ch4_us=1000,
+                        ch5_us=1000, last_update_mono_s=now)
+
+    def _run(self, engage, release, ch, oa=None, dist=None):
+        """Arm, engage the stop with the stick held at ``ch``, release it;
+        return (engaged output, the first 3 released outputs)."""
+        self.assertTrue(default_config.slew_limiter.snap_first_command)
+        motor = self._Motor()
+        clock = {"t": 10.0}
+        out = []
+        with patch("pi_app.control.controller.time.monotonic",
+                   side_effect=lambda: clock["t"]):
+            c = Controller(motor_driver=motor, arm_relay=FakeRelay(),
+                           shutdown_scheduler=FakeShutdown(),
+                           obstacle_avoidance=oa,
+                           safety_params=SafetyParams(debounce_seconds=0.0,
+                                                      arm_high_persist_s=0.0))
+            state = {"dist": 5.0}
+
+            def tick(stick):
+                clock["t"] += self.DT
+                if oa is not None:
+                    c.set_obstacle_data(distance_m=state["dist"], age_s=0.0)
+                cmd, _, _ = c.process(self._rc(clock["t"], stick), now_epoch_s=clock["t"])
+                self.assertTrue(cmd.is_armed)
+                return (cmd.left_byte, cmd.right_byte)
+
+            tick(1500)                       # arm at rest
+            engage(c, motor, state)
+            engaged = [tick(ch) for _ in range(3)]
+            release(c, motor, state)
+            out = [tick(ch) for _ in range(3)]
+        return engaged, out
+
+    def _expect_ramp(self, engaged, out, sign):
+        step = int(round(self.ACCEL * self.DT))
+        for e in engaged:
+            self.assertEqual(e, (CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE))
+        for k, (l, r) in enumerate(out, start=1):
+            want = CENTER_OUTPUT_VALUE + sign * k * step
+            self.assertEqual((l, r), (want, want), out)
+
+    @staticmethod
+    def _charger_on(c, m, s):
+        c.set_charger_inhibit(True)
+
+    @staticmethod
+    def _charger_off(c, m, s):
+        c.set_charger_inhibit(False)
+
+    def test_charger_release_with_stick_full_reverse_ramps(self):
+        """The 2026-11-05 sequence: no 126 -> 0 step."""
+        engaged, out = self._run(self._charger_on, self._charger_off, ch=1000)
+        self._expect_ramp(engaged, out, sign=-1)
+
+    def test_charger_release_with_stick_full_forward_ramps(self):
+        engaged, out = self._run(self._charger_on, self._charger_off, ch=2000)
+        self._expect_ramp(engaged, out, sign=+1)
+
+    def test_charger_release_with_neutral_stick_stays_neutral(self):
+        engaged, out = self._run(self._charger_on, self._charger_off, ch=1500)
+        for e in engaged + out:
+            self.assertEqual(e, (CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE))
+
+    def test_pack_low_release_with_production_snap_config_ramps(self):
+        def on(c, m, s):
+            m.pack_low_latched = True
+
+        def off(c, m, s):
+            m.pack_low_latched = False
+        engaged, out = self._run(on, off, ch=2000)
+        self._expect_ramp(engaged, out, sign=+1)
+
+    def test_person_stop_release_ramps_and_the_stop_stays_immediate(self):
+        """Distance 0.0 (YOLO stop tier) bypasses the slew on engage; its
+        release must ramp, not snap to the held stick."""
+        from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
+        from config import ObstacleAvoidanceConfig
+
+        def on(c, m, s):
+            s["dist"] = 0.0
+
+        def off(c, m, s):
+            s["dist"] = 5.0
+        oa = ObstacleAvoidanceController(ObstacleAvoidanceConfig())
+        engaged, out = self._run(on, off, ch=2000, oa=oa)
+        self._expect_ramp(engaged, out, sign=+1)
+
+    def test_person_stop_cuts_a_moving_command_in_one_tick(self):
+        """The fix must not delay the stop: full forward to neutral at once."""
+        from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
+        from config import ObstacleAvoidanceConfig
+        motor = self._Motor()
+        clock = {"t": 10.0}
+        with patch("pi_app.control.controller.time.monotonic",
+                   side_effect=lambda: clock["t"]):
+            c = Controller(motor_driver=motor, arm_relay=FakeRelay(),
+                           shutdown_scheduler=FakeShutdown(),
+                           obstacle_avoidance=ObstacleAvoidanceController(ObstacleAvoidanceConfig()),
+                           safety_params=SafetyParams(debounce_seconds=0.0,
+                                                      arm_high_persist_s=0.0))
+            last = None
+            for k in range(30):
+                clock["t"] += self.DT
+                c.set_obstacle_data(distance_m=5.0 if k < 29 else 0.0, age_s=0.0)
+                cmd, _, _ = c.process(self._rc(clock["t"], 1500 if k == 0 else 2000),
+                                      now_epoch_s=clock["t"])
+                if k == 28:
+                    last = cmd.left_byte
+        self.assertGreater(last, CENTER_OUTPUT_VALUE + 50)
+        self.assertEqual((cmd.left_byte, cmd.right_byte),
+                         (CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE))
+
+
 class TestControllerVescBusTelemetry(unittest.TestCase):
     """Bus voltage, input current and motor current per VESC reach the telemetry
     dict (and from there the run log) and clear to None when the VESC goes stale."""
