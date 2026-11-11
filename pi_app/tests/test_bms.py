@@ -882,5 +882,60 @@ class TestControllerChargerInhibit(unittest.TestCase):
         self.assertEqual(len(release_lines), 1)
 
 
+class TestCellReadingAndSilentPoll(unittest.TestCase):
+    """2026-11-11 review (Grok 01a1ccba and the wiring review): the pack guard
+    reads the cell, the poll id and the age in ONE locked snapshot, and a
+    poll where no query was answered is not a successful poll."""
+
+    _SHORT = b"\xA5\x01"   # answers at once, parses as nothing (no 3 s timeout)
+
+    def _poll(self, svc, responses: dict) -> None:
+        async def run():
+            buf = bytearray()
+            event = asyncio.Event()
+            by_cmd = {v: k for k, v in _DALY_CMD.items()}
+
+            async def fake_write(char, data, response=False):
+                name = by_cmd.get(bytes(data))
+                buf.clear()
+                buf.extend(responses.get(name, self._SHORT))
+                event.set()
+
+            client = MagicMock()
+            client.write_gatt_char = fake_write
+            await svc._do_poll(client, "fake-char", buf, event)
+
+        asyncio.run(run())
+
+    def test_cell_reading_is_one_snapshot(self):
+        svc = BmsService(_BmsCfg())
+        self.assertEqual(svc.get_cell_reading(), (None, None, None))
+        self._poll(svc, {"cell_voltage_range": _make_daly_response(0x91, _cell_range_payload(3850, 3300))})
+        v, pid, age = svc.get_cell_reading()
+        self.assertAlmostEqual(v, 3.300, places=3)
+        self.assertEqual(pid, svc.get_state().last_update_epoch_s)
+        self.assertGreaterEqual(age, 0.0)
+        self.assertLess(age, 5.0)
+
+    def test_a_poll_with_no_answer_is_not_a_success(self):
+        svc = BmsService(_BmsCfg())
+        self._poll(svc, {"cell_voltage_range": _make_daly_response(0x91, _cell_range_payload(3850, 3300))})
+        good_last = svc._last_success_monotonic
+        good_pid = svc.get_state().last_update_epoch_s
+        self.assertGreater(good_last, 0.0)
+        with self.assertLogs("pi_app.hardware.bms", level="WARNING") as cm:
+            self._poll(svc, {})                    # every query unanswered
+            self._poll(svc, {})
+        self.assertEqual(svc._last_success_monotonic, good_last)   # age keeps growing
+        self.assertEqual(svc.get_state().last_update_epoch_s, good_pid)
+        self.assertEqual(svc.get_state().cell_min_mv, 3300)          # last good state kept
+        self.assertEqual(sum("no query answered" in m for m in cm.output), 1)   # once
+
+    def test_an_answered_poll_with_no_flags_is_still_a_success(self):
+        svc = BmsService(_BmsCfg())
+        self._poll(svc, {"errors": _make_daly_response(0x98, _errors_payload(flags=0))})
+        self.assertGreater(svc._last_success_monotonic, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

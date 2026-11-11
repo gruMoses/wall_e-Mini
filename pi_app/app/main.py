@@ -672,13 +672,10 @@ def run() -> int:
                 _set_cell = getattr(motor_driver, "set_bms_cell_reading", None)
                 if callable(_set_cell):
                     try:
-                        _cmv = _bms_st_for_inhibit.cell_min_mv if _bms_st_for_inhibit else None
-                        _set_cell(
-                            cell_min_v=(_cmv / 1000.0) if _cmv is not None else None,
-                            poll_id=(_bms_st_for_inhibit.last_update_epoch_s or None)
-                            if _bms_st_for_inhibit else None,
-                            age_s=bms_service.get_last_poll_age_s(),
-                        )
+                        # One locked snapshot: separate state and age reads
+                        # can pair one poll's cell with the next poll's age.
+                        _cell_v, _cell_pid, _cell_age = bms_service.get_cell_reading()
+                        _set_cell(cell_min_v=_cell_v, poll_id=_cell_pid, age_s=_cell_age)
                     except Exception as _cell_exc:
                         # Once per process: this block runs every tick.
                         if not _bms_cell_feed_err_logged:

@@ -234,6 +234,20 @@ class BmsService:
         with self._lock:
             return copy.copy(self._state)
 
+    def get_cell_reading(self) -> tuple:
+        """(lowest cell V or None, poll id or None, age s or None) from ONE
+        locked snapshot, for VescCanDriver.set_bms_cell_reading. Separate
+        get_state() and get_last_poll_age_s() calls can tear: a poll that
+        lands between them pairs the old cell with the new age (Grok 01a1ccba).
+        """
+        with self._lock:
+            st = self._state
+            last = self._last_success_monotonic
+            cmv = st.cell_min_mv if st is not None else None
+            pid = (st.last_update_epoch_s or None) if st is not None else None
+        age = None if last == 0.0 else max(0.0, time.monotonic() - last)
+        return ((cmv / 1000.0) if cmv is not None else None), pid, age
+
     def get_last_poll_age_s(self) -> Optional[float]:
         """Seconds since the last successful poll (monotonic), None if never.
 
@@ -442,11 +456,13 @@ class BmsService:
 
         new = BmsState()
         new.connected = True
+        answered = False   # True once any query returns a parsable frame
 
         # --- SOC: pack voltage, current, state of charge ---
         resp = await send_recv(_DALY_CMD["soc"])
         if len(resp) >= 13 and resp[2] == 0x90:
             p = resp[4:12]
+            answered = True
             new.pack_voltage_v = struct.unpack(">H", p[0:2])[0] * 0.1
             current_raw = struct.unpack(">H", p[4:6])[0]
             new.pack_current_a = (current_raw - 30000) * 0.1
@@ -456,6 +472,7 @@ class BmsService:
         resp = await send_recv(_DALY_CMD["cell_voltage_range"])
         if len(resp) >= 13 and resp[2] == 0x91:
             p = resp[4:12]
+            answered = True
             max_mv = struct.unpack(">H", p[0:2])[0]
             min_mv = struct.unpack(">H", p[3:5])[0]
             new.cell_max_mv = max_mv
@@ -466,6 +483,7 @@ class BmsService:
         resp = await send_recv(_DALY_CMD["temp_range"])
         if len(resp) >= 13 and resp[2] == 0x92:
             p = resp[4:12]
+            answered = True
             new.temp_max_c = p[0] - 40
             new.temp_min_c = p[2] - 40
 
@@ -473,6 +491,7 @@ class BmsService:
         resp = await send_recv(_DALY_CMD["mosfet_status"])
         if len(resp) >= 13 and resp[2] == 0x93:
             p = resp[4:12]
+            answered = True
             new.bms_mode = _DALY_MODES.get(p[0], f"unknown_{p[0]}")
             new.charge_fet_on = bool(p[1])
             new.discharge_fet_on = bool(p[2])
@@ -481,6 +500,7 @@ class BmsService:
         resp = await send_recv(_DALY_CMD["status"])
         if len(resp) >= 13 and resp[2] == 0x94:
             p = resp[4:12]
+            answered = True
             new.num_cells = p[0]
             new.charger_connected = bool(p[2])
             new.load_connected = bool(p[3])
@@ -490,6 +510,7 @@ class BmsService:
         resp = await send_recv(_DALY_CMD["errors"])
         if len(resp) >= 13 and resp[2] == 0x98:
             p = resp[4:12]
+            answered = True
             new.error_flags = [
                 label
                 for byte_idx, bit, label in _DALY_0x98_ALARM_BITS
@@ -544,6 +565,17 @@ class BmsService:
             and new.pack_current_a > min_current
         )
 
+        # A poll where no query was answered is not a success: it would stamp
+        # the link "up" while every value is None and hide a dark BMS
+        # (2026-11-11 review). Keep the last good state; its age keeps growing.
+        if not answered:
+            if not getattr(self, "_silent_poll_warned", False):
+                self._silent_poll_warned = True
+                logger.warning("BMS poll: no query answered — not counted as a successful poll "
+                               "(logged once until a poll is answered)")
+            return
+        self._silent_poll_warned = False
+
         with self._lock:
             self._state = new
             if poll_looks_like_charging:
@@ -551,7 +583,9 @@ class BmsService:
             else:
                 self._consecutive_charge_polls = 0
             self._confirmed_charging = self._consecutive_charge_polls >= min_polls
-        self._last_success_monotonic = time.monotonic()
+            # Stamped under the same lock as the state, so get_cell_reading()
+            # never pairs one poll's cell with another poll's age.
+            self._last_success_monotonic = time.monotonic()
 
     # ------------------------------------------------------------------ #
     # Helpers
