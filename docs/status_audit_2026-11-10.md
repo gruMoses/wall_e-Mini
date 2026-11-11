@@ -223,6 +223,32 @@ DEPLOYED 2026-11-10 18:20 with Kevin's approval, in one push (`cd9086e`, `be768c
 
 Before the switch goes on (the list is also in `tools/odometry_analysis/README.md`): a stall check for dead reckoning (it integrates the commanded bytes, so a blocked robot still "moves"), a straight run of approximately 20 m on a tape, a run in an empty area with pursuit beyond 5.2 m and a lost target, a Grok review of the change, and Kevin's approval.
 
+### 9.6 Prepared in the evening of 2026-11-10, NOT deployed
+
+Kevin said: "Do what you can do without me." Four agents prepared the work below in local worktrees under `.claude/worktrees/`. The branches are on the Mac only. Each code change needs Kevin's approval, and each push restarts `wall-e`. The documents of that evening are in `main` already (`docs/charger_inhibit_review_2026-11-10.md`, `docs/wheel_speed_scale_2026-11-10.md`, and the updates to the log, teleop, services and heading documents).
+
+| Branch | Commits | Content | Review |
+|---|---|---|---|
+| `worktree-agent-a837df54463a83f51` | `16f9ab5` | `tools/follow_me_analyze.py`: a FOLLOW_ME run ends only at a real mode change (one log: 115 segments before, 2 after). | Tests only. |
+| the same | `50f7ae8` | `_apply_safety_tier_override` does not raise on a malformed detection. The decision for a correct detection is the same (4,000 random cases). | Grok `01a1c83f`, `01a1c843`, `01a1c84f`: safe. |
+| `worktree-agent-ab8c37e4e00bd66e0` | `64b3132` | BMS link state in the telemetry, the journal and the status line (`BMS(dark Nm)`). No change to arming or motion. | Tests only. |
+| the same | `7057ca0` | Slew correction. After the charger inhibit, the pack-low latch or the person stop released, a held stick went to the motors in one tick (2026-11-05 09:31:19: neutral to full reverse). Now the command ramps from neutral. A stop is still immediate. | Grok `01a1c857`: no item to correct. |
+| `worktree-agent-a989fe051ee4d7bb4` | six, on top of the branch above | Item 6, the pack-low latch: 44.0 V for 30 s on the minimum of the fresh readings, a ramp to zero in 1.0 s, release at 46.0 V with zero throttle or on a disarm, a BMS trigger at 3.30 V for the lowest cell, a restricted state after 10 s without two fresh readings that agree (no autonomous mode, MANUAL at 32 bytes), a seeded count after a restart. Limp home is built and off. | Grok `01a1c84b`, `01a1c854`, `01a1c859`, `01a1c86b` found defects; `01a1c86f`: no item to correct. |
+| `worktree-agent-a096ba08eff3b0952` | `9848972` | `VescConfig.wheel_ground_scale = 0.815`. The eRPM speed reads 1.23 times the ground speed (a constant scale error, not slip). The follow-me speed loop uses one scale for the target and the feedback, so the motor commands do not change; its two limits in m/s become 23 percent more bytes if they are not scaled. The top speed is approximately 1.31 m/s, not 1.61. | Grok `01a1c83e` agrees. |
+
+Order for a deploy: the two small corrections, then `64b3132`, then `7057ca0`, then the pack-low latch (it is on top of them), and the wheel scale alone. Apply VESC part A before the pack-low latch or with it.
+
+Decisions for Kevin:
+
+1. Approve the push of each item above.
+2. Pack-low latch: the delay (30 s until VESC part A is applied), limp home on or off (32 bytes, floors 42.0 V and 3.15 V for each cell), the 1.0 V offset of the right VESC.
+3. Wheel scale: deploy it, and scale the two loop limits (0.163 m/s and 0.815) to keep the same motor bytes, or keep the limits.
+4. Charger inhibit (item 7): the recommended option is a charger latch that is kept in a file, with an operator override. Select the override input (a phone button, an arm-switch pattern, or the two). Refer to `docs/charger_inhibit_review_2026-11-10.md`.
+5. The first command after a re-arm (after an RC dropout or an e-stop clear) goes to the motors in one tick. This is the `snap_first_command` design. Keep it or change it.
+6. Two checks by hand settle the wheel scale: roll the robot for four tyre turns and measure the distance, and drive 20 m along a tape (`docs/wheel_speed_scale_2026-11-10.md`, section 8).
+
+Not verified by the orchestrating session: the pack-low latch and the wheel scale had the agents' tests and the Grok reviews only. Read the diffs before the push.
+
 ## 10. Technical Names
 
 boot ID, monotonic clock, worktree, odometry, dead reckoning, pure pursuit, trail pursuit, math angle, course over ground, eRPM, VIO, Grok, VESC, BMS, Daly, OAK, RTK, GPS, IMU, UPS, HAT, RTC, NTP, I2C, RC, PV, FOLLOW_ME, WAYPOINT_NAV, MANUAL, ALIGN, `wall-e`, `main`, `flask-sock`, FET, e-stop, slew limiter, latch, taper, sag, worktree, endpoint, clamp, standby, multimeter, pivot, corridor, backstop.
