@@ -117,6 +117,11 @@ class RecordingTelemetry:
     bms_connected: bool | None = None
     bms_charging: bool | None = None
     bms_discharge_fet_on: bool | None = None
+    # BMS data freshness (BmsService.get_link_health): "pending" / "up" /
+    # "dark", and seconds since the last good poll. While "dark" the BMS
+    # values above are the last polled ones and the charger inhibit fails open.
+    bms_link_state: str | None = None
+    bms_data_age_s: float | None = None
     # VESC temperatures (°C) from CAN STATUS_4 — FET = MOSFET heatsink, motor = winding.
     vesc_left_temp_c: float | None = None
     vesc_right_temp_c: float | None = None

@@ -155,6 +155,30 @@ class BuildLogObjVescBlockTests(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(obj))["vesc"]["l_bus_v_max"], 61.5)
 
 
+class BuildLogObjBmsLinkTests(unittest.TestCase):
+    """The bms block carries the data freshness (link_state, age_s)."""
+
+    def _bms_state(self):
+        return SimpleNamespace(
+            pack_voltage_v=54.6, pack_current_a=0.0, soc_pct=100.0,
+            cell_min_mv=4190, cell_max_mv=4204, cell_delta_mv=14, temp_max_c=20,
+            charge_fet_on=True, discharge_fet_on=True, cycle_count=3,
+            error_flags=[], connected=False,
+        )
+
+    def test_dark_link_logs_state_and_age(self):
+        link = SimpleNamespace(state="dark", data_age_s=2591.27, dark_for_s=2591.27)
+        obj = build_log_obj(**_base_kwargs(bms_state=self._bms_state(), bms_charging=False, bms_link=link))
+        self.assertEqual(obj["bms"]["link_state"], "dark")
+        self.assertEqual(obj["bms"]["age_s"], 2591.3)
+
+    def test_keys_present_and_none_without_link(self):
+        obj = build_log_obj(**_base_kwargs(bms_state=self._bms_state(), bms_charging=False))
+        self.assertIn("link_state", obj["bms"])
+        self.assertIsNone(obj["bms"]["link_state"])
+        self.assertIsNone(obj["bms"]["age_s"])
+
+
 class BuildLogObjImuSteeringBlockTests(unittest.TestCase):
     def test_imu_steering_block_carries_new_fields(self):
         telem = {"correction_blend": 0.75, "speed_gain_scale": 0.9}

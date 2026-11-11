@@ -501,6 +501,7 @@ def run() -> int:
     _bms_fet_false_since = None # monotonic() when discharge_fet_on first went False (post-startup)
     _bms_fet_warn_last_t = 0.0  # monotonic() of last rate-limited warning print
     _bms_safety_stopped = False # True after safety timeout fires; cleared on DISARMED
+    _bms_fet_stale_warned = False  # one "armed with a dark BMS link" warning per armed session
 
     try:
         last_log_ts = 0.0
@@ -649,6 +650,7 @@ def run() -> int:
                 controller.set_gps_reading(gps_reading)
             # Update charger inhibit from BMS (fail-open: False when BMS unreachable).
             # Also force inhibit when the discharge FET safety timeout has fired.
+            bms_link = None
             if bms_service is not None:
                 _bms_st_for_inhibit = bms_service.get_state()
                 controller.set_charger_inhibit(
@@ -656,6 +658,12 @@ def run() -> int:
                     bms_current_a=_bms_st_for_inhibit.pack_current_a if _bms_st_for_inhibit else None,
                     charge_fet_on=_bms_st_for_inhibit.charge_fet_on if _bms_st_for_inhibit else None,
                 )
+                # Observation only: journal WARNING on the dark/restored edges
+                # and the data age for the run log, the status line and the SSE.
+                try:
+                    bms_link = bms_service.check_link()
+                except Exception:
+                    bms_link = None
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
             _nm = telem.get("netting_mute")
             if isinstance(_nm, dict) and _nm.get("event"):
@@ -878,6 +886,20 @@ def run() -> int:
             if bms_service is not None and cmd.is_armed:
                 _bms_st = bms_service.get_state()
                 _fet_on = _bms_st.discharge_fet_on if _bms_st is not None else None
+                if (
+                    _fet_on is not None
+                    and bms_link is not None
+                    and bms_link.state == "dark"
+                    and not _bms_fet_stale_warned
+                ):
+                    # Observation only: the guard below still acts on this
+                    # last polled value. Once per armed session.
+                    _bms_fet_stale_warned = True
+                    print(
+                        f"\nWARNING: armed with the BMS link dark — discharge_fet_on={_fet_on} "
+                        f"is {bms_link.dark_for_s or 0.0:.0f} s old; the FET guard and the "
+                        "charger inhibit cannot see the pack"
+                    )
                 if _fet_on is False:
                     if loop_now - _bms_fet_warn_last_t >= 5.0:
                         _bms_fet_warn_last_t = loop_now
@@ -905,10 +927,12 @@ def run() -> int:
                     _arm_time = loop_now
                     _bms_fet_false_since = None
                     _bms_safety_stopped = False
+                    _bms_fet_stale_warned = False
                 elif _ev is SafetyEvent.DISARMED:
                     _arm_time = None
                     _bms_fet_false_since = None
                     _bms_safety_stopped = False
+                    _bms_fet_stale_warned = False
 
             # Start a new log file on each arm event for per-session analysis
             if any(e is SafetyEvent.ARMED for e in events):
@@ -994,6 +1018,8 @@ def run() -> int:
                         bms_connected=(bms_state.connected if bms_state is not None else None),
                         bms_charging=bms_charging,
                         bms_discharge_fet_on=(bms_state.discharge_fet_on if bms_state is not None else None),
+                        bms_link_state=(bms_link.state if bms_link is not None else None),
+                        bms_data_age_s=(bms_link.data_age_s if bms_link is not None else None),
                         charger_inhibit=telem.get("charger_inhibit"),
                         vesc_left_rpm=telem.get("vesc_left_rpm"),
                         vesc_right_rpm=telem.get("vesc_right_rpm"),
@@ -1159,6 +1185,12 @@ def run() -> int:
                 state_tag = " F" if _ho_frozen else (" L" if _ho_locked else " -")
                 hdg_off_info = f"  HDG_OFF({_ho_deg:+.1f}°{state_tag})"
 
+            # BMS link dark: the charger inhibit fails open and the FET values
+            # are stale. Shown only while dark, so the normal line is unchanged.
+            bms_info = ""
+            if bms_link is not None and bms_link.state == "dark":
+                bms_info = f"  BMS(dark {(bms_link.dark_for_s or 0.0) / 60.0:.0f}m)"
+
             # In non-MANUAL modes, add nav_state + motor bytes so we can see
             # ALIGN/DRIVE transitions and whether pivot actually reaches motors.
             nav_info = ""
@@ -1179,7 +1211,7 @@ def run() -> int:
                 f"{bt_display}  "
                 f"{imu_info}  corr_raw={corr_raw_str} corr_applied={corr_app_str}  "
                 f"armed={'Y' if cmd.is_armed else 'N'} ev={len(events)}"
-                f"{oak_info}{gps_info}{hdg_off_info}{nav_info}{mode_info}   "
+                f"{oak_info}{gps_info}{hdg_off_info}{nav_info}{mode_info}{bms_info}   "
             )
             if pid_debug:
                 print(line_cli)
@@ -1292,6 +1324,7 @@ def run() -> int:
                         oak_camera_health=oak_camera_health,
                         oak_animals=_oak_animals_for_log,
                         vesc_bus_peaks=_vesc_peaks_for_log,
+                        bms_link=bms_link,
                     )
                     line = json.dumps(log_obj)
                     # Do not print structured JSON to console; keep file logging only

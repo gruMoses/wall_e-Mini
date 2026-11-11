@@ -121,6 +121,26 @@ class BmsState:
     connected: bool = False
 
 
+@dataclass
+class BmsLinkHealth:
+    """Freshness of the BMS data, for telemetry and the journal only.
+
+    ``state`` is ``"pending"`` (never polled, still inside ``bms_timeout_s``
+    of the service start), ``"up"`` (last good poll inside ``bms_timeout_s``)
+    or ``"dark"`` (no good poll for longer than ``bms_timeout_s``). While the
+    link is dark, ``is_charging()`` fails open and the FET values in
+    ``get_state()`` are the last polled values, not live ones.
+
+    This is observation only: nothing reads it to decide motion.
+    """
+    state: str
+    # Seconds since the last good poll; None if the BMS was never polled.
+    data_age_s: Optional[float]
+    # Seconds without a good poll (since the service start when never
+    # polled); None unless state is "dark".
+    dark_for_s: Optional[float]
+
+
 class BmsService:
     """Threaded Daly BMS reader.
 
@@ -142,6 +162,8 @@ class BmsService:
 
     _BACKOFF_INITIAL_S: float = 5.0
     _BACKOFF_MAX_S: float = 60.0
+    # Journal reminder interval while the link stays dark (check_link()).
+    _DARK_REMINDER_S: float = 600.0
 
     def __init__(self, bms_config) -> None:
         """
@@ -172,6 +194,12 @@ class BmsService:
         # is_charging() reports (subject to the fail-open checks below) —
         # a single spurious positive-current sample can no longer trip it.
         self._confirmed_charging: bool = False
+        # Link-health bookkeeping for check_link() (main-loop thread only).
+        # Monotonic time of the service object creation: a link that never
+        # polls counts as dark bms_timeout_s after this.
+        self._created_monotonic: float = time.monotonic()
+        self._link_reported_dark: bool = False
+        self._link_dark_reminder_at: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -236,6 +264,63 @@ class BmsService:
 
         with self._lock:
             return self._confirmed_charging
+
+    def get_link_health(self, now_monotonic: Optional[float] = None) -> BmsLinkHealth:
+        """Return the freshness of the BMS data. No side effects.
+
+        Uses the same staleness limit (``bms_timeout_s``) as the fail-open
+        check in ``is_charging()``, so ``state == "dark"`` is exactly the
+        condition in which the charger inhibit cannot engage.
+        """
+        now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        timeout = float(self._cfg.bms_timeout_s)
+        last = self._last_success_monotonic
+        if last == 0.0:
+            silent_for = max(0.0, now - self._created_monotonic)
+            if silent_for <= timeout:
+                return BmsLinkHealth(state="pending", data_age_s=None, dark_for_s=None)
+            return BmsLinkHealth(state="dark", data_age_s=None, dark_for_s=silent_for)
+        age = max(0.0, now - last)
+        if age > timeout:
+            return BmsLinkHealth(state="dark", data_age_s=age, dark_for_s=age)
+        return BmsLinkHealth(state="up", data_age_s=age, dark_for_s=None)
+
+    def check_link(self, now_monotonic: Optional[float] = None) -> BmsLinkHealth:
+        """``get_link_health()`` plus journal WARNINGs on the link edges.
+
+        Call once per control-loop tick from one thread. Logs one WARNING
+        when the link goes dark, one every ``_DARK_REMINDER_S`` while it
+        stays dark, and one when a good poll arrives again. Observation
+        only: it changes no inhibit and no guard.
+        """
+        now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        health = self.get_link_health(now)
+        if health.state == "dark":
+            if not self._link_reported_dark:
+                self._link_reported_dark = True
+                self._link_dark_reminder_at = now + self._DARK_REMINDER_S
+                with self._lock:
+                    last_epoch = self._state.last_update_epoch_s
+                last_txt = (
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_epoch))
+                    if last_epoch > 0.0 else "never"
+                )
+                logger.warning(
+                    "BMS link DARK: no good poll for %.0f s (last good poll %s). "
+                    "The charger inhibit fails open and the discharge-FET value is stale.",
+                    health.dark_for_s or 0.0,
+                    last_txt,
+                )
+            elif now >= self._link_dark_reminder_at:
+                self._link_dark_reminder_at = now + self._DARK_REMINDER_S
+                logger.warning(
+                    "BMS link still DARK after %.0f min. The charger inhibit fails open.",
+                    (health.dark_for_s or 0.0) / 60.0,
+                )
+        elif health.state == "up" and self._link_reported_dark:
+            self._link_reported_dark = False
+            logger.warning("BMS link restored (good poll %.0f s ago).", health.data_age_s or 0.0)
+        return health
 
     # ------------------------------------------------------------------ #
     # Background asyncio loop

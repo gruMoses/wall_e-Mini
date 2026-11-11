@@ -319,6 +319,29 @@ def test_sse_new_fields_present_even_when_none():
     assert d["vesc_rx_thread_alive"] is None
 
 
+def test_sse_payload_carries_bms_link_freshness():
+    t = RecordingTelemetry(
+        timestamp=time.time(), mode="MANUAL", throttle_scale=1.0,
+        obstacle_distance_m=2.0, motor_left=126, motor_right=126, is_armed=False,
+        depth_stats=None, person_detections=[],
+        bms_connected=False, bms_link_state="dark", bms_data_age_s=2591.27,
+    )
+    d = _first_sse_payload(_OneShotRecorder(t))
+    assert d["bms_link_state"] == "dark"
+    assert d["bms_data_age_s"] == pytest.approx(2591.3)
+
+
+def test_sse_bms_link_keys_present_when_none():
+    t = RecordingTelemetry(
+        timestamp=time.time(), mode="MANUAL", throttle_scale=1.0,
+        obstacle_distance_m=None, motor_left=126, motor_right=126, is_armed=False,
+        depth_stats=None, person_detections=[],
+    )
+    d = _first_sse_payload(_OneShotRecorder(t))
+    assert "bms_link_state" in d and d["bms_link_state"] is None
+    assert "bms_data_age_s" in d and d["bms_data_age_s"] is None
+
+
 _TEMP_SSE_KEYS = (
     "bms_temp_max_c",
     "bms_temp_min_c",

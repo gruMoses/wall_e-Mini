@@ -407,6 +407,7 @@ def build_log_obj(
     oak_camera_health=None,
     oak_animals=None,
     vesc_bus_peaks=None,
+    bms_link=None,
 ) -> dict:
     """Build the per-tick structured JSON log object.
 
@@ -613,6 +614,13 @@ def build_log_obj(
             "error_flags": bms_state.error_flags,
             "connected": bms_state.connected,
             "charging": bms_charging,
+            # Data freshness (BmsService.get_link_health): "pending" / "up" /
+            # "dark". While "dark" every value above is the last polled one.
+            "link_state": getattr(bms_link, "state", None),
+            "age_s": (
+                round(bms_link.data_age_s, 1)
+                if getattr(bms_link, "data_age_s", None) is not None else None
+            ),
         } if bms_state is not None else None,
         "vesc": {
             "left_rpm": telem.get("vesc_left_rpm"),

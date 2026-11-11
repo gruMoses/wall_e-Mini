@@ -667,6 +667,103 @@ class TestCleanShutdown(unittest.TestCase):
 # Integration test: controller charger inhibit
 # ---------------------------------------------------------------------------
 
+class TestLinkHealth(unittest.TestCase):
+    """BmsService.get_link_health / check_link: data freshness, observation only.
+
+    Field case (2026-11-08 and 2026-11-10): the BMS stopped advertising while
+    the robot sat on the charger, the journal showed only the reconnect
+    retries, and nothing said that the inhibit and the FET values were blind.
+    """
+
+    LOGGER = "pi_app.hardware.bms"
+
+    def _service(self, timeout_s=30.0) -> BmsService:
+        return BmsService(_BmsCfg(bms_timeout_s=timeout_s))
+
+    def _good_poll(self, svc: BmsService, at: float) -> None:
+        with svc._lock:
+            svc._state = BmsState(discharge_fet_on=True, connected=True,
+                                  last_update_epoch_s=time.time())
+        svc._last_success_monotonic = at
+
+    def test_pending_before_timeout_when_never_polled(self):
+        svc = self._service()
+        h = svc.get_link_health(svc._created_monotonic + 10.0)
+        self.assertEqual(h.state, "pending")
+        self.assertIsNone(h.data_age_s)
+        self.assertIsNone(h.dark_for_s)
+
+    def test_dark_after_timeout_when_never_polled(self):
+        svc = self._service()
+        h = svc.get_link_health(svc._created_monotonic + 31.0)
+        self.assertEqual(h.state, "dark")
+        self.assertIsNone(h.data_age_s)
+        self.assertAlmostEqual(h.dark_for_s, 31.0, places=3)
+
+    def test_up_with_age_after_a_good_poll(self):
+        svc = self._service()
+        t0 = svc._created_monotonic + 5.0
+        self._good_poll(svc, t0)
+        h = svc.get_link_health(t0 + 8.0)
+        self.assertEqual(h.state, "up")
+        self.assertAlmostEqual(h.data_age_s, 8.0, places=3)
+        self.assertIsNone(h.dark_for_s)
+
+    def test_dark_matches_the_fail_open_limit_of_is_charging(self):
+        """'dark' is exactly the age at which is_charging() fails open."""
+        svc = self._service(timeout_s=30.0)
+        t0 = svc._created_monotonic + 5.0
+        self._good_poll(svc, t0)
+        self.assertEqual(svc.get_link_health(t0 + 30.0).state, "up")
+        h = svc.get_link_health(t0 + 30.5)
+        self.assertEqual(h.state, "dark")
+        self.assertAlmostEqual(h.data_age_s, 30.5, places=3)
+        self.assertAlmostEqual(h.dark_for_s, 30.5, places=3)
+
+    def test_get_link_health_has_no_log_side_effect(self):
+        svc = self._service()
+        with self.assertRaises(AssertionError):
+            with self.assertLogs(self.LOGGER, level="WARNING"):
+                svc.get_link_health(svc._created_monotonic + 100.0)
+
+    def test_check_link_warns_once_on_the_dark_edge(self):
+        svc = self._service()
+        t0 = svc._created_monotonic + 5.0
+        self._good_poll(svc, t0)
+        with self.assertLogs(self.LOGGER, level="WARNING") as ctx:
+            for k in range(50):
+                svc.check_link(t0 + 31.0 + k * 0.05)
+        dark = [r for r in ctx.output if "DARK" in r]
+        self.assertEqual(len(dark), 1, ctx.output)
+        self.assertIn("fails open", dark[0])
+
+    def test_check_link_reminds_while_dark_and_reports_restore(self):
+        svc = self._service()
+        t0 = svc._created_monotonic + 5.0
+        self._good_poll(svc, t0)
+        with self.assertLogs(self.LOGGER, level="WARNING") as ctx:
+            svc.check_link(t0 + 31.0)                       # dark edge
+            svc.check_link(t0 + 31.0 + 300.0)               # no reminder yet
+            svc.check_link(t0 + 31.0 + 600.0)               # reminder
+            self._good_poll(svc, t0 + 700.0)
+            svc.check_link(t0 + 701.0)                      # restored edge
+            svc.check_link(t0 + 702.0)                      # no repeat
+        self.assertEqual(sum("BMS link DARK" in r for r in ctx.output), 1)
+        self.assertEqual(sum("still DARK" in r for r in ctx.output), 1)
+        self.assertEqual(sum("restored" in r for r in ctx.output), 1)
+
+    def test_check_link_changes_no_inhibit(self):
+        """Observation only: a dark link still reads as not charging (fail-open
+        is unchanged; changing it is Kevin's decision)."""
+        svc = self._service(timeout_s=5.0)
+        with svc._lock:
+            svc._confirmed_charging = True
+        svc._last_success_monotonic = time.monotonic() - 10.0
+        with self.assertLogs(self.LOGGER, level="WARNING"):
+            self.assertEqual(svc.check_link().state, "dark")
+        self.assertFalse(svc.is_charging())
+
+
 class TestControllerChargerInhibit(unittest.TestCase):
     """Verify controller.set_charger_inhibit() blocks drive commands."""
 

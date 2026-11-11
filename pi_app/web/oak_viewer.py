@@ -2292,6 +2292,8 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
                     "bms_connected": getattr(t, "bms_connected", None),
                     "bms_charging": getattr(t, "bms_charging", None),
                     "bms_discharge_fet_on": getattr(t, "bms_discharge_fet_on", None),
+                    "bms_link_state": getattr(t, "bms_link_state", None),
+                    "bms_data_age_s": _finite_or_none(getattr(t, "bms_data_age_s", None), 1),
                     "imu_heading_deg": round(t.imu_heading_deg, 1) if t.imu_heading_deg is not None else None,
                     "vesc_left_rpm": getattr(t, "vesc_left_rpm", None),
                     "vesc_right_rpm": getattr(t, "vesc_right_rpm", None),
