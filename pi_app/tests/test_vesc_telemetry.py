@@ -362,8 +362,11 @@ class TestVoltageThreshold(unittest.TestCase):
         d._parse_status5("left", _status5_frame(2, 21.0).data, time.monotonic())
         d._check_voltage_shutdown()
         self.assertIsNotNone(d._low_voltage_since)
-        # Voltage recovers
-        d._parse_status5("left", _status5_frame(2, 25.0).data, time.monotonic())
+        # Voltage recovers on BOTH VESCs: only a cross-checked reading clears
+        # the countdown since 2026-11-11 (a lone reader stuck high must not).
+        now = time.monotonic()
+        d._parse_status5("left", _status5_frame(2, 25.0).data, now)
+        d._parse_status5("right", _status5_frame(1, 25.0).data, now)
         d._check_voltage_shutdown()
         self.assertIsNone(d._low_voltage_since)
         self.assertFalse(d._pack_low_latched)
@@ -937,6 +940,14 @@ class TestPackLowLatch(unittest.TestCase):
     def _set_v(self, d: VescCanDriver, v: float) -> None:
         d._parse_status5("left", _status5_frame(2, v).data, time.monotonic())
 
+    def _set_both(self, d: VescCanDriver, v: float) -> None:
+        # A release or a countdown clear needs a CROSS-CHECKED reading (both
+        # VESCs fresh and agreeing) since 2026-11-11; a lone reader can only
+        # latch.
+        now = time.monotonic()
+        d._parse_status5("left", _status5_frame(2, v).data, now)
+        d._parse_status5("right", _status5_frame(1, v).data, now)
+
     # (a) 6.8V reading -> no shutdown, motors stopped, log emitted, no latch.
     def test_below_floor_no_latch_motors_stopped_logged(self):
         d = self._driver()
@@ -988,7 +999,7 @@ class TestPackLowLatch(unittest.TestCase):
         self._set_v(d, 38.0)
         d._check_voltage_shutdown()
         self.assertIsNotNone(d._low_voltage_since)    # timer running
-        self._set_v(d, 45.0)
+        self._set_both(d, 45.0)                         # cross-checked recovery
         d._check_voltage_shutdown()
         self.assertIsNone(d._low_voltage_since)        # timer reset
         self.assertFalse(d._pack_low_latched)
@@ -1061,7 +1072,8 @@ class TestPackLowLatch(unittest.TestCase):
         self.assertEqual(sent, [(d._left_id, 0), (d._right_id, 0)])
         # Recovery above threshold + hysteresis clears the latch only with zero
         # commanded throttle (contract 2026-11-10), so centre the sticks first.
-        self._set_v(d, 45.0)
+        # It also needs both VESCs fresh and agreeing (2026-11-11).
+        self._set_both(d, 45.0)
         d._check_voltage_shutdown()
         self.assertTrue(d._pack_low_latched)           # throttle still 200
         with patch.object(d, "_send_rpm"):

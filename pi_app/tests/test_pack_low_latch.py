@@ -872,5 +872,154 @@ class TestStartSeed(_Base):
         self.assertFalse(d.get_pack_low_latched())
 
 
+class TestFinalReviewFixes(_Base):
+    """Grok final review 01a1cc96 and its follow-up 01a1ccba (2026-11-11).
+    Seven of these fail on 22149ba. Two pass there and guard the first fix
+    round: the floor reader beside a healthy one (restricted only) and the
+    pack switch-off (a straddle frame must not latch at power-on)."""
+
+    def test_seed_survives_frames_arriving_one_vesc_at_a_time(self):
+        # The RX loop runs the check after EVERY frame, so the first sample is
+        # always one VESC alone; that sample used the seed up before.
+        d = self.make(pack_low_seed_on_start=True)
+        with self.assertLogs(LOGGER, level="WARNING") as cm:
+            self.volts(d, left=43.5)              # first frame: left alone
+            self.clock.t += 0.02
+            self.volts(d, right=44.4)             # second frame: cross-checked
+            for _ in range(22):                   # 2.2 s, one VESC per frame
+                self.clock.t += 0.05
+                self.volts(d, left=43.5)
+                self.clock.t += 0.05
+                self.volts(d, right=44.4)
+        self.assertTrue(d.get_pack_low_latched())
+        self.assertTrue(any("seeded" in m for m in cm.output))
+
+    def test_a_lone_reader_cannot_release_a_latch(self):
+        d = self.make()
+        self.latch_by_voltage(d, 43.5)
+        d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+        self.clock.t += 1.0                       # the right VESC goes silent
+        self.hold(d, 3.0, left=47.0)              # left alone, high
+        self.assertTrue(d.get_pack_low_latched())
+        self.hold(d, 0.2, 47.0, 47.0)             # cross-checked recovery
+        self.assertFalse(d.get_pack_low_latched())
+
+    def test_a_lone_reader_cannot_clear_a_running_countdown(self):
+        d = self.make()
+        self.volts(d, 43.5, 43.5)
+        self.hold(d, 10.0, 43.5, 43.5)
+        since = d._low_voltage_since
+        self.assertIsNotNone(since)
+        self.clock.t += 1.0                       # the right VESC goes silent
+        self.hold(d, 5.0, left=46.0)              # left alone, out of band
+        self.assertEqual(d._low_voltage_since, since)
+        self.hold(d, 2.5, 46.0, 46.0)             # cross-checked, past the grace
+        self.assertIsNone(d._low_voltage_since)
+
+    def test_a_reader_below_the_floor_does_not_block_the_good_one(self):
+        d = self.make()
+        self.volts(d, 0.0, 43.4)                  # left garbage, right 43.4
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "trusted_right")
+        self.hold(d, 30.2, 0.0, 43.4)             # right alone: 42.4 V, in band
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_a_reader_below_the_floor_beside_a_healthy_one_restricts_only(self):
+        d = self.make()
+        self.volts(d, 0.0, 50.0)
+        self.hold(d, 10.5, 0.0, 50.0)
+        st = d.get_pack_guard_status()
+        self.assertTrue(st["restricted"])
+        self.assertFalse(st["latched"])
+
+    def test_a_cell_trip_session_needs_a_fresh_cell_to_end(self):
+        d = self.make()
+        self.volts(d, 48.0, 48.0)
+        d.set_bms_cell_reading(3.25, poll_id=1, age_s=1.0)
+        d.set_bms_cell_reading(3.25, poll_id=2, age_s=1.0)
+        self.assertTrue(d.get_pack_low_latched())
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+        self.hold(d, 1.0, 48.0, 48.0)             # pack well above 46 V, neutral
+        st = d.get_pack_guard_status()
+        self.assertTrue(st["post_latch"])         # kept: the cell is still low
+        self.assertTrue(st["limp_active"])
+        d.set_drive_context(armed=True, manual=False)   # FOLLOW_ME: still zero
+        d.set_tracks(150, 150)
+        self.assertEqual(self.last_pair(), (0, 0))
+        d.set_drive_context(armed=True, manual=True)
+        d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+        d.set_bms_cell_reading(3.40, poll_id=3, age_s=1.0)    # rested, below 3.50
+        self.hold(d, 0.5, 48.0, 48.0)
+        self.assertTrue(d.get_pack_guard_status()["post_latch"])
+        d.set_bms_cell_reading(3.55, poll_id=4, age_s=25.0)   # BMS dark: kept
+        self.hold(d, 0.5, 48.0, 48.0)
+        self.assertTrue(d.get_pack_guard_status()["post_latch"])
+        d.set_bms_cell_reading(3.55, poll_id=5, age_s=1.0)    # fresh and back up: 1 of 2
+        self.hold(d, 0.2, 48.0, 48.0)
+        self.assertTrue(d.get_pack_guard_status()["post_latch"])
+        d.set_bms_cell_reading(3.55, poll_id=5, age_s=0.5)    # same poll again: no count
+        self.hold(d, 0.2, 48.0, 48.0)
+        self.assertTrue(d.get_pack_guard_status()["post_latch"])
+        d.set_bms_cell_reading(3.56, poll_id=6, age_s=1.0)    # second new fresh poll
+        self.hold(d, 0.2, 48.0, 48.0)
+        self.assertFalse(d.get_pack_guard_status()["post_latch"])
+
+    def test_pack_switch_off_does_not_latch_at_the_next_power_on(self):
+        # Grok 01a1ccba: on the way down one frame has one reader below the
+        # floor and the other in the band; that started the countdown, the
+        # off time counted as sustain time, and the next in-band sample
+        # latched at once.
+        d = self.make()
+        self.hold(d, 1.0, 45.0, 45.0)              # resting, out of band
+        self.volts(d, 29.0, 40.0)                 # straddle: right alone, in band
+        self.clock.t += 0.02
+        self.volts(d, 20.0, 22.0)                 # both below the floor
+        self.clock.t += 60.0                      # pack off for a minute (stale)
+        d._check_voltage_shutdown()
+        self.hold(d, 1.0, 43.5, 43.5)             # power on, low pack
+        self.assertFalse(d.get_pack_low_latched())   # a fresh 30 s, not at once
+        self.hold(d, 29.5, 43.5, 43.5)
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_limp_floor_latch_lone_rested_reader_lets_a_disarm_clear(self):
+        # Grok 01a1ccba: a lone reader cannot clear the countdown, so with one
+        # VESC silent a rested pack stayed latched through every disarm.
+        d = self.make()
+        self.latch_by_voltage(d, 43.5)
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)          # limp home
+        self.hold(d, 5.3, 41.9, 41.9)
+        self.assertEqual(d.get_pack_guard_status()["reason"], "limp_floor")
+        self.clock.t += 1.0                                   # right VESC silent
+        self.hold(d, 1.0, left=41.5)                          # lone, still low
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        self.assertTrue(d.get_pack_low_latched())             # kept: below the floor
+        self.hold(d, 3.0, left=47.0)                          # lone, rested
+        self.assertTrue(d.get_pack_low_latched())             # no auto release on one reader
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        self.assertFalse(d.get_pack_low_latched())            # the disarm clears it
+
+    def test_limp_cell_floor_latch_survives_a_stale_bms_gap_and_a_disarm(self):
+        d = self.make()
+        self.latch_by_voltage(d, 43.5)
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)          # limp home
+        self.hold(d, 0.5, 43.5, 43.5)
+        d.set_bms_cell_reading(3.10, poll_id=1, age_s=1.0)
+        d.set_bms_cell_reading(3.10, poll_id=2, age_s=1.0)
+        self.assertTrue(d.get_pack_low_latched())             # cell floor in limp
+        d.set_bms_cell_reading(3.10, poll_id=2, age_s=21.0)   # one late poll: stale
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        self.assertTrue(d.get_pack_low_latched())             # KEPT through disarm
+        d.set_bms_cell_reading(3.30, poll_id=3, age_s=1.0)    # rested above 3.15 V
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        self.assertFalse(d.get_pack_low_latched())            # another crawl
+
+
 if __name__ == "__main__":
     unittest.main()

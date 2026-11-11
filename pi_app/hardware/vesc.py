@@ -82,6 +82,7 @@ _PACK_DEFAULTS = {
     "bms_cell_max_age_s": 20.0,
     "bms_cell_low_consecutive_polls": 2,
     "bms_cell_plausible_min_v": 2.5,
+    "bms_cell_release_v": 3.50,
 }
 
 # Latch reasons. A voltage reason is released by voltage recovery; a cell
@@ -275,7 +276,7 @@ class VescCanDriver:
         # RESTRICTED state (RX thread sets/ends it; a disarm with trusted data
         # ends it on the control thread): the pack voltage has been untrusted
         # for pack_voltage_untrusted_limit_s. No low-voltage claim: MANUAL at
-        # the limp cap, autonomous modes ramp to zero.
+        # the limp cap, autonomous modes go to zero at once.
         self._restricted_active: bool = False
         self._untrusted_since: Optional[float] = None
         self._trusted_since: Optional[float] = None
@@ -289,6 +290,18 @@ class VescCanDriver:
         self._bms_cell_state: str = "no_data"
         self._bms_last_poll_id = None
         self._bms_low_count: int = 0
+        # Result of the last NEW fresh BMS poll against the current cell limit
+        # (control thread). A stale gap does NOT reset it: it is the evidence
+        # that keeps a limp-floor cell latch through a disarm (Grok 01a1cc96).
+        self._bms_last_fresh_low: bool = False
+        # Consecutive NEW fresh polls with the lowest cell >= bms_cell_release_v
+        # (control thread); a stale gap resets it.
+        self._bms_high_count: int = 0
+        # The post-latch session holds a cell reason (set on a bms_cell trip,
+        # cleared when the session ends): it then ends only with a fresh BMS
+        # lowest cell >= bms_cell_release_v, not on pack voltage alone.
+        self._post_latch_cell: bool = False
+        self._post_latch_cell_hold_logged: bool = False
 
         # CAN send failure tracking (thread-safe via _telem_lock)
         self._send_fail_count: int = 0
@@ -502,7 +515,7 @@ class VescCanDriver:
         The armed -> disarmed edge clears every latch reason (the operator's
         deliberate act; a latch must never need a restart). It also restarts
         the voltage countdown and the BMS cell count, and starts the
-        POST-LATCH session: MANUAL only (autonomous modes ramp to zero) until
+        POST-LATCH session: MANUAL only (autonomous modes go to zero at once) until
         the trusted pack is back at threshold + hysteresis with zero throttle.
         With pack_low_limp_enabled the session also caps the speed and uses
         the limp floors; without it the next MANUAL drive gets a fresh
@@ -529,16 +542,29 @@ class VescCanDriver:
                 ))
             # The limp floor is a HARD floor: a latch tripped while already
             # limping is NOT cleared by a disarm while its evidence still holds
-            # (the 42 V countdown still running, or the cell count still at
-            # the limit). Another crawl needs the resting pack back above the
-            # floor for the sustain grace (which clears the countdown), then a
-            # disarm; charging to 46 V also releases it. Not cleared = no tick
-            # of motion under the floor (Grok 01a1c89a).
+            # (the 42 V countdown still running, or the last fresh BMS poll
+            # still at or below the cell floor; a stale BMS gap keeps that
+            # evidence). Another crawl needs the resting pack back above the
+            # floor for the sustain grace on cross-checked readings (which
+            # clears the countdown) or a fresh poll above the cell floor, then
+            # a disarm; charging to 46 V also releases a voltage reason. Not
+            # cleared = no tick of motion under the floor (Grok 01a1c89a,
+            # 01a1cc96).
             hard_floor = self._post_latch_active and self._limp_on_locked()
-            need_cells = max(1, int(self._pcfg("bms_cell_low_consecutive_polls")))
+            # A lone reader cannot clear the countdown (it may be stuck high),
+            # so a running countdown alone is not evidence when the ONLY live
+            # reader rests at or above the floor: the disarm may then clear,
+            # or one silent VESC would strand a rested pack until a restart
+            # (Grok 01a1ccba). A lone reader below the floor still keeps it.
+            lone_rested = (
+                self._pack_v_state in ("trusted_left", "trusted_right")
+                and self._pack_v_used is not None
+                and self._pack_v_used >= float(self._pcfg("pack_low_limp_floor_v"))
+            )
             floor_evidence = hard_floor and (
-                (_REASON_LIMP_FLOOR in self._pack_low_reasons and self._low_voltage_since is not None)
-                or (_REASON_BMS_CELL in self._pack_low_reasons and self._bms_low_count >= need_cells)
+                (_REASON_LIMP_FLOOR in self._pack_low_reasons
+                 and self._low_voltage_since is not None and not lone_rested)
+                or (_REASON_BMS_CELL in self._pack_low_reasons and self._bms_last_fresh_low)
             )
             if disarm_edge and self._pack_low_reasons and floor_evidence:
                 msgs.append((
@@ -557,6 +583,7 @@ class VescCanDriver:
                 self._low_voltage_since = None
                 self._out_of_band_since = None
                 self._bms_low_count = 0
+                self._bms_last_fresh_low = False
                 self._post_latch_active = True
                 if self._limp_on_locked():
                     msgs.append((
@@ -619,20 +646,30 @@ class VescCanDriver:
                 # A gap (dark link, old or implausible sample) breaks the run:
                 # "consecutive" means consecutive FRESH polls.
                 self._bms_low_count = 0
+                self._bms_high_count = 0
                 return
             if poll_id is None or poll_id == self._bms_last_poll_id:
                 return
             self._bms_last_poll_id = poll_id
+            # The release side needs the same bar as the trip: consecutive NEW
+            # fresh polls, so a repeated poll id or one torn read cannot end a
+            # cell session (Grok 01a1ccba).
+            if float(cell_min_v) >= float(self._pcfg("bms_cell_release_v")):
+                self._bms_high_count += 1
+            else:
+                self._bms_high_count = 0
             limit = float(self._pcfg(
                 "bms_cell_limp_floor_v" if self._limp_on_locked() else "bms_cell_low_trip_v"
             ))
-            if float(cell_min_v) <= limit:
+            self._bms_last_fresh_low = float(cell_min_v) <= limit
+            if self._bms_last_fresh_low:
                 self._bms_low_count += 1
             else:
                 self._bms_low_count = 0
             if self._bms_low_count >= need and _REASON_BMS_CELL not in self._pack_low_reasons:
                 was = bool(self._pack_low_reasons)
                 self._pack_low_reasons.add(_REASON_BMS_CELL)
+                self._post_latch_cell = True
                 msgs.append((
                     "VESC: pack-low latch ENGAGED (bms_cell%s): lowest cell %.3f V <= %.2f V "
                     "on %d fresh BMS polls (age %.1f s); ramping motors to zero over %.1f s; "
@@ -1040,6 +1077,21 @@ class VescCanDriver:
                 frozen = "right"
         ulv = None if frozen == "left" else lv
         urv = None if frozen == "right" else rv
+        # A fresh reader below the plausibility floor beside one at or above it
+        # is a bad reader, not the pack: the other is used alone (a lone
+        # reader can latch, never release, and makes the state RESTRICTED).
+        # Before, the pair "disagreed" and the good reading could not latch
+        # (Grok 01a1cc96). Both below the floor stays "below_floor".
+        if self._cfg is not None and ulv is not None and urv is not None:
+            fl = float(self._cfg.voltage_shutdown_floor_v)
+            if ulv < fl <= urv:
+                ulv = None
+            elif urv < fl <= ulv:
+                urv = None
+            elif ulv < fl and urv < fl:
+                # Both below the floor (pack switching off; the two decay at
+                # different rates, so they may also differ by > max_dis).
+                return None, "below_floor", lv, rv, frozen
         if ulv is not None and urv is not None:
             if abs(ulv - urv) > max_dis:
                 return None, "disagree", lv, rv, frozen
@@ -1139,6 +1191,16 @@ class VescCanDriver:
 
             # ── Below the plausibility floor: pack switched off ───────────────
             if state == "below_floor":
+                # BOTH readers fresh and below the floor = the pack is being
+                # switched off (a single bad reader is dropped earlier in
+                # _read_pack_voltage). Forget the countdown: a straddle sample
+                # on the way down must not let the off time count as sustain
+                # time and latch at the next power-on (Grok 01a1ccba). A lone
+                # reader below the floor keeps it (one garbage frame must not
+                # buy a fresh delay).
+                if lv is not None and rv is not None:
+                    self._low_voltage_since = None
+                    self._out_of_band_since = None
                 if not self._below_floor_active:
                     self._below_floor_active = True
                     # RPM 0 only when the control loop is silent: while it is
@@ -1158,7 +1220,7 @@ class VescCanDriver:
 
             # ── RESTRICTED state (no low-voltage claim) ───────────────────────
             # Not cross-checked for pack_voltage_untrusted_limit_s -> restricted:
-            # MANUAL at the limp cap, autonomous modes ramp to zero. "Not
+            # MANUAL at the limp cap, autonomous modes go to zero at once. "Not
             # cross-checked" = untrusted (stale, disagree, below floor) OR only
             # one usable reader (the other VESC silent or frozen): a lone
             # reader stuck high cannot be caught, so autonomy must not depend
@@ -1174,7 +1236,7 @@ class VescCanDriver:
                     self._restricted_active = True
                     msgs.append((logging.WARNING,
                                  "VESC: pack voltage not cross-checked for %.0f s (%s: left %s V, right %s V) — "
-                                 "RESTRICTED: MANUAL capped at %d bytes, autonomous modes ramp to zero "
+                                 "RESTRICTED: MANUAL capped at %d bytes, autonomous modes stop "
                                  "(no low-voltage claim)",
                                  (now - self._untrusted_since, state, self._fmt_v(lv), self._fmt_v(rv),
                                   int(self._pcfg("pack_low_limp_max_byte_offset")))))
@@ -1197,25 +1259,30 @@ class VescCanDriver:
                                  (now - self._trusted_since, state, voltage)))
 
             # ── Seeded countdown after a service start ────────────────────────
-            # The first trusted sample decides, and only a CROSS-CHECKED
-            # (trusted_both) one can seed: below the
-            # threshold, the countdown starts already run down to
-            # pack_low_seed_confirm_s, so a restart cannot hand out a fresh
-            # voltage_shutdown_delay_s of full drive on a low pack. At or
-            # above it, no seed. A lone reader cannot seed (a single bad first
-            # reader cannot latch a healthy pack); the normal rules apply to it.
+            # The first CROSS-CHECKED (trusted_both) sample decides: below the
+            # threshold, the countdown is pulled forward so the latch comes
+            # pack_low_seed_confirm_s later, and a restart cannot hand out a
+            # fresh voltage_shutdown_delay_s of full drive on a low pack. At
+            # or above it, no seed. Lone-reader samples before it do not use
+            # the seed up: the RX loop checks after every frame, so the first
+            # sample is always one VESC alone (Grok 01a1cc96). A lone reader
+            # cannot seed (a single bad first reader cannot latch a healthy
+            # pack); the normal rules apply to it. The seed only moves the
+            # countdown EARLIER, never later.
             seeded = False
-            if self._seed_pending and voltage is not None:
-                self._seed_pending = False     # decided once, on the first trusted sample
-                if (state == "trusted_both" and bool(self._pcfg("pack_low_seed_on_start"))
-                        and floor <= voltage < threshold and self._low_voltage_since is None):
+            if self._seed_pending and state == "trusted_both":
+                self._seed_pending = False     # decided once, on the first cross-checked sample
+                if (bool(self._pcfg("pack_low_seed_on_start"))
+                        and floor <= voltage < threshold):
                     seed_confirm = float(self._pcfg("pack_low_seed_confirm_s"))
-                    self._low_voltage_since = now - max(0.0, delay - seed_confirm)
-                    seeded = True
-                    msgs.append((logging.WARNING,
-                                 "VESC: pack voltage %.1fV below threshold %.1fV at service start — "
-                                 "countdown seeded: pack-low latch in %.0fs if sustained",
-                                 (voltage, threshold, min(delay, seed_confirm))))
+                    target = now - max(0.0, delay - seed_confirm)
+                    if self._low_voltage_since is None or self._low_voltage_since > target:
+                        self._low_voltage_since = target
+                        seeded = True
+                        msgs.append((logging.WARNING,
+                                     "VESC: pack voltage %.1fV below threshold %.1fV at service start — "
+                                     "countdown seeded: pack-low latch in %.0fs if sustained",
+                                     (voltage, threshold, min(delay, seed_confirm))))
 
             # ── Sustain countdown ─────────────────────────────────────────────
             # A low sample starts, continues or completes it: a TRUSTED reading
@@ -1235,7 +1302,9 @@ class VescCanDriver:
                 if floor <= min(lv, rv) and hi < threshold:
                     band_v = hi
             in_band = band_v is not None and floor <= band_v < threshold
-            trusted_out = voltage is not None and not in_band
+            # Only a CROSS-CHECKED reading can clear the countdown: a lone
+            # reader stuck high must not wipe a running one (Grok 01a1cc96).
+            trusted_out = voltage is not None and not in_band and state == "trusted_both"
             if in_band:
                 self._out_of_band_since = None
                 if self._low_voltage_since is None:
@@ -1274,8 +1343,11 @@ class VescCanDriver:
                                  (now - self._out_of_band_since, state, self._fmt_v(voltage))))
                     self._low_voltage_since = None
 
-            # ── Release (trusted only) ────────────────────────────────────────
-            if (voltage is not None and voltage >= release_v
+            # ── Release (cross-checked only) ──────────────────────────────────
+            # A lone reader can latch but never release: one VESC stuck high
+            # beside a silent one must not end a latch or the post-latch
+            # session (Grok 01a1cc96).
+            if (voltage is not None and state == "trusted_both" and voltage >= release_v
                     and self._req_neutral and self._ctx_manual):
                 voltage_reasons = self._pack_low_reasons & _VOLTAGE_REASONS
                 if voltage_reasons:
@@ -1287,12 +1359,33 @@ class VescCanDriver:
                                   ("; still latched: " + ",".join(sorted(self._pack_low_reasons)))
                                   if self._pack_low_reasons else "")))
                 if self._post_latch_active and not self._pack_low_reasons:
-                    self._post_latch_active = False
-                    self._low_voltage_since = None
-                    msgs.append((logging.WARNING,
-                                 "VESC: pack voltage %.1fV >= %.1fV with zero throttle — "
-                                 "post-latch session (MANUAL only%s) ended",
-                                 (voltage, release_v, ", limp home" if limp else "")))
+                    # A session that held a cell reason ends only when a fresh
+                    # BMS poll shows the lowest cell back up: a weak cell on a
+                    # pack still above 46 V is the case that trigger is for
+                    # (Grok 01a1cc96). A dark BMS keeps the session.
+                    cell_release = float(self._pcfg("bms_cell_release_v"))
+                    need_high = max(1, int(self._pcfg("bms_cell_low_consecutive_polls")))
+                    cell_ok = (self._bms_cell_state == "fresh"
+                               and self._bms_high_count >= need_high)
+                    if self._post_latch_cell and not cell_ok:
+                        if not self._post_latch_cell_hold_logged:
+                            self._post_latch_cell_hold_logged = True
+                            msgs.append((logging.WARNING,
+                                         "VESC: pack voltage %.1fV >= %.1fV but the post-latch session "
+                                         "(MANUAL only%s) is KEPT: it followed a BMS cell trip and the "
+                                         "lowest cell is %s (%s), needs a fresh %.2f V",
+                                         (voltage, release_v, ", limp home" if limp else "",
+                                          ("%.3f V" % self._bms_cell_v) if self._bms_cell_v is not None
+                                          else "unknown", self._bms_cell_state, cell_release)))
+                    else:
+                        self._post_latch_active = False
+                        self._post_latch_cell = False
+                        self._post_latch_cell_hold_logged = False
+                        self._low_voltage_since = None
+                        msgs.append((logging.WARNING,
+                                     "VESC: pack voltage %.1fV >= %.1fV with zero throttle — "
+                                     "post-latch session (MANUAL only%s) ended",
+                                     (voltage, release_v, ", limp home" if limp else "")))
         for level, fmt, args in msgs:
             logger.log(level, fmt, *args)
         if send_zero:

@@ -274,7 +274,7 @@ class VescConfig:
     # disagreement, a below-floor reading, or only one usable reader because
     # the other VESC is silent or frozen; a lone reader stuck high cannot be
     # caught) means the robot no longer knows its pack. Then autonomous modes
-    # ramp to zero and MANUAL is capped at pack_low_limp_max_byte_offset. It is
+    # go to zero at once and MANUAL is capped at pack_low_limp_max_byte_offset. It is
     # NOT the latch: no low-voltage claim. A lone reader still latches.
     # 10 s: a CAN reopen or a VESC reboot is 1-3 s; ten times a frame gap is
     # still a short exposure at walking pace.
@@ -293,15 +293,22 @@ class VescConfig:
     # 2026-11-08 and the parked night of 2026-11-10 found 1,600 "frozen"
     # episodes and 404 RESTRICTED episodes (8,000 s) with 20 s, among them
     # 5 min of armed MANUAL capped at the crawl speed; with 0 there were none.
-    # A frozen reader stays covered without this rule: the guard uses the
-    # LOWER reading (a reader frozen high is ignored), and a reader frozen
-    # while the pack falls disagrees by more than pack_voltage_max_disagree_v,
-    # which is untrusted and RESTRICTED after pack_voltage_untrusted_limit_s.
+    # Without this rule a frozen reader is only PARTLY covered: the guard uses
+    # the LOWER reading, so a reader frozen high has no effect while the
+    # other stays within pack_voltage_max_disagree_v of it. Once the pack
+    # falls further the pair disagrees: untrusted, RESTRICTED after
+    # pack_voltage_untrusted_limit_s (autonomous modes zero, MANUAL at the
+    # crawl cap), but NO latch and no 42 V floor. The backstop then is the
+    # BMS cell trigger (bms_cell_low_trip_v) while the BMS link is up, and the
+    # BMS's own cut-off. Accepted (Grok 01a1cc96, 2026-11-11): latching on the
+    # lower reading of a disagreeing pair would let one VESC stuck low strand
+    # the robot on a healthy pack. A lone reader never releases a latch.
     pack_voltage_frozen_s: float = 0.0
     pack_voltage_frozen_other_moved_s: float = 2.0
     # Seeded countdown after a service start (default ON): if the first
-    # trusted reading is already below the threshold, the countdown starts
-    # run down so the latch comes pack_low_seed_confirm_s later, not after a
+    # cross-checked reading (both VESCs fresh and agreeing; lone-reader frames
+    # before it do not count) is already below the threshold, the countdown is
+    # pulled forward so the latch comes pack_low_seed_confirm_s later, not after a
     # fresh voltage_shutdown_delay_s of full drive. The resting voltage at
     # start carries no load sag, so below the threshold there means a low
     # pack; 2 s rejects a single bad first frame.
@@ -319,13 +326,13 @@ class VescConfig:
     # anti-chatter band, kept (audit section 3, item 3). A disarm also releases.
     pack_low_release_hysteresis_v: float = 2.0
     # On a trip the motors ramp to zero over this time instead of a step to
-    # RPM 0 from up to 1.6 m/s. The ramp runs in VescCanDriver.set_tracks()
+    # RPM 0 from up to 1.31 m/s (ground speed, wheel_ground_scale 0.815). The ramp runs in VescCanDriver.set_tracks()
     # every control tick (~30 Hz), which also refreshes the VESC ~1 s command
     # timeout. A requested stop (stick to neutral, person stop) still goes to
     # zero at once: the ramp only limits how much speed is KEPT.
     pack_low_ramp_s: float = 1.0
     # The disarm that clears a pack-low latch ALWAYS starts a post-latch
-    # session: MANUAL only (FOLLOW_ME / WAYPOINT_NAV ramp to zero), a fresh
+    # session: MANUAL only (FOLLOW_ME / WAYPOINT_NAV go to zero at once), a fresh
     # countdown, a fresh cell count. It ends when the trusted pack is back at
     # threshold + hysteresis with zero throttle (or on a service restart).
     # Without limp, MANUAL drives at full speed and latches again after
@@ -333,10 +340,11 @@ class VescConfig:
     # speed capped at pack_low_limp_max_byte_offset, and the 44 V / 3.30 V
     # triggers replaced by the floors below. ON by the owner's decision of
     # 2026-11-10 (Kevin wants a slow MANUAL crawl home after a disarm on a
-    # low pack). Autonomous modes never limp: they ramp to zero in the
+    # low pack). Autonomous modes never limp: they go to zero at once in the
     # session either way.
     pack_low_limp_enabled: bool = True
-    # 32 bytes of 128 = 0.40 m/s at max_erpm 20000 (walking pace). At that
+    # 32 bytes of 128 = about 0.33 m/s on the ground at max_erpm 20000 (0.40 m/s
+    # in the old eRPM units, before wheel_ground_scale 0.815; walking pace). At that
     # speed the pack current is about 10 A, so the sag is about 0.7 V.
     pack_low_limp_max_byte_offset: int = 32
     # Hard floor in limp: 40.0 V BMS trip + 0.7 V limp sag + 0.1 V reading
@@ -355,13 +363,23 @@ class VescConfig:
     # A BMS sample older than this is ignored (never a stop: a dark BLE link
     # must not stop the robot). The service polls every 8 s
     # (BmsConfig.bms_poll_interval_s) and a poll takes 1-3 s, so 20 s accepts
-    # the latest poll plus one late or missed poll and nothing older.
+    # the latest poll and a late one, and nothing older. One MISSED poll can
+    # pass 20 s; that breaks a run of fresh polls, which delays a cell trip
+    # by about one poll (it never makes a false one).
     bms_cell_max_age_s: float = 20.0
     # Two consecutive fresh polls (about 16 s) so one sample taken during a
     # current spike, or one bad frame, cannot latch.
     bms_cell_low_consecutive_polls: int = 2
     # A cell reading below this is a parse error, not a cell: ignored.
     bms_cell_plausible_min_v: float = 2.5
+    # A post-latch session that followed a BMS cell trip ends only when
+    # bms_cell_low_consecutive_polls consecutive NEW fresh polls show the
+    # lowest cell at or above this (the same bar as the trip), in addition to the
+    # 46 V pack release (Grok 01a1cc96: a weak cell on a pack still above
+    # 46 V ended limp on the first re-arm). 3.50 V x 13 = 45.5 V, so a
+    # balanced pack at 46 V (3.54 V per cell) passes. A dark BMS keeps the
+    # session (MANUAL only, limp cap) until a fresh poll or a service restart.
+    bms_cell_release_v: float = 3.50
 
     # Wheel geometry + drivetrain for eRPM -> wheel speed (m/s) conversion.
     # wheel_radius_m: centre of wheel axle to contact patch (14.5in wheel dia).
