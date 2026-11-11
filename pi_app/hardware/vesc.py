@@ -397,6 +397,23 @@ class VescCanDriver:
         with self._telem_lock:
             return self._drive_limit_bytes_locked()
 
+    def _autonomous_blocked_locked(self) -> bool:
+        """An autonomous mode inside a limp / post-latch / restricted session.
+
+        Caller holds _telem_lock. Autonomous modes never move there: the
+        output is zero AT ONCE (no ramp; a crawl is at most the 32-byte cap),
+        unlike a latch trip, which ramps. Grok 01a1c89a.
+        """
+        if self._pack_low_reasons:
+            return False
+        return (self._post_latch_active or self._restricted_active) and not self._ctx_manual
+
+    def get_drive_limit_immediate(self) -> bool:
+        """Control thread: True when the limit must apply at once (see
+        _autonomous_blocked_locked), False when it ramps."""
+        with self._telem_lock:
+            return self._autonomous_blocked_locked()
+
     def set_tracks(self, left_byte: int, right_byte: int) -> None:
         """Send one drive command (control thread, every tick).
 
@@ -427,6 +444,15 @@ class VescCanDriver:
                 if limit_b is None:
                     self._ramp_start_s = None
                     out = list(req)
+                elif self._autonomous_blocked_locked():
+                    # Autonomous in a limp / restricted session: zero at once,
+                    # and the envelope collapses so a return to MANUAL climbs
+                    # from zero.
+                    self._ramp_start_s = now
+                    self._ramp_last_s = now
+                    self._ramp_env = [0, 0]
+                    self._ramp_sign = [0, 0]
+                    out = [0, 0]
                 else:
                     limit = abs(self._byte_to_rpm(CENTER_OUTPUT_VALUE + limit_b, self._max_rpm))
                     if self._ramp_start_s is None:
@@ -501,22 +527,36 @@ class VescCanDriver:
                     "VESC: pack voltage RESTRICTED state ended by disarm (trusted %s V, %s)",
                     (self._fmt_v(self._pack_v_used), self._pack_v_state),
                 ))
-            if disarm_edge and self._pack_low_reasons:
+            # The limp floor is a HARD floor: a latch tripped while already
+            # limping is NOT cleared by a disarm while its evidence still holds
+            # (the 42 V countdown still running, or the cell count still at
+            # the limit). Another crawl needs the resting pack back above the
+            # floor for the sustain grace (which clears the countdown), then a
+            # disarm; charging to 46 V also releases it. Not cleared = no tick
+            # of motion under the floor (Grok 01a1c89a).
+            hard_floor = self._post_latch_active and self._limp_on_locked()
+            need_cells = max(1, int(self._pcfg("bms_cell_low_consecutive_polls")))
+            floor_evidence = hard_floor and (
+                (_REASON_LIMP_FLOOR in self._pack_low_reasons and self._low_voltage_since is not None)
+                or (_REASON_BMS_CELL in self._pack_low_reasons and self._bms_low_count >= need_cells)
+            )
+            if disarm_edge and self._pack_low_reasons and floor_evidence:
+                msgs.append((
+                    "VESC: pack-low latch (%s) KEPT through disarm: still below the limp floor "
+                    "(pack %s V, %s); rest the pack above %.1f V or charge",
+                    (",".join(sorted(self._pack_low_reasons)), self._fmt_v(self._pack_v_used),
+                     self._pack_v_state, float(self._pcfg("pack_low_limp_floor_v"))),
+                ))
+            elif disarm_edge and self._pack_low_reasons:
                 cleared = ",".join(sorted(self._pack_low_reasons))
-                # A trip of the LIMP floors (already limping) keeps its
-                # evidence: the limp floor is a hard floor. While the pack is
-                # still below it the countdown stays run down and the next
-                # frame (or the next fresh BMS poll) latches again; another
-                # crawl needs the resting pack back above the floor for the
-                # sustain grace. The first latch of a session (44 V / 3.30 V)
-                # restarts both, which starts the limp crawl.
-                hard_floor = self._post_latch_active and self._limp_on_locked()
                 self._pack_low_reasons = set()
                 self._ramp_start_s = None
-                if not hard_floor:
-                    self._low_voltage_since = None
-                    self._out_of_band_since = None
-                    self._bms_low_count = 0
+                # The crawl (or the next drive) starts from zero.
+                self._last_out_rpm = [0, 0]
+                self._ramp_env = [0, 0]
+                self._low_voltage_since = None
+                self._out_of_band_since = None
+                self._bms_low_count = 0
                 self._post_latch_active = True
                 if self._limp_on_locked():
                     msgs.append((

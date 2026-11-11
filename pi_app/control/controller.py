@@ -333,6 +333,8 @@ class Controller:
         # voltage, limp, BMS cell state) so a field stop explains itself in the
         # run log. None when the driver has no pack guard.
         self._vesc_pack_guard: Optional[dict] = None
+        # This tick's pack limit applies at once (autonomous in a session).
+        self._pack_limit_immediate: bool = False
         # Per-motor STATUS(9) frame ages + RX-thread liveness. Already read below
         # to drive the open-loop staleness fallback; also surfaced (same
         # charger_inhibit plumbing) so the /debug board can show which motor
@@ -967,6 +969,21 @@ class Controller:
         From VescCanDriver.get_drive_limit_bytes(); a driver without it falls
         back to the polled pack_low_latched flag (limit 0).
         """
+        self._pack_limit_immediate = False
+        # Autonomous inside a limp / post-latch / restricted session: zero at
+        # once (Grok 01a1c89a). Asked from the driver, and also from the polled
+        # guard status so a failed context push cannot leave the cap in force.
+        if self._mode != "MANUAL":
+            imm_fn = getattr(self._motor, "get_drive_limit_immediate", None)
+            try:
+                imm = bool(imm_fn()) if callable(imm_fn) else False
+            except Exception:
+                _logger.exception("motor get_drive_limit_immediate failed")
+                imm = True
+            g = self._vesc_pack_guard if isinstance(self._vesc_pack_guard, dict) else {}
+            if imm or ((g.get("post_latch") or g.get("restricted")) and not g.get("latched")):
+                self._pack_limit_immediate = True
+                return 0
         fn = getattr(self._motor, "get_drive_limit_bytes", None)
         if callable(fn):
             try:
@@ -999,6 +1016,13 @@ class Controller:
         rates instead of snapping (snap_first_command).
         """
         prev_l, prev_r, prev_t = prev
+        if getattr(self, "_pack_limit_immediate", False):
+            # Autonomous in a limp / restricted session: neutral at once.
+            self._slew_initialized = True
+            self._slew_seen_non_neutral = True
+            self._slew_last_update = mono_now
+            self._slew_last_left = self._slew_last_right = CENTER_OUTPUT_VALUE
+            return CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE
         ramp_s = float(getattr(getattr(config, "vesc", None), "pack_low_ramp_s", 1.0))
         span = float(MAX_OUTPUT - CENTER_OUTPUT_VALUE)
         dt = max(0.0, mono_now - float(prev_t))

@@ -500,11 +500,17 @@ class TestLimpHome(_Base):
         d.set_drive_context(armed=True, manual=False)
         outs = []
         for _ in range(15):
-            self.clock.t += 0.1
+            self.clock.t += 0.03
             d.set_tracks(150, 150)
             outs.append(self.last_pair()[0])
-        self.assertEqual(outs[-1], 0)
-        self.assertTrue(all(b <= a for a, b in zip(outs, outs[1:])))
+        # Zero on the FIRST autonomous tick, not after a ramp (Grok 01a1c89a).
+        self.assertEqual(outs, [0] * 15)
+        self.assertTrue(d.get_drive_limit_immediate())
+        # Back to MANUAL: the crawl starts again from zero, capped.
+        d.set_drive_context(armed=True, manual=True)
+        d.set_tracks(254, 254)
+        cap = VescCanDriver._byte_to_rpm(CENTER_OUTPUT_VALUE + 32, MAX_ERPM)
+        self.assertLessEqual(self.last_pair()[0], cap)
 
     def test_limp_floor_trips_after_limp_delay(self):
         d = self._limp()
@@ -588,10 +594,9 @@ class TestRestrictedState(_Base):
         self.assertEqual(self.last_pair(), (self.cap_rpm(), self.cap_rpm()))
         self.assertLess(self.cap_rpm(), full)
         d.set_drive_context(armed=True, manual=False)   # FOLLOW_ME
-        for _ in range(12):
-            self.clock.t += 0.1
-            d.set_tracks(254, 254)
-        self.assertEqual(self.last_pair(), (0, 0))
+        self.clock.t += 0.03
+        d.set_tracks(254, 254)
+        self.assertEqual(self.last_pair(), (0, 0))      # at once
         d.set_drive_context(armed=True, manual=True)
 
     def test_disagreement_straddling_44_v_past_the_limit_restricts(self):
@@ -752,11 +757,10 @@ class TestLimpDefaultOperatorCases(_Base):
         self.assertEqual(self.last_pair(), (self.cap(), self.cap()))  # 0.40 m/s crawl
         d.set_tracks(0, 0)
         self.assertEqual(self.last_pair(), (-self.cap(), -self.cap()))
-        # Autonomous modes never limp.
+        # Autonomous modes never limp: zero on the first tick.
+        d.set_tracks(254, 254)
         d.set_drive_context(armed=True, manual=False)
-        for _ in range(5):
-            self.clock.t += 0.1
-            d.set_tracks(254, 254)
+        d.set_tracks(254, 254)
         self.assertEqual(self.last_pair(), (0, 0))
 
     def test_case_3_falling_through_the_limp_floor_stops_and_stays_stopped(self):
@@ -773,13 +777,15 @@ class TestLimpDefaultOperatorCases(_Base):
         self.assertTrue(d.get_pack_low_latched())
         self.assertEqual(d.get_pack_guard_status()["reason"], "limp_floor")
         self.assertEqual(self.last_pair(), (0, 0))
-        # Hard floor: a disarm clears the latch, but while the resting pack is
-        # still below 42 V it latches again on the next frame.
-        d.set_drive_context(armed=False, manual=True)
-        self.assertFalse(d.get_pack_low_latched())
-        d.set_drive_context(armed=True, manual=True)
-        self.hold(d, 0.1, 41.9, 41.9)
+        # Hard floor: while the resting pack is still below 42 V a disarm
+        # does NOT clear it (no tick of motion under the floor).
+        with self.assertLogs(LOGGER, level="WARNING") as cm:
+            d.set_drive_context(armed=False, manual=True)
         self.assertTrue(d.get_pack_low_latched())
+        self.assertTrue(any("KEPT through disarm" in m for m in cm.output))
+        d.set_drive_context(armed=True, manual=True)
+        d.set_tracks(254, 254)
+        self.assertEqual(self.last_pair(), (0, 0))
         # Rested back above the floor: another crawl after a disarm.
         self.hold(d, 2.5, 42.4, 42.4)
         d.set_drive_context(armed=False, manual=True)

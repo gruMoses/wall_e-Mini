@@ -452,6 +452,29 @@ class TestControllerPackLowLatch(unittest.TestCase):
         # Stick released: the normal decel applies, inside the envelope.
         self.assertLess(outs[-1], CENTER_OUTPUT_VALUE + 32)
 
+    def test_autonomous_in_a_limp_session_is_neutral_at_once(self):
+        motor = self._FakeVescMotor()
+        motor.get_drive_limit_immediate = lambda: True  # type: ignore[attr-defined]
+        clock = {"t": 10.0}
+        with patch("pi_app.control.controller.time.monotonic",
+                   side_effect=lambda: clock["t"]):
+            c = Controller(motor_driver=motor, arm_relay=FakeRelay(),
+                           shutdown_scheduler=FakeShutdown(),
+                           safety_params=SafetyParams(debounce_seconds=0.0,
+                                                      arm_high_persist_s=0.0))
+            motor.limit = 32                       # limp cap in MANUAL
+            for k in range(15):
+                clock["t"] += self.DT
+                cmd, _, _ = c.process(self._rc(clock["t"], 1500 if k == 0 else 2000),
+                                      now_epoch_s=clock["t"])
+            self.assertEqual(cmd.left_byte, CENTER_OUTPUT_VALUE + 32)   # crawling
+            motor.limit = 0
+            c._mode = "FOLLOW_ME"
+            clock["t"] += self.DT
+            cmd, _, _ = c.process(self._rc(clock["t"], 2000), now_epoch_s=clock["t"])
+        self.assertEqual((cmd.left_byte, cmd.right_byte),
+                         (CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE))      # first tick
+
     def test_guard_query_error_fails_closed(self):
         motor = self._FakeVescMotor()
 
