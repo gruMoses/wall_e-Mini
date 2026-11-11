@@ -144,6 +144,46 @@ class TestPackVoltageSelection(_Base):
         self.volts(d2, 43.0, 44.5)
         self.assertEqual(d2.get_pack_guard_status()["voltage_state"], "trusted_both")
 
+    def test_sustained_disagreement_does_not_clear_a_running_countdown(self):
+        # Grok round 2: 2 s of disagreement used to restart the 30 s forever.
+        d = self.make()
+        self.volts(d, 43.0, 43.0)
+        self.hold(d, 20.0, 43.0, 43.0)
+        self.hold(d, 10.0, 43.0, 44.6)      # straddles 44 V: untrusted, 10 s
+        self.assertFalse(d.get_pack_low_latched())
+        self.assertIsNotNone(d._low_voltage_since)   # countdown kept
+        self.hold(d, 0.1, 43.0, 43.0)
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_disagreement_with_both_readings_low_still_latches(self):
+        d = self.make()
+        self.volts(d, 41.0, 43.0)           # 2 V apart, but both below 44 V
+        self.hold(d, 30.2, 41.0, 43.0)
+        self.assertTrue(d.get_pack_low_latched())
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
+        # ... and disagreeing data never releases.
+        d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+        self.hold(d, 3.0, 46.5, 49.0)
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_right_reading_alone_is_corrected_for_its_offset(self):
+        d = self.make()
+        self.volts(d, 50.0, 50.0)
+        self.clock.t += 1.0                  # left goes stale
+        self.volts(d, right=44.5)            # BMS would see about 43.5 V
+        self.assertAlmostEqual(d.get_voltage(), 43.5, places=2)
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "trusted_right")
+        self.hold(d, 30.2, right=44.5)
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_voltage_release_needs_a_drive_context(self):
+        d = VescCanDriver(left_id=2, right_id=1, max_rpm=MAX_ERPM, vesc_cfg=VescConfig())
+        d._send_rpm = lambda can_id, rpm: None  # type: ignore[method-assign]
+        d._trigger_low_voltage_shutdown(43.0)
+        d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+        self.hold(d, 1.0, 47.0, 47.0)
+        self.assertTrue(d.get_pack_low_latched())   # no context: no release
+
     def test_untrusted_while_latched_does_not_release(self):
         d = self.make()
         self.latch_by_voltage(d)

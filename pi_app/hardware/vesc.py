@@ -65,6 +65,7 @@ _PACK_DEFAULTS = {
     "pack_voltage_max_disagree_v": 1.5,
     "pack_low_release_hysteresis_v": 2.0,
     "pack_low_sustain_grace_s": 2.0,
+    "pack_voltage_right_alone_offset_v": 1.0,
     "pack_low_ramp_s": 1.0,
     "pack_low_limp_enabled": False,
     "pack_low_limp_max_byte_offset": 32,
@@ -249,7 +250,10 @@ class VescCanDriver:
         self._pack_v_state: str = "no_data"
         self._post_latch_active: bool = False
         self._ctx_armed: Optional[bool] = None
-        self._ctx_manual: bool = True
+        # False until the controller says otherwise: without a context push a
+        # voltage release cannot happen (fail-safe; the controller pushes every
+        # tick).
+        self._ctx_manual: bool = False
         self._req_neutral: bool = True
         self._last_out_rpm: list = [0, 0]  # [left, right] last RPM sent by the control thread
         self._last_tracks_mono: float = 0.0
@@ -865,8 +869,10 @@ class VescCanDriver:
         STATUS_5 frame is newer than pack_voltage_max_age_s (a reading that
         stopped updating is not used). The voltage is the MINIMUM of the fresh
         readings: the right VESC reads about 0.9 V high, and the low reader is
-        the one that agrees with the BMS. One fresh reading is used alone. No
-        fresh reading, or two that differ by more than
+        the one that agrees with the BMS. One fresh reading is used alone; the
+        right one alone minus pack_voltage_right_alone_offset_v (it reads
+        high, so uncorrected it could hold a low pack above the threshold).
+        No fresh reading, or two that differ by more than
         pack_voltage_max_disagree_v, is UNTRUSTED (voltage None).
         """
         max_age = float(self._pcfg("pack_voltage_max_age_s"))
@@ -885,7 +891,7 @@ class VescCanDriver:
         if lv is not None:
             return lv, "trusted_left", lv, rv
         if rv is not None:
-            return rv, "trusted_right", lv, rv
+            return rv - float(self._pcfg("pack_voltage_right_alone_offset_v")), "trusted_right", lv, rv
         return None, "stale", lv, rv
 
     def _get_pack_voltage(self) -> Optional[float]:
@@ -970,12 +976,24 @@ class VescCanDriver:
                 self._below_floor_active = False
 
             # ── Sustain countdown ─────────────────────────────────────────────
-            # Only a TRUSTED in-band sample starts, advances or completes it.
-            # Any other sample (untrusted, below floor, at/above threshold)
-            # PAUSES it; it resets only after pack_low_sustain_grace_s of such
-            # samples in a row, so one noisy or disagreeing frame at 29 s cannot
-            # restart the full delay (and cannot latch either).
-            in_band = voltage is not None and floor <= voltage < threshold
+            # A low sample starts, continues or completes it: a TRUSTED reading
+            # in [floor, threshold), or a disagreement where even the HIGHER
+            # reading is in that band (the pack is low whichever VESC is right;
+            # this is the only use of disagreeing data, and it can only latch,
+            # never release).
+            # Only a TRUSTED reading at/above the threshold or below the floor
+            # can clear it, and only after pack_low_sustain_grace_s of them in
+            # a row. Untrusted samples (stale, or a disagreement that straddles
+            # the threshold) neither latch nor clear: the countdown keeps its
+            # start time, so the next low sample may latch at once (fail-safe;
+            # a disagreement can never postpone the latch).
+            band_v = voltage
+            if voltage is None and state == "disagree" and lv is not None and rv is not None:
+                hi = max(lv, rv)
+                if floor <= min(lv, rv) and hi < threshold:
+                    band_v = hi
+            in_band = band_v is not None and floor <= band_v < threshold
+            trusted_out = voltage is not None and not in_band
             if in_band:
                 self._out_of_band_since = None
                 if self._low_voltage_since is None:
@@ -983,7 +1001,7 @@ class VescCanDriver:
                     msgs.append((logging.WARNING,
                                  "VESC: pack voltage %.1fV below %s %.1fV (left %s, right %s) — "
                                  "pack-low latch in %.0fs if sustained",
-                                 (voltage, "limp floor" if limp else "threshold", threshold,
+                                 (band_v, "limp floor" if limp else "threshold", threshold,
                                   self._fmt_v(lv), self._fmt_v(rv), delay)))
                 elif now - self._low_voltage_since >= delay:
                     reason = _REASON_LIMP_FLOOR if limp else _REASON_PACK_V
@@ -1000,10 +1018,10 @@ class VescCanDriver:
                                      "%.0fs (left %s, right %s, %s); ramping motors to zero over "
                                      "%.1fs; release at >= %.1fV with zero throttle in MANUAL, "
                                      "or a disarm",
-                                     (reason, voltage, threshold, delay, self._fmt_v(lv),
+                                     (reason, band_v, threshold, delay, self._fmt_v(lv),
                                       self._fmt_v(rv), state,
                                       float(self._pcfg("pack_low_ramp_s")), release_v)))
-            else:
+            elif trusted_out:
                 if self._out_of_band_since is None:
                     self._out_of_band_since = now
                 if (self._low_voltage_since is not None

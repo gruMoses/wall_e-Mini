@@ -263,6 +263,12 @@ class VescConfig:
     # voltage used is the MINIMUM of the fresh readings (the low reader is the
     # left one, within 0.1 V of the BMS).
     pack_voltage_max_disagree_v: float = 1.5
+    # When ONLY the right VESC's reading is fresh it is used minus this. That
+    # VESC reads 0.9-1.0 V high (battery_settings.md finding 7), so the
+    # uncorrected value could hold a 43 V pack above 44 V. 1.0 V takes the
+    # high end (latches earlier, never later). Set to 0.0 once the right VESC's
+    # voltage reading is recalibrated in VESC Tool.
+    pack_voltage_right_alone_offset_v: float = 1.0
     # The sustain countdown PAUSES on a sample that is not trusted and in the
     # band (a disagreeing frame, a stale gap, a reading at or above the
     # threshold) and resets only after this many seconds of such samples in a

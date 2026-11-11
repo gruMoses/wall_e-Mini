@@ -170,7 +170,11 @@ class TestFrameParsing(unittest.TestCase):
     def test_status5_voltage_right(self):
         d = self._driver()
         d._parse_status5("right", _status5_frame(1, 23.1).data, time.monotonic())
-        self.assertAlmostEqual(d.get_voltage(), 23.1, places=1)
+        # The raw per-VESC value is parsed unchanged; the pack voltage from
+        # the right VESC ALONE is corrected by its 1.0 V high offset
+        # (VescConfig.pack_voltage_right_alone_offset_v, contract 2026-11-10).
+        self.assertAlmostEqual(d._right_telem.voltage_v, 23.1, places=1)
+        self.assertAlmostEqual(d.get_voltage(), 22.1, places=1)
 
     def test_voltage_min_of_two(self):
         """get_voltage() returns the LOWER fresh reading (contract 2026-11-10:
@@ -1037,6 +1041,8 @@ class TestPackLowLatch(unittest.TestCase):
     # Recovery: latched, then 45V -> latch clears, motors no longer forced.
     def test_latch_clears_on_recovery_and_reenables_motors(self):
         d = self._driver(delay=0.0)
+        # Voltage release is MANUAL only; the controller pushes this each tick.
+        d.set_drive_context(armed=True, manual=True)
         with patch.object(d, "_send_rpm"):
             d._trigger_low_voltage_shutdown(38.0)      # force the latch
         self.assertTrue(d._pack_low_latched)
