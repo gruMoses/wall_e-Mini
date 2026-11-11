@@ -683,8 +683,45 @@ class TestRestrictedState(_Base):
         d.set_drive_context(armed=False, manual=True)
         self.assertFalse(d.get_pack_guard_status()["restricted"])
 
-    def test_frozen_reader_is_excluded_then_restricts(self):
+    def test_steady_reader_beside_a_flickering_one_does_not_restrict_by_default(self):
+        """Real data (2026-11-06 to 2026-11-10): at rest one VESC holds one
+        value while the other flickers by 0.1 V. With the frozen rule on, that
+        restricted the robot 404 times. Default: off, so this never restricts."""
         d = self.make()
+        self.volts(d, 54.3, 55.3)
+        for i in range(1200):                         # 120 s parked
+            self.clock.t += 0.1
+            self.volts(d, 54.3, 55.3 if i % 2 else 55.4)
+        st = d.get_pack_guard_status()
+        self.assertIsNone(st["frozen_reader"])
+        self.assertEqual(st["voltage_state"], "trusted_both")
+        self.assertFalse(st["restricted"])
+        self.assertIsNone(st["drive_limit_bytes"])
+
+    def test_reader_frozen_high_while_the_pack_falls_still_restricts(self):
+        """Without the frozen rule a reader stuck high is still covered: the
+        guard uses the lower reading, and once the two differ by more than
+        pack_voltage_max_disagree_v the voltage is untrusted, so RESTRICTED
+        follows after pack_voltage_untrusted_limit_s."""
+        d = self.make()
+        self.volts(d, 47.0, 47.9)
+        left = 47.0
+        for i in range(300):                          # the real pack falls 0.1 V/s
+            self.clock.t += 0.1
+            if i % 10 == 0:
+                left = round(left - 0.1, 1)
+            self.volts(d, left, 47.9)                 # right frozen at 47.9
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
+        for _ in range(105):
+            self.clock.t += 0.1
+            self.volts(d, left, 47.9)
+        st = d.get_pack_guard_status()
+        self.assertTrue(st["restricted"])
+        self.assertFalse(st["latched"])
+
+    def test_frozen_reader_is_excluded_then_restricts(self):
+        # The rule itself, when it is switched on (default OFF since the review).
+        d = self.make(pack_voltage_frozen_s=20.0)
         self.volts(d, 47.0, 47.0)
         for i in range(215):                          # 21.5 s: left frozen, right moves
             self.clock.t += 0.1

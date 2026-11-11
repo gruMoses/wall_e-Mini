@@ -502,6 +502,7 @@ def run() -> int:
     _bms_fet_warn_last_t = 0.0  # monotonic() of last rate-limited warning print
     _bms_safety_stopped = False # True after safety timeout fires; cleared on DISARMED
     _bms_fet_stale_warned = False  # one "armed with a dark BMS link" warning per armed session
+    _bms_cell_feed_err_logged = False  # the cell-feed failure below is printed once, not 30 times a second
 
     try:
         last_log_ts = 0.0
@@ -679,7 +680,10 @@ def run() -> int:
                             age_s=bms_service.get_last_poll_age_s(),
                         )
                     except Exception as _cell_exc:
-                        print(f"\nBMS cell feed to the VESC pack guard failed: {_cell_exc}")
+                        # Once per process: this block runs every tick.
+                        if not _bms_cell_feed_err_logged:
+                            _bms_cell_feed_err_logged = True
+                            print(f"\nBMS cell feed to the VESC pack guard failed: {_cell_exc}")
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
             _nm = telem.get("netting_mute")
             if isinstance(_nm, dict) and _nm.get("event"):

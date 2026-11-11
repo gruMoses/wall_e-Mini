@@ -68,7 +68,7 @@ _PACK_DEFAULTS = {
     "pack_voltage_right_alone_offset_v": 1.0,
     "pack_voltage_untrusted_limit_s": 10.0,
     "pack_voltage_trust_confirm_s": 2.0,
-    "pack_voltage_frozen_s": 20.0,
+    "pack_voltage_frozen_s": 0.0,   # OFF: see VescConfig (false RESTRICTED at rest)
     "pack_voltage_frozen_other_moved_s": 2.0,
     "pack_low_seed_on_start": True,
     "pack_low_seed_confirm_s": 2.0,

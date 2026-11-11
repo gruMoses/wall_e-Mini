@@ -286,9 +286,18 @@ class VescConfig:
     pack_voltage_trust_confirm_s: float = 2.0
     # FROZEN reader: a fresh reading that has not changed at all for this long
     # while the other reader changed within pack_voltage_frozen_other_moved_s
-    # is not used (the other one is used alone). The readings step in 0.1 V,
-    # and under load they move every second; both still at rest is NOT frozen.
-    pack_voltage_frozen_s: float = 20.0
+    # is not used (the other one is used alone). 0 = OFF (the default).
+    # OFF since 2026-11-10 (review): the readings step in 0.1 V, and at rest
+    # one VESC often holds one value while the other flickers between two.
+    # A replay of the real code over every armed log of 2026-11-06 to
+    # 2026-11-08 and the parked night of 2026-11-10 found 1,600 "frozen"
+    # episodes and 404 RESTRICTED episodes (8,000 s) with 20 s, among them
+    # 5 min of armed MANUAL capped at the crawl speed; with 0 there were none.
+    # A frozen reader stays covered without this rule: the guard uses the
+    # LOWER reading (a reader frozen high is ignored), and a reader frozen
+    # while the pack falls disagrees by more than pack_voltage_max_disagree_v,
+    # which is untrusted and RESTRICTED after pack_voltage_untrusted_limit_s.
+    pack_voltage_frozen_s: float = 0.0
     pack_voltage_frozen_other_moved_s: float = 2.0
     # Seeded countdown after a service start (default ON): if the first
     # trusted reading is already below the threshold, the countdown starts
