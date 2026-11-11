@@ -106,7 +106,7 @@ Not corrected, because the text is in a code file and a push of a code file rest
 - `pi_app/web/waypoint_nav_ui.py`: the `/api/nav/go` docstring says that motion starts when the robot arms. It does not: the mode drops on the first disarmed tick.
 - `docs/walle_one_sheet.html` still shows the UPSPlus HAT.
 
-Housekeeping: the worktrees and branches in `docs/NEXT_SESSION.md`, section 4, item 8 (2026-11-10 note) have all their content in `main`. Remove them only with Kevin's approval.
+Housekeeping: DONE 2026-11-10 (evening) with Kevin's approval. All worktrees and their local branches are removed, and the stash is dropped (`docs/NEXT_SESSION.md`, section 4, item 8). The two remote `claude/` branches are still on GitHub.
 
 ## 8. Odometry on the drives of 2026-11-06 to 2026-11-08 (added 2026-11-10)
 
@@ -210,9 +210,18 @@ History of the reviews:
 - Rulings kept from the review: no new hold in MANUAL by default (`person_stop_hold_in_manual` False). Reason: with the netting over the lens the corridor does not show clear, so a MANUAL hold would stay until the arm switch is cycled each time the camera sees Kevin near the robot. A hold that is active at a change to MANUAL stays until the sticks are at neutral for 0.25 s. A trigger in the last 1.0 s engages the hold at the start of an autonomous mode.
 - The fourth version (one chain, no list; session `01a1c7bd`) still released on a clear corridor after the object was seen beyond and then left the view. A person can come back inside 0.8 m in that time with no detection. The deployed version has no corridor release in the autonomous modes.
 
-### 9.5 GPS odometry repair: prepared, not deployed
+### 9.5 GPS odometry repair: deployed at 18:20 as inert code
 
-Branch `worktree-agent-a51d633112c7c0737`. One frame contract for the two odometry classes and each user, dead reckoning as the default source of the trail, and tests. With `trail_follow_enabled` False the motor commands are the same as on `main` (2,309 replay frames; Grok session `01a1c77e`). It needs a rebase on `main`. The field checklist in the agent's report applies before the switch goes on: a stall check for dead reckoning, a straight run on a tape, pursuit beyond 5.2 m and a lost target in an empty area.
+DEPLOYED 2026-11-10 18:20 with Kevin's approval, in one push (`cd9086e`, `be768cc`, `bf23d47`, with `862e066` and `41a6c67`). `trail_follow_enabled` stays False, so this code does not run on the robot.
+
+- One frame contract for the two odometry classes and each user (`pi_app/control/odometry.py`): +x is heading 0, +y is 90 degrees clockwise of +x, the heading is clockwise-positive, forward is (cos, sin), right is (−sin, cos). The recorder overlay and the web trail canvas drew the trail mirrored; they use the contract now.
+- The trail uses one odometry source, `trail_odometry_source`, with `"dead_reckon"` as the default. On 30 s windows of the drives of 2026-11-06 and 2026-11-08, dead reckoning had a median error of 0.85 m (5 percent of the path). GPS odometry has steps of 1.8 to 2.1 m at each change of fix quality, a position at 1 Hz, and no pose before a straight run. GPS odometry is repaired to the same contract and stays selectable.
+- The wheel scale `trail_speed_scale_mps_per_byte` 0.0100 agrees with the GPS track. The 20 to 25 percent in section 8.3 is in the VESC eRPM speed, not in this scale.
+- A status read does not change the trail (`_peek_odometry`); only the control tick clears it (`_tick_odometry`). An unknown source name is an error at the start.
+- Checks: with the switch off, the motor commands are the same as before on 2,309 replay frames; the full suite passed (2,128 tests, and the one known failure on the Mac); Grok sessions `01a1c77e` and `01a1c7f7` (safe as inert code).
+- `862e066` is a comment only (why the confidence gate in `DetectionFilter` stays). `41a6c67` keeps the replay and analysis scripts of that day under `tools/person_stop_hold`, `tools/odometry_analysis` and `tools/wait_deploy.sh`.
+
+Before the switch goes on (the list is also in `tools/odometry_analysis/README.md`): a stall check for dead reckoning (it integrates the commanded bytes, so a blocked robot still "moves"), a straight run of approximately 20 m on a tape, a run in an empty area with pursuit beyond 5.2 m and a lost target, a Grok review of the change, and Kevin's approval.
 
 ## 10. Technical Names
 
