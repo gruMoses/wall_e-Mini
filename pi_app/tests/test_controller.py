@@ -349,14 +349,13 @@ class TestSlewLimiter(unittest.TestCase):
 
 
 class TestControllerPackLowLatch(unittest.TestCase):
-    """The controller must OBSERVE the VESC pack-low latch, not rely on the
-    driver's set_tracks() enforcement alone. Without controller-level handling
-    the slew state (_slew_last_left/right) keeps advancing toward the commanded
-    value while latched, so the instant the latch clears (~41V) the fully-
-    ramped command is emitted = full-speed lurch. While latched the controller
-    must force neutral + _motor.stop() + _reset_slew_state() every loop
-    (mirroring the charger_inhibit block), so release ramps from neutral via
-    the normal slew."""
+    """Contract of 2026-11-10: the VESC driver enforces the pack-low latch in
+    set_tracks() (a ramp to zero, VescConfig.pack_low_ramp_s). The controller
+    no longer forces neutral with _motor.stop() — that was a step to RPM 0 from
+    up to 1.6 m/s. It keeps sending the operator's slewed command, because the
+    driver releases the latch only with zero commanded throttle (so a release
+    cannot lurch), and it tells the driver the arm state and the mode every
+    tick (set_drive_context) so a disarm clears the latch."""
 
     class _FakeVescTelemetry:
         left_rpm = 100
@@ -371,11 +370,18 @@ class TestControllerPackLowLatch(unittest.TestCase):
         def __init__(self):
             super().__init__()
             self.pack_low_latched = False
+            self.contexts = []
 
         def get_telemetry(self):
             return TestControllerPackLowLatch._FakeVescTelemetry(self.pack_low_latched)
 
-    def test_latched_forces_neutral_pins_slew_and_release_ramps_from_neutral(self):
+        def set_drive_context(self, armed, manual):
+            self.contexts.append((armed, manual))
+
+        def get_pack_guard_status(self):
+            return {"latched": self.pack_low_latched, "reason": "pack_voltage"}
+
+    def test_latched_passes_command_to_driver_without_stop(self):
         slew_cfg = replace(
             default_config.slew_limiter,
             enabled=True,
@@ -388,8 +394,6 @@ class TestControllerPackLowLatch(unittest.TestCase):
         arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000,
                           ch5_us=1000, last_update_mono_s=0.0)
         motor = self._FakeVescMotor()
-        # Controlled virtual clock (robust to however many monotonic() calls
-        # each tick makes, unlike a fixed side_effect list).
         fake_now = {"t": 0.0}
         with patch("pi_app.control.controller.config", test_cfg):
             with patch("pi_app.control.controller.time.monotonic",
@@ -399,40 +403,41 @@ class TestControllerPackLowLatch(unittest.TestCase):
                                safety_params=params)
                 motor.pack_low_latched = True
                 fake_now["t"] = 1.0
-                c.process(arm_rc, now_epoch_s=0.1)  # arm; telem poll engages latch
-
-                # Two latched ticks with a full-forward web/BT command. Without
-                # the controller-level block the slew state would fully ramp to
-                # 220 across these ticks (1.0s + 0.5s of dt at 100 bps).
-                fake_now["t"] = 2.0
-                cmd_l1, _, _ = c.process(
+                c.process(arm_rc, now_epoch_s=0.1)  # arm; telem poll sees the latch
+                stops_before = motor.stops
+                fake_now["t"] = 1.1
+                cmd, _, telem = c.process(
                     arm_rc, now_epoch_s=0.2, bt_override_bytes=(220, 220))
-                fake_now["t"] = 2.5
-                cmd_l2, _, telem_l2 = c.process(
-                    arm_rc, now_epoch_s=0.3, bt_override_bytes=(220, 220))
 
-                # Latched: neutral output, motors stopped, slew pinned neutral.
-                self.assertEqual((cmd_l1.left_byte, cmd_l1.right_byte),
-                                 (CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE))
-                self.assertEqual((cmd_l2.left_byte, cmd_l2.right_byte),
-                                 (CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE))
-                self.assertGreaterEqual(motor.stops, 2)
-                self.assertEqual(c._slew_last_left, CENTER_OUTPUT_VALUE)
-                self.assertEqual(c._slew_last_right, CENTER_OUTPUT_VALUE)
-                self.assertTrue(telem_l2.get("vesc_pack_low_latched"))
-                self.assertEqual(telem_l2.get("slew_out_left"), CENTER_OUTPUT_VALUE)
+        # The slewed command reaches the driver (100 bps x 0.1 s = +10); the
+        # driver, not the controller, turns it into the ramp to zero.
+        self.assertEqual(motor.commands[-1], (CENTER_OUTPUT_VALUE + 10, CENTER_OUTPUT_VALUE + 10))
+        self.assertEqual(motor.stops, stops_before)        # no step via stop()
+        self.assertTrue(telem.get("vesc_pack_low_latched"))
+        self.assertEqual(telem.get("vesc_pack_guard"), {"latched": True, "reason": "pack_voltage"})
+        self.assertEqual(motor.contexts[-1], (True, True))  # armed, MANUAL
 
-                # Release the latch; the next telemetry poll clears the flag.
-                motor.pack_low_latched = False
-                fake_now["t"] = 2.6
-                cmd_r, _, telem_r = c.process(
-                    arm_rc, now_epoch_s=0.4, bt_override_bytes=(220, 220))
-
-        self.assertFalse(telem_r.get("vesc_pack_low_latched"))
-        # Ramp from neutral: dt = 2.6 - 2.5 = 0.1s at 100 bps = +10 bytes —
-        # NOT an instant jump to the commanded 220.
-        self.assertEqual((cmd_r.left_byte, cmd_r.right_byte),
-                         (CENTER_OUTPUT_VALUE + 10, CENTER_OUTPUT_VALUE + 10))
+    def test_disarm_edge_reaches_driver(self):
+        params = SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0)
+        arm_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1900, ch4_us=1000,
+                          ch5_us=1000, last_update_mono_s=0.0)
+        off_rc = RCInputs(ch1_us=1500, ch2_us=1500, ch3_us=1000, ch4_us=1000,
+                          ch5_us=1000, last_update_mono_s=0.0)
+        motor = self._FakeVescMotor()
+        fake_now = {"t": 1.0}
+        with patch("pi_app.control.controller.time.monotonic",
+                   side_effect=lambda: fake_now["t"]):
+            c = Controller(motor_driver=motor, arm_relay=FakeRelay(),
+                           shutdown_scheduler=FakeShutdown(), safety_params=params)
+            c.process(arm_rc, now_epoch_s=0.1)
+            self.assertEqual(motor.contexts[-1], (True, True))
+            fake_now["t"] = 1.2
+            c._mode = "FOLLOW_ME"
+            c.process(arm_rc, now_epoch_s=0.2)
+            self.assertEqual(motor.contexts[-1][0], True)
+            fake_now["t"] = 1.4
+            c.process(off_rc, now_epoch_s=0.3)
+        self.assertEqual(motor.contexts[-1][0], False)
 
     def test_latched_telemetry_key_present_and_false_by_default(self):
         """vesc_pack_low_latched reaches the telemetry dict every tick (same

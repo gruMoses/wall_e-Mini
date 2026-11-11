@@ -67,7 +67,7 @@ from pi_app.hardware.vesc import VescCanDriver, _CAN_PACKET_STATUS, _CAN_PACKET_
 
 @dataclass
 class _Cfg:
-    # Test-convenient values, NOT the real config defaults (real: threshold 39.0,
+    # Test-convenient values, NOT the real config defaults (real: threshold 44.0,
     # floor 30.0, delay 30.0 — see config.VescConfig). The legacy band/timer tests
     # below use a 22.4V test threshold with a low 15.0V floor so their ~20-21V test
     # frames land inside the shutdown band [floor, threshold). delay mirrors the new
@@ -168,12 +168,13 @@ class TestFrameParsing(unittest.TestCase):
         d._parse_status5("right", _status5_frame(1, 23.1).data, time.monotonic())
         self.assertAlmostEqual(d.get_voltage(), 23.1, places=1)
 
-    def test_voltage_max_of_two(self):
-        """get_voltage() returns the higher reading to avoid false shutdown triggers."""
+    def test_voltage_min_of_two(self):
+        """get_voltage() returns the LOWER fresh reading (contract 2026-11-10:
+        the old max() let the right VESC's +0.9 V offset hide a low pack)."""
         d = self._driver()
         d._parse_status5("left", _status5_frame(2, 22.0).data, time.monotonic())
         d._parse_status5("right", _status5_frame(1, 23.5).data, time.monotonic())
-        self.assertAlmostEqual(d.get_voltage(), 23.5, places=1)
+        self.assertAlmostEqual(d.get_voltage(), 22.0, places=1)
 
     def test_voltage_none_when_no_frames(self):
         d = self._driver()
@@ -333,13 +334,17 @@ class TestVoltageThreshold(unittest.TestCase):
         self.assertFalse(d._pack_low_latched)
 
     def test_shutdown_triggers_after_delay(self):
+        # The check now latches inline (reason pack_voltage) instead of calling
+        # _trigger_low_voltage_shutdown(); assert the latch, not the helper.
         d = self._driver(threshold=22.4, delay=0.05)
-        with patch.object(d, "_trigger_low_voltage_shutdown") as mock_trigger:
+        with patch.object(d, "_send_rpm"):
             d._parse_status5("left", _status5_frame(2, 21.0).data, time.monotonic())
             d._check_voltage_shutdown()
+            self.assertFalse(d._pack_low_latched)
             time.sleep(0.1)
             d._check_voltage_shutdown()
-            mock_trigger.assert_called_once()
+        self.assertTrue(d._pack_low_latched)
+        self.assertEqual(d.get_pack_guard_status()["reason"], "pack_voltage")
 
     def test_timer_clears_on_voltage_recovery(self):
         d = self._driver()
@@ -1011,7 +1016,8 @@ class TestPackLowLatch(unittest.TestCase):
         cfg = VescConfig()
         self.assertEqual(cfg.voltage_shutdown_floor_v, 30.0)
         self.assertEqual(cfg.voltage_shutdown_delay_s, 30.0)
-        self.assertEqual(cfg.voltage_shutdown_threshold_v, 39.0)
+        # 44.0 V since 2026-11-10: 39.0 V was below the 40.0 V BMS trip.
+        self.assertEqual(cfg.voltage_shutdown_threshold_v, 44.0)
 
     def test_delay_is_config_driven(self):
         d = self._driver(delay=0.2)
@@ -1035,8 +1041,13 @@ class TestPackLowLatch(unittest.TestCase):
         with patch.object(d, "_send_rpm", side_effect=lambda *a: sent.append(a)):
             d.set_tracks(200, 200)
         self.assertEqual(sent, [(d._left_id, 0), (d._right_id, 0)])
-        # Recovery above threshold + hysteresis clears the latch.
+        # Recovery above threshold + hysteresis clears the latch only with zero
+        # commanded throttle (contract 2026-11-10), so centre the sticks first.
         self._set_v(d, 45.0)
+        d._check_voltage_shutdown()
+        self.assertTrue(d._pack_low_latched)           # throttle still 200
+        with patch.object(d, "_send_rpm"):
+            d.set_tracks(126, 126)
         d._check_voltage_shutdown()
         self.assertFalse(d._pack_low_latched)
         # Motors re-enabled: set_tracks() now sends the commanded (non-neutral) rpm.

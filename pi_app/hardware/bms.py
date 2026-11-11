@@ -234,6 +234,17 @@ class BmsService:
         with self._lock:
             return copy.copy(self._state)
 
+    def get_last_poll_age_s(self) -> Optional[float]:
+        """Seconds since the last successful poll (monotonic), None if never.
+
+        Used by the pack-low cell trigger (VescCanDriver.set_bms_cell_reading)
+        to ignore old samples while the BLE link is dark.
+        """
+        last = self._last_success_monotonic
+        if last == 0.0:
+            return None
+        return max(0.0, time.monotonic() - last)
+
     def is_charging(self) -> bool:
         """Return True only once the BMS has *confirmed* active charging.
 

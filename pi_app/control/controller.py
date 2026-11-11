@@ -329,6 +329,10 @@ class Controller:
         # VESC low-voltage watchdog latch (early-warning + motor-cutoff). Mirrors
         # the charger_inhibit plumbing so the run log / SSE / dashboard can see it.
         self._vesc_pack_low_latched: bool = False
+        # VescCanDriver.get_pack_guard_status() snapshot (reason, trusted
+        # voltage, limp, BMS cell state) so a field stop explains itself in the
+        # run log. None when the driver has no pack guard.
+        self._vesc_pack_guard: Optional[dict] = None
         # Per-motor STATUS(9) frame ages + RX-thread liveness. Already read below
         # to drive the open-loop staleness fallback; also surfaced (same
         # charger_inhibit plumbing) so the /debug board can show which motor
@@ -930,6 +934,21 @@ class Controller:
         """
         self._reset_slew_state(now_s)
         self._slew_seen_non_neutral = True
+
+    def _push_motor_drive_context(self) -> None:
+        """Tell the motor driver the arm state and whether the mode is MANUAL.
+
+        VescCanDriver.set_drive_context() clears the pack-low latch on the
+        armed -> disarmed edge and gates limp home / voltage release to
+        MANUAL. Drivers without it (Arduino fallback, test fakes) are skipped.
+        """
+        fn = getattr(self._motor, "set_drive_context", None)
+        if not callable(fn):
+            return
+        try:
+            fn(armed=bool(self._safety_state.is_armed), manual=(self._mode == "MANUAL"))
+        except Exception:
+            _logger.exception("motor set_drive_context failed")
 
     def _on_armed_session_ended(self) -> None:
         """An armed session ended (disarm, RC stale, e-stop).
@@ -1709,6 +1728,12 @@ class Controller:
                 self._vesc_pack_low_latched = bool(
                     getattr(_telem, "pack_low_latched", False)
                 )
+                _guard_fn = getattr(self._motor, "get_pack_guard_status", None)
+                if callable(_guard_fn):
+                    try:
+                        self._vesc_pack_guard = _guard_fn()
+                    except Exception:
+                        self._vesc_pack_guard = None
 
                 # ── Per-motor staleness fallback ─────────────────────────────
                 # get_telemetry() returns non-None as long as EITHER motor has
@@ -1859,6 +1884,7 @@ class Controller:
             self._armed_idle_since = None
             if was_armed:
                 self._on_armed_session_ended()
+            self._push_motor_drive_context()
             cmd = DriveCommand(
                 left_byte=CENTER_OUTPUT_VALUE,
                 right_byte=CENTER_OUTPUT_VALUE,
@@ -1926,6 +1952,7 @@ class Controller:
             events = [*auto_events, *events]
         if was_armed and not self._safety_state.is_armed:
             self._on_armed_session_ended()
+        self._push_motor_drive_context()
 
         # Initialize telemetry before any event handler can write to it.
         # (Previously this dict was created further down, so the
@@ -2398,6 +2425,11 @@ class Controller:
         telemetry["slew_delta_left"] = 0
         telemetry["slew_delta_right"] = 0
 
+        # Mode is final for this tick: the driver's pack-low gate needs it
+        # (limp home is MANUAL only; voltage release is MANUAL only).
+        self._push_motor_drive_context()
+        telemetry["vesc_pack_guard"] = self._vesc_pack_guard
+
         # If disarmed, force neutral outputs
         if not self._safety_state.is_armed:
             left = right = CENTER_OUTPUT_VALUE
@@ -2419,22 +2451,14 @@ class Controller:
             telemetry["slew_out_right"] = right
             telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
             telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
-        elif self._vesc_pack_low_latched:
-            # VESC pack-low latch engaged (see vesc._check_voltage_shutdown):
-            # refuse all drive commands. The driver's set_tracks() also forces
-            # neutral (belt-and-suspenders), but the controller must observe
-            # the latch too — otherwise the slew state keeps ramping toward the
-            # commanded value while latched, and the moment the latch clears at
-            # ~41V the fully-ramped command would be emitted instantly (full-
-            # speed lurch). Holding slew at neutral makes release ramp from neutral.
-            left = right = CENTER_OUTPUT_VALUE
-            self._motor.stop()
-            self._hold_slew_at_neutral(mono_now)
-            telemetry["slew_out_left"] = left
-            telemetry["slew_out_right"] = right
-            telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
-            telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
         else:
+            # The VESC pack-low latch (vesc.VescCanDriver, contract 2026-11-10)
+            # is enforced in the driver's set_tracks(): it ramps the tracks to
+            # zero over VescConfig.pack_low_ramp_s instead of the step to RPM 0
+            # this branch used to command with _motor.stop(). The controller
+            # therefore keeps sending the operator's slewed command: the driver
+            # needs it to see "zero commanded throttle", and it releases the
+            # latch only then (or on a disarm), so the release cannot lurch.
             left_in = int(left)
             right_in = int(right)
             slewc = getattr(config, "slew_limiter", None)

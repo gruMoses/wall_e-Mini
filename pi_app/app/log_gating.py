@@ -446,6 +446,9 @@ def build_log_obj(
         "follow_me_exit_reason": telem.get("follow_me_exit_reason"),
         "charger_inhibit": telem.get("charger_inhibit", False),
         "vesc_pack_low_latched": telem.get("vesc_pack_low_latched", False),
+        # Pack-low latch detail (VescCanDriver.get_pack_guard_status): reason,
+        # trusted voltage and its state, limp, BMS cell state. None without VESC.
+        "vesc_pack_guard": telem.get("vesc_pack_guard"),
         # Armed-idle watchdog (2026-09-24 overnight-armed incident).
         "armed_idle_s": telem.get("armed_idle_s"),
         "rearm_requires_switch_cycle": telem.get("rearm_requires_switch_cycle"),

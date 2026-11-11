@@ -224,18 +224,21 @@ class VescConfig:
     left_can_id: int = 2
     right_can_id: int = 1
 
-    # Low-voltage watchdog — EARLY WARNING + MOTOR CUTOFF only (no OS shutdown).
-    # When pack voltage stays in the band [floor, threshold) for
-    # voltage_shutdown_delay_s consecutive seconds we cut motors and raise a
-    # recoverable pack-low latch (surfaced on telemetry). We do NOT halt the Pi:
-    # the Pi runs on its own UPS, so over-discharge protection is delegated to
-    # the pack BMS hard-cut (~37.7 V) -> UPS input-loss -> graceful-shutdown
-    # chain, which auto-recovers when pack power returns.
-    # 39.0 V = 13S Li-ion at 3.0 V/cell (safe cutoff; BMS hardware also cuts at ~2.9 V/cell).
-    # BMS reports 13 cells — confirmed 13S (stale 14S comment corrected 2026-04-01).
-    voltage_shutdown_threshold_v: float = 39.0
+    # Low-voltage watchdog — MOTOR CUTOFF only (no OS shutdown). Contract of
+    # 2026-11-10 (docs/status_audit_2026-11-10.md section 3). When the TRUSTED
+    # pack voltage (see pack_voltage_*) stays in [floor, threshold) for
+    # voltage_shutdown_delay_s we ramp the motors to zero and raise a
+    # recoverable pack-low latch. The latch must trip BEFORE the BMS does: the
+    # BMS pack undervoltage trip is 40.0 V and its cell trip 3.000 V
+    # (docs/battery_settings.md). A BMS trip opens the discharge FET, so drive
+    # AND braking stop at once and the Pi halts 5 s later on UPS mains loss.
+    # 44.0 V = 13 x 3.38 V. Worst case from the audit: 44.0 - 0.1 V reading
+    # offset - 0.3 V drain over 30 s - 2.6 V sag (40 A x 65 mOhm) = 41.0 V at
+    # the BMS, 1.0 V above its trip. 43.0 V leaves no margin. The old 39.0 V
+    # was below the BMS trip and could never fire. 13S confirmed 2026-04-01.
+    voltage_shutdown_threshold_v: float = 44.0
     # Plausibility floor: a reading BELOW this means the pack is disconnected /
-    # switched off / sensor garbage. A 13S pack's BMS hard-cuts ~37.7 V, so it
+    # switched off / sensor garbage. This 13S pack's BMS trips at 40.0 V, so it
     # can never genuinely sit this low — a reading below the floor is a normal
     # bench event (main battery switched off while the Pi runs on its UPS), NOT
     # a dying pack. Below the floor we stop motors and log once, but never latch
@@ -243,8 +246,66 @@ class VescConfig:
     voltage_shutdown_floor_v: float = 30.0
     # 30s sustain: a genuinely dying pack sags slowly, so a full 30s continuous
     # in-band reading is required before cutting motors (rejects transients).
-    # (Was 10.0; contract changed 2026-07-10.)
+    # (Was 10.0; contract changed 2026-07-10.) Not agreed (audit section 3,
+    # item 6): a Grok review wanted 3-5 s. With today's VESC limits (40 A per
+    # side, part A of docs/battery_settings.md not applied) a hard launch at
+    # low charge sags the bus 2-3 V for a few seconds, so a 3-5 s delay can
+    # latch on acceleration alone. Keep 30 s until part A is applied and the
+    # bus-voltage logs show the real sag near 44 V.
     voltage_shutdown_delay_s: float = 30.0
+    # A per-VESC bus reading (STATUS_5) older than this is not used. Same
+    # 0.5 s as the telemetry staleness cut-off (vesc._BUS_STALE_S); each VESC
+    # sends STATUS_5 at about 48 Hz, so 0.5 s is more than 20 missed frames.
+    pack_voltage_max_age_s: float = 0.5
+    # Two fresh readings that differ by more than this are UNTRUSTED: no latch,
+    # no release, reported in telemetry. The right VESC reads about 0.9 V high
+    # (battery_settings.md finding 7), so 1.5 V keeps 0.6 V for noise. The pack
+    # voltage used is the MINIMUM of the fresh readings (the low reader is the
+    # left one, within 0.1 V of the BMS).
+    pack_voltage_max_disagree_v: float = 1.5
+    # Release: the trusted pack voltage at or above threshold + this, with zero
+    # commanded throttle on both tracks, in MANUAL. 2.0 V (46.0 V) is the old
+    # anti-chatter band, kept (audit section 3, item 3). A disarm also releases.
+    pack_low_release_hysteresis_v: float = 2.0
+    # On a trip the motors ramp to zero over this time instead of a step to
+    # RPM 0 from up to 1.6 m/s. The ramp runs in VescCanDriver.set_tracks()
+    # every control tick (~30 Hz), which also refreshes the VESC ~1 s command
+    # timeout. A requested stop (stick to neutral, person stop) still goes to
+    # zero at once: the ramp only limits how much speed is KEPT.
+    pack_low_ramp_s: float = 1.0
+    # Limp home after a deliberate re-arm (default OFF; Kevin decides). When on,
+    # the disarm that clears a pack-low latch starts a limp state: MANUAL only
+    # (FOLLOW_ME / WAYPOINT_NAV ramp to zero), speed capped at
+    # pack_low_limp_max_byte_offset, and the 44 V / 3.30 V triggers are replaced
+    # by the floors below. Limp ends when the trusted pack is back at
+    # threshold + hysteresis with zero throttle, or on a service restart.
+    pack_low_limp_enabled: bool = False
+    # 32 bytes of 128 = 0.40 m/s at max_erpm 20000 (walking pace). At that
+    # speed the pack current is about 10 A, so the sag is about 0.7 V.
+    pack_low_limp_max_byte_offset: int = 32
+    # Hard floor in limp: 40.0 V BMS trip + 0.7 V limp sag + 0.1 V reading
+    # offset + 1.2 V margin = 42.0 V (3.23 V per cell).
+    pack_low_limp_floor_v: float = 42.0
+    # The limp floor needs a shorter sustain than 30 s: limp current is low, so
+    # the sag is small and a short delay does not trip on acceleration.
+    pack_low_limp_delay_s: float = 5.0
+    # Second trigger from the Daly BMS: lowest cell at or below this voltage on
+    # bms_cell_low_consecutive_polls consecutive FRESH polls latches until a
+    # disarm. 3.30 V is 0.30 V above the 3.000 V BMS cell trip (audit item 5).
+    bms_cell_low_trip_v: float = 3.30
+    # Limp replaces the cell trigger with this floor: 3.000 V trip + about
+    # 0.05 V limp sag per cell + 0.10 V margin.
+    bms_cell_limp_floor_v: float = 3.15
+    # A BMS sample older than this is ignored (never a stop: a dark BLE link
+    # must not stop the robot). The service polls every 8 s
+    # (BmsConfig.bms_poll_interval_s) and a poll takes 1-3 s, so 20 s accepts
+    # the latest poll plus one late or missed poll and nothing older.
+    bms_cell_max_age_s: float = 20.0
+    # Two consecutive fresh polls (about 16 s) so one sample taken during a
+    # current spike, or one bad frame, cannot latch.
+    bms_cell_low_consecutive_polls: int = 2
+    # A cell reading below this is a parse error, not a cell: ignored.
+    bms_cell_plausible_min_v: float = 2.5
 
     # Wheel geometry + drivetrain for eRPM -> wheel speed (m/s) conversion.
     # wheel_radius_m: centre of wheel axle to contact patch (14.5in wheel dia).

@@ -664,6 +664,22 @@ def run() -> int:
                     bms_link = bms_service.check_link()
                 except Exception:
                     bms_link = None
+                # Pack-low cell trigger (VescCanDriver): the driver ignores a
+                # sample older than VescConfig.bms_cell_max_age_s, so a dark
+                # BLE link never stops the robot. The poll's wall-clock stamp
+                # is only an identity (one count per poll), never a clock.
+                _set_cell = getattr(motor_driver, "set_bms_cell_reading", None)
+                if callable(_set_cell):
+                    try:
+                        _cmv = _bms_st_for_inhibit.cell_min_mv if _bms_st_for_inhibit else None
+                        _set_cell(
+                            cell_min_v=(_cmv / 1000.0) if _cmv is not None else None,
+                            poll_id=(_bms_st_for_inhibit.last_update_epoch_s or None)
+                            if _bms_st_for_inhibit else None,
+                            age_s=bms_service.get_last_poll_age_s(),
+                        )
+                    except Exception as _cell_exc:
+                        print(f"\nBMS cell feed to the VESC pack guard failed: {_cell_exc}")
             cmd, events, telem = controller.process(rc, bt_override_bytes=bt_override)
             _nm = telem.get("netting_mute")
             if isinstance(_nm, dict) and _nm.get("event"):
