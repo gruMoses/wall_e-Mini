@@ -17,11 +17,28 @@ import sys
 from pathlib import Path
 
 
+# A run also ends when two FOLLOW_ME ticks are further apart than this. The
+# armed log writes a tick every 0.1 s or so, so 5 s of silence means the
+# logger was gated off (for example disarmed) and a new run has started.
+RUN_GAP_S = 5.0
+
+
 def parse_follow_me_runs(path: str) -> list[list[dict]]:
-    """Parse log file and return list of follow-me runs (each = list of frames)."""
+    """Parse log file and return list of follow-me runs (each = list of frames).
+
+    The armed logs mix four line shapes: per-tick lines (they carry "mode"),
+    1 Hz "slow" lines, one "session_header" and "event" lines. Only a per-tick
+    line with another mode, a session header, or a time gap longer than
+    RUN_GAP_S ends a run. Slow and event lines (no "mode") never end a run.
+    """
     runs: list[list[dict]] = []
     current_run: list[dict] = []
-    was_follow_me = False
+
+    def close() -> None:
+        nonlocal current_run
+        if current_run:
+            runs.append(current_run)
+            current_run = []
 
     with open(path) as f:
         for line in f:
@@ -32,19 +49,29 @@ def parse_follow_me_runs(path: str) -> list[list[dict]]:
                 d = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
+            if not isinstance(d, dict):
+                continue
 
-            is_follow_me = d.get("mode") == "FOLLOW_ME"
-            if is_follow_me:
+            if d.get("type") == "session_header":
+                close()
+                continue
+            mode = d.get("mode")
+            if mode is None:
+                # slow line, event line or other non-tick shape
+                continue
+            if mode == "FOLLOW_ME":
+                if current_run:
+                    try:
+                        gap = float(d.get("ts")) - float(current_run[-1].get("ts"))
+                    except (TypeError, ValueError):
+                        gap = 0.0
+                    if gap > RUN_GAP_S:
+                        close()
                 current_run.append(d)
-                was_follow_me = True
-            elif was_follow_me and current_run:
-                runs.append(current_run)
-                current_run = []
-                was_follow_me = False
+            else:
+                close()
 
-    if current_run:
-        runs.append(current_run)
-
+    close()
     return runs
 
 
