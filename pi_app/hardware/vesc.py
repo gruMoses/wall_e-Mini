@@ -73,7 +73,7 @@ _PACK_DEFAULTS = {
     "pack_low_seed_on_start": True,
     "pack_low_seed_confirm_s": 2.0,
     "pack_low_ramp_s": 1.0,
-    "pack_low_limp_enabled": False,
+    "pack_low_limp_enabled": True,   # owner's decision 2026-11-10
     "pack_low_limp_max_byte_offset": 32,
     "pack_low_limp_floor_v": 42.0,
     "pack_low_limp_delay_s": 5.0,
@@ -503,11 +503,20 @@ class VescCanDriver:
                 ))
             if disarm_edge and self._pack_low_reasons:
                 cleared = ",".join(sorted(self._pack_low_reasons))
+                # A trip of the LIMP floors (already limping) keeps its
+                # evidence: the limp floor is a hard floor. While the pack is
+                # still below it the countdown stays run down and the next
+                # frame (or the next fresh BMS poll) latches again; another
+                # crawl needs the resting pack back above the floor for the
+                # sustain grace. The first latch of a session (44 V / 3.30 V)
+                # restarts both, which starts the limp crawl.
+                hard_floor = self._post_latch_active and self._limp_on_locked()
                 self._pack_low_reasons = set()
                 self._ramp_start_s = None
-                self._low_voltage_since = None
-                self._out_of_band_since = None
-                self._bms_low_count = 0
+                if not hard_floor:
+                    self._low_voltage_since = None
+                    self._out_of_band_since = None
+                    self._bms_low_count = 0
                 self._post_latch_active = True
                 if self._limp_on_locked():
                     msgs.append((

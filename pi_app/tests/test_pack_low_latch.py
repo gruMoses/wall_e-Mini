@@ -326,7 +326,7 @@ class TestReleaseRules(_Base):
         self.assertFalse(d.get_pack_low_latched())
 
     def test_disarm_releases_and_drive_resumes(self):
-        d = self.make()
+        d = self.make(pack_low_limp_enabled=False)   # explicit OFF (default ON since 2026-11-10)
         self.latch_by_voltage(d, 43.5)
         self.hold(d, 1.0, 44.5, 44.5)                    # rests between 44 and 46
         d.set_drive_context(armed=False, manual=True)
@@ -339,7 +339,7 @@ class TestReleaseRules(_Base):
         self.assertEqual(self.last_pair(), (full, full))  # full drive (limp off)
 
     def test_rearm_between_44_and_46_retrips_after_full_delay(self):
-        d = self.make()
+        d = self.make(pack_low_limp_enabled=False)   # explicit OFF (default ON since 2026-11-10)
         self.latch_by_voltage(d, 43.5)
         self.hold(d, 1.0, 45.0, 45.0)
         d.set_drive_context(armed=False, manual=True)
@@ -353,7 +353,7 @@ class TestReleaseRules(_Base):
     def test_rearm_below_44_gets_a_fresh_window_manual_only(self):
         # A latch must never need a restart (Grok round 1): the disarm gives a
         # new countdown, but only MANUAL may drive until the pack recovers.
-        d = self.make()
+        d = self.make(pack_low_limp_enabled=False)   # explicit OFF (default ON since 2026-11-10)
         self.latch_by_voltage(d, 43.5)
         d.set_drive_context(armed=False, manual=True)
         self.assertFalse(d.get_pack_low_latched())
@@ -373,7 +373,7 @@ class TestReleaseRules(_Base):
         self.assertTrue(d.get_pack_low_latched())        # new 30 s ran out
 
     def test_disarm_restarts_the_cell_count(self):
-        d = self.make()
+        d = self.make(pack_low_limp_enabled=False)   # explicit OFF (default ON since 2026-11-10)
         d.set_bms_cell_reading(3.25, poll_id=1, age_s=1.0)
         d.set_bms_cell_reading(3.25, poll_id=2, age_s=1.0)
         self.assertTrue(d.get_pack_low_latched())
@@ -472,14 +472,14 @@ class TestBmsCellTrigger(_Base):
 
 class TestLimpHome(_Base):
     def _limp(self) -> VescCanDriver:
-        d = self.make(pack_low_limp_enabled=True)
+        d = self.make()                       # limp home ON is the default
         self.latch_by_voltage(d, 43.5)
         d.set_drive_context(armed=False, manual=True)
         d.set_drive_context(armed=True, manual=True)
         return d
 
-    def test_off_by_default(self):
-        self.assertFalse(VescConfig().pack_low_limp_enabled)
+    def test_on_by_default(self):
+        self.assertTrue(VescConfig().pack_low_limp_enabled)   # owner, 2026-11-10
 
     def test_limp_caps_speed_in_manual(self):
         d = self._limp()
@@ -531,7 +531,7 @@ class TestLimpHome(_Base):
         self.assertFalse(d.get_pack_guard_status()["limp_active"])
 
     def test_without_limp_no_cap_after_disarm(self):
-        d = self.make()
+        d = self.make(pack_low_limp_enabled=False)   # explicit OFF (default ON since 2026-11-10)
         self.latch_by_voltage(d, 43.5)
         self.hold(d, 0.5, 44.5, 44.5)
         d.set_drive_context(armed=False, manual=True)
@@ -708,6 +708,86 @@ class TestRestrictedState(_Base):
         self.assertEqual(st["voltage_state"], "below_floor")
         self.assertTrue(st["restricted"])
         self.assertFalse(st["latched"])
+
+
+class TestLimpDefaultOperatorCases(_Base):
+    """What the operator sees with limp home ON (the default since the
+    owner's decision of 2026-11-10)."""
+
+    def cap(self) -> int:
+        return VescCanDriver._byte_to_rpm(CENTER_OUTPUT_VALUE + 32, MAX_ERPM)
+
+    def test_case_1_trip_at_speed_in_manual_ramps_to_zero_and_holds(self):
+        d = self.make()
+        full = VescCanDriver._byte_to_rpm(254, MAX_ERPM)
+        self.volts(d, 43.5, 43.5)
+        for _ in range(400):
+            if d.get_pack_low_latched():
+                break
+            self.clock.t += 0.1
+            self.volts(d, 43.5, 43.5)
+            if not d.get_pack_low_latched():
+                d.set_tracks(254, 254)
+        outs = []
+        for _ in range(20):                    # stick still held full forward
+            d.set_tracks(254, 254)
+            outs.append(self.last_pair()[0])
+            self.clock.t += 0.1
+        self.assertEqual(outs[0], full)
+        self.assertTrue(all(b <= a for a, b in zip(outs, outs[1:])))
+        self.assertEqual(outs[10:], [0] * 10)  # zero after 1.0 s, held
+        self.assertFalse(d.get_pack_guard_status()["limp_active"])   # limp only after a disarm
+
+    def test_case_2_disarm_rearm_at_43_5_v_crawls_manual_only(self):
+        d = self.make()
+        self.latch_by_voltage(d, 43.5)
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        st = d.get_pack_guard_status()
+        self.assertTrue(st["limp_active"])
+        self.assertFalse(st["latched"])
+        self.hold(d, 60.0, 43.5, 43.5)          # above the 42 V limp floor
+        self.assertFalse(d.get_pack_low_latched())
+        d.set_tracks(254, 254)
+        self.assertEqual(self.last_pair(), (self.cap(), self.cap()))  # 0.40 m/s crawl
+        d.set_tracks(0, 0)
+        self.assertEqual(self.last_pair(), (-self.cap(), -self.cap()))
+        # Autonomous modes never limp.
+        d.set_drive_context(armed=True, manual=False)
+        for _ in range(5):
+            self.clock.t += 0.1
+            d.set_tracks(254, 254)
+        self.assertEqual(self.last_pair(), (0, 0))
+
+    def test_case_3_falling_through_the_limp_floor_stops_and_stays_stopped(self):
+        d = self.make()
+        self.latch_by_voltage(d, 43.5)
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        d.set_tracks(254, 254)                  # crawling at the cap
+        self.volts(d, 41.9, 41.9)
+        for _ in range(60):
+            self.clock.t += 0.1
+            self.volts(d, 41.9, 41.9)
+            d.set_tracks(254, 254)
+        self.assertTrue(d.get_pack_low_latched())
+        self.assertEqual(d.get_pack_guard_status()["reason"], "limp_floor")
+        self.assertEqual(self.last_pair(), (0, 0))
+        # Hard floor: a disarm clears the latch, but while the resting pack is
+        # still below 42 V it latches again on the next frame.
+        d.set_drive_context(armed=False, manual=True)
+        self.assertFalse(d.get_pack_low_latched())
+        d.set_drive_context(armed=True, manual=True)
+        self.hold(d, 0.1, 41.9, 41.9)
+        self.assertTrue(d.get_pack_low_latched())
+        # Rested back above the floor: another crawl after a disarm.
+        self.hold(d, 2.5, 42.4, 42.4)
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        self.hold(d, 1.0, 42.4, 42.4)
+        self.assertFalse(d.get_pack_low_latched())
+        d.set_tracks(254, 254)
+        self.assertEqual(self.last_pair(), (self.cap(), self.cap()))
 
 
 class TestStartSeed(_Base):

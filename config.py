@@ -320,11 +320,13 @@ class VescConfig:
     # countdown, a fresh cell count. It ends when the trusted pack is back at
     # threshold + hysteresis with zero throttle (or on a service restart).
     # Without limp, MANUAL drives at full speed and latches again after
-    # voltage_shutdown_delay_s below 44 V. Limp home (default OFF; Kevin
-    # decides) adds to that session: speed capped at
-    # pack_low_limp_max_byte_offset, and the 44 V / 3.30 V triggers replaced by
-    # the floors below.
-    pack_low_limp_enabled: bool = False
+    # voltage_shutdown_delay_s below 44 V. Limp home adds to that session:
+    # speed capped at pack_low_limp_max_byte_offset, and the 44 V / 3.30 V
+    # triggers replaced by the floors below. ON by the owner's decision of
+    # 2026-11-10 (Kevin wants a slow MANUAL crawl home after a disarm on a
+    # low pack). Autonomous modes never limp: they ramp to zero in the
+    # session either way.
+    pack_low_limp_enabled: bool = True
     # 32 bytes of 128 = 0.40 m/s at max_erpm 20000 (walking pace). At that
     # speed the pack current is about 10 A, so the sag is about 0.7 V.
     pack_low_limp_max_byte_offset: int = 32
