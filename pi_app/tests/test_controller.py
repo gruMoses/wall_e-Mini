@@ -452,6 +452,21 @@ class TestControllerPackLowLatch(unittest.TestCase):
         # Stick released: the normal decel applies, inside the envelope.
         self.assertLess(outs[-1], CENTER_OUTPUT_VALUE + 32)
 
+    def test_guard_query_error_fails_closed(self):
+        motor = self._FakeVescMotor()
+
+        def boom():
+            raise RuntimeError("guard unreadable")
+        outs, _ = self._drive(motor, [(1500, None)] + [(2000, None)] * 5)
+        moving = outs[-1]
+        self.assertGreater(moving, CENTER_OUTPUT_VALUE)
+        motor2 = self._FakeVescMotor()
+        motor2.get_drive_limit_bytes = boom  # type: ignore[method-assign]
+        with self.assertLogs("pi_app.control.controller", level="ERROR"):
+            outs2, telem = self._drive(motor2, [(1500, None)] + [(2000, None)] * 5)
+        self.assertEqual(outs2[-1], CENTER_OUTPUT_VALUE)
+        self.assertEqual(telem.get("vesc_pack_drive_limit_bytes"), 0)
+
     def test_telemetry_flag_without_limit_method_falls_back_to_latch(self):
         motor = self._FakeVescMotor()
         del_limit = motor.get_drive_limit_bytes

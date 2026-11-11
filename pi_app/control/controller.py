@@ -971,12 +971,13 @@ class Controller:
         if callable(fn):
             try:
                 lim = fn()
+                lim = None if lim is None else max(0, int(lim))
             except Exception:
-                # Fail closed: an unreadable guard is treated as "to zero".
+                # Fail closed: an unreadable guard (or a bad value) is "to zero".
                 _logger.exception("motor get_drive_limit_bytes failed")
                 return 0
             if lim is not None or not self._vesc_pack_low_latched:
-                return None if lim is None else max(0, int(lim))
+                return lim
         return 0 if self._vesc_pack_low_latched else None
 
     def _apply_pack_limit(
