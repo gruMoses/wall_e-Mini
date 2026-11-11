@@ -168,6 +168,15 @@ class DetectionFilter:
         out: list[_FilteredDetection] = []
         for det in raw:
             depth_known = getattr(det, "depth_status", "ok") == "ok"
+            # Confidence gate — NOT redundant with oak_depth._poll_detections'
+            # fm_conf pre-filter. That gate only covers PersonDetection objects
+            # built inside the live OAK poll loop. Callers that construct
+            # PersonDetection directly bypass it and reach compute() unfiltered:
+            # trail_replay.py (replays logged detections whose confidences are
+            # recorded pre-filter, and under a config that may differ from the
+            # one that recorded the log), the test suite, and any future
+            # producer. For those paths this is the sole confidence filter, so it
+            # stays. (See test_low_confidence_filtered, which depends on it.)
             if det.confidence < self._conf:
                 self.last_reject_counts["conf"] += 1
                 continue
