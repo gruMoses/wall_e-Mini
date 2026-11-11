@@ -619,13 +619,36 @@ class TestRestrictedState(_Base):
         self.volts(d, 47.0, 47.0)
         for _ in range(3):
             self.hold(d, 3.0, 47.0, 49.0)           # 3 s disagreement
-            self.hold(d, 0.5, 47.0, 47.0)           # back to cross-checked
+            self.hold(d, 2.5, 47.0, 47.0)           # cross-checked again > 2 s
         self.clock.t += 0.3                          # a 0.3 s CAN gap
         d._check_voltage_shutdown()
         self.hold(d, 0.5, 47.0, 47.0)
         self.assertFalse(d.get_pack_guard_status()["restricted"])
         d.set_tracks(254, 254)
         full = VescCanDriver._byte_to_rpm(254, MAX_ERPM)
+        self.assertEqual(self.last_pair(), (full, full))
+
+    def test_bad_time_accumulates_across_short_good_gaps(self):
+        # Grok 01a1c86b: 9.9 s bad / 0.1 s good used to reset the 10 s clock.
+        d = self.make()
+        self.volts(d, 47.0, 47.0)
+        for _ in range(3):
+            self.hold(d, 9.9, 47.0, 49.0)
+            self.hold(d, 0.1, 47.0, 47.0)
+        self.assertTrue(d.get_pack_guard_status()["restricted"])
+
+    def test_below_floor_frame_does_not_pulse_zero_while_driving(self):
+        d = self.make()
+        full = VescCanDriver._byte_to_rpm(254, MAX_ERPM)
+        self.volts(d, 47.0, 47.0)
+        d.set_tracks(254, 254)
+        self.sent.clear()
+        self.clock.t += 0.03
+        self.volts(d, 6.0, 6.0)                     # one garbage frame pair
+        self.assertNotIn((2, 0), self.sent)         # no brake pulse
+        self.clock.t += 0.03
+        self.volts(d, 47.0, 47.0)
+        d.set_tracks(254, 254)
         self.assertEqual(self.last_pair(), (full, full))
 
     def test_recovery_needs_confirm_and_zero_throttle(self):
@@ -710,6 +733,14 @@ class TestStartSeed(_Base):
         self.assertFalse(d.get_pack_low_latched())    # normal 30 s countdown
         self.hold(d, 5.5, 43.5, 44.4)
         self.assertTrue(d.get_pack_low_latched())
+
+    def test_a_lone_bad_first_reader_cannot_seed(self):
+        d = self.make(pack_low_seed_on_start=True)
+        self.volts(d, left=43.0)                     # only one reader, low
+        self.clock.t += 0.1
+        self.volts(d, 46.0, 46.5)                    # both healthy
+        self.hold(d, 5.0, 46.0, 46.5)
+        self.assertFalse(d.get_pack_low_latched())
 
     def test_seed_off_gives_the_full_delay(self):
         d = self.make(pack_low_seed_on_start=False)

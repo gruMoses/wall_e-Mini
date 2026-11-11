@@ -1092,9 +1092,14 @@ class VescCanDriver:
             if state == "below_floor":
                 if not self._below_floor_active:
                     self._below_floor_active = True
-                    send_zero = True
-                    self._last_out_rpm = [0, 0]
-                    self._ramp_env = [0, 0]
+                    # RPM 0 only when the control loop is silent: while it is
+                    # alive a zero here would be a one-tick brake pulse and the
+                    # next tick would restore the full command (Grok 01a1c86b).
+                    # A real pack-off leaves the motors unpowered anyway.
+                    if now - self._last_tracks_mono > _CONTROL_SILENT_S:
+                        send_zero = True
+                        self._last_out_rpm = [0, 0]
+                        self._ramp_env = [0, 0]
                     msgs.append((logging.WARNING,
                                  "VESC: pack voltage below plausibility floor %.1fV (left %s, right %s) — "
                                  "treating as pack switched off, NOT shutting down",
@@ -1125,9 +1130,14 @@ class VescCanDriver:
                                  (now - self._untrusted_since, state, self._fmt_v(lv), self._fmt_v(rv),
                                   int(self._pcfg("pack_low_limp_max_byte_offset")))))
             else:
-                self._untrusted_since = None
                 if self._trusted_since is None:
                     self._trusted_since = now
+                # The not-cross-checked time ACCUMULATES across short good
+                # gaps: it is forgotten only after pack_voltage_trust_confirm_s
+                # of cross-checked readings in a row, so 9.9 s bad / 0.1 s good
+                # cannot keep autonomy unrestricted (Grok 01a1c86b).
+                if now - self._trusted_since >= confirm:
+                    self._untrusted_since = None
                 if (self._restricted_active and self._req_neutral
                         and now - self._trusted_since >= confirm):
                     self._restricted_active = False
@@ -1138,14 +1148,17 @@ class VescCanDriver:
                                  (now - self._trusted_since, state, voltage)))
 
             # ── Seeded countdown after a service start ────────────────────────
-            # The first TRUSTED sample decides: below the threshold, the
-            # countdown starts already run down to pack_low_seed_confirm_s, so
-            # a restart cannot hand out a fresh voltage_shutdown_delay_s of
-            # full drive on a low pack. At or above it, no seed.
+            # The first trusted sample decides, and only a CROSS-CHECKED
+            # (trusted_both) one can seed: below the
+            # threshold, the countdown starts already run down to
+            # pack_low_seed_confirm_s, so a restart cannot hand out a fresh
+            # voltage_shutdown_delay_s of full drive on a low pack. At or
+            # above it, no seed. A lone reader cannot seed (a single bad first
+            # reader cannot latch a healthy pack); the normal rules apply to it.
             seeded = False
             if self._seed_pending and voltage is not None:
-                self._seed_pending = False
-                if (bool(self._pcfg("pack_low_seed_on_start"))
+                self._seed_pending = False     # decided once, on the first trusted sample
+                if (state == "trusted_both" and bool(self._pcfg("pack_low_seed_on_start"))
                         and floor <= voltage < threshold and self._low_voltage_since is None):
                     seed_confirm = float(self._pcfg("pack_low_seed_confirm_s"))
                     self._low_voltage_since = now - max(0.0, delay - seed_confirm)
