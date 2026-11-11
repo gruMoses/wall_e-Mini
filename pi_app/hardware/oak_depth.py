@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import marshal  # kept for _build_hand_tracker_script compatibility
 import math
+import numbers
 import os
 import re
 import sys
@@ -3640,9 +3641,12 @@ class OakDepthReader:
             stop — returns (0.0, that detection);
           * a more-distant stop-tier detection nearer than the corridor reading
             pulls the effective distance down to it;
-          * a stop-tier detection whose depth_status is not "ok" (getattr
-            default "ok") and whose bbox width >= ``safety_stop_bbox_width``
-            forces the same hard stop. Default 0.0 disables the size rule so
+          * a stop-tier detection with no usable range and whose bbox width
+            >= ``safety_stop_bbox_width`` forces the same hard stop. No usable
+            range means: z_m <= 0 with a depth_status that is not "ok" (a
+            missing depth_status counts as not "ok", 2026-11-10), or a NaN or
+            non-numeric z_m whatever its depth_status. z_m <= 0 with an
+            explicit "ok" is skipped. Default 0.0 disables the size rule so
             existing callers are unchanged. Detections with z_m <= 0 are
             ignored by the distance rule (unchanged).
 
@@ -3658,27 +3662,50 @@ class OakDepthReader:
         """
         effective_min_mm = corridor_p5_mm
         width_thresh = float(safety_stop_bbox_width)
-        for det in detections:
-            if getattr(det, "safety_tier", "") != "stop":
-                continue
-            z_m = getattr(det, "z_m", 0)
-            if z_m > 0:
-                if det.z_m < safety_stop_radius_m:
+        # Total function (2026-11-10): a malformed detection never raises. An
+        # unreadable depth counts as unknown (never "ok"), so the width
+        # backstop still applies; a box that cannot be read is skipped, and
+        # the other detections are still evaluated.
+        try:
+            det_iter = iter(detections)
+        except Exception:
+            return effective_min_mm, None
+        while True:
+            try:
+                det = next(det_iter)
+            except StopIteration:
+                break
+            except Exception:
+                # A broken iterator cannot be resumed; the detections not
+                # yet read are unseen, so fail safe: stop.
+                return 0.0, None
+            try:
+                if getattr(det, "safety_tier", "") != "stop":
+                    continue
+                z_m = getattr(det, "z_m", 0)
+                z_ok = isinstance(z_m, numbers.Real) and z_m == z_m
+                if z_ok and z_m > 0:
+                    if z_m < safety_stop_radius_m:
+                        return 0.0, det
+                    det_mm = z_m * 1000.0
+                    if det_mm < effective_min_mm:
+                        effective_min_mm = det_mm
+                    continue
+                if width_thresh <= 0.0:
+                    continue
+                # z_m <= 0 with a known depth_status "ok" is a real "no
+                # range" reading (unchanged). An unreadable z_m or a missing
+                # depth_status is unknown, so the width rule applies.
+                if z_ok and getattr(det, "depth_status", None) == "ok":
+                    continue
+                bbox = getattr(det, "bbox", None)
+                if bbox is None or len(bbox) < 4:
+                    continue
+                width = float(bbox[2]) - float(bbox[0])
+                if width >= width_thresh:
                     return 0.0, det
-                det_mm = det.z_m * 1000.0
-                if det_mm < effective_min_mm:
-                    effective_min_mm = det_mm
+            except Exception:
                 continue
-            if width_thresh <= 0.0:
-                continue
-            if getattr(det, "depth_status", "ok") == "ok":
-                continue
-            bbox = getattr(det, "bbox", None)
-            if bbox is None or len(bbox) < 4:
-                continue
-            width = float(bbox[2]) - float(bbox[0])
-            if width >= width_thresh:
-                return 0.0, det
         return effective_min_mm, None
 
     @staticmethod
