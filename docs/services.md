@@ -56,7 +56,11 @@ systemd service.
   session-gated writer: arming ceremony, latched e-stop, and 250 ms deadman.
   Refer to `docs/teleop.md`.
 - Main loop (`pi_app/app/main.py`) reads that file and applies the override only
-  when command age is `<= 0.6s`. RC arming still gates the motors.
+  when the command age is 0 to 0.6 s on the monotonic clock and the command is
+  from this boot (`pi_app/app/phone_override.py`, 2026-11-10). Each command
+  carries `last_update_mono_s` and `boot_id`. A command with no stamp, a
+  future stamp, or a missing or different `boot_id` is stale. RC arming still
+  gates the motors. Refer to `docs/teleop.md`.
 - `wall-e-spp.service` runs `pi_app/cli/spp_server.py`. This is a diagnostics
   server: it accepts connections and parses, acknowledges, and logs commands.
   Its control writes to `/tmp/wall_e_bt_latest.json` are gated OFF by default

@@ -81,7 +81,12 @@ for backward compatibility with existing tools).
 
 One line per tick while armed (10 Hz); a low-rate heartbeat plus
 always-log-on-event while disarmed (`should_log_tick`,
-`pi_app/app/log_gating.py`). Built by `build_log_obj()`. Top-level blocks:
+`pi_app/app/log_gating.py`). Since 2026-11-10 a tick with a non-empty
+`events` list always writes a line while armed. Before that, the 10 Hz gate
+could skip such a tick and the event was lost, because `events` lives in one
+tick only. In the worst case this gives one line per control tick (about
+30 Hz). Events are edge-triggered, so a session has only a few extra lines.
+Built by `build_log_obj()`. Top-level blocks:
 
 - `rc`, `bt`, `motor`, `safety`, `pid`, `obstacle`, `waypoint_nav`,
   `detections`, `heading_align`, `recording_state`, `bms`, `events`.
@@ -90,6 +95,19 @@ always-log-on-event while disarmed (`should_log_tick`,
   cow): `label`, `conf`, `z_m`, `x_m`, `bbox`, `tier` (`stop`/`slow`/`log`;
   birds are `log`), `depth_status`. `null` when none. Data for the planned
   animal slow zone; it changes no behaviour.
+- `obstacle.person_stop_hold` (2026-11-10): the state of the person-stop
+  hold (`pi_app/control/person_stop_hold.py`) at the last depth poll. The
+  hold keeps the 0.8 m person/animal stop after a trigger until positive
+  evidence or the operator releases it. Keys (`PersonStopHoldSnapshot`):
+  `active` (bool), `reason`, `evidence_polls` (int), `operator_only` (bool),
+  `operator_only_reason`, `chain` (`"person"`, `"animal"` or `""`),
+  `chain_present` (bool), `beyond_streak` (int), `resolved` (bool),
+  `manual_carry` (bool). `reason` is what engaged the hold (`trigger`,
+  `carry_in`) or how it ended (`seen_beyond`, `corridor_clear`, `operator`,
+  `manual_neutral`); it is `""` before the first event. When `operator_only`
+  is true, only the operator ends the hold, and `operator_only_reason` is
+  `lost`, `ambiguous`, `second_object`, `impostor_in_gate` or
+  `second_trigger`. The value is `null` when the hold is off.
 - `imu`: `controller.get_imu_status()`, rounded to 3 decimals. Its nested
   `oak_imu` sub-block drops the counters that duplicate `imu_pipeline`
   (`producer_*`, `queue_*`, `drain_batch_*`, `cadence_*`, `host_queue_*`,
@@ -116,6 +134,14 @@ always-log-on-event while disarmed (`should_log_tick`,
   `closed` (bool: whether the closed-loop velocity PID ran this tick; `p`/
   `i`/`d` are only meaningful when `closed` is `True`).
 - Top level also adds `straight_intent`.
+- `waypoint_nav_exit_reason` (2026-11-10): the controller sets this key in
+  its telemetry dict on the one tick where it ends WAYPOINT_NAV by itself
+  and returns the robot to MANUAL (`controller.py`). Values: `vision_stale`,
+  `heading_unavailable`, `heading_stale`, `heading_lock_lost` (the
+  heading-alignment lock was lost), `align_timeout` (ALIGN lasted longer than
+  `waypoint_nav.align_timeout_s`, 10 s by default). WARNING: `build_log_obj()`
+  does not copy this key into the JSON line yet. To find the reason, search
+  the journal for `WAYPOINT_NAV stopped: <reason>`.
 - Dropped: `imu_pipeline`, `oak_camera_health` (moved to the slow line —
   see below), and the flat `heading_offset_deg` / `heading_offset_locked`
   / `heading_offset_frozen` / `heading_offset_refining` keys (the same
@@ -204,6 +230,16 @@ temperature, sampled once a second from
 `pipeline.getDefaultDevice().getChipTemperature()` inside the pipeline
 worker thread.
 
+The `oak_camera_health` block (`OakDepthReader.get_health()`) holds the IMU
+health fields (2026-11-10): `imu_age_s` (age of the newest IMU sample;
+`null` before the first sample), `imu_stale` (true when that age is more than
+the reader's stale age, 0.5 s, or when there is no sample yet; the heading is
+frozen while it is true), `imu_watchdog` (the IMU watchdog is active),
+`imu_stall_restarts` (count of camera restarts that the IMU watchdog caused)
+and `imu_stall_fault` (true when the shared restart budget is full and the
+watchdog stopped restarting). `imu_stale` is not part of `is_stale`; that
+field stays the vision health.
+
 `tools/imu_pipeline_analyzer.py` reads `imu_pipeline` from the slow line
 when present, and falls back to the old per-tick location for logs
 captured before this change.
@@ -226,10 +262,24 @@ tunables that matter for interpreting a run or deriving PID gains offline:
 
 ### Event lines (`"type": "event"`)
 
-Written immediately when something happens, not on a timer. Currently one
+Written immediately when something happens, not on a timer. The first
 kind: `{"type":"event","event":"oak_health","from":"HEALTHY"|"STALE",
 "to":"HEALTHY"|"STALE","ts":...}`, mirroring the console
 "OAK camera health transition" print.
+
+IMU stall events (2026-11-10, `ImuStallMonitor` in `pi_app/app/imu_stall.py`).
+The main loop writes each one as `{"type":"event", ...fields...,
+"is_armed":<bool>,"ts":...}`. They exist because a 38.8 h IMU stall on
+2026-11-06 left only `integrate_status` "stale" in the log:
+
+- `oak_imu_stall`: the IMU has been stale for `OakDetectionConfig.imu_stall_event_s`
+  (5 s). Fields: `imu_age_s`, `stale_for_s`. Shorter drops are not events.
+- `oak_imu_stall_restart`: the IMU watchdog ended the camera session.
+  Fields: `imu_age_s`, `imu_stall_restarts` (the new count).
+- `oak_imu_stall_fault`: the restart budget is full and the watchdog stopped
+  restarting. Fields: `imu_age_s`, `imu_stall_restarts`.
+- `oak_imu_recovered`: fresh IMU samples after an `oak_imu_stall`. Fields:
+  `stalled_for_s`, `imu_stall_restarts`.
 
 `{"type":"event","event":"arm_midband_disarm","ch3_us":...,"ch4_us":...,
 "since_held_high_s":...,"mode":...,"ts":...}` (2026-11-05): the robot

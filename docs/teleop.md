@@ -26,7 +26,7 @@ The real motor path is the main loop in `pi_app/app/main.py`:
 
 ```
 rc = rc_reader.get_state()
-bt_override = <read /tmp/wall_e_bt_latest.json if fresh within 600 ms>
+bt_override = <read /tmp/wall_e_bt_latest.json if fresh: age 0 to 0.6 s on the monotonic clock, and from this boot>
 cmd = controller.process(rc, bt_override_bytes=bt_override)   # -> motor.set_tracks
 ```
 
@@ -40,6 +40,19 @@ Teleop does **not** touch the motor or `controller.process`. It writes the same
 already uses, so it rides the already-RC-gated path. On top of that file channel
 it adds a tighter 250 ms deadman, an arming ceremony, a latched e-stop, a speed
 cap, and a stale-command guard.
+
+Command file format and freshness (2026-11-10, `pi_app/app/phone_override.py`):
+- Each command carries `last_update_mono_s` (the writer's `time.monotonic()`)
+  and `boot_id` (the kernel boot ID from `/proc/sys/kernel/random/boot_id`).
+  The files `teleop.py` and `spp_server.py` write both. They also write
+  `last_update_epoch_s`, but the reader does not use it.
+- The reader accepts a command only if its age is 0 to 0.6 s on its own
+  `time.monotonic()` and its `boot_id` is the reader's boot ID.
+- A command is stale if the stamp is missing, not finite, or in the future
+  (negative age), or if the `boot_id` is missing or from another boot.
+- Reason: the wall clock steps at boot (the RTC resets when 5 V drops, then
+  NTP corrects it), and `/tmp` can keep the file across a reboot. A command
+  from an earlier boot must not look fresh again.
 
 RC authority is enforced twice in teleop, independent of the downstream gate:
 - `TeleopSession.tick()` reads `rc_state_provider()` first, every tick; if RC is
@@ -206,7 +219,7 @@ if `flask-sock` is unavailable. The deadman is watchdog-enforced either way.
 - **Audit finding:** the pre-existing `POST /api/teleop` (and `/api/teleop/stop`)
   endpoints have **no auth** — any host on the LAN can POST and write the
   override file. The blast radius is bounded by RC authority (the controller
-  forces neutral unless RC-armed) and the 600 ms freshness window, but it is a
+  forces neutral unless RC-armed) and the 0.6 s monotonic freshness window, but it is a
   real unauthenticated motor-command surface. Left intact (not in scope to
   change); flagged here for tranche 3.
   CORRECTION: these two endpoints are retired. They return 410 Gone since 2026-07-05 (commit `387a1bf`, `pi_app/web/oak_viewer.py`).

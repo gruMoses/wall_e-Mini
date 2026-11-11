@@ -71,8 +71,32 @@ navigation update require exactly fix quality **4** when
 `gps_quality_not_trusted` at activation and commands zero motion if quality
 drops during a mission. The existing stale-GPS timeout remains in force.
 
+Start refusal reasons (2026-11-10, `Controller.waypoint_nav_activation_blocked()`).
+The check runs in this order, and the first problem is the reason:
+`waypoint_nav_unavailable`, `gps_state_unknown` (no GPS reading yet, for
+example right after a restart), `gps_stale` (the reading is older than
+`waypoint_nav.stale_timeout_s`, 3 s by default, or its age is unreadable),
+`gps_quality_not_trusted`, `vision_stale` (the detection stream is older
+than `OakDetectionConfig.vision_stale_s`; the person stop would be blind),
+then the heading check: `heading_unavailable` (alignment is required but
+there is no IMU compensator), `heading_alignment_not_locked`, and
+`heading_stale` (the heading is older than `waypoint_nav.heading_stale_s`,
+0.5 s by default, or its age is unknown). The `/navigate` page shows a
+message for each reason (`pi_app/web/waypoint_nav_ui.py`).
+
+Run end reasons (2026-11-10). While WAYPOINT_NAV runs, the controller checks
+the same conditions on every tick. If one fails, it sets the mode to MANUAL,
+the sticks have control, and the route and index stay. The reasons are
+`vision_stale`, `heading_lock_lost` (the lock is gone; it is the in-run
+name of `heading_alignment_not_locked`), `heading_stale`,
+`heading_unavailable`, and `align_timeout` (ALIGN lasted longer than
+`waypoint_nav.align_timeout_s`, 10 s by default). The reason is in the
+controller telemetry key `waypoint_nav_exit_reason` and in the journal line
+`WAYPOINT_NAV stopped: <reason>`. Refer to `docs/logging_troubleshooting.md`.
+
 When alignment is disabled (`gps_heading_align.enabled = False`) or the GPS/IMU
-stack is absent, waypoint nav behaves as before.
+stack is absent, waypoint nav behaves as before, except for the GPS and vision
+checks above.
 
 The `/navigate` pre-run validation panel shows **GPS heading alignment locked**
 when the gate applies.
