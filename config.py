@@ -785,8 +785,8 @@ class FollowMeConfig:
     # RE-ENABLED 2026-09-19 with two guards that make the old failure impossible:
     #   1. VescConfig.rpm_plausibility_*: commanded-but-0-eRPM → telemetry nulled
     #      → open-loop. The PID never sees the bogus zero for more than window_s.
-    #   2. speed_pid_max_correction_mps clamps the loop's authority to ±0.20 m/s
-    #      (≈ ±21 bytes), so even a wrong error can only nudge, never lunge.
+    #   2. speed_pid_max_correction_mps clamps the loop's authority to ±0.163 m/s
+    #      (±15.9 bytes; 0.20 m/s in the pre-2026-11-10 units), so even a wrong error can only nudge, never lunge.
     #
     # SCALE: the old loop mixed two scales — target from the GPS-measured GROUND
     # speed (trail_speed_scale 0.0075 m/s/byte, gravel scrub included) against a
@@ -806,14 +806,20 @@ class FollowMeConfig:
     speed_kp: float = 0.6
     speed_ki: float = 0.15
     speed_kd: float = 0.0
-    speed_integral_limit: float = 1.0    # anti-windup clamp (m/s·s); was 50 — absurd with a 0.2 m/s clamp
-    speed_pid_max_correction_mps: float = 0.20   # |closed-loop correction| ceiling (≈ 21 bytes)
+    # The two clamps below were tuned in the old (over-reading) wheel units on
+    # 2026-09-19/20: 1.0 m/s·s and 0.20 m/s. On 2026-11-10 both were scaled by
+    # VescConfig.wheel_ground_scale (0.815) so that they are worth the same
+    # motor bytes as before and the validated behaviour is unchanged:
+    #   integral authority ki × limit / k = 0.15 × 0.815 / 0.010232 = 11.9 bytes
+    #   correction ceiling          0.163 / 0.010232               = 15.9 bytes
+    # test_wheel_ground_scale.py::TestIdenticalMotorBytes pins this.
+    speed_integral_limit: float = 0.815  # anti-windup clamp (m/s·s); 1.0 × 0.815 (was 50 — absurd with the clamp)
+    speed_pid_max_correction_mps: float = 0.163  # |closed-loop correction| ceiling: 0.20 × 0.815 (= 15.9 bytes)
     # 0.012555 -> 0.010232 on 2026-11-10: the same derivation now includes
     # VescConfig.wheel_ground_scale (0.815). The loop is ratiometric (target
-    # and feedback share this scale), so follow-me bytes do not change while
-    # the loop is unsaturated. The m/s clamps above are now worth about 23 %
-    # more bytes: speed_pid_max_correction_mps 0.20 = 19.5 bytes (was 15.9).
-    speed_loop_mps_per_byte: float = 0.010232    # m/s per byte at max_erpm 20000 (1.310 m/s / 128) — see SCALE above
+    # and feedback share this scale, kp and ki are m/s per m/s), so with the
+    # two clamps scaled the follow-me bytes do not change at all.
+    speed_loop_mps_per_byte: float = 0.010232325  # = 0.012555 × 0.815 exactly (1.310 m/s / 128), so every byte matches the old loop — see SCALE above
 
     # ── Slip detection & compensation ─────────────────────────────────────────
     # Hard off-switch. When False the slip compensator is a TRUE no-op: it returns

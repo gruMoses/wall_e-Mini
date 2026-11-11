@@ -6,11 +6,12 @@ drives at 2-4 A of motor current. VescConfig.wheel_ground_scale (0.815)
 carries the correction; the geometry constants stay as labelled.
 """
 
+import dataclasses
 import math
 import unittest
 
 from config import FollowMeConfig, VescConfig
-from pi_app.control.follow_me import PIDController, SpeedLayer
+from pi_app.control.follow_me import FollowMeController, PIDController, SpeedLayer
 from pi_app.control.rpm_plausibility import erpm_to_wheel_mps, wheel_mps_per_byte
 
 
@@ -83,6 +84,95 @@ class TestLoopIsRatiometric(unittest.TestCase):
             b_old = old.compute(depth, actual_speed_mps=wheel_bytes * old_k, dt=0.05)
             b_new = new.compute(depth, actual_speed_mps=wheel_bytes * new_k, dt=0.05)
             self.assertAlmostEqual(b_old, b_new, places=6)
+
+
+OLD_LOOP_SCALE = 0.012555        # speed_loop_mps_per_byte before 2026-11-10
+OLD_MAX_CORRECTION_MPS = 0.20
+OLD_INTEGRAL_LIMIT = 1.0
+
+
+class TestIdenticalMotorBytes(unittest.TestCase):
+    """The whole 2026-11-10 correction (ground scale + loop scale + the two
+    scaled clamps) gives the SAME follow-me forward bytes as before, also when
+    the loop saturates at the correction ceiling and at the integral clamp.
+
+    Both worlds see the same eRPM; each converts it with its own scale.
+    """
+
+    def _worlds(self):
+        new_cfg = FollowMeConfig()
+        old_cfg = dataclasses.replace(
+            new_cfg, speed_loop_mps_per_byte=OLD_LOOP_SCALE,
+            speed_pid_max_correction_mps=OLD_MAX_CORRECTION_MPS,
+            speed_integral_limit=OLD_INTEGRAL_LIMIT)
+        v = VescConfig()
+        new_conv = dict(motor_poles=v.motor_poles, drive_gear_ratio=v.drive_gear_ratio,
+                        wheel_radius_m=v.wheel_radius_m, ground_speed_scale=v.wheel_ground_scale)
+        old_conv = dict(new_conv, ground_speed_scale=1.0)
+        return ((FollowMeController(old_cfg), old_conv), (FollowMeController(new_cfg), new_conv))
+
+    def _run(self, steps):
+        """steps: list of (depth_m, wheel_erpm, dt). Returns per-tick bytes."""
+        (fm_old, conv_old), (fm_new, conv_new) = self._worlds()
+        out_old, out_new = [], []
+        em_old = em_new = None
+        for depth, erpm, dt in steps:
+            b_old = fm_old._speed.compute(depth, actual_speed_mps=erpm_to_wheel_mps(erpm, **conv_old),
+                                          dt=dt, emitted_forward_byte=em_old)
+            b_new = fm_new._speed.compute(depth, actual_speed_mps=erpm_to_wheel_mps(erpm, **conv_new),
+                                          dt=dt, emitted_forward_byte=em_new)
+            em_old, em_new = b_old, b_new
+            out_old.append(b_old)
+            out_new.append(b_new)
+        return fm_old, fm_new, out_old, out_new
+
+    def _assert_same(self, out_old, out_new):
+        for i, (a, b) in enumerate(zip(out_old, out_new)):
+            self.assertAlmostEqual(a, b, delta=1e-9, msg=f"tick {i}")
+            self.assertEqual(round(a), round(b), msg=f"tick {i}")
+
+    @staticmethod
+    def _erpm(bytes_):
+        return bytes_ / 128.0 * VescConfig().max_erpm
+
+    def test_clamp_byte_values_match_old(self):
+        new = FollowMeConfig()
+        self.assertAlmostEqual(new.speed_pid_max_correction_mps / new.speed_loop_mps_per_byte,
+                               OLD_MAX_CORRECTION_MPS / OLD_LOOP_SCALE, delta=0.01)   # 15.9
+        self.assertAlmostEqual(new.speed_ki * new.speed_integral_limit / new.speed_loop_mps_per_byte,
+                               new.speed_ki * OLD_INTEGRAL_LIMIT / OLD_LOOP_SCALE, delta=0.01)  # 11.9
+
+    def test_step_hits_correction_ceiling(self):
+        # Open loop 60 bytes (depth 2.02 m); wheels stuck at 30 bytes' eRPM:
+        # P alone asks 0.6 * 30 = 18 bytes > the 15.9-byte ceiling.
+        depth = 1.2 + 60.0 / (128.0 / 1.75)
+        steps = [(1.3, 0.0, 0.05)] * 3 + [(depth, self._erpm(30.0), 0.05)] * 40
+        fm_old, fm_new, a, b = self._run(steps)
+        self._assert_same(a, b)
+        for fm in (fm_old, fm_new):
+            self.assertAlmostEqual(abs(fm._speed.last_corr_byte), 15.93, delta=0.02)
+
+    def test_sustained_error_hits_integral_clamp(self):
+        # 5-byte shortfall for 20 s: P = 3 bytes, I saturates at 11.9 bytes,
+        # total 14.9 < 15.9, so the integral clamp (not the ceiling) binds.
+        depth = 1.2 + 60.0 / (128.0 / 1.75)
+        steps = [(depth, self._erpm(55.0), 0.1)] * 200
+        fm_old, fm_new, a, b = self._run(steps)
+        self._assert_same(a, b)
+        for fm, lim in ((fm_old, OLD_INTEGRAL_LIMIT), (fm_new, FollowMeConfig().speed_integral_limit)):
+            pid = fm._speed._velocity_pid
+            self.assertAlmostEqual(pid._integral, lim, places=9)
+            self.assertLess(abs(fm._speed.last_corr_byte), 15.9)
+
+    def test_overspeed_and_mixed_sequence(self):
+        depth_a = 1.2 + 40.0 / (128.0 / 1.75)
+        depth_b = 1.2 + 90.0 / (128.0 / 1.75)
+        steps = ([(depth_a, self._erpm(70.0), 0.05)] * 60       # wheels too fast: negative ceiling
+                 + [(depth_b, self._erpm(50.0), 0.1)] * 120     # big shortfall, both clamps
+                 + [(depth_b, self._erpm(88.0), 0.05)] * 40
+                 + [(1.3, 0.0, 0.05)] * 5)                      # dead zone: reset
+        _, _, a, b = self._run(steps)
+        self._assert_same(a, b)
 
 
 if __name__ == "__main__":
