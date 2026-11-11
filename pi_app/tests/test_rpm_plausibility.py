@@ -54,42 +54,42 @@ class TestSpeedLoopScale(unittest.TestCase):
         return dict(
             max_erpm=v.max_erpm, motor_poles=v.motor_poles,
             drive_gear_ratio=v.drive_gear_ratio, wheel_radius_m=v.wheel_radius_m,
+            ground_speed_scale=v.wheel_ground_scale,
         )
 
     def test_speed_loop_scale_matches_vesc_kinematics(self):
         """FollowMeConfig.speed_loop_mps_per_byte must equal the wheel speed one
-        byte produces through max_erpm / poles / gearing / radius."""
+        byte produces through max_erpm / poles / gearing / radius / ground scale."""
         derived = wheel_mps_per_byte(**self._vesc_kw())
         self.assertAlmostEqual(FollowMeConfig().speed_loop_mps_per_byte, derived, places=5)
 
     def test_full_scale_byte_reproduces_documented_top_speed(self):
         """docs/gearing_memo.md §a: byte 254 → max_erpm → top speed.
 
-        At the memo's max_erpm 15000 that was 1.205 m/s. max_erpm became
-        20000 on 2026-09-19 (VESC duty was only 0.58-0.65 at 13,000 eRPM),
-        so full scale is now 1.607 m/s. The kinematic chain is unchanged.
+        The nominal chain (scale 1.0) still gives the memo's numbers: 1.205 m/s
+        at 15000 eRPM, 1.607 m/s at 20000. With the GPS-measured
+        wheel_ground_scale (2026-11-10) byte 254 is 1.310 m/s on the ground.
         """
         v = self._vesc_kw()
         erpm = byte_offset_to_erpm(128, max_erpm=v["max_erpm"])
         self.assertAlmostEqual(erpm, 20000.0, places=6)
-        mps = erpm_to_wheel_mps(erpm, motor_poles=v["motor_poles"],
-                                drive_gear_ratio=v["drive_gear_ratio"],
-                                wheel_radius_m=v["wheel_radius_m"])
-        self.assertAlmostEqual(mps, 1.607, places=2)
-        # The memo's number still holds for the memo's cap.
-        mps_memo = erpm_to_wheel_mps(15000.0, motor_poles=v["motor_poles"],
-                                     drive_gear_ratio=v["drive_gear_ratio"],
-                                     wheel_radius_m=v["wheel_radius_m"])
-        self.assertAlmostEqual(mps_memo, 1.205, places=2)
+        nominal = dict(motor_poles=v["motor_poles"], drive_gear_ratio=v["drive_gear_ratio"],
+                       wheel_radius_m=v["wheel_radius_m"])
+        self.assertAlmostEqual(erpm_to_wheel_mps(erpm, **nominal), 1.607, places=2)
+        self.assertAlmostEqual(erpm_to_wheel_mps(15000.0, **nominal), 1.205, places=2)
+        ground = erpm_to_wheel_mps(erpm, ground_speed_scale=v["ground_speed_scale"], **nominal)
+        self.assertAlmostEqual(ground, 1.310, places=2)
 
-    def test_loop_scale_is_wheel_speed_not_ground_speed(self):
-        """The GPS-calibrated trail scale (ground speed on gravel) is ~20 % lower
-        than the wheel-speed scale; the velocity loop must use the wheel scale."""
+    def test_loop_scale_agrees_with_gps_fitted_byte_scale(self):
+        """2026-11-10: the GPS-fitted dead-reckoning byte scale (0.0100,
+        best fit 0.0100-0.0105) and the eRPM path describe one ground speed,
+        because the VESC holds the commanded eRPM (measured/commanded 1.000).
+        Before the correction the eRPM path read ~25 % higher; the old test
+        called that gap "track scrub" and pinned it at 0.7-0.9."""
         cfg = FollowMeConfig()
-        self.assertGreater(cfg.speed_loop_mps_per_byte, cfg.trail_speed_scale_mps_per_byte)
         ratio = cfg.trail_speed_scale_mps_per_byte / cfg.speed_loop_mps_per_byte
-        self.assertGreater(ratio, 0.7)
-        self.assertLess(ratio, 0.9)
+        self.assertGreater(ratio, 0.93)
+        self.assertLess(ratio, 1.07)
 
     def test_controller_actual_speed_uses_same_kinematics(self):
         class T:
@@ -112,11 +112,13 @@ class TestSpeedLoopScale(unittest.TestCase):
         v = VescConfig()
         expected = erpm_to_wheel_mps(1500, motor_poles=v.motor_poles,
                                      drive_gear_ratio=v.drive_gear_ratio,
-                                     wheel_radius_m=v.wheel_radius_m)
+                                     wheel_radius_m=v.wheel_radius_m,
+                                     ground_speed_scale=v.wheel_ground_scale)
         self.assertAlmostEqual(telem["vesc_actual_speed_mps"], expected, places=6)
-        # 1500 eRPM is ~12.8 bytes' worth of command → ~0.12 m/s wheel speed
-        # (the bench's 1500 eRPM test point; see tools/vesc_rpm_bench.py).
-        self.assertAlmostEqual(expected, 0.1205, delta=0.002)
+        # 1500 eRPM is ~9.6 bytes' worth of command → 0.1205 m/s nominal,
+        # 0.0982 m/s with the 2026-11-10 ground scale (the bench's 1500 eRPM
+        # test point; see tools/vesc_rpm_bench.py).
+        self.assertAlmostEqual(expected, 0.0982, delta=0.002)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -434,7 +436,8 @@ class TestActualSpeedIsForwardComponent(unittest.TestCase):
         v = VescConfig()
         return erpm_to_wheel_mps(erpm, motor_poles=v.motor_poles,
                                  drive_gear_ratio=v.drive_gear_ratio,
-                                 wheel_radius_m=v.wheel_radius_m)
+                                 wheel_radius_m=v.wheel_radius_m,
+                                 ground_speed_scale=v.wheel_ground_scale)
 
     def test_arc_reads_forward_component(self):
         # v = 1000, yaw = 1500 → L = 2500, R = −500. Forward = 1000 eRPM.

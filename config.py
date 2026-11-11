@@ -254,6 +254,17 @@ class VescConfig:
     wheel_radius_m: float = 0.18415
     motor_poles: int = 14
     drive_gear_ratio: float = 34.2857142857
+    # Ground metres per nominal kinematic wheel metre, MEASURED (2026-11-10,
+    # docs/wheel_speed_scale_2026-11-10.md). The three constants above read
+    # 1.23x the GPS ground speed on straight steady drives (per-drive medians
+    # 1.18-1.26 above 0.8 m/s, 1.24 pooled over 181 m of long segments, no
+    # dependence on motor current at 2-4 A; March 2026 RTK on gravel gave
+    # 1.256 too). The data cannot say whether radius, gearing or pole count
+    # is wrong, so the geometry stays as labelled and this lumped factor
+    # carries the correction. Uncertainty about +-0.03. Byte 254 = 20000 eRPM
+    # = 1.31 m/s on the ground (not 1.61). Only the m/s VALUES change: the
+    # VESC still runs the same eRPM for the same byte.
+    wheel_ground_scale: float = 0.815
 
     # Set False to disable all closed-loop telemetry features (pure open-loop fallback).
     vesc_telemetry_enabled: bool = True
@@ -561,7 +572,8 @@ class FollowMeConfig:
     close_unknown_bbox_height: float = 0.85
     # Top speed 110 -> 128 bytes on 2026-09-26 (same log as max_distance_m):
     # 110 capped follow-me at 1.38 m/s while the robot was 3-6 m behind a
-    # walking operator. 128 is byte 254 = max_erpm 20000 = 1.61 m/s, the
+    # walking operator. 128 is byte 254 = max_erpm 20000 = 1.61 m/s (nominal
+    # kinematics; about 1.31 m/s on the ground, see wheel_ground_scale), the
     # same top speed as full RC stick. The VESC reached 17,200 eRPM at duty
     # 0.71 on a full 53.5 V pack, so 20,000 eRPM needs ~0.82 there; below
     # ~46 V it saturates at max duty (about 1.5 m/s), as full stick does.
@@ -796,7 +808,12 @@ class FollowMeConfig:
     speed_kd: float = 0.0
     speed_integral_limit: float = 1.0    # anti-windup clamp (m/s·s); was 50 — absurd with a 0.2 m/s clamp
     speed_pid_max_correction_mps: float = 0.20   # |closed-loop correction| ceiling (≈ 21 bytes)
-    speed_loop_mps_per_byte: float = 0.012555    # kinematic WHEEL m/s per byte at max_erpm 20000 (1.607 m/s / 128) — see SCALE above
+    # 0.012555 -> 0.010232 on 2026-11-10: the same derivation now includes
+    # VescConfig.wheel_ground_scale (0.815). The loop is ratiometric (target
+    # and feedback share this scale), so follow-me bytes do not change while
+    # the loop is unsaturated. The m/s clamps above are now worth about 23 %
+    # more bytes: speed_pid_max_correction_mps 0.20 = 19.5 bytes (was 15.9).
+    speed_loop_mps_per_byte: float = 0.010232    # m/s per byte at max_erpm 20000 (1.310 m/s / 128) — see SCALE above
 
     # ── Slip detection & compensation ─────────────────────────────────────────
     # Hard off-switch. When False the slip compensator is a TRUE no-op: it returns

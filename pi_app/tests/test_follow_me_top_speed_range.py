@@ -33,8 +33,14 @@ class TestTopSpeed(unittest.TestCase):
     def test_top_speed_outpaces_the_logged_walk(self):
         cfg = FollowMeConfig()
         top_mps = cfg.max_follow_speed_byte * cfg.speed_loop_mps_per_byte
-        self.assertAlmostEqual(top_mps, 1.607, delta=0.01)
-        self.assertGreater(top_mps, 1.55)  # operator pace in the 12:55 run
+        # 1.607 m/s nominal; 1.310 m/s on the ground since the 2026-11-10
+        # wheel_ground_scale (0.815). The 12:55 "1.55 m/s" walk was computed
+        # in the same over-reading wheel units (robot at the "1.38 m/s" cap
+        # plus the range rate; INFERRED, the log is gone), so it is about
+        # 1.55 * 0.815 = 1.26 m/s on the ground. Compare like with like.
+        self.assertAlmostEqual(top_mps, 1.310, delta=0.01)
+        logged_walk_ground_mps = 1.55 * VescConfig().wheel_ground_scale
+        self.assertGreater(top_mps, logged_walk_ground_mps)
 
     def test_large_gap_reaches_the_new_cap(self):
         fm = FollowMeController(FollowMeConfig())

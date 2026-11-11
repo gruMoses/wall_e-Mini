@@ -1689,6 +1689,7 @@ class Controller:
                         motor_poles=int(getattr(_vesc_cfg, "motor_poles", 14)),
                         drive_gear_ratio=float(getattr(_vesc_cfg, "drive_gear_ratio", 1.0)),
                         wheel_radius_m=float(getattr(_vesc_cfg, "wheel_radius_m", 0.085)),
+                        ground_speed_scale=float(getattr(_vesc_cfg, "wheel_ground_scale", 1.0)),
                     )
                 else:
                     self._actual_speed_mps = None

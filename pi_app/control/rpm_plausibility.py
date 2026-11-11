@@ -37,11 +37,18 @@ def erpm_to_wheel_mps(
     motor_poles: int,
     drive_gear_ratio: float,
     wheel_radius_m: float,
+    ground_speed_scale: float = 1.0,
 ) -> float:
-    """Electrical RPM -> wheel surface speed (m/s). Sign is preserved."""
+    """Electrical RPM -> wheel speed (m/s). Sign is preserved.
+
+    ``ground_speed_scale`` (``VescConfig.wheel_ground_scale``) multiplies the
+    nominal kinematic speed to give the measured ground speed. 1.0 returns the
+    nominal geometry (14 poles, 34.2857:1, 0.18415 m label radius). See
+    docs/wheel_speed_scale_2026-11-10.md.
+    """
     pole_pairs = max(int(motor_poles) // 2, 1)
     mech_rpm = float(erpm) / max(pole_pairs * max(float(drive_gear_ratio), 1e-6), 1e-6)
-    return (mech_rpm / 60.0) * 2.0 * math.pi * float(wheel_radius_m)
+    return (mech_rpm / 60.0) * 2.0 * math.pi * float(wheel_radius_m) * float(ground_speed_scale)
 
 
 def byte_offset_to_erpm(offset_bytes: float, *, max_erpm: int) -> float:
@@ -114,21 +121,25 @@ def wheel_mps_per_byte(
     motor_poles: int,
     drive_gear_ratio: float,
     wheel_radius_m: float,
+    ground_speed_scale: float = 1.0,
 ) -> float:
-    """Kinematic wheel speed produced by ONE drive byte above neutral (m/s).
+    """Wheel speed produced by ONE drive byte above neutral (m/s).
 
-    With the as-built drivetrain (15000 eRPM full scale, 14 poles, 34.2857:1,
-    r = 0.18415 m) this is ~0.00942 m/s per byte, i.e. 1.205 m/s at byte 254.
-    This is WHEEL speed (what eRPM telemetry measures), not ground speed: the
-    GPS-calibrated ``trail_speed_scale_mps_per_byte`` (0.0075) is ~20 % lower
-    because of track scrub on gravel. The velocity loop must use THIS value so
-    that the commanded target and the measured feedback share one scale.
+    Nominal geometry (14 poles, 34.2857:1, r = 0.18415 m, scale 1.0) gives
+    0.012555 m/s per byte at max_erpm 20000 (1.607 m/s at byte 254). With the
+    GPS-measured ``VescConfig.wheel_ground_scale`` 0.815 it is 0.010232 m/s
+    per byte (1.310 m/s at byte 254), which agrees with the GPS-fitted
+    ``trail_speed_scale_mps_per_byte`` (0.0100). The old note here blamed
+    "track scrub" for that gap; the 2026-11-10 data show a constant scale
+    error at 2-4 A of motor current instead. The velocity loop must use the
+    same value as ``actual_speed_mps`` so target and feedback share one scale.
     """
     return erpm_to_wheel_mps(
         byte_offset_to_erpm(1.0, max_erpm=max_erpm),
         motor_poles=motor_poles,
         drive_gear_ratio=drive_gear_ratio,
         wheel_radius_m=wheel_radius_m,
+        ground_speed_scale=ground_speed_scale,
     )
 
 
