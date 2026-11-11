@@ -1,5 +1,7 @@
 # Wheel speed scale — 2026-11-10
 
+UPDATE 2026-11-10 21:40: the correction is deployed (`962454a` and `1e3a26f`). Kevin selected the variant with the two loop limits scaled: `speed_pid_max_correction_mps` is 0.163 and `speed_integral_limit` is 0.815. Thus the limits are 15.9 and 11.9 bytes, the same as before. The values 19.5 and 14.7 bytes in this document describe the variant that was not selected. `speed_loop_mps_per_byte` is 0.010232325.
+
 Status: the correction is prepared in a worktree. It is NOT pushed. Kevin decides when it ships.
 
 ## 1. Summary

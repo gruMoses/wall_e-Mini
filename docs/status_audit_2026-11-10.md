@@ -225,6 +225,13 @@ Before the switch goes on (the list is also in `tools/odometry_analysis/README.m
 
 ### 9.6 Prepared in the evening of 2026-11-10, NOT deployed
 
+STATUS 2026-11-10 21:40, after Kevin's answers:
+
+- DEPLOYED, each push alone and confirmed on the robot: the replay tool (`78c3e67`, 21:25), the stop hardening (`efd0516`, 21:30), the slew correction (`cce9b06`, 21:35), and the wheel ground scale with the two limits scaled (`962454a` and `1e3a26f` in one push), so the motor bytes do not change.
+- NOT deployed: the BMS link telemetry (`929123e` on the pack-low branch) and the pack-low latch (branch `worktree-agent-a989fe051ee4d7bb4`, tip `ba22c5d`). Kevin wants limp home; it is on by default in that branch (Grok session `01a1c8a0`: no item to correct). The branch waits for VESC part A and for a full read of the diff.
+- Kevin's rulings: no charger latch and no "charger unplugged" button (decision 4: "No. Stupid idea."), so item 7 stays open by his decision. The first command after a re-arm stays as it is (decision 5: "Unnecessary."). Do not propose them again.
+- The commit names in the table below are the names on the agents' branches; the names in `main` are in this list.
+
 Kevin said: "Do what you can do without me." Four agents prepared the work below in local worktrees under `.claude/worktrees/`. The branches are on the Mac only. Each code change needs Kevin's approval, and each push restarts `wall-e`. The documents of that evening are in `main` already (`docs/charger_inhibit_review_2026-11-10.md`, `docs/wheel_speed_scale_2026-11-10.md`, and the updates to the log, teleop, services and heading documents).
 
 | Branch | Commits | Content | Review |
