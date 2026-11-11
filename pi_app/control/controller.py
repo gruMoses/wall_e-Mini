@@ -335,6 +335,17 @@ class Controller:
         self._vesc_pack_guard: Optional[dict] = None
         # This tick's pack limit applies at once (autonomous in a session).
         self._pack_limit_immediate: bool = False
+        # The arm state pushed to set_drive_context(). It goes False only on a
+        # DELIBERATE disarm (ch3 low on a live RC link, the ch5 e-stop, or an
+        # auto-disarm), never on an RC dropout: the driver's disarm edge clears
+        # a pack-low latch into limp home (_update_driver_armed).
+        self._driver_armed: bool = False
+        # This tick's pack-guard block for FOLLOW_ME / WAYPOINT_NAV (reason or
+        # None) and the status it came from (_pack_guard_autonomy_block).
+        self._pack_guard_block: Optional[str] = None
+        self._pack_guard_block_status: Optional[dict] = None
+        self._pack_guard_err_logged: bool = False
+        self._pack_limit_bad_logged: bool = False
         # Per-motor STATUS(9) frame ages + RX-thread liveness. Already read below
         # to drive the open-loop staleness fallback; also surfaced (same
         # charger_inhibit plumbing) so the /debug board can show which motor
@@ -682,6 +693,10 @@ class Controller:
             and self._safety_state.is_armed
             and self._follow_me_target_present()
         ):
+            block, _ = self._pack_guard_autonomy_block()
+            if block is not None:
+                _logger.warning("FOLLOW_ME start refused: pack guard %s", block)
+                return False
             self._mode = "FOLLOW_ME"
             self._safety_state.set_follow_me_active(True)
             self._follow_me.start_recorder()
@@ -800,10 +815,17 @@ class Controller:
         than the nav's stale timeout. Then the fix quality must be trusted
         (exactly RTK fixed, quality 4, by default) and the heading reference
         valid (_waypoint_heading_problem).
+
+        ``pack_guard``: the motor driver's pack guard is latched, RESTRICTED
+        or in a post-latch session, or its status cannot be read (fail
+        closed). A driver without get_pack_guard_status() is not gated.
         """
         nav = self._waypoint_nav
         if nav is None:
             return "waypoint_nav_unavailable"
+        block, _ = self._pack_guard_autonomy_block()
+        if block is not None:
+            return "pack_guard"
         gps = self._gps_reading
         if gps is None:
             return "gps_state_unknown"
@@ -889,6 +911,103 @@ class Controller:
             f" (ALIGN for {align_s:.1f} s)" if reason == "align_timeout" and align_s is not None else "",
         )
 
+    def _pack_guard_autonomy_block(self) -> tuple[Optional[str], Optional[dict]]:
+        """Why the pack guard forbids FOLLOW_ME / WAYPOINT_NAV now, or None.
+
+        Returns (reason, status). The reason is ``latched``, ``restricted``,
+        ``post_latch`` (from VescCanDriver.get_pack_guard_status()) or
+        ``unreadable`` (the getter raised or returned no dict: fail closed).
+        A driver without the method (Arduino fallback, test fakes) is not
+        gated: (None, None). Called from the control thread and from the web
+        thread (activate_follow_me / waypoint_nav_activation_blocked).
+        """
+        fn = getattr(self._motor, "get_pack_guard_status", None)
+        if not callable(fn):
+            return None, None
+        try:
+            status = fn()
+        except Exception:
+            if not self._pack_guard_err_logged:
+                self._pack_guard_err_logged = True
+                _logger.exception(
+                    "motor get_pack_guard_status failed; FOLLOW_ME / WAYPOINT_NAV blocked"
+                )
+            return "unreadable", None
+        if not isinstance(status, dict):
+            if not self._pack_guard_err_logged:
+                self._pack_guard_err_logged = True
+                _logger.error(
+                    "motor get_pack_guard_status returned %r; FOLLOW_ME / WAYPOINT_NAV blocked",
+                    type(status).__name__,
+                )
+            return "unreadable", None
+        self._pack_guard_err_logged = False
+        for key in ("latched", "restricted", "post_latch"):
+            if status.get(key):
+                return key, status
+        return None, status
+
+    def _leave_autonomy_if_pack_guarded(self, telemetry: dict, mono_now: float) -> None:
+        """Drop FOLLOW_ME / WAYPOINT_NAV on this tick while the pack guard blocks them.
+
+        The block is this tick's ``_pack_guard_block``: RESTRICTED, a
+        post-latch session, or an unreadable guard. Mode MANUAL before any
+        command is computed, and the slew is pinned at neutral
+        (_hold_slew_at_neutral): the autonomous motion stops AT ONCE, as the
+        driver's immediate zero did before this exit existed, and a held
+        stick then ramps up from neutral at the MANUAL rates inside the pack
+        limit (never a jump). A slew DECEL from the autonomous speed toward
+        centred sticks would coast about 0.37 s with the 0.8 m person stop
+        blind, because that stop only sees forward targets (Grok 01a1ccd5).
+
+        A LATCH does not exit: the mode stays, the pack limit ramps it to
+        zero over pack_low_ramp_s with the person stop live, and nothing
+        releases a latch in an autonomous mode (voltage release is MANUAL
+        only; a disarm ends the session). New starts are still refused.
+
+        Nothing resumes by itself: the starts are refused while the block
+        lasts, and the operator restarts the mode by hand after it.
+        ``pack_guard_mode_exit`` in the telemetry is the JSON event for the
+        run log.
+        """
+        block = self._pack_guard_block
+        if block is None or block == "latched" or self._mode not in ("FOLLOW_ME", "WAYPOINT_NAV"):
+            return
+        left_mode = self._mode
+        self._mode = "MANUAL"
+        self._hold_slew_at_neutral(mono_now)
+        if left_mode == "FOLLOW_ME":
+            self._safety_state.set_follow_me_active(False)
+            if self._follow_me is not None:
+                self._follow_me.stop_recorder()
+                reset = getattr(self._follow_me, "reset_tracking", None)
+                if callable(reset):
+                    reset()
+            if self._gesture is not None:
+                self._gesture.notify_external_deactivation()
+            telemetry["follow_me_exit_reason"] = "pack_guard"
+        else:
+            self._wp_align_since = None
+            self._wp_align_index = None
+            telemetry["waypoint_nav_exit_reason"] = "pack_guard"
+        status = self._pack_guard_block_status if isinstance(self._pack_guard_block_status, dict) else {}
+        voltage = status.get("voltage_v")
+        telemetry["pack_guard_mode_exit"] = {
+            "mode": left_mode,
+            "reason": block,
+            "latch_reason": status.get("reason"),
+            "voltage_v": voltage,
+            "voltage_state": status.get("voltage_state"),
+        }
+        _logger.warning(
+            "%s stopped: pack guard %s (pack %s V, %s); the sticks have control, "
+            "restart the mode by hand",
+            left_mode,
+            block,
+            f"{voltage:.1f}" if isinstance(voltage, (int, float)) else "?",
+            status.get("voltage_state"),
+        )
+
     def _track_waypoint_align(self, nav_state_value: str, wp_index: int, mono_now: float) -> None:
         """Start, keep, or clear the ALIGN episode timer from this tick's state.
 
@@ -937,19 +1056,50 @@ class Controller:
         self._reset_slew_state(now_s)
         self._slew_seen_non_neutral = True
 
+    def _update_driver_armed(self, rc_live: bool, ch3_us: int, forced_disarm: bool) -> None:
+        """Update the arm state that _push_motor_drive_context() sends.
+
+        True while armed. It goes False only on a DELIBERATE disarm: ch3 at
+        or below arm_low_threshold_us on a live (not stale) RC link, the ch5
+        e-stop latch, or an auto-disarm (force_disarm). During an RC dropout
+        it keeps its last value, because the driver's armed -> disarmed edge
+        clears a pack-low latch into limp home, and a 1 s dropout with the
+        switch still up is not the operator's act (the robot re-arms when
+        the link returns). Same rule as the vision-hang restart gate: the
+        raw switch level on a fresh link, not ``is_armed``. Unlike that gate,
+        a long silence never counts as a switch-off here (fail closed: the
+        latch then waits for ch3 low on a live link).
+        """
+        if self._safety_state.is_armed:
+            self._driver_armed = True
+            return
+        try:
+            ch3_low = int(ch3_us) <= int(self._safety_params.arm_low_threshold_us)
+        except (TypeError, ValueError):
+            ch3_low = False
+        if (
+            forced_disarm
+            or self._safety_state.emergency_active
+            or (rc_live and ch3_low)
+        ):
+            self._driver_armed = False
+
     def _push_motor_drive_context(self, request_neutral: Optional[bool] = None) -> None:
         """Tell the motor driver the arm state and whether the mode is MANUAL.
 
         VescCanDriver.set_drive_context() clears the pack-low latch on the
         armed -> disarmed edge and gates limp home / voltage release to
-        MANUAL. ``request_neutral`` (the request before the pack guard is
-        zero throttle) is what its releases wait for. Drivers without it
-        (Arduino fallback, test fakes) are skipped.
+        MANUAL. The arm state is the DELIBERATE one (_update_driver_armed),
+        so an RC dropout cannot clear a latch. ``request_neutral`` (the
+        operator's MANUAL request before the obstacle layer and the pack
+        guard is zero throttle; always False in FOLLOW_ME / WAYPOINT_NAV) is
+        what its releases wait for. Drivers without it (Arduino fallback,
+        test fakes) are skipped.
         """
         fn = getattr(self._motor, "set_drive_context", None)
         if not callable(fn):
             return
-        kwargs = {"armed": bool(self._safety_state.is_armed), "manual": (self._mode == "MANUAL")}
+        kwargs = {"armed": bool(self._driver_armed), "manual": (self._mode == "MANUAL")}
         if request_neutral is not None:
             kwargs["request_neutral"] = bool(request_neutral)
         try:
@@ -966,8 +1116,17 @@ class Controller:
     def _pack_drive_limit_bytes(self) -> Optional[int]:
         """The pack guard's limit in bytes off centre (0 = to zero), or None.
 
-        From VescCanDriver.get_drive_limit_bytes(); a driver without it falls
-        back to the polled pack_low_latched flag (limit 0).
+        From VescCanDriver.get_drive_limit_bytes(). A value that is not an
+        int (a bool counts as not an int) or is outside 0..127 gives 0 (fail
+        closed), as does a getter that raises.
+
+        A driver without get_drive_limit_bytes() has NO pack cutoff: the
+        result is 0 only while its polled telemetry reports
+        pack_low_latched, and the Arduino fallback (ArduinoModelXDriver)
+        reports no telemetry at all, so for it this is always None. main.py
+        also feeds the BMS cell trigger only to a driver that has
+        set_bms_cell_reading(), so the Arduino fallback has no BMS cutoff
+        either.
         """
         self._pack_limit_immediate = False
         # Autonomous inside a limp / post-latch / restricted session: zero at
@@ -988,11 +1147,21 @@ class Controller:
         if callable(fn):
             try:
                 lim = fn()
-                lim = None if lim is None else max(0, int(lim))
             except Exception:
-                # Fail closed: an unreadable guard (or a bad value) is "to zero".
+                # Fail closed: an unreadable guard is "to zero".
                 _logger.exception("motor get_drive_limit_bytes failed")
                 return 0
+            if lim is not None and (
+                isinstance(lim, bool) or not isinstance(lim, int) or not 0 <= lim <= 127
+            ):
+                # Fail closed: a garbage limit is "to zero", never "no limit".
+                if not self._pack_limit_bad_logged:
+                    self._pack_limit_bad_logged = True
+                    _logger.error(
+                        "motor get_drive_limit_bytes returned %r; treating it as limit 0", lim
+                    )
+                return 0
+            self._pack_limit_bad_logged = False
             if lim is not None or not self._vesc_pack_low_latched:
                 return lim
         return 0 if self._vesc_pack_low_latched else None
@@ -1986,6 +2155,9 @@ class Controller:
             self._armed_idle_since = None
             if was_armed:
                 self._on_armed_session_ended()
+            # An RC dropout is not a deliberate disarm: the driver keeps the
+            # last deliberate arm state, so a pack-low latch survives it.
+            self._update_driver_armed(rc_live=False, ch3_us=rc.ch3_us, forced_disarm=False)
             self._push_motor_drive_context()
             cmd = DriveCommand(
                 left_byte=CENTER_OUTPUT_VALUE,
@@ -2054,6 +2226,13 @@ class Controller:
             events = [*auto_events, *events]
         if was_armed and not self._safety_state.is_armed:
             self._on_armed_session_ended()
+        # The RC link is live here (the stale path returned above). An
+        # auto-disarm (force_disarm) is deliberate; it emits DISARMED.
+        self._update_driver_armed(
+            rc_live=True,
+            ch3_us=rc.ch3_us,
+            forced_disarm=any(e is SafetyEvent.DISARMED for e in auto_events),
+        )
         self._push_motor_drive_context()
 
         # Initialize telemetry before any event handler can write to it.
@@ -2108,10 +2287,22 @@ class Controller:
             self._end_vision_tick()
             return cmd, events, cal_telem
 
+        # Pack guard (latched, RESTRICTED, post-latch session, or unreadable):
+        # read once per tick. It refuses the FOLLOW_ME starts below and ends a
+        # running FOLLOW_ME / WAYPOINT_NAV session (_leave_autonomy_if_pack_guarded).
+        self._pack_guard_block, self._pack_guard_block_status = self._pack_guard_autonomy_block()
+
         # React to mode transitions from safety events
         for ev in events:
             if ev is SafetyEvent.FOLLOW_ME_ENTERED:
-                if self._follow_me_target_present():
+                if self._pack_guard_block is not None:
+                    self._mode = "MANUAL"
+                    self._safety_state.set_follow_me_active(False)
+                    telemetry["follow_me_activation_blocked"] = "pack_guard"
+                    _logger.warning(
+                        "FOLLOW_ME start refused: pack guard %s", self._pack_guard_block
+                    )
+                elif self._follow_me_target_present():
                     self._mode = "FOLLOW_ME"
                     if self._follow_me is not None:
                         self._follow_me.start_recorder()
@@ -2153,6 +2344,10 @@ class Controller:
                     gesture_event = None  # cannot activate
                     gesture_status["event"] = None
                     gesture_status["event_reason"] = "blocked_no_target"
+                elif self._pack_guard_block is not None:
+                    gesture_event = None  # cannot activate
+                    gesture_status["event"] = None
+                    gesture_status["event_reason"] = "blocked_pack_guard"
                 else:
                     self._mode = "FOLLOW_ME"
                     self._safety_state.set_follow_me_active(True)
@@ -2177,6 +2372,8 @@ class Controller:
         # reference is lost or stale, or ALIGN has run too long (2026-11-10
         # status audit, items 3 and 4).
         self._leave_waypoint_nav_if_unsafe(telemetry, mono_now)
+        # And both autonomous modes while the pack guard blocks them.
+        self._leave_autonomy_if_pack_guarded(telemetry, mono_now)
 
         # Command computation
         telemetry["mode"] = self._mode
@@ -2528,12 +2725,19 @@ class Controller:
         telemetry["slew_delta_right"] = 0
 
         # Mode is final for this tick: the driver's pack-low gate needs it
-        # (limp home is MANUAL only; voltage release is MANUAL only). The
-        # request bytes here are BEFORE the pack guard: their neutrality is the
-        # "zero commanded throttle" the driver's releases wait for.
+        # (limp home is MANUAL only; voltage release is MANUAL only). "Zero
+        # commanded throttle", which the driver's releases wait for, is the
+        # operator's MANUAL request BEFORE the obstacle layer (drive_cmd_*,
+        # RC or phone): a stick held into the person stop is still throttle.
+        # FOLLOW_ME / WAYPOINT_NAV never count as zero throttle, so nothing
+        # releases in an autonomous mode (_leave_autonomy_if_pack_guarded
+        # leaves them anyway).
         self._push_motor_drive_context(
-            request_neutral=(int(left) == CENTER_OUTPUT_VALUE
-                             and int(right) == CENTER_OUTPUT_VALUE)
+            request_neutral=(
+                self._mode == "MANUAL"
+                and int(telemetry["drive_cmd_left"]) == CENTER_OUTPUT_VALUE
+                and int(telemetry["drive_cmd_right"]) == CENTER_OUTPUT_VALUE
+            )
         )
         pack_limit_b = self._pack_drive_limit_bytes()
         telemetry["vesc_pack_guard"] = self._vesc_pack_guard

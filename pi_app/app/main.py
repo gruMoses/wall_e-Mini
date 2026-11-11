@@ -740,6 +740,21 @@ def run() -> int:
                     log_fh.flush()
                 except Exception:
                     pass
+            # Pack guard ended FOLLOW_ME / WAYPOINT_NAV (2026-11-11): the
+            # controller wrote the journal warning; mirror it into the JSON
+            # log so it is there even when the 10 Hz gate skips the tick.
+            _pg = telem.get("pack_guard_mode_exit")
+            if isinstance(_pg, dict) and log_fh is not None:
+                try:
+                    log_fh.write(json.dumps({
+                        "type": "event",
+                        "event": "pack_guard_mode_exit",
+                        **_pg,
+                        "ts": round(time.time(), 3),
+                    }) + "\n")
+                    log_fh.flush()
+                except Exception:
+                    pass
             # OAK vision worker hang (2026-10-08): the reader's health flag
             # says neither its session loop nor its supervisor has ticked for
             # vision_hang_s (or the thread died). Shout in the journal every
