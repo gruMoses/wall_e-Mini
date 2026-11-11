@@ -55,6 +55,9 @@ class _Base(unittest.TestCase):
         self.sent: list = []
 
     def make(self, **overrides) -> VescCanDriver:
+        # Most tests start straight in the low band to time the countdown, so
+        # the start seed is off unless a test asks for it (TestStartSeed).
+        overrides.setdefault("pack_low_seed_on_start", False)
         cfg = replace(VescConfig(), **overrides)
         d = VescCanDriver(left_id=2, right_id=1, max_rpm=MAX_ERPM, vesc_cfg=cfg)
         d._send_rpm = lambda can_id, rpm: self.sent.append((can_id, int(rpm)))  # type: ignore[method-assign]
@@ -564,6 +567,155 @@ class TestTelemetrySurface(_Base):
             self.latch_by_voltage(d, 43.5)
             self.hold(d, 5.0, 43.5, 43.5)
         self.assertEqual(sum("ENGAGED" in m for m in cm.output), 1)
+
+
+class TestRestrictedState(_Base):
+    """Voltage not cross-checked for pack_voltage_untrusted_limit_s (10 s):
+    MANUAL capped at the limp speed, autonomous ramps to zero. Not the latch."""
+
+    CAP_B = 32
+
+    def cap_rpm(self) -> int:
+        return VescCanDriver._byte_to_rpm(CENTER_OUTPUT_VALUE + self.CAP_B, MAX_ERPM)
+
+    def assert_restricted_effects(self, d):
+        full = VescCanDriver._byte_to_rpm(254, MAX_ERPM)
+        st = d.get_pack_guard_status()
+        self.assertTrue(st["restricted"])
+        self.assertFalse(st["latched"])              # no low-voltage claim
+        self.assertIsNone(st["reason"])
+        d.set_tracks(254, 254)
+        self.assertEqual(self.last_pair(), (self.cap_rpm(), self.cap_rpm()))
+        self.assertLess(self.cap_rpm(), full)
+        d.set_drive_context(armed=True, manual=False)   # FOLLOW_ME
+        for _ in range(12):
+            self.clock.t += 0.1
+            d.set_tracks(254, 254)
+        self.assertEqual(self.last_pair(), (0, 0))
+        d.set_drive_context(armed=True, manual=True)
+
+    def test_disagreement_straddling_44_v_past_the_limit_restricts(self):
+        d = self.make()
+        with self.assertLogs(LOGGER, level="WARNING") as cm:
+            self.volts(d, 43.0, 44.8)
+            self.hold(d, 9.5, 43.0, 44.8)
+            self.assertFalse(d.get_pack_guard_status()["restricted"])
+            self.hold(d, 0.7, 43.0, 44.8)
+        self.assert_restricted_effects(d)
+        self.assertEqual(sum("RESTRICTED" in m for m in cm.output), 1)
+
+    def test_lone_high_reader_restricts(self):
+        # Left VESC silent, right one stuck reading high: it cannot be
+        # cross-checked, so autonomy must not depend on it.
+        d = self.make()
+        self.volts(d, 47.0, 48.0)
+        self.clock.t += 1.0
+        self.hold(d, 10.5, right=48.0)
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "trusted_right")
+        self.assert_restricted_effects(d)
+
+    def test_short_glitch_does_not_restrict(self):
+        d = self.make()
+        self.volts(d, 47.0, 47.0)
+        for _ in range(3):
+            self.hold(d, 3.0, 47.0, 49.0)           # 3 s disagreement
+            self.hold(d, 0.5, 47.0, 47.0)           # back to cross-checked
+        self.clock.t += 0.3                          # a 0.3 s CAN gap
+        d._check_voltage_shutdown()
+        self.hold(d, 0.5, 47.0, 47.0)
+        self.assertFalse(d.get_pack_guard_status()["restricted"])
+        d.set_tracks(254, 254)
+        full = VescCanDriver._byte_to_rpm(254, MAX_ERPM)
+        self.assertEqual(self.last_pair(), (full, full))
+
+    def test_recovery_needs_confirm_and_zero_throttle(self):
+        d = self.make()
+        self.volts(d, 43.0, 44.8)
+        self.hold(d, 10.5, 43.0, 44.8)
+        self.assertTrue(d.get_pack_guard_status()["restricted"])
+        d.set_drive_context(armed=True, manual=True, request_neutral=False)
+        self.hold(d, 1.0, 46.0, 46.0)
+        self.assertTrue(d.get_pack_guard_status()["restricted"])   # confirm not met
+        self.hold(d, 2.0, 46.0, 46.0)
+        self.assertTrue(d.get_pack_guard_status()["restricted"])   # throttle held
+        d.set_drive_context(armed=True, manual=True, request_neutral=True)
+        with self.assertLogs(LOGGER, level="WARNING") as cm:
+            self.hold(d, 0.1, 46.0, 46.0)
+        self.assertFalse(d.get_pack_guard_status()["restricted"])
+        self.assertTrue(any("RESTRICTED state ended" in m for m in cm.output))
+
+    def test_disarm_ends_it_only_with_cross_checked_data(self):
+        d = self.make()
+        self.volts(d, 43.0, 44.8)
+        self.hold(d, 10.5, 43.0, 44.8)
+        d.set_drive_context(armed=False, manual=True)
+        d.set_drive_context(armed=True, manual=True)
+        self.assertTrue(d.get_pack_guard_status()["restricted"])   # still disagreeing
+        self.hold(d, 0.2, 46.0, 46.0)
+        d.set_drive_context(armed=False, manual=True)
+        self.assertFalse(d.get_pack_guard_status()["restricted"])
+
+    def test_frozen_reader_is_excluded_then_restricts(self):
+        d = self.make()
+        self.volts(d, 47.0, 47.0)
+        for i in range(215):                          # 21.5 s: left frozen, right moves
+            self.clock.t += 0.1
+            self.volts(d, 47.0, 47.0 if i % 2 else 47.1)
+        st = d.get_pack_guard_status()
+        self.assertEqual(st["frozen_reader"], "left")
+        self.assertEqual(st["voltage_state"], "trusted_right")
+        for i in range(105):
+            self.clock.t += 0.1
+            self.volts(d, 47.0, 47.0 if i % 2 else 47.1)
+        self.assertTrue(d.get_pack_guard_status()["restricted"])
+
+    def test_both_still_at_rest_is_not_frozen(self):
+        d = self.make()
+        self.volts(d, 47.0, 47.9)
+        self.hold(d, 60.0, 47.0, 47.9)
+        st = d.get_pack_guard_status()
+        self.assertIsNone(st["frozen_reader"])
+        self.assertFalse(st["restricted"])
+
+    def test_below_floor_with_frames_restricts_and_never_latches(self):
+        d = self.make()
+        self.volts(d, 6.8, 6.8)
+        self.hold(d, 40.0, 6.8, 6.8)
+        st = d.get_pack_guard_status()
+        self.assertEqual(st["voltage_state"], "below_floor")
+        self.assertTrue(st["restricted"])
+        self.assertFalse(st["latched"])
+
+
+class TestStartSeed(_Base):
+    """pack_low_seed_on_start (default True): a service restart on a low pack
+    must not hand out a fresh 30 s of full drive."""
+
+    def test_restart_at_43_5_v_latches_after_2_s_not_30(self):
+        self.assertTrue(VescConfig().pack_low_seed_on_start)
+        d = self.make(pack_low_seed_on_start=True)
+        with self.assertLogs(LOGGER, level="WARNING") as cm:
+            self.volts(d, 43.5, 44.4)                 # first trusted reading
+            self.hold(d, 1.8, 43.5, 44.4)
+            self.assertFalse(d.get_pack_low_latched())
+            self.hold(d, 0.4, 43.5, 44.4)
+        self.assertTrue(d.get_pack_low_latched())
+        self.assertTrue(any("seeded" in m for m in cm.output))
+
+    def test_restart_on_a_healthy_pack_is_not_seeded(self):
+        d = self.make(pack_low_seed_on_start=True)
+        self.volts(d, 45.0, 45.9)
+        self.hold(d, 1.0, 45.0, 45.9)
+        self.hold(d, 25.0, 43.5, 44.4)
+        self.assertFalse(d.get_pack_low_latched())    # normal 30 s countdown
+        self.hold(d, 5.5, 43.5, 44.4)
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_seed_off_gives_the_full_delay(self):
+        d = self.make(pack_low_seed_on_start=False)
+        self.volts(d, 43.5, 44.4)
+        self.hold(d, 25.0, 43.5, 44.4)
+        self.assertFalse(d.get_pack_low_latched())
 
 
 if __name__ == "__main__":

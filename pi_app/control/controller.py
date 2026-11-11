@@ -935,20 +935,95 @@ class Controller:
         self._reset_slew_state(now_s)
         self._slew_seen_non_neutral = True
 
-    def _push_motor_drive_context(self) -> None:
+    def _push_motor_drive_context(self, request_neutral: Optional[bool] = None) -> None:
         """Tell the motor driver the arm state and whether the mode is MANUAL.
 
         VescCanDriver.set_drive_context() clears the pack-low latch on the
         armed -> disarmed edge and gates limp home / voltage release to
-        MANUAL. Drivers without it (Arduino fallback, test fakes) are skipped.
+        MANUAL. ``request_neutral`` (the request before the pack guard is
+        zero throttle) is what its releases wait for. Drivers without it
+        (Arduino fallback, test fakes) are skipped.
         """
         fn = getattr(self._motor, "set_drive_context", None)
         if not callable(fn):
             return
+        kwargs = {"armed": bool(self._safety_state.is_armed), "manual": (self._mode == "MANUAL")}
+        if request_neutral is not None:
+            kwargs["request_neutral"] = bool(request_neutral)
         try:
-            fn(armed=bool(self._safety_state.is_armed), manual=(self._mode == "MANUAL"))
+            fn(**kwargs)
+        except TypeError:
+            # A driver with the older two-argument signature.
+            try:
+                fn(armed=kwargs["armed"], manual=kwargs["manual"])
+            except Exception:
+                _logger.exception("motor set_drive_context failed")
         except Exception:
             _logger.exception("motor set_drive_context failed")
+
+    def _pack_drive_limit_bytes(self) -> Optional[int]:
+        """The pack guard's limit in bytes off centre (0 = to zero), or None.
+
+        From VescCanDriver.get_drive_limit_bytes(); a driver without it falls
+        back to the polled pack_low_latched flag (limit 0).
+        """
+        fn = getattr(self._motor, "get_drive_limit_bytes", None)
+        if callable(fn):
+            try:
+                lim = fn()
+                if lim is not None or not self._vesc_pack_low_latched:
+                    return None if lim is None else max(0, int(lim))
+            except Exception:
+                _logger.exception("motor get_drive_limit_bytes failed")
+        return 0 if self._vesc_pack_low_latched else None
+
+    def _apply_pack_limit(
+        self,
+        left: int,
+        right: int,
+        limit_b: int,
+        prev: tuple,
+        mono_now: float,
+    ) -> tuple:
+        """Bound this tick's slewed output by the pack guard's limit.
+
+        Per track the envelope is |previous output - centre| shrinking at
+        full speed (128 bytes) per VescConfig.pack_low_ramp_s, never below
+        ``limit_b``. The slewed value passes when inside it, so a stop (stick
+        release, person stop) is never delayed; above the limit a track
+        cannot reverse past the limit. The slew state takes the bounded value
+        and is marked "motion seen", so a release ramps from it at the mode
+        rates instead of snapping (snap_first_command).
+        """
+        prev_l, prev_r, prev_t = prev
+        ramp_s = float(getattr(getattr(config, "vesc", None), "pack_low_ramp_s", 1.0))
+        span = float(MAX_OUTPUT - CENTER_OUTPUT_VALUE)
+        dt = max(0.0, mono_now - float(prev_t))
+        dec = (span / ramp_s) * dt if ramp_s > 0.0 else float("inf")
+        out = []
+        for prev_b, cur in ((prev_l, left), (prev_r, right)):
+            d_prev = int(prev_b) - CENTER_OUTPUT_VALUE
+            mag = abs(d_prev)
+            env = max(float(limit_b), mag - dec) if mag > limit_b else float(limit_b)
+            d = int(cur) - CENTER_OUTPUT_VALUE
+            if env > limit_b and d_prev > 0:
+                lo, hi = -float(limit_b), env
+            elif env > limit_b and d_prev < 0:
+                lo, hi = -env, float(limit_b)
+            else:
+                lo, hi = -float(limit_b), float(limit_b)
+            d = int(round(max(lo, min(hi, float(d)))))
+            # Rounding must never step past the envelope.
+            if d > 0 and d > hi:
+                d = int(hi)
+            if d < 0 and d < lo:
+                d = -int(-lo)
+            out.append(CENTER_OUTPUT_VALUE + d)
+        self._slew_initialized = True
+        self._slew_seen_non_neutral = True
+        self._slew_last_update = mono_now
+        self._slew_last_left, self._slew_last_right = out[0], out[1]
+        return out[0], out[1]
 
     def _on_armed_session_ended(self) -> None:
         """An armed session ended (disarm, RC stale, e-stop).
@@ -2426,9 +2501,19 @@ class Controller:
         telemetry["slew_delta_right"] = 0
 
         # Mode is final for this tick: the driver's pack-low gate needs it
-        # (limp home is MANUAL only; voltage release is MANUAL only).
-        self._push_motor_drive_context()
+        # (limp home is MANUAL only; voltage release is MANUAL only). The
+        # request bytes here are BEFORE the pack guard: their neutrality is the
+        # "zero commanded throttle" the driver's releases wait for.
+        self._push_motor_drive_context(
+            request_neutral=(int(left) == CENTER_OUTPUT_VALUE
+                             and int(right) == CENTER_OUTPUT_VALUE)
+        )
+        pack_limit_b = self._pack_drive_limit_bytes()
         telemetry["vesc_pack_guard"] = self._vesc_pack_guard
+        telemetry["vesc_pack_drive_limit_bytes"] = pack_limit_b
+        telemetry["vesc_pack_restricted"] = bool(
+            isinstance(self._vesc_pack_guard, dict) and self._vesc_pack_guard.get("restricted")
+        )
 
         # If disarmed, force neutral outputs
         if not self._safety_state.is_armed:
@@ -2452,15 +2537,18 @@ class Controller:
             telemetry["slew_delta_left"] = left - telemetry["slew_in_left"]
             telemetry["slew_delta_right"] = right - telemetry["slew_in_right"]
         else:
-            # The VESC pack-low latch (vesc.VescCanDriver, contract 2026-11-10)
-            # is enforced in the driver's set_tracks(): it ramps the tracks to
-            # zero over VescConfig.pack_low_ramp_s instead of the step to RPM 0
-            # this branch used to command with _motor.stop(). The controller
-            # therefore keeps sending the operator's slewed command: the driver
-            # needs it to see "zero commanded throttle", and it releases the
-            # latch only then (or on a disarm), so the release cannot lurch.
+            # The VESC pack guard (latch, restricted state, post-latch session,
+            # limp) is applied AFTER the normal slew below, by
+            # _apply_pack_limit(): a ramp to the limit at the pack_low_ramp_s
+            # rate from this tick's previous output, so a trip never steps to
+            # neutral. It replaces the old _motor.stop() + slew reset (a step).
+            # The slew state follows the limited output and stays "motion
+            # seen", so a release ramps from there at the mode rates (never a
+            # snap_first_command step to a held stick; commit 7057ca0). The
+            # driver's set_tracks() enforces the same limit as the last gate.
             left_in = int(left)
             right_in = int(right)
+            pack_prev = (self._slew_last_left, self._slew_last_right, self._slew_last_update)
             slewc = getattr(config, "slew_limiter", None)
             mode_for_slew = self._mode
             slewc_enabled = bool(getattr(slewc, "enabled", False))
@@ -2543,6 +2631,8 @@ class Controller:
                 self._slew_last_left = left
                 self._slew_last_right = right
 
+            if pack_limit_b is not None:
+                left, right = self._apply_pack_limit(left, right, pack_limit_b, pack_prev, mono_now)
             if left > MAX_OUTPUT:
                 left = MAX_OUTPUT
             if right > MAX_OUTPUT:

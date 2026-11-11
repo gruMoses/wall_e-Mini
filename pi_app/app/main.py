@@ -1206,6 +1206,19 @@ def run() -> int:
             bms_info = ""
             if bms_link is not None and bms_link.state == "dark":
                 bms_info = f"  BMS(dark {(bms_link.dark_for_s or 0.0) / 60.0:.0f}m)"
+            # Pack guard (VescCanDriver): shown only while it limits the drive.
+            # LATCH = low-voltage claim; RESTRICTED = voltage not trusted (no
+            # low-voltage claim); POST = MANUAL-only session after a disarm.
+            _pg = telem.get("vesc_pack_guard")
+            if isinstance(_pg, dict):
+                _pg_v = _pg.get("voltage_v")
+                _pg_vs = f"{_pg_v:.1f}V" if isinstance(_pg_v, (int, float)) else "?V"
+                if _pg.get("latched"):
+                    bms_info += f"  PACK(LATCH {_pg.get('reason')} {_pg_vs})"
+                elif _pg.get("restricted"):
+                    bms_info += f"  PACK(RESTRICTED {_pg.get('voltage_state')})"
+                elif _pg.get("post_latch"):
+                    bms_info += f"  PACK(POST-LATCH{' LIMP' if _pg.get('limp_active') else ''} {_pg_vs})"
 
             # In non-MANUAL modes, add nav_state + motor bytes so we can see
             # ALIGN/DRIVE transitions and whether pivot actually reaches motors.

@@ -269,6 +269,35 @@ class VescConfig:
     # high end (latches earlier, never later). Set to 0.0 once the right VESC's
     # voltage reading is recalibrated in VESC Tool.
     pack_voltage_right_alone_offset_v: float = 1.0
+    # RESTRICTED state (2026-11-10 follow-up): untrusted data never latches,
+    # but a pack voltage that stays NOT CROSS-CHECKED for this long (stale, a
+    # disagreement, a below-floor reading, or only one usable reader because
+    # the other VESC is silent or frozen; a lone reader stuck high cannot be
+    # caught) means the robot no longer knows its pack. Then autonomous modes
+    # ramp to zero and MANUAL is capped at pack_low_limp_max_byte_offset. It is
+    # NOT the latch: no low-voltage claim. A lone reader still latches.
+    # 10 s: a CAN reopen or a VESC reboot is 1-3 s; ten times a frame gap is
+    # still a short exposure at walking pace.
+    pack_voltage_untrusted_limit_s: float = 10.0
+    # RESTRICTED ends after this many seconds of cross-checked (both fresh,
+    # agreeing) readings with zero throttle, or on a disarm while they are
+    # cross-checked. 2 s = about 100
+    # frames per VESC, the same as the sustain grace.
+    pack_voltage_trust_confirm_s: float = 2.0
+    # FROZEN reader: a fresh reading that has not changed at all for this long
+    # while the other reader changed within pack_voltage_frozen_other_moved_s
+    # is not used (the other one is used alone). The readings step in 0.1 V,
+    # and under load they move every second; both still at rest is NOT frozen.
+    pack_voltage_frozen_s: float = 20.0
+    pack_voltage_frozen_other_moved_s: float = 2.0
+    # Seeded countdown after a service start (default ON): if the first
+    # trusted reading is already below the threshold, the countdown starts
+    # run down so the latch comes pack_low_seed_confirm_s later, not after a
+    # fresh voltage_shutdown_delay_s of full drive. The resting voltage at
+    # start carries no load sag, so below the threshold there means a low
+    # pack; 2 s rejects a single bad first frame.
+    pack_low_seed_on_start: bool = True
+    pack_low_seed_confirm_s: float = 2.0
     # The sustain countdown PAUSES on a sample that is not trusted and in the
     # band (a disagreeing frame, a stale gap, a reading at or above the
     # threshold) and resets only after this many seconds of such samples in a

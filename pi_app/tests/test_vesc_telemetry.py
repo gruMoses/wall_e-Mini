@@ -79,6 +79,9 @@ class _Cfg:
     # countdown" timing. The real 2.0 s grace (VescConfig) is covered in
     # test_pack_low_latch.py with a fake clock.
     pack_low_sustain_grace_s: float = 0.0
+    # These tests start in the low band on purpose; the start seed (real
+    # default True) is tested in test_pack_low_latch.py.
+    pack_low_seed_on_start: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -991,7 +994,11 @@ class TestPackLowLatch(unittest.TestCase):
         self.assertFalse(d._pack_low_latched)
 
     # (d) 38V (timer running) then drop below floor to 6V -> countdown CANCELLED.
-    def test_band_then_below_floor_cancels_countdown(self):
+    def test_band_then_below_floor_keeps_countdown_no_latch(self):
+        # Contract 2026-11-10 follow-up: a below-floor reading is untrusted
+        # ("below_floor"). It never latches, and it no longer CANCELS a running
+        # countdown either (one garbage frame must not buy 30 s more drive);
+        # if it lasts, the RESTRICTED state takes over.
         d = self._driver(delay=30.0)
         self._set_v(d, 38.0)
         d._check_voltage_shutdown()
@@ -999,8 +1006,9 @@ class TestPackLowLatch(unittest.TestCase):
         with patch.object(d, "_send_rpm"):
             self._set_v(d, 6.0)
             d._check_voltage_shutdown()
-        self.assertIsNone(d._low_voltage_since)        # countdown cancelled
+        self.assertIsNotNone(d._low_voltage_since)     # countdown kept
         self.assertFalse(d._pack_low_latched)          # never latched
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "below_floor")
 
     # (e) below-floor then recovery above threshold -> normal monitoring resumes.
     def test_below_floor_then_recovery_resumes_monitoring(self):
