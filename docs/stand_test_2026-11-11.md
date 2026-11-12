@@ -88,12 +88,23 @@ Not changed by it (also true at 1.5 V): if the LEFT reader sticks high, the
 minimum falls to the right reading, which is about 1 V high, so the latch
 can be up to 1 V late (a true pack of about 43.0 V).
 
+Follow-up on branch `pack-guard-averaged-compare` (not deployed, for Kevin's
+review): each VESC keeps an exponential average of its own readings
+(`pack_voltage_compare_tau_s` = 0.25 s). A pair disagrees when the two
+averages differ by more than 2.0 V (`pack_voltage_max_disagree_v`), OR when
+the two latest raw readings differ by more than 3.0 V
+(`pack_voltage_max_raw_disagree_v`, the raw backstop). The backstop was
+added after both reviews (Grok `01a1cde8-af3b-7872-b122-dec57ee0ff91` and an
+independent Opus review): without it, a one-frame low glitch of a reader on
+a healthy 50 V pack was trusted while the averages lagged, and the minimum
+latched a healthy pack. With it, the check never trusts a pair that the
+raw 3.0 V check rejects. Replays: the stand log at the real swings gives no
+"disagree" episode (averaged gap 0.96-1.22 V); every logged drive of
+2026-11-06 to 2026-11-10, through the real frame parser, gives none.
+
 ## 4. Open items
 
-1. Better fix: put both readings through the same 0.25 s moving average
-   before the comparison. In the replay the gap then stayed 0.96-1.22 V
-   (0.88-1.53 V with the swings scaled x2.5). Then tighten the limit to about
-   2.0 V.
+1. Decide on branch `pack-guard-averaged-compare` (see section 3).
 2. A lone right reading is corrected by a fixed 1.0 V
    (`pack_voltage_right_alone_offset_v`). It is used only when the left VESC
    is silent.
@@ -106,4 +117,4 @@ can be up to 1 V late (a true pack of about 43.0 V).
 
 VESC, CAN, eRPM, regen, RC, MOSFET, BMS, RESTRICTED, Grok, Opus, `candump`,
 `wall-e.service`, `VescConfig`, `VescCanDriver`, MANUAL, STATUS_5, speed loop,
-moving average.
+moving average, exponential average, raw backstop.

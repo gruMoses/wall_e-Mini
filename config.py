@@ -269,10 +269,17 @@ class VescConfig:
     # at the same moment differ by only 0.8-1.3 V (the right VESC's offset).
     # 3.0 V (raw) was the same-night stopgap (6ec19b9). With the average, the
     # stand data gave a gap of 0.96-1.22 V (0.88-1.53 V with the swings scaled
-    # x2.5), so 2.0 V is the limit again. A left reader that reads high still
+    # x2.5), so 2.0 V is the limit on the AVERAGES. A left reader that reads high still
     # lets min() fall to the right reading (about 1 V high): the latch can be
     # up to 1 V late. That is true at any limit.
     pack_voltage_max_disagree_v: float = 2.0
+    # Raw backstop (Grok 01a1cde8 and an independent Opus review, 2026-11-11):
+    # the two LATEST raw readings more than this apart also count as a
+    # disagreement. The average lags a step by about 0.2 s; without this, a
+    # one-frame glitch of a reader to 43 V on a healthy 50 V pack was trusted
+    # and the minimum latched a healthy pack (Opus demo). 3.0 V is the raw
+    # limit of 6ec19b9, so this check never trusts a pair that one rejected.
+    pack_voltage_max_raw_disagree_v: float = 3.0
     # Time constant (s) of the exponential average used only for the
     # disagreement check. Both readings use the same one, so a swing that one
     # VESC reports a frame earlier than the other cancels. 0 = compare the

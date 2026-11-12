@@ -2,7 +2,8 @@
 
 VescCanDriver must:
   * use the MINIMUM of the FRESH (< 0.5 s) per-VESC bus readings; none fresh,
-    or two that disagree by > 3.0 V (1.5 V before 2026-11-11), is untrusted and never latches;
+    or two whose 0.25 s averages differ by > 2.0 V or whose raw readings differ by
+    > 3.0 V (raw 1.5 V before 2026-11-11), is untrusted and never latches;
   * latch at the trusted voltage < 44.0 V sustained for voltage_shutdown_delay_s;
   * ramp the tracks to zero over pack_low_ramp_s instead of a step;
   * release only at >= 46.0 V with zero throttle in MANUAL, or on a disarm;
@@ -317,31 +318,54 @@ class TestReleaseRules(_Base):
 
     def test_wide_but_trusted_pair_releases_only_on_its_lower_reading(self):
         # 2.0 V limit on the averaged readings: 45.9 / 47.8 is trusted but its
-        # minimum is under 46 V, so no release; 46.0 / 48.2 disagrees and
-        # cannot release; 46.0 / 47.9 releases on the 46.0 V minimum once the
-        # averages agree (well inside 1 s).
+        # minimum is under 46 V, so no release; a pair whose AVERAGES are
+        # 2.2 V apart disagrees and cannot release, even once its minimum is
+        # 46.0 V; 46.0 / 47.9 releases on the 46.0 V minimum once the averages
+        # agree (well inside 1 s). (Right after a step, while the averages
+        # still lag, a 2.0-3.0 V raw pair is trusted like the raw 3.0 V check
+        # of 6ec19b9; its minimum still has to be 46.0 V.)
         d = self.make()
         self.latch_by_voltage(d)
         d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
         self.hold(d, 3.0, 45.9, 47.8)
         self.assertTrue(d.get_pack_low_latched())
+        self.hold(d, 3.0, 45.9, 48.1)        # averages settle 2.2 V apart
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
         self.hold(d, 3.0, 46.0, 48.2)
         self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
         self.assertTrue(d.get_pack_low_latched())
         self.hold(d, 1.0, 46.0, 47.9)
         self.assertFalse(d.get_pack_low_latched())
 
-    def test_release_needs_the_raw_readings_to_agree_too(self):
-        # Right after a step the averages still agree while the raw pair does
-        # not: no release in that window.
+    def test_raw_backstop_blocks_a_release_while_the_averages_lag(self):
+        # Right after a step the averages still agree while the raw pair is
+        # more than 3.0 V apart: disagree, no release.
         d = self.make()
         self.latch_by_voltage(d)
         d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
         self.hold(d, 2.0, 43.5, 44.5)
         self.clock.t += 0.02
-        self.volts(d, 46.5, 49.5)            # raw 3.0 V apart, averages close
-        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "trusted_both")
+        self.volts(d, 46.5, 49.6)            # raw 3.1 V apart, averages close
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
         self.assertTrue(d.get_pack_low_latched())
+
+    def test_release_works_with_a_2_1_v_raw_gap_seen_on_the_stand(self):
+        # Grok 01a1cde8: a raw gap of 2.1 V (skewed frames) with the averages
+        # about 1 V apart is cross-checked, so a healthy pack releases.
+        d = self.make()
+        self.latch_by_voltage(d)
+        d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+        self.hold(d, 2.0, 46.0, 47.0)
+        self.assertFalse(d.get_pack_low_latched())
+        d2 = self.make()
+        self.latch_by_voltage(d2)
+        d2.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+        self.hold(d2, 0.2, 45.0, 46.0)       # not yet released (under 46 V)
+        self.assertTrue(d2.get_pack_low_latched())
+        self.clock.t += 0.02
+        self.volts(d2, 46.0, 48.1)           # one skewed frame: raw 2.1 V
+        self.assertEqual(d2.get_pack_guard_status()["voltage_state"], "trusted_both")
+        self.assertFalse(d2.get_pack_low_latched())
 
     def test_wide_but_trusted_pair_latches_on_its_lower_reading(self):
         # 43.9 beside 45.8 (1.9 V apart) is trusted; the 43.9 V minimum latches.
@@ -687,13 +711,64 @@ class TestRestrictedState(_Base):
         self._skewed_swings(d, seconds=15.0)
         self.assertTrue(d.get_pack_guard_status()["restricted"])
 
-    def test_a_real_offset_still_disagrees_through_the_average(self):
-        # A reader that is really 2.5 V off (beyond the 1.0 V offset) shows
-        # in the averaged gap within about a second.
+    def test_a_sustained_2_6_v_gap_disagrees_through_the_average(self):
+        # 2.6 V apart: the raw-only 3.0 V check of 6ec19b9 trusted it; the
+        # averaged 2.0 V check flags it within about a second.
         d = self.make()
         self.hold(d, 2.0, 50.0, 51.0)
-        self.hold(d, 1.0, 50.0, 53.5)
+        self.hold(d, 1.0, 50.0, 52.6)
         self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
+        main_like = self.make(pack_voltage_compare_tau_s=0.0, pack_voltage_max_disagree_v=3.0)
+        self.hold(main_like, 1.0, 50.0, 52.6)
+        self.assertEqual(main_like.get_pack_guard_status()["voltage_state"], "trusted_both")
+
+    def test_one_frame_low_glitch_on_a_healthy_pack_restricts_never_latches(self):
+        # Opus review 2026-11-11: without the raw backstop, a left reader
+        # dropping to 43 V for one frame every 1.5 s was trusted (the averages
+        # lag) and the minimum latched a healthy 50 V pack at 32.9 s.
+        d = self.make()
+        for i in range(int(40 / 0.02)):
+            self.clock.t += 0.02
+            glitch = i % 75 == 0 and i > 0
+            self.volts(d, 43.0 if glitch else 50.0, 51.0)
+        st = d.get_pack_guard_status()
+        self.assertFalse(d.get_pack_low_latched())
+        self.assertTrue(st["restricted"])
+
+    def test_one_sided_step_does_not_clear_a_running_countdown(self):
+        # Grok 01a1cde8: settled 43.0 / 44.0 (countdown running); the low side
+        # steps to 50.0. Raw 6.0 V apart: disagree at once, countdown kept.
+        d = self.make()
+        self.hold(d, 5.0, 43.0, 44.0)
+        self.assertIsNotNone(d._low_voltage_since)
+        for _ in range(10):                  # 0.2 s of frames at 50 Hz
+            self.clock.t += 0.02
+            self.volts(d, 50.0, 44.0)
+            self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
+        self.assertIsNotNone(d._low_voltage_since)
+
+    def test_average_weight_restart_and_implausible_frames(self):
+        d = self.make()
+        self.hold(d, 2.0, 50.0, 51.0)        # settled
+        self.assertAlmostEqual(d._left_telem.v_avg, 50.0, places=6)
+        self.clock.t += 0.02
+        self.volts(d, 51.0, 51.0)            # one step after 20 ms
+        import math
+        self.assertAlmostEqual(d._left_telem.v_avg, 50.0 + (1 - math.exp(-0.02 / 0.25)), places=6)
+        self.clock.t += 0.02
+        d._parse_status5("left", _status5(3276.7), self.clock.t)    # corrupt frame
+        self.assertAlmostEqual(d._left_telem.v_avg, 50.0 + (1 - math.exp(-0.02 / 0.25)), places=6)
+        self.clock.t += 0.6                  # left silent longer than max age
+        self.volts(d, 45.0, 51.0)
+        self.assertAlmostEqual(d._left_telem.v_avg, 45.0, places=6)   # restarted, no ghost
+
+    def test_compare_gap_is_none_while_one_reader_is_silent(self):
+        d = self.make()
+        self.hold(d, 1.0, 50.0, 51.0)
+        self.assertAlmostEqual(d.get_pack_guard_status()["compare_gap_v"], 1.0, places=2)
+        self.clock.t += 1.0
+        self.volts(d, right=51.0)
+        self.assertIsNone(d.get_pack_guard_status()["compare_gap_v"])
 
     def test_short_glitch_does_not_restrict(self):
         d = self.make()

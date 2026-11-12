@@ -9,7 +9,7 @@ Design:
   thread-safe telemetry state.
 - Pack-low latch (motor cutoff ONLY — no OS shutdown; contract of 2026-11-10): the pack
   voltage is the MINIMUM of the FRESH (< 0.5 s) per-VESC readings; none fresh, or two
-  whose 0.25 s averages disagree by > pack_voltage_max_disagree_v (2.0 V), is untrusted and never latches.  Trusted voltage in
+  whose 0.25 s averages differ by > 2.0 V or whose raw readings differ by > 3.0 V, is untrusted and never latches.  Trusted voltage in
   [floor, threshold) for the delay latches; so does the BMS lowest cell <= 3.30 V on two
   fresh polls (set_bms_cell_reading).  Release: trusted voltage >= threshold +
   hysteresis with zero throttle in MANUAL, or a disarm (set_drive_context).  Optional
@@ -61,9 +61,14 @@ _CAN_PACKET_STATUS_5 = 27
 # Defaults for the pack-low latch when vesc_cfg lacks a field (tests pass a
 # minimal config object). Production values and their reasons are in
 # config.VescConfig; keep these equal to them.
+# Bus readings above this never enter the comparison average (a corrupt frame;
+# the VESCs' own over-voltage fault is 90 V).
+_AVG_MAX_PLAUSIBLE_V = 100.0
+
 _PACK_DEFAULTS = {
     "pack_voltage_max_age_s": 0.5,
     "pack_voltage_max_disagree_v": 2.0,
+    "pack_voltage_max_raw_disagree_v": 3.0,
     "pack_voltage_compare_tau_s": 0.25,
     "pack_low_release_hysteresis_v": 2.0,
     "pack_low_sustain_grace_s": 2.0,
@@ -730,12 +735,20 @@ class VescCanDriver:
                 "bms_cell_low_count": self._bms_low_count,
                 # Averaged right - left gap that the disagreement check uses
                 # (about +1.0 V at rest: the right VESC reads high).
-                "compare_gap_v": (
-                    round(self._right_telem.v_avg - self._left_telem.v_avg, 2)
-                    if self._right_telem.v_avg is not None
-                    and self._left_telem.v_avg is not None else None
-                ),
+                "compare_gap_v": self._compare_gap_locked(),
             }
+
+    def _compare_gap_locked(self) -> Optional[float]:
+        """Averaged right - left gap (about +1.0 V at rest), only while both
+        readings are fresh. Caller holds _telem_lock."""
+        now = time.monotonic()
+        max_age = float(self._pcfg("pack_voltage_max_age_s"))
+        l, r = self._left_telem, self._right_telem
+        if (l.v_avg is None or r.v_avg is None
+                or l.last_status5_s <= 0.0 or r.last_status5_s <= 0.0
+                or now - l.last_status5_s > max_age or now - r.last_status5_s > max_age):
+            return None
+        return round(r.v_avg - l.v_avg, 2)
 
     @property
     def _pack_low_latched(self) -> bool:
@@ -1035,14 +1048,22 @@ class VescCanDriver:
         voltage_raw = struct.unpack_from(">h", data, 4)[0]
         tau = float(self._pcfg("pack_voltage_compare_tau_s"))
         max_age = float(self._pcfg("pack_voltage_max_age_s"))
+        floor = float(self._cfg.voltage_shutdown_floor_v) if self._cfg is not None else 0.0
         with self._telem_lock:
             t = self._telem_for(motor)
             new_v = voltage_raw / 10.0
             if t.voltage_v is None or new_v != t.voltage_v:
                 t.v_last_change_s = now      # frozen-reader detection
             # Average for the disagreement check (see _read_pack_voltage).
+            # Implausible values (below the floor: a VESC booting or the pack
+            # off; above 100 V: a corrupt frame) never enter it; the raw rules
+            # deal with them. Restarted after a gap longer than max_age.
             gap_s = now - t.last_status5_s
-            if (t.v_avg is None or t.last_status5_s <= 0.0 or tau <= 0.0
+            plausible = floor <= new_v <= _AVG_MAX_PLAUSIBLE_V
+            if not plausible:
+                if gap_s > max_age or gap_s < 0.0:
+                    t.v_avg = None
+            elif (t.v_avg is None or t.last_status5_s <= 0.0 or tau <= 0.0
                     or gap_s > max_age or gap_s < 0.0):
                 t.v_avg = new_v
             else:
@@ -1086,6 +1107,7 @@ class VescCanDriver:
         """
         max_age = float(self._pcfg("pack_voltage_max_age_s"))
         max_dis = float(self._pcfg("pack_voltage_max_disagree_v"))
+        max_raw = float(self._pcfg("pack_voltage_max_raw_disagree_v"))
         tau = float(self._pcfg("pack_voltage_compare_tau_s"))
         frozen_s = float(self._pcfg("pack_voltage_frozen_s"))
         moved_s = float(self._pcfg("pack_voltage_frozen_other_moved_s"))
@@ -1124,11 +1146,20 @@ class VescCanDriver:
                 # different rates, so they may also differ by > max_dis).
                 return None, "below_floor", lv, rv, frozen
         if ulv is not None and urv is not None:
+            # Two tests, either one disagrees: the AVERAGED gap against
+            # max_dis (sees a sustained offset; immune to the 0-40 ms skew
+            # between the two latest frames), and the RAW gap against max_raw
+            # (sees a step or a one-frame glitch at once, while the averages
+            # still lag). With the raw backstop this check never trusts a pair
+            # that the raw-only check of 6ec19b9 (3.0 V) rejected (Grok
+            # 01a1cde8, Opus review 2026-11-11). No average yet: raw against
+            # max_dis.
+            raw_gap = abs(ulv - urv)
             if tau > 0.0 and l_avg is not None and r_avg is not None:
-                gap = abs(l_avg - r_avg)
+                bad = abs(l_avg - r_avg) > max_dis or raw_gap > max_raw
             else:
-                gap = abs(ulv - urv)
-            if gap > max_dis:
+                bad = raw_gap > max_dis
+            if bad:
                 return None, "disagree", lv, rv, frozen
             v, st = min(ulv, urv), "trusted_both"
         elif ulv is not None:
@@ -1183,7 +1214,6 @@ class VescCanDriver:
         grace = float(self._pcfg("pack_low_sustain_grace_s"))
         untrusted_limit = float(self._pcfg("pack_voltage_untrusted_limit_s"))
         confirm = float(self._pcfg("pack_voltage_trust_confirm_s"))
-        max_dis = float(self._pcfg("pack_voltage_max_disagree_v"))
         msgs = []   # (level, fmt, args), logged after the lock is released
         send_zero = False
         with self._telem_lock:
@@ -1382,12 +1412,11 @@ class VescCanDriver:
             # ── Release (cross-checked only) ──────────────────────────────────
             # A lone reader can latch but never release: one VESC stuck high
             # beside a silent one must not end a latch or the post-latch
-            # session (Grok 01a1cc96). The averaged comparison lags a step by
-            # about 0.2 s, so a release ALSO needs the latest raw readings to
-            # agree; at zero throttle they do (no swings), so this costs nothing.
-            raw_agree = lv is not None and rv is not None and abs(lv - rv) <= max_dis
-            if (voltage is not None and state == "trusted_both" and raw_agree
-                    and voltage >= release_v and self._req_neutral and self._ctx_manual):
+            # session (Grok 01a1cc96). trusted_both includes the raw
+            # backstop, so a pair whose latest raw readings are more than
+            # pack_voltage_max_raw_disagree_v apart never releases.
+            if (voltage is not None and state == "trusted_both" and voltage >= release_v
+                    and self._req_neutral and self._ctx_manual):
                 voltage_reasons = self._pack_low_reasons & _VOLTAGE_REASONS
                 if voltage_reasons:
                     self._pack_low_reasons -= voltage_reasons
