@@ -1088,12 +1088,15 @@ class VescCanDriver:
         right one alone minus pack_voltage_right_alone_offset_v (it reads
         high, so uncorrected it could hold a low pack above the threshold).
         No fresh reading, or two that differ by more than
-        pack_voltage_max_disagree_v, is UNTRUSTED (voltage None). The
+        pack_voltage_max_disagree_v, is UNTRUSTED (voltage None). That
         difference is taken between the two AVERAGED readings (time constant
-        pack_voltage_compare_tau_s), not the latest raw ones: the latest
-        frames of the two VESCs can be up to 40 ms apart while the bus swings
-        about 1 V in 20 ms (stand test 2026-11-11). The voltage itself and
-        every other rule here use the raw readings.
+        pack_voltage_compare_tau_s): the latest frames of the two VESCs can
+        be up to 40 ms apart while the bus swings about 1 V in 20 ms (stand
+        test 2026-11-11). The latest RAW readings are a second test (raw
+        backstop): more than pack_voltage_max_raw_disagree_v apart is also
+        UNTRUSTED, so a step or a one-frame glitch counts at once, while the
+        averages still lag. The voltage itself and every other rule here use
+        the raw readings.
 
         Physically impossible readers (2026-11-10 follow-up):
           * FROZEN: a fresh reader whose value has not changed for
@@ -1247,10 +1250,12 @@ class VescCanDriver:
                 if prev_state != state:
                     msgs.append((logging.WARNING,
                                  "VESC: pack voltage UNTRUSTED (%s: left %s V, right %s V, "
-                                 "max age %.1f s, max difference %.1f V); no pack-low latch on it",
+                                 "max age %.1f s, max difference %.1f V averaged / %.1f V raw); "
+                                 "no pack-low latch on it",
                                  (state, self._fmt_v(lv), self._fmt_v(rv),
                                   float(self._pcfg("pack_voltage_max_age_s")),
-                                  float(self._pcfg("pack_voltage_max_disagree_v")))))
+                                  float(self._pcfg("pack_voltage_max_disagree_v")),
+                                  float(self._pcfg("pack_voltage_max_raw_disagree_v")))))
             elif not prev_state.startswith("trusted") and prev_state != "no_data":
                 msgs.append((logging.WARNING,
                              "VESC: pack voltage trusted again (%s, %.1f V)", (state, voltage)))
