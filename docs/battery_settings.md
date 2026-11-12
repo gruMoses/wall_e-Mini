@@ -1,8 +1,9 @@
 # Traction battery: BMS and VESC settings
 
 Status: review of 2026-11-05. The "Now" columns are the measured values.
-The "Target" columns are recommendations. Kevin makes each change in the
-phone apps. Nothing in this document is applied by software.
+The "Target" columns are recommendations. Kevin makes the BMS changes in the
+Daly phone app. The VESC changes (section 4) can be made in the VESC Tool
+phone app or with `tools/vesc_battery_limits.py` (section 4.1).
 
 ## 1. The pack and the charger
 
@@ -95,7 +96,13 @@ Read the configuration first. Change only these values. Then write it.
 Do not run the motor setup wizard after this: it overwrites the cutoffs.
 The left VESC is CAN id 2 and the right VESC is CAN id 1.
 
-UPDATE 2026-11-10 (Kevin): the VESC targets (part A) are not applied yet.
+UPDATE 2026-11-11 20:26: the VESC targets (part A) are applied on both
+VESCs with `tools/vesc_battery_limits.py` (section 4.1). Each one was
+verified live and again after a reboot (the copy in flash), and
+`tools/vesc_info.py` read back all 7 values with no fault. The "Now" column
+shows the values before that write. The backups of the old configuration
+are in `/home/pi/vesc_backups/` and in `~/Documents/walle/vesc_backups/` on
+Kevin's Mac.
 
 | Setting (VESC Tool name, MCCONF field) | Now | Target left (id 2) | Target right (id 1) | Reason |
 |---|---|---|---|---|
@@ -119,6 +126,87 @@ cost of a full charge. A charger that ends at 4.10-4.15 V/cell removes it.
 
 Read back the VESC values after the change:
 `/home/pi/.venv/bin/python3 tools/vesc_info.py` on the robot (read-only).
+
+### 4.1 Software method (2026-11-11)
+
+`tools/vesc_battery_limits.py` writes the same targets over CAN. It uses
+the method of VESC Tool: it reads the live motor configuration
+(`COMM_GET_MCCONF`), changes only the bytes of the 7 fields in the table,
+and writes the configuration back (`COMM_SET_MCCONF`). Then it reboots the
+VESC (`COMM_REBOOT`) and reads the configuration again, to prove the copy in
+flash. The targets are in the `TARGETS` table of the tool. If you change a
+target in this section, change the tool too.
+
+The tool does a dry run unless `--write` is given. The dry run only reads,
+and it can run while `wall-e.service` runs.
+
+The firmware ramps regen down between the two regen cutoff values: full
+regen below start + 0.1 V, no regen above end - 0.1 V. On the left VESC
+that is full regen below 54.5 V and no regen above 54.8 V.
+
+WARNING: The firmware does not check that the motor is stopped, and the
+flash store and the reboot release both motors (no brake current). Put the
+robot on level ground or chock the wheels before a write.
+
+CAUTION: The firmware does not report a failed flash store. After a bad
+store the VESC boots on its old configuration or on the firmware defaults
+(99 A, no cutoffs, 3 cells), and GET_VALUES shows no fault. The reboot check
+of the tool finds both. Do not drive until the tool reports "VERIFIED: live
+and stored" for both VESCs.
+
+Procedure (on the robot, `/home/pi/wall_e-Mini`):
+
+1. Disarm the robot. Put it on level ground or chock it. Disconnect the
+   VESC Tool phone app.
+2. Do the dry run: `/home/pi/.venv/bin/python3 tools/vesc_battery_limits.py`.
+   Examine the field table. Each VESC must show only the 7 fields. While
+   wall-e runs, the dry run always reports "a write now would be REFUSED"
+   (service active, no deploy hold, command timeout not active). That is
+   correct.
+3. Get Kevin's permission to stop the service. Then set the auto-deploy hold
+   and stop the service:
+   `touch /home/pi/wall_e-Mini/.deploy_hold` and
+   `sudo systemctl stop wall-e`. (Without the hold, an auto-deploy restarts
+   the stopped service.)
+4. Do the dry run again. Both VESCs must now show "gates pass".
+5. Write: `/home/pi/.venv/bin/python3 tools/vesc_battery_limits.py --write`.
+   The tool writes, verifies and reboots the left VESC (id 2), then the
+   right VESC (id 1). It stops at the first failure. A VESC that is already
+   at target is not written again, but it is rebooted, to prove the copy in
+   flash.
+6. Read the exit code before you start the service:
+   - 0: both VESCs are verified, live and in flash.
+   - 1: nothing was changed (a gate refused, or the store did not take).
+     Correct the cause and run step 5 again.
+   - 2: the CAN bus did not open.
+   - 3: a write failed, or a VESC reports a fault. The state is uncertain.
+   - 4: the two VESCs have (or may have) different limits.
+   - 130: interrupted.
+   For 3 and 4, do not drive. Run step 5 again, or use the restore command
+   that the tool printed. A restore of one VESC always exits 4: restore the
+   other VESC too, or run step 5 for both.
+7. Start the service and remove the hold:
+   `sudo systemctl start wall-e` and `rm /home/pi/wall_e-Mini/.deploy_hold`.
+8. Copy the new backups in `/home/pi/vesc_backups/` off the robot.
+
+Gates (checked first, and again immediately before each write and before
+the reboot): the service is "inactive"; the deploy hold file exists; the
+VESC reports its command timeout as active (no device sends it motor
+commands); no motor turns (100 eRPM or more); the input current is below
+1 A; no fault; the bus voltage is between 30 V and 60 V; the hardware is
+75_100_V2 with firmware 6.05; the VESC UUID is the one pinned for its CAN
+id; each of the 7 fields holds its documented "Now" value or its target;
+the live configuration agrees with the newest backup of that VESC outside
+the 7 fields (`--accept-live` overrides only this check).
+
+Backup and restore: before each write the tool saves the live configuration
+in `/home/pi/vesc_backups/` (a `.bin` file and a `.json` file with its
+SHA-256, with the VESC id and UUID in the name). The backup includes the
+motor detection values. To put a backup back, use
+`tools/vesc_battery_limits.py --restore <file>.bin --id <id> --write`. The
+tool refuses a backup with a different VESC UUID or a wrong SHA-256. The
+firmware rounds some fields by one step on each write (VESC Tool does the
+same), so a restore gives those fields back to within one step.
 
 ## 5. Charger measurement (2026-11-05, BMS log)
 
@@ -160,4 +248,6 @@ about 54.6 V, with the 55.3 V trip.
 ## Appendix: Technical Names
 
 BMS, VESC, VESC Tool, Daly, JHB, NMC, Ternary, LTO, Li-ion, FET, MCCONF,
-CAN, Grok, `wall-e.service`, XM2703, regen, Bluetooth, mOhm.
+CAN, Grok, `wall-e.service`, XM2703, regen, Bluetooth, mOhm, flash,
+`COMM_GET_MCCONF`, `COMM_SET_MCCONF`, `COMM_REBOOT`, GET_VALUES, UUID,
+SHA-256, eRPM, auto-deploy hold, `tools/vesc_battery_limits.py`, 75_100_V2.
