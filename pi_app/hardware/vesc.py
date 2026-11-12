@@ -9,7 +9,7 @@ Design:
   thread-safe telemetry state.
 - Pack-low latch (motor cutoff ONLY — no OS shutdown; contract of 2026-11-10): the pack
   voltage is the MINIMUM of the FRESH (< 0.5 s) per-VESC readings; none fresh, or two
-  that disagree by > 1.5 V, is untrusted and never latches.  Trusted voltage in
+  that disagree by > pack_voltage_max_disagree_v (3.0 V), is untrusted and never latches.  Trusted voltage in
   [floor, threshold) for the delay latches; so does the BMS lowest cell <= 3.30 V on two
   fresh polls (set_bms_cell_reading).  Release: trusted voltage >= threshold +
   hysteresis with zero throttle in MANUAL, or a disarm (set_drive_context).  Optional
@@ -62,7 +62,7 @@ _CAN_PACKET_STATUS_5 = 27
 # config.VescConfig; keep these equal to them.
 _PACK_DEFAULTS = {
     "pack_voltage_max_age_s": 0.5,
-    "pack_voltage_max_disagree_v": 1.5,
+    "pack_voltage_max_disagree_v": 3.0,
     "pack_low_release_hysteresis_v": 2.0,
     "pack_low_sustain_grace_s": 2.0,
     "pack_voltage_right_alone_offset_v": 1.0,

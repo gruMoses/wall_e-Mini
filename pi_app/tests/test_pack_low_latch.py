@@ -2,7 +2,7 @@
 
 VescCanDriver must:
   * use the MINIMUM of the FRESH (< 0.5 s) per-VESC bus readings; none fresh,
-    or two that disagree by > 1.5 V, is untrusted and never latches;
+    or two that disagree by > 3.0 V (1.5 V before 2026-11-11), is untrusted and never latches;
   * latch at the trusted voltage < 44.0 V sustained for voltage_shutdown_delay_s;
   * ramp the tracks to zero over pack_low_ramp_s instead of a step;
   * release only at >= 46.0 V with zero throttle in MANUAL, or on a disarm;
@@ -137,14 +137,14 @@ class TestPackVoltageSelection(_Base):
     def test_disagreement_is_untrusted_no_latch_logged_once(self):
         d = self.make()
         with self.assertLogs(LOGGER, level="WARNING") as cm:
-            self.volts(d, 43.0, 44.6)       # 1.6 V apart
-            self.hold(d, 40.0, 43.0, 44.6)
+            self.volts(d, 43.0, 46.1)       # 3.1 V apart
+            self.hold(d, 40.0, 43.0, 46.1)
         self.assertFalse(d.get_pack_low_latched())
         self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
         self.assertEqual(sum("UNTRUSTED" in m for m in cm.output), 1)
-        # 1.5 V apart is still trusted (limit is "more than").
+        # 3.0 V apart is still trusted (limit is "more than").
         d2 = self.make()
-        self.volts(d2, 43.0, 44.5)
+        self.volts(d2, 43.0, 46.0)
         self.assertEqual(d2.get_pack_guard_status()["voltage_state"], "trusted_both")
 
     def test_sustained_disagreement_does_not_clear_a_running_countdown(self):
@@ -152,7 +152,7 @@ class TestPackVoltageSelection(_Base):
         d = self.make()
         self.volts(d, 43.0, 43.0)
         self.hold(d, 20.0, 43.0, 43.0)
-        self.hold(d, 10.0, 43.0, 44.6)      # straddles 44 V: untrusted, 10 s
+        self.hold(d, 10.0, 43.0, 46.1)      # straddles 44 V: untrusted, 10 s
         self.assertFalse(d.get_pack_low_latched())
         self.assertIsNotNone(d._low_voltage_since)   # countdown kept
         self.hold(d, 0.1, 43.0, 43.0)
@@ -160,13 +160,13 @@ class TestPackVoltageSelection(_Base):
 
     def test_disagreement_with_both_readings_low_still_latches(self):
         d = self.make()
-        self.volts(d, 41.0, 43.0)           # 2 V apart, but both below 44 V
-        self.hold(d, 30.2, 41.0, 43.0)
+        self.volts(d, 40.0, 43.5)           # 3.5 V apart, but both below 44 V
+        self.hold(d, 30.2, 40.0, 43.5)
         self.assertTrue(d.get_pack_low_latched())
         self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
         # ... and disagreeing data never releases.
         d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
-        self.hold(d, 3.0, 46.5, 49.0)
+        self.hold(d, 3.0, 46.5, 50.0)
         self.assertTrue(d.get_pack_low_latched())
 
     def test_right_reading_alone_is_corrected_for_its_offset(self):
@@ -191,7 +191,7 @@ class TestPackVoltageSelection(_Base):
         d = self.make()
         self.latch_by_voltage(d)
         d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
-        self.volts(d, 47.0, 49.0)           # disagree, both above release
+        self.volts(d, 47.0, 50.5)           # disagree, both above release
         self.assertTrue(d.get_pack_low_latched())
 
 
@@ -314,6 +314,30 @@ class TestReleaseRules(_Base):
         self.assertTrue(d.get_pack_low_latched())
         self.hold(d, 0.1, 46.0, 46.0)
         self.assertFalse(d.get_pack_low_latched())
+
+    def test_wide_but_trusted_pair_releases_only_on_its_lower_reading(self):
+        # Grok 01a1cdbe (3.0 V limit): 45.9 / 48.9 is trusted but its minimum
+        # is under 46 V, so no release; 46.0 / 49.0 (exactly 3.0 V) releases
+        # on the 46.0 V minimum; 46.0 / 49.1 is untrusted and cannot release.
+        d = self.make()
+        self.latch_by_voltage(d)
+        d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+        self.hold(d, 3.0, 45.9, 48.9)
+        self.assertTrue(d.get_pack_low_latched())
+        self.hold(d, 3.0, 46.0, 49.1)
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
+        self.assertTrue(d.get_pack_low_latched())
+        self.hold(d, 0.1, 46.0, 49.0)
+        self.assertFalse(d.get_pack_low_latched())
+
+    def test_wide_but_trusted_pair_latches_on_its_lower_reading(self):
+        # 43.9 beside 46.8 (2.9 V apart) is trusted; the 43.9 V minimum latches.
+        d = self.make()
+        self.volts(d, 43.9, 46.8)
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "trusted_both")
+        self.assertAlmostEqual(d.get_voltage(), 43.9, places=2)
+        self.hold(d, 30.2, 43.9, 46.8)
+        self.assertTrue(d.get_pack_low_latched())
 
     def test_autonomous_mode_releases_only_by_disarm(self):
         d = self.make()
@@ -602,10 +626,10 @@ class TestRestrictedState(_Base):
     def test_disagreement_straddling_44_v_past_the_limit_restricts(self):
         d = self.make()
         with self.assertLogs(LOGGER, level="WARNING") as cm:
-            self.volts(d, 43.0, 44.8)
-            self.hold(d, 9.5, 43.0, 44.8)
+            self.volts(d, 43.0, 46.3)
+            self.hold(d, 9.5, 43.0, 46.3)
             self.assertFalse(d.get_pack_guard_status()["restricted"])
-            self.hold(d, 0.7, 43.0, 44.8)
+            self.hold(d, 0.7, 43.0, 46.3)
         self.assert_restricted_effects(d)
         self.assertEqual(sum("RESTRICTED" in m for m in cm.output), 1)
 
@@ -619,11 +643,28 @@ class TestRestrictedState(_Base):
         self.assertEqual(d.get_pack_guard_status()["voltage_state"], "trusted_right")
         self.assert_restricted_effects(d)
 
+    def test_load_induced_gap_measured_on_the_stand_stays_trusted(self):
+        """Stand test 2026-11-11 21:03: the guard compares the latest reading
+        of each VESC, up to 40 ms apart, while the speed loop swings the bus
+        about 1 V in 20 ms; the compared pair reached 2.1 V (more with a
+        heavier load). Gaps up to 2.9 V must stay cross-checked, so a long
+        hard drive never restricts."""
+        d = self.make()
+        gaps = (1.0, 1.9, 2.2, 2.9, 1.1, 2.6)
+        for i in range(1200):                         # 120 s of driving
+            self.clock.t += 0.1
+            left = 52.5
+            self.volts(d, left, left + gaps[i % len(gaps)])
+        st = d.get_pack_guard_status()
+        self.assertEqual(st["voltage_state"], "trusted_both")
+        self.assertFalse(st["restricted"])
+        self.assertIsNone(st["unchecked_for_s"])
+
     def test_short_glitch_does_not_restrict(self):
         d = self.make()
         self.volts(d, 47.0, 47.0)
         for _ in range(3):
-            self.hold(d, 3.0, 47.0, 49.0)           # 3 s disagreement
+            self.hold(d, 3.0, 47.0, 50.5)           # 3 s disagreement
             self.hold(d, 2.5, 47.0, 47.0)           # cross-checked again > 2 s
         self.clock.t += 0.3                          # a 0.3 s CAN gap
         d._check_voltage_shutdown()
@@ -638,7 +679,7 @@ class TestRestrictedState(_Base):
         d = self.make()
         self.volts(d, 47.0, 47.0)
         for _ in range(3):
-            self.hold(d, 9.9, 47.0, 49.0)
+            self.hold(d, 9.9, 47.0, 50.5)
             self.hold(d, 0.1, 47.0, 47.0)
         self.assertTrue(d.get_pack_guard_status()["restricted"])
 
@@ -658,8 +699,8 @@ class TestRestrictedState(_Base):
 
     def test_recovery_needs_confirm_and_zero_throttle(self):
         d = self.make()
-        self.volts(d, 43.0, 44.8)
-        self.hold(d, 10.5, 43.0, 44.8)
+        self.volts(d, 43.0, 46.3)
+        self.hold(d, 10.5, 43.0, 46.3)
         self.assertTrue(d.get_pack_guard_status()["restricted"])
         d.set_drive_context(armed=True, manual=True, request_neutral=False)
         self.hold(d, 1.0, 46.0, 46.0)
@@ -674,8 +715,8 @@ class TestRestrictedState(_Base):
 
     def test_disarm_ends_it_only_with_cross_checked_data(self):
         d = self.make()
-        self.volts(d, 43.0, 44.8)
-        self.hold(d, 10.5, 43.0, 44.8)
+        self.volts(d, 43.0, 46.3)
+        self.hold(d, 10.5, 43.0, 46.3)
         d.set_drive_context(armed=False, manual=True)
         d.set_drive_context(armed=True, manual=True)
         self.assertTrue(d.get_pack_guard_status()["restricted"])   # still disagreeing

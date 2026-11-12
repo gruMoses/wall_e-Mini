@@ -258,11 +258,26 @@ class VescConfig:
     # sends STATUS_5 at about 48 Hz, so 0.5 s is more than 20 missed frames.
     pack_voltage_max_age_s: float = 0.5
     # Two fresh readings that differ by more than this are UNTRUSTED: no latch,
-    # no release, reported in telemetry. The right VESC reads about 0.9 V high
-    # (battery_settings.md finding 7), so 1.5 V keeps 0.6 V for noise. The pack
-    # voltage used is the MINIMUM of the fresh readings (the low reader is the
-    # left one, within 0.1 V of the BMS).
-    pack_voltage_max_disagree_v: float = 1.5
+    # no release, reported in telemetry. The pack voltage used is the MINIMUM of
+    # the fresh readings (the low reader is the left one, within 0.1 V of the
+    # BMS). 3.0 V since 2026-11-11 (was 1.5 V). Stand test 2026-11-11 21:03
+    # (docs/stand_test_2026-11-11.md): readings taken within 5 ms of each other
+    # differ by 0.8-1.3 V (the right VESC's offset; no wiring drop worth
+    # counting), but the guard compares the LATEST reading of each VESC, and
+    # those can be 0-40 ms apart. With the wheels free the speed loop swings
+    # the bus about 1 V in 20 ms, so the compared pair reached 2.1 V. Replayed
+    # through this driver frame by frame: 1.5 V gave 35 "disagree" episodes and
+    # up to 4.3 s untrusted (a drive would reach RESTRICTED); 2.5 V and 3.0 V
+    # gave none; with the swings scaled x2.5, 3.0 V gave 4 one-frame episodes
+    # and never RESTRICTED. Reviewed by Grok (01a1cdbe) and an independent Opus
+    # pass: no late latch and no wrong release from the change. Cost: a left
+    # reader 1.5-3 V low now latches early instead of restricting, and a frozen
+    # reader is flagged later. Not changed by it (true at 1.5 V too): a LEFT
+    # reader stuck high makes min() fall to the right reading, which is about
+    # 1 V high, so the latch can be up to 1 V late. Better fix for later: run
+    # both readings through the same 0.25 s average before comparing them
+    # (the gap then stayed 0.96-1.22 V), then tighten this to about 2.0 V.
+    pack_voltage_max_disagree_v: float = 3.0
     # When ONLY the right VESC's reading is fresh it is used minus this. That
     # VESC reads 0.9-1.0 V high (battery_settings.md finding 7), so the
     # uncorrected value could hold a 43 V pack above 44 V. 1.0 V takes the
