@@ -357,6 +357,16 @@ class TestVoltageThreshold(unittest.TestCase):
         self.assertTrue(d._pack_low_latched)
         self.assertEqual(d.get_pack_guard_status()["reason"], "pack_voltage")
 
+    @staticmethod
+    def _recover_both(d: VescCanDriver, v: float) -> None:
+        # One second of steady frames from both VESCs (the comparison uses a
+        # 0.25 s average, pack_voltage_compare_tau_s).
+        now = time.monotonic()
+        for k in range(50):
+            t = now + 0.02 * k
+            d._parse_status5("left", _status5_frame(2, v).data, t)
+            d._parse_status5("right", _status5_frame(1, v).data, t)
+
     def test_timer_clears_on_voltage_recovery(self):
         d = self._driver()
         d._parse_status5("left", _status5_frame(2, 21.0).data, time.monotonic())
@@ -364,9 +374,7 @@ class TestVoltageThreshold(unittest.TestCase):
         self.assertIsNotNone(d._low_voltage_since)
         # Voltage recovers on BOTH VESCs: only a cross-checked reading clears
         # the countdown since 2026-11-11 (a lone reader stuck high must not).
-        now = time.monotonic()
-        d._parse_status5("left", _status5_frame(2, 25.0).data, now)
-        d._parse_status5("right", _status5_frame(1, 25.0).data, now)
+        self._recover_both(d, 25.0)
         d._check_voltage_shutdown()
         self.assertIsNone(d._low_voltage_since)
         self.assertFalse(d._pack_low_latched)
@@ -943,10 +951,14 @@ class TestPackLowLatch(unittest.TestCase):
     def _set_both(self, d: VescCanDriver, v: float) -> None:
         # A release or a countdown clear needs a CROSS-CHECKED reading (both
         # VESCs fresh and agreeing) since 2026-11-11; a lone reader can only
-        # latch.
+        # latch. The two readings are compared through a 0.25 s average
+        # (pack_voltage_compare_tau_s), so a recovery is one second of steady
+        # frames at 50 Hz, not one instantaneous frame pair.
         now = time.monotonic()
-        d._parse_status5("left", _status5_frame(2, v).data, now)
-        d._parse_status5("right", _status5_frame(1, v).data, now)
+        for k in range(50):
+            t = now + 0.02 * k
+            d._parse_status5("left", _status5_frame(2, v).data, t)
+            d._parse_status5("right", _status5_frame(1, v).data, t)
 
     # (a) 6.8V reading -> no shutdown, motors stopped, log emitted, no latch.
     def test_below_floor_no_latch_motors_stopped_logged(self):

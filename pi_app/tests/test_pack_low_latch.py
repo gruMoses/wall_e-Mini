@@ -142,9 +142,9 @@ class TestPackVoltageSelection(_Base):
         self.assertFalse(d.get_pack_low_latched())
         self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
         self.assertEqual(sum("UNTRUSTED" in m for m in cm.output), 1)
-        # 3.0 V apart is still trusted (limit is "more than").
+        # 2.0 V apart is still trusted (limit is "more than").
         d2 = self.make()
-        self.volts(d2, 43.0, 46.0)
+        self.volts(d2, 43.0, 45.0)
         self.assertEqual(d2.get_pack_guard_status()["voltage_state"], "trusted_both")
 
     def test_sustained_disagreement_does_not_clear_a_running_countdown(self):
@@ -316,27 +316,40 @@ class TestReleaseRules(_Base):
         self.assertFalse(d.get_pack_low_latched())
 
     def test_wide_but_trusted_pair_releases_only_on_its_lower_reading(self):
-        # Grok 01a1cdbe (3.0 V limit): 45.9 / 48.9 is trusted but its minimum
-        # is under 46 V, so no release; 46.0 / 49.0 (exactly 3.0 V) releases
-        # on the 46.0 V minimum; 46.0 / 49.1 is untrusted and cannot release.
+        # 2.0 V limit on the averaged readings: 45.9 / 47.8 is trusted but its
+        # minimum is under 46 V, so no release; 46.0 / 48.2 disagrees and
+        # cannot release; 46.0 / 47.9 releases on the 46.0 V minimum once the
+        # averages agree (well inside 1 s).
         d = self.make()
         self.latch_by_voltage(d)
         d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
-        self.hold(d, 3.0, 45.9, 48.9)
+        self.hold(d, 3.0, 45.9, 47.8)
         self.assertTrue(d.get_pack_low_latched())
-        self.hold(d, 3.0, 46.0, 49.1)
+        self.hold(d, 3.0, 46.0, 48.2)
         self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
         self.assertTrue(d.get_pack_low_latched())
-        self.hold(d, 0.1, 46.0, 49.0)
+        self.hold(d, 1.0, 46.0, 47.9)
         self.assertFalse(d.get_pack_low_latched())
 
-    def test_wide_but_trusted_pair_latches_on_its_lower_reading(self):
-        # 43.9 beside 46.8 (2.9 V apart) is trusted; the 43.9 V minimum latches.
+    def test_release_needs_the_raw_readings_to_agree_too(self):
+        # Right after a step the averages still agree while the raw pair does
+        # not: no release in that window.
         d = self.make()
-        self.volts(d, 43.9, 46.8)
+        self.latch_by_voltage(d)
+        d.set_tracks(CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE)
+        self.hold(d, 2.0, 43.5, 44.5)
+        self.clock.t += 0.02
+        self.volts(d, 46.5, 49.5)            # raw 3.0 V apart, averages close
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "trusted_both")
+        self.assertTrue(d.get_pack_low_latched())
+
+    def test_wide_but_trusted_pair_latches_on_its_lower_reading(self):
+        # 43.9 beside 45.8 (1.9 V apart) is trusted; the 43.9 V minimum latches.
+        d = self.make()
+        self.volts(d, 43.9, 45.8)
         self.assertEqual(d.get_pack_guard_status()["voltage_state"], "trusted_both")
         self.assertAlmostEqual(d.get_voltage(), 43.9, places=2)
-        self.hold(d, 30.2, 43.9, 46.8)
+        self.hold(d, 30.2, 43.9, 45.8)
         self.assertTrue(d.get_pack_low_latched())
 
     def test_autonomous_mode_releases_only_by_disarm(self):
@@ -643,22 +656,44 @@ class TestRestrictedState(_Base):
         self.assertEqual(d.get_pack_guard_status()["voltage_state"], "trusted_right")
         self.assert_restricted_effects(d)
 
-    def test_load_induced_gap_measured_on_the_stand_stays_trusted(self):
-        """Stand test 2026-11-11 21:03: the guard compares the latest reading
-        of each VESC, up to 40 ms apart, while the speed loop swings the bus
-        about 1 V in 20 ms; the compared pair reached 2.1 V (more with a
-        heavier load). Gaps up to 2.9 V must stay cross-checked, so a long
-        hard drive never restricts."""
+    def _skewed_swings(self, d, seconds: float = 120.0) -> None:
+        """The stand test of 2026-11-11: the bus swings 1.5 V every 20 ms
+        (free-wheel speed loop) and the right VESC (1.0 V high) reports each
+        level 20 ms after the left one. Same-moment readings differ by 1.0 V,
+        but the LATEST left and right frames differ by up to 2.5 V."""
+        bus = (51.5, 53.0)
+        n = int(round(seconds / 0.01))
+        for k in range(n):
+            self.clock.t += 0.01
+            if k % 2 == 0:
+                d._parse_status5("left", _status5(bus[(k // 2) % 2]), self.clock.t)
+            else:
+                d._parse_status5("right", _status5(bus[((k - 2) // 2) % 2] + 1.0), self.clock.t)
+            d._check_voltage_shutdown()
+
+    def test_time_skewed_swings_stay_cross_checked(self):
         d = self.make()
-        gaps = (1.0, 1.9, 2.2, 2.9, 1.1, 2.6)
-        for i in range(1200):                         # 120 s of driving
-            self.clock.t += 0.1
-            left = 52.5
-            self.volts(d, left, left + gaps[i % len(gaps)])
+        self._skewed_swings(d)
         st = d.get_pack_guard_status()
         self.assertEqual(st["voltage_state"], "trusted_both")
         self.assertFalse(st["restricted"])
         self.assertIsNone(st["unchecked_for_s"])
+        self.assertAlmostEqual(st["compare_gap_v"], 1.0, delta=0.3)
+
+    def test_time_skewed_swings_restrict_without_the_average(self):
+        # Control: comparing the latest raw frames (tau 0, the behaviour
+        # before 2026-11-11) calls the same data a disagreement and restricts.
+        d = self.make(pack_voltage_compare_tau_s=0.0)
+        self._skewed_swings(d, seconds=15.0)
+        self.assertTrue(d.get_pack_guard_status()["restricted"])
+
+    def test_a_real_offset_still_disagrees_through_the_average(self):
+        # A reader that is really 2.5 V off (beyond the 1.0 V offset) shows
+        # in the averaged gap within about a second.
+        d = self.make()
+        self.hold(d, 2.0, 50.0, 51.0)
+        self.hold(d, 1.0, 50.0, 53.5)
+        self.assertEqual(d.get_pack_guard_status()["voltage_state"], "disagree")
 
     def test_short_glitch_does_not_restrict(self):
         d = self.make()

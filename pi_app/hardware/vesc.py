@@ -9,7 +9,7 @@ Design:
   thread-safe telemetry state.
 - Pack-low latch (motor cutoff ONLY — no OS shutdown; contract of 2026-11-10): the pack
   voltage is the MINIMUM of the FRESH (< 0.5 s) per-VESC readings; none fresh, or two
-  that disagree by > pack_voltage_max_disagree_v (3.0 V), is untrusted and never latches.  Trusted voltage in
+  whose 0.25 s averages disagree by > pack_voltage_max_disagree_v (2.0 V), is untrusted and never latches.  Trusted voltage in
   [floor, threshold) for the delay latches; so does the BMS lowest cell <= 3.30 V on two
   fresh polls (set_bms_cell_reading).  Release: trusted voltage >= threshold +
   hysteresis with zero throttle in MANUAL, or a disarm (set_drive_context).  Optional
@@ -41,6 +41,7 @@ VESC CAN status frame layout (all big-endian, extended IDs):
 from __future__ import annotations
 
 import logging
+import math
 import os
 import struct
 import threading
@@ -62,7 +63,8 @@ _CAN_PACKET_STATUS_5 = 27
 # config.VescConfig; keep these equal to them.
 _PACK_DEFAULTS = {
     "pack_voltage_max_age_s": 0.5,
-    "pack_voltage_max_disagree_v": 3.0,
+    "pack_voltage_max_disagree_v": 2.0,
+    "pack_voltage_compare_tau_s": 0.25,
     "pack_low_release_hysteresis_v": 2.0,
     "pack_low_sustain_grace_s": 2.0,
     "pack_voltage_right_alone_offset_v": 1.0,
@@ -117,6 +119,11 @@ class _MotorTelemetry:
     last_status4_s: float = 0.0
     last_status5_s: float = 0.0
     v_last_change_s: float = 0.0   # when voltage_v last took a NEW value
+    # Exponential average of voltage_v (time constant pack_voltage_compare_tau_s),
+    # used ONLY for the disagreement check, so both readings are compared over
+    # the same span of time. None until the first frame; restarted after a
+    # gap longer than pack_voltage_max_age_s.
+    v_avg: Optional[float] = None
     # Peak-hold since the last take_bus_peaks(): the highest bus voltage and the
     # most negative input current (regen into the pack) in ANY frame, so a spike
     # shorter than one log line still shows. None = no frame since the last take.
@@ -721,6 +728,13 @@ class VescCanDriver:
                 "bms_cell_min_v": self._bms_cell_v,
                 "bms_cell_state": self._bms_cell_state,
                 "bms_cell_low_count": self._bms_low_count,
+                # Averaged right - left gap that the disagreement check uses
+                # (about +1.0 V at rest: the right VESC reads high).
+                "compare_gap_v": (
+                    round(self._right_telem.v_avg - self._left_telem.v_avg, 2)
+                    if self._right_telem.v_avg is not None
+                    and self._left_telem.v_avg is not None else None
+                ),
             }
 
     @property
@@ -1019,11 +1033,20 @@ class VescCanDriver:
         if len(data) < 6:
             return
         voltage_raw = struct.unpack_from(">h", data, 4)[0]
+        tau = float(self._pcfg("pack_voltage_compare_tau_s"))
+        max_age = float(self._pcfg("pack_voltage_max_age_s"))
         with self._telem_lock:
             t = self._telem_for(motor)
             new_v = voltage_raw / 10.0
             if t.voltage_v is None or new_v != t.voltage_v:
                 t.v_last_change_s = now      # frozen-reader detection
+            # Average for the disagreement check (see _read_pack_voltage).
+            gap_s = now - t.last_status5_s
+            if (t.v_avg is None or t.last_status5_s <= 0.0 or tau <= 0.0
+                    or gap_s > max_age or gap_s < 0.0):
+                t.v_avg = new_v
+            else:
+                t.v_avg += (1.0 - math.exp(-gap_s / tau)) * (new_v - t.v_avg)
             t.voltage_v = new_v
             if t.bus_v_max is None or t.voltage_v > t.bus_v_max:
                 t.bus_v_max = t.voltage_v
@@ -1044,7 +1067,12 @@ class VescCanDriver:
         right one alone minus pack_voltage_right_alone_offset_v (it reads
         high, so uncorrected it could hold a low pack above the threshold).
         No fresh reading, or two that differ by more than
-        pack_voltage_max_disagree_v, is UNTRUSTED (voltage None).
+        pack_voltage_max_disagree_v, is UNTRUSTED (voltage None). The
+        difference is taken between the two AVERAGED readings (time constant
+        pack_voltage_compare_tau_s), not the latest raw ones: the latest
+        frames of the two VESCs can be up to 40 ms apart while the bus swings
+        about 1 V in 20 ms (stand test 2026-11-11). The voltage itself and
+        every other rule here use the raw readings.
 
         Physically impossible readers (2026-11-10 follow-up):
           * FROZEN: a fresh reader whose value has not changed for
@@ -1058,6 +1086,7 @@ class VescCanDriver:
         """
         max_age = float(self._pcfg("pack_voltage_max_age_s"))
         max_dis = float(self._pcfg("pack_voltage_max_disagree_v"))
+        tau = float(self._pcfg("pack_voltage_compare_tau_s"))
         frozen_s = float(self._pcfg("pack_voltage_frozen_s"))
         moved_s = float(self._pcfg("pack_voltage_frozen_other_moved_s"))
         with self._telem_lock:
@@ -1069,6 +1098,8 @@ class VescCanDriver:
                                  and now - r.last_status5_s <= max_age) else None
             l_chg = l.v_last_change_s
             r_chg = r.v_last_change_s
+            l_avg = l.v_avg
+            r_avg = r.v_avg
         frozen = None
         if lv is not None and rv is not None and frozen_s > 0.0:
             if now - l_chg >= frozen_s and now - r_chg <= moved_s:
@@ -1093,7 +1124,11 @@ class VescCanDriver:
                 # different rates, so they may also differ by > max_dis).
                 return None, "below_floor", lv, rv, frozen
         if ulv is not None and urv is not None:
-            if abs(ulv - urv) > max_dis:
+            if tau > 0.0 and l_avg is not None and r_avg is not None:
+                gap = abs(l_avg - r_avg)
+            else:
+                gap = abs(ulv - urv)
+            if gap > max_dis:
                 return None, "disagree", lv, rv, frozen
             v, st = min(ulv, urv), "trusted_both"
         elif ulv is not None:
@@ -1148,6 +1183,7 @@ class VescCanDriver:
         grace = float(self._pcfg("pack_low_sustain_grace_s"))
         untrusted_limit = float(self._pcfg("pack_voltage_untrusted_limit_s"))
         confirm = float(self._pcfg("pack_voltage_trust_confirm_s"))
+        max_dis = float(self._pcfg("pack_voltage_max_disagree_v"))
         msgs = []   # (level, fmt, args), logged after the lock is released
         send_zero = False
         with self._telem_lock:
@@ -1346,9 +1382,12 @@ class VescCanDriver:
             # ── Release (cross-checked only) ──────────────────────────────────
             # A lone reader can latch but never release: one VESC stuck high
             # beside a silent one must not end a latch or the post-latch
-            # session (Grok 01a1cc96).
-            if (voltage is not None and state == "trusted_both" and voltage >= release_v
-                    and self._req_neutral and self._ctx_manual):
+            # session (Grok 01a1cc96). The averaged comparison lags a step by
+            # about 0.2 s, so a release ALSO needs the latest raw readings to
+            # agree; at zero throttle they do (no swings), so this costs nothing.
+            raw_agree = lv is not None and rv is not None and abs(lv - rv) <= max_dis
+            if (voltage is not None and state == "trusted_both" and raw_agree
+                    and voltage >= release_v and self._req_neutral and self._ctx_manual):
                 voltage_reasons = self._pack_low_reasons & _VOLTAGE_REASONS
                 if voltage_reasons:
                     self._pack_low_reasons -= voltage_reasons
