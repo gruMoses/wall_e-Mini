@@ -331,13 +331,25 @@ Requirements:
   up after a halt (refer to "Sneak feeds" in `docs/power_module_spec.md`).
 - **S7. Pins and addresses that are in use.** Do not use GPIO 6 (X1202 power
   loss), GPIO 16 (X1202 charge control) or GPIO2 and GPIO3 for other
-  functions. Do not use I2C addresses 0x20, 0x36 and 0x42 on bus 1.
-- **S8. Mechanical.** Pi 5 HAT+ outline. The X1202 is under the Pi on pogo
-  pins, and the NVMe carrier is on top. The shield must stack above the
-  NVMe carrier on a stacking header and keep the PCIe ribbon and the fan
-  clear. VERIFY the carrier model and its height.
+  functions. Do not use I2C addresses 0x20, 0x36 and 0x42 on bus 1. Do not
+  use the pins of the Waveshare RS485 CAN HAT (S8): its MCP2515 is on SPI0
+  (GPIO 8 CE0, GPIO 9, GPIO 10, GPIO 11) with its interrupt on GPIO 25
+  (`dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25` in the Pi's
+  `config.txt`, read 2026-11-13). Its RS485 side uses the UART (GPIO 14 and
+  GPIO 15) and, on some versions, GPIO 4. VERIFY the RS485 pins on the
+  Waveshare page for the fitted version.
+- **S8. Mechanical.** Pi 5 HAT+ outline. Kevin, 2026-11-13: the shield
+  mounts on top of the Waveshare RS485 CAN HAT, which is on the Pi's
+  header. The X1202 is under the Pi on pogo pins. VERIFY that the CAN HAT
+  passes the 40 pins up (or needs a stacking header), the height of its
+  parts and terminal blocks, and where the NVMe carrier and the fan sit in
+  the stack.
 - **S9. USB link.** The 40-pin header has no USB lines. The shield needs a
-  USB connector. Kevin has a short USB cable for it (D4).
+  Mini-B (mini USB) socket. Kevin's short cable has a 90° Mini-B plug: the
+  cable leaves at a right angle to the plug. Place the socket so the plug's
+  bend clears the stack and the cable can reach a Pi USB port. Kevin's
+  photo of the plug in the current Nano:
+  `docs/data/shield_inputs_20261113/nano_mount_and_usb_plug.jpg`.
 - **S10. Two 5 V rails that do not connect.** The microcontroller and the
   receiver get their power from the USB VBUS only, as the Arduino and the
   receiver do today: a USB port of the Pi supplies them (Kevin,
@@ -405,6 +417,11 @@ Decisions (Kevin, 2026-11-13):
    on-board chip, and a Nano socket in case the new chip fails.
 7. **D7. CH6 is wired now:** to A0 on the current Arduino, and to the
    microcontroller on the shield. The code reads it later.
+8. **D8. Hand-soldered build:** an ATmega328P (DIP-28) in a socket, a
+   CH340C (SOP-16) as the only surface-mount chip, and through-hole parts
+   for the rest, like the other boards in `~/Documents/KiCad/pcb-lessons`.
+9. **D9. The shield mounts on the Waveshare RS485 CAN HAT** (S8), and the
+   USB socket is a Mini-B for Kevin's 90° Mini-B cable (S9).
 
 ## Appendix: Technical Names and Technical Verbs
 

@@ -145,7 +145,7 @@
   <text x="732" y="478" font-size="11" fill="#888">UPS HAT (B) INA219 0x42 (robot)</text>
   <text x="732" y="492" font-size="11" fill="#888">X1202 gauge 0x36; GPIO 6, 16 (bench)</text>
   <text x="732" y="506" font-size="11" fill="#888">i2c-bus-guard unlocks a stuck bus</text>
-  <text x="732" y="522" font-size="11" fill="#888">NVMe carrier on top, X1202 below</text>
+  <text x="732" y="522" font-size="11" fill="#888">CAN HAT on the header, X1202 below</text>
 
   <!-- ===== Pi to DFRobot rover, 4 wires ===== -->
   <g stroke-width="2">
