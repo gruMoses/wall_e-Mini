@@ -248,8 +248,13 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
 `wall-e` stopped. Then the motors cannot move.
 
 1. **Arduino board.** Done 2026-11-13: a CH340 (`1a86:7523`) and an
-   ATmega328P with the Nano old bootloader (section 3). Open: photograph
-   the board, both sides.
+   ATmega328P with the Nano old bootloader (section 3). Photographed on
+   both sides (a CH340G with a 12 MHz crystal, an AMS1117 5 V regulator,
+   and the "B2" diode at the USB end). Length: about 1.70 in (43.2 mm) on a
+   dial caliper. The USB shell appears to touch the jaw, so this is
+   probably the overall length with the USB socket. Photos in
+   `docs/data/shield_inputs_20261113/`. Open: the diode-mode check of
+   "B2".
 2. **Firmware.** Done 2026-11-13 13:22, with `wall-e` stopped for about
    15 s (Kevin's approval). avrdude read the flash in no-write mode
    (`-n -U flash:r`) at 57600 baud. The first 4,806 bytes are the same, byte
