@@ -1,6 +1,6 @@
 # X1202 power watcher: design and install procedure (DRAFT, not approved)
 
-Status: draft 3, 2026-11-13. Nothing is installed or pushed. Grok and an independent Opus reviewer examined this design in three rounds (refer to "Review history"). The bench results that this document calls "the bench" are in `docs/pi_power_architecture.md`, sections 7.5 to 7.8. The install is gated on the bench go/no-go in `docs/pi_power_architecture.md` section 7.6. Kevin decides the items in section 10. "Verify on the bench" marks each item that is not proven on this Raspberry Pi OS image.
+Status: draft 3, 2026-11-13. Nothing is installed or pushed. Grok and an independent Opus reviewer examined this design in three rounds (refer to "Review history"). The bench results that this document calls "the bench" are in `docs/pi_power_architecture.md`, sections 7.5 to 7.8. NOTE, 2026-11-13: those results are for the USB Type-C input of the board with a 5 V supply. The robot uses the 6 V to 18 V input, which is not tested yet. Do bench tests 3 to 5 of section 9 on that input. The install is gated on the bench go/no-go in `docs/pi_power_architecture.md` section 7.6. Kevin decides the items in section 10. "Verify on the bench" marks each item that is not proven on this Raspberry Pi OS image.
 
 ## 1. Scope and non-goals
 
