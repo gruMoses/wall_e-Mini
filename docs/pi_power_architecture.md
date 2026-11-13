@@ -302,6 +302,8 @@ Go/no-go, 2026-11-13: **not yet**. No result rejects option F. The primary funct
 5. The tests with hands in 7.7.
 6. A plain relay outlet for the bench supply, not a dimmer.
 
+A draft design for the software that replaces `bin/walle_ups.py`, with the install procedure, is in `docs/x1202_power_watcher_design.md`. Grok and an independent Opus reviewer examined it in three rounds. It is not approved, and nothing from it is installed. It adds two items to this list: set the robot's converter from 7.5 V to approximately 12 V before the X1202 goes on the robot, and there is no cell temperature, thus the condition "charge disabled above 45 C" needs a sensor on the cells.
+
 ### 7.7 Bench procedure for the tests that need hands
 
 Kevin does the physical steps. The harness and the logger continue to record.
