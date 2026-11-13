@@ -340,14 +340,16 @@ Requirements:
   Waveshare page for the fitted version.
 - **S8. Mechanical.** Pi 5 HAT+ outline. Kevin, 2026-11-13: the shield
   mounts on top of the Waveshare RS485 CAN HAT, which is on the Pi's
-  header. The X1202 is under the Pi on pogo pins. VERIFY that the CAN HAT
-  passes the 40 pins up (or needs a stacking header), the height of its
-  parts and terminal blocks, and where the NVMe carrier and the fan sit in
-  the stack.
-- **S9. USB link.** The 40-pin header has no USB lines. The shield needs a
-  Mini-B (mini USB) socket. Kevin's short cable has a 90° Mini-B plug: the
-  cable leaves at a right angle to the plug. Place the socket so the plug's
-  bend clears the stack and the cable can reach a Pi USB port. Kevin's
+  header. The CAN HAT passes the 40 pins up through its top, so the shield
+  plugs straight onto them (Kevin, 2026-11-13). The X1202 is under the Pi
+  on pogo pins. VERIFY the height of the CAN HAT's parts and terminal
+  blocks, and where the NVMe carrier and the fan sit in the stack.
+- **S9. USB link.** The 40-pin header has no USB lines. Kevin's short cable
+  has a 90° Mini-B plug: the cable leaves at a right angle to the plug.
+  Kevin, 2026-11-13: mount the Nano so that its own Mini-B port sticks out
+  of the side of the case, as it does today, and the existing cable plugs
+  straight into the Nano. Put the on-board chip's Mini-B socket at the same
+  edge, near the same place, so the same cable reaches either one. Kevin's
   photo of the plug in the current Nano:
   `docs/data/shield_inputs_20261113/nano_mount_and_usb_plug.jpg`.
 - **S10. Two 5 V rails that do not connect.** The microcontroller and the
@@ -420,8 +422,10 @@ Decisions (Kevin, 2026-11-13):
 8. **D8. Hand-soldered build:** an ATmega328P (DIP-28) in a socket, a
    CH340C (SOP-16) as the only surface-mount chip, and through-hole parts
    for the rest, like the other boards in `~/Documents/KiCad/pcb-lessons`.
-9. **D9. The shield mounts on the Waveshare RS485 CAN HAT** (S8), and the
-   USB socket is a Mini-B for Kevin's 90° Mini-B cable (S9).
+9. **D9. The shield mounts on the Waveshare RS485 CAN HAT** (S8), which
+   passes the pins up. The Nano's own USB port sticks out of the side of
+   the case for Kevin's 90° Mini-B cable, and the on-board chip's Mini-B
+   socket sits at the same edge (S9).
 
 ## Appendix: Technical Names and Technical Verbs
 
