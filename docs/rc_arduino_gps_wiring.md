@@ -358,8 +358,12 @@ Requirements:
   Kevin, 2026-11-13: mount the Nano so that its own Mini-B port sticks out
   of the side of the case, as it does today, and the existing cable plugs
   straight into the Nano. The Nano's own USB port is the only USB
-  connection on the shield (D6). Kevin's photo of the plug in the current
-  Nano: `docs/data/shield_inputs_20261113/nano_mount_and_usb_plug.jpg`.
+  connection on the shield (D6). Kevin, 2026-11-13, later: put the Nano on
+  the side of the Pi's USB ports (the short end with the USB-A ports and
+  Ethernet), so the cable to a Pi USB port is short. This replaces the
+  earlier south-edge (USB-C and HDMI side) position. Kevin's photo of the
+  plug in the current Nano:
+  `docs/data/shield_inputs_20261113/nano_mount_and_usb_plug.jpg`.
 - **S10. Two 5 V rails that do not connect.** The microcontroller and the
   receiver get their power from the USB VBUS only, as the Arduino and the
   receiver do today: a USB port of the Pi supplies them (Kevin,
@@ -443,8 +447,8 @@ Decisions (Kevin, 2026-11-13):
 8. **D8. Hand-soldered build,** through-hole where a part allows it, like
    the other boards in `~/Documents/KiCad/pcb-lessons`.
 9. **D9. The shield mounts on the Waveshare RS485 CAN HAT** (S8), which
-   passes the pins up. The Nano's own USB port sticks out of the side of
-   the case for Kevin's 90° Mini-B cable (S9).
+   passes the pins up. The Nano sits on the side of the Pi's USB ports,
+   and its own USB port takes Kevin's 90° Mini-B cable (S9).
 
 ## Appendix: Technical Names and Technical Verbs
 
