@@ -93,6 +93,46 @@ Monitor options (2026-11-08). The base has no documented data port: the DFRobot 
 3. Decode the link with the same listener: find the frequency by RSSI, then try spreading factor, bandwidth and sync word until packets decode, and look for RTCM3 frames (preamble 0xD3). If that works, the RTCM stream shows base restarts (a changed 1005 coordinate), the byte rate, and (with MSM4 or MSM7) the base's signal strength. The decoded stream can also feed a home-built rover (any dual-band RTK module). Risk: an unknown framing or frequency hopping. CAD and RSSI see only the frequency, spreading factor and bandwidth that are programmed, so the search is a sweep (902–928 MHz, SF5–SF11, BW 125/250/500 kHz, both sync words, both IQ settings). An implicit header, a custom sync word or hopping can stop the decode while CAD still fires. If the sweep finds nothing, the next tool is a USB SDR waterfall, not another LoRa board.
 4. A second KIT0198-US is the plug-and-play rover. The wiki suggests that one base serves any number of rovers, but that a rover from another kit hears this base is not verified. Ask DFRobot before buying. Never re-pair the robot's rover to another base.
 
+### 2.4 Listener results (2026-11-12)
+
+The receive-only listener of option 2 is built: Heltec WiFi LoRa 32 V3,
+firmware in `~/Documents/walle/heltec_lora_listener/` (outside this
+repository). It runs on the outdoor Wi-Fi near the barn as
+`lora-listener.local` (192.168.84.115), with a network console on port 23
+and over-the-air updates. At boot it logs a 10 s summary of the base's
+bursts.
+
+Results:
+
+1. The base is on the air. It sends a group of 9-10 short LoRa packets
+   once per second (fixed 33.3 ms slots, about 263 ms per group), centred
+   near 915.01 MHz. The level is about -68 dBm at the house and about
+   -40 dBm near the barn (SNR about +9 dB). The listener hears this every
+   second.
+2. Radio settings: LoRa, SF5, 500 kHz, sync word 0x12, explicit header,
+   CRC on. The packets decode with a valid LoRa CRC.
+3. The payload is not plain RTCM3; the kit's own framing hides it. We do
+   not try to read the payload. Ask DFRobot for the RTCM message set if it
+   is needed (cause 2 in section 3).
+4. The robot's logs agree: every drive of 2026-11-06 to 2026-11-08 shows
+   reference station 3335 and a differential age of 1.0 s while
+   corrections arrive. But corrections were missing for long stretches:
+   87 % of the rows on 2026-11-07 evening, and 100 % while the robot is in
+   the garage (2026-11-11 and 2026-11-12).
+
+Conclusion: the base and its radio work. The weak point is reception at
+the robot. Next checks: the rover's LoRa antenna (connected, vertical,
+clear of the chassis and the battery), and a reception map. Carry the
+listener (or log it next to the robot) where the robot drives, and
+compare its burst count with the robot's differential age at the same
+time. Bursts at the listener with a dead differential age at the robot
+means the rover's antenna or radio.
+
+A firmware defect in the first listener build hid all packets for a few
+hours: the receive loop restarted the radio on every interrupt,
+including "preamble detected". Version 1.2.0 raises the interrupt line
+only for reception outcomes.
+
 The test is faster and more certain with per-satellite carrier-to-noise density (C/N0) in the log, which the rover driver does not read yet (GSV sentences, possibly in `get_all_gnss()`, register 91). With C/N0, compare the midday value with the value near sunset, and compare satellites near the sun with satellites far from it (solar radio noise).
 
 ## 3. Ranked causes
