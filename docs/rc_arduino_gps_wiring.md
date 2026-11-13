@@ -385,6 +385,19 @@ Requirements:
 - **S12. The Pi changes first.** The Pi parser must accept 6 fields and the
   "no signal" value before a firmware sends them (section 7). Kevin,
   2026-11-13: the code can come later, but the CH6 wire must exist now.
+- **S13. Receiver mount, if there is room.** Kevin, 2026-11-13: "It'd be
+  nice to have the real estate to put the receiver on the board. Leave me
+  some screw holes to 3D print a clip to attach it if we have the room."
+  Reserve a clear area on the top of the shield for the F-06A, next to the
+  servo headers J11 to J16 so the six leads stay short, with its pin
+  header facing them. Size it for the larger published size, 38 x 24 x
+  13 mm (another listing gives 32 x 19 x 13 mm; Kevin can measure). Put no
+  parts taller than about 1 mm under it. Give 2 to 4 screw holes (M2.5 or
+  M3) around it for a printed clip, with the hole positions in the README
+  for the clip design. Leave a path for the receiver's antenna lead to
+  reach the board edge, away from the USB and the crystal of the Nano. If
+  it does not fit the HAT outline, say so and give the space that is
+  free.
 
 Second opinion on the first S11, the on-board chip, now removed (Grok,
 session `6f2eb58a-e096-4a22-a90d-751115f951fb`, 2026-11-13):
