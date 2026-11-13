@@ -54,7 +54,7 @@
     <line x1="250" y1="330" x2="410" y2="330" stroke="#1f4e8c"/>
     <line x1="250" y1="360" x2="410" y2="360" stroke="#1f4e8c"/>
     <line x1="250" y1="390" x2="410" y2="390" stroke="#c0392b"/>
-    <line x1="250" y1="420" x2="275" y2="420" stroke="#888"/>
+    <line x1="250" y1="420" x2="410" y2="420" stroke="#d9822b" stroke-dasharray="6,4"/>
     <line x1="250" y1="450" x2="410" y2="450" stroke="#c0392b"/>
     <line x1="250" y1="475" x2="410" y2="475" stroke="#111"/>
   </g>
@@ -64,7 +64,7 @@
     <text x="262" y="325" fill="#1f4e8c">CH3 signal: arm switch</text>
     <text x="262" y="355" fill="#1f4e8c">CH4 signal: FOLLOW_ME</text>
     <text x="262" y="385" fill="#c0392b">CH5 signal: e-stop</text>
-    <text x="281" y="424" fill="#888">not connected</text>
+    <text x="262" y="415" fill="#d9822b">CH6 signal: to wire now</text>
     <text x="262" y="445" fill="#c0392b">+ USB 5 V, Arduino side</text>
     <text x="262" y="470" fill="#111">&#8722; ground, Arduino side</text>
   </g>
@@ -72,14 +72,15 @@
   <!-- ===== Arduino ===== -->
   <rect x="410" y="175" width="250" height="345" rx="6" fill="#f4f6fa" stroke="#333"/>
   <text x="422" y="197" font-size="13" font-weight="bold" fill="#111">Arduino, ATmega328P</text>
-  <text x="422" y="213" fill="#d9822b">Probably a Nano clone (CH340)</text>
-  <text x="422" y="229" fill="#222">arduino_rc_reader.ino</text>
+  <text x="422" y="213" fill="#222">Nano clone, CH340, 16 MHz</text>
+  <text x="422" y="229" fill="#222">Flash = arduino_rc_reader.ino at dcc550e</text>
   <g fill="#111" font-weight="bold">
     <text x="420" y="274">D2</text>
     <text x="420" y="304">D3</text>
     <text x="420" y="334">D4</text>
     <text x="420" y="364">D5</text>
     <text x="420" y="394">D6</text>
+    <text x="420" y="424" fill="#d9822b">A0</text>
     <text x="420" y="454">5V</text>
     <text x="420" y="479">GND</text>
   </g>
@@ -93,6 +94,7 @@
     <text x="470" y="392" fill="#c0392b" font-weight="bold">No pulse timeout:</text>
     <text x="470" y="406" fill="#c0392b" font-weight="bold">a lost pulse keeps the</text>
     <text x="470" y="420" fill="#c0392b" font-weight="bold">last width</text>
+    <text x="470" y="434" fill="#666">A0: input, not read yet</text>
   </g>
   <text x="470" y="454" font-size="11" fill="#222">Arduino and receiver run on</text>
   <text x="470" y="468" font-size="11" fill="#222">the USB 5 V only, not the</text>
