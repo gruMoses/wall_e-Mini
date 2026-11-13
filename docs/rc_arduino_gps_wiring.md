@@ -31,7 +31,7 @@ Solid lines are Confirmed. Orange dashed lines are Unknown or Inferred.
 | Transmitter | HotRC DS600 V3, LCD model, sold as Havcybin | Confirmed, 2026-11-04 (`docs/NEXT_SESSION.md`) |
 | Receiver | HotRC F-06A: 6 channels, PWM, 4 V to 9 V DC | Inferred. Page 6 of the DS600 manual names the F-06A. Nobody read the label on the robot. |
 | RC bridge MCU | Arduino Nano clone: ATmega328P at 16 MHz, CH340 USB serial chip, Nano old bootloader (57600 baud) | Confirmed 2026-11-13: `lsusb` shows `1a86:7523`, avrdude reads signature `0x1e950f` at 57600 baud, and the last flash used FQBN `arduino:avr:nano:cpu=atmega328old`. Nobody photographed the board. |
-| Fallback motor driver | OSOYOO Model X H-bridge | The code is Confirmed (`pi_app/hardware/arduino_modelx.py`). Whether the board is fitted is Unknown. |
+| Former motor driver | OSOYOO Model X H-bridge | Removed. Kevin, 2026-11-13: the Arduino used to control it. Today the Arduino only streams the RC channels to the Pi over USB. The sketch still has the Model X code (section 5). |
 | USB hub | Genesys Logic, USB IDs 05e3:0610 and 05e3:0626, own supply from the main pack | Confirmed (`docs/ups_hat_b.md`) |
 | RTK rover | DFRobot KIT0198: Quectel LC29HDA, LoRa 915 MHz, I2C address 0x20 | Confirmed (`docs/rtk_gps_module.md`) |
 
@@ -66,7 +66,25 @@ Electrical facts:
   a high level at 3.0 V or more (0.6 × VCC). A 3.3 V output thus has 0.3 V
   of margin. VERIFY (section 10, check 5).
 
-## 5. Arduino to Model X (fallback)
+## 5. Model X code in the sketch (board removed)
+
+Kevin, 2026-11-13: the Arduino only streams the RC channels to the Pi over
+USB. No device connects to its output pins. The Arduino used to control the
+Model X, a hobby motor driver board from the first prototype (its code is in
+the initial commit, 2025-08-15, before the VESCs). The board is removed. The
+VESCs on CAN drive the robot.
+
+The firmware still has the Model X code. At start it sets D7 to D12 as
+outputs and drives them low. It drives them again when the Pi sends
+`M,<left>,<right>`. The Pi sends that command only when it finds no VESC on
+CAN: `pi_app/app/main.py` ("VESC not detected") and four calibration tools in
+`pi_app/cli/` do this. With the board removed, those commands drive nothing,
+and without `can0` the robot has no drive path.
+
+WARNING: Do not connect an input, for example CH6, to D7 to D12. The sketch
+drives those pins as outputs.
+
+Former pin map, for reference:
 
 | Arduino pin | Model X pin | Use |
 |---|---|---|
@@ -77,12 +95,7 @@ Electrical facts:
 | D12 | IN1 | Right direction 1 |
 | D11 | IN2 | Right direction 2 |
 
-The Model X is a hobby motor driver board from the first prototype. Its code
-is in the initial commit (2025-08-15), before the VESCs. The VESCs on CAN are
-the drive path. The Pi uses the Model X path only when `can0` does not exist
-(`pi_app/app/main.py`, "VESC not detected"). A comment in the sketch says that the IN1/IN2
-polarity "may need swap depending on wiring". Nobody recorded a check of the
-right-side direction.
+Remove the Model X code with the next change to the sketch.
 
 ## 6. Power and ground
 
@@ -113,9 +126,11 @@ right-side direction.
 - Each time a program opens the port, the DTR line resets the Arduino. The
   Pi start-up opens the port two times (detection, then the reader), so the
   Arduino resets two times.
-- Pi to Arduino: `M,<left>,<right>`. The bytes are 0 to 254, neutral 126.
-  The sketch accepts 0 to 255, but byte 255 overflows its PWM calculation
-  (`abs(delta) * 255` in a 16-bit `int`). The Pi never sends 255.
+- Pi to Arduino: `M,<left>,<right>`, for the removed Model X only. The Pi
+  sends it only when it finds no VESC on CAN (section 5). The bytes are 0 to
+  254, neutral 126. The sketch accepts 0 to 255, but byte 255 overflows its
+  PWM calculation (`abs(delta) * 255` in a 16-bit `int`). The Pi never sends
+  255.
 - The Pi parser accepts a line with 4 or 5 fields only. It drops a line with
   6 fields, so a firmware that sends CH6 needs a Pi change first.
 - The Pi puts a monotonic time stamp on each line that it parses. An RC
@@ -190,9 +205,9 @@ right-side direction.
    the logs stay in 992 µs to 2004 µs, at the default (maximum) travel of
    the transmitter. A change of the transmitter travel or of the receiver
    mode can cause this. Latent; source: agent review, sketch line 188.
-6. **Low: the Model X path has no motor-command timeout.** If the Pi stops
-   sending, the sketch keeps the last Model X command. This is not
-   important if the Model X is not fitted (check 8).
+6. **No effect now: the Model X code has no motor-command timeout.** If the
+   Pi stops sending, the sketch keeps the last Model X command on D7 to
+   D12. The board is removed (section 5), so nothing moves.
 7. **Low: `millis()` wraps after 49.7 days.** The CSV timing comparison
    then can stop the CSV. The Pi sees a stale stream and disarms, which is
    safe.
@@ -235,8 +250,8 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
 7. **Lead loss.** Run `python3 -m pi_app.cli.monitor_rc`. Put the arm switch
    up. Disconnect the CH3 signal lead at the Arduino. Record ch3. Finding 1
    expects ch3 to stay near 2000 µs.
-8. **Model X.** Record whether the board is fitted. Kevin did not know the
-   board on 2026-11-13, so it is probably not fitted.
+8. **Model X.** Done. Kevin, 2026-11-13: the board is removed. The Arduino
+   used to control it.
 9. **Rover pin order and pull-ups.** Read the silkscreen. With the rover on
    5 V and the Pi on, measure the SDA and SCL voltage at rest.
 10. **Rover current.** Measure it at 5 V and at 3.3 V.
@@ -332,9 +347,8 @@ Decisions (Kevin, 2026-11-13):
 2. **D3. The CAN interface stays separate** for now.
 3. **D4. The microcontroller connects to the Pi by USB.**
 4. **D2. The shield has no Model X outputs.** The Model X is a hobby motor
-   driver board from the first prototype. Its code is in the initial commit
-   (2025-08-15), before the VESCs. Kevin does not know the board, so it is
-   probably not fitted (check 8).
+   driver board from the first prototype. The Arduino used to control it,
+   and the board is removed (section 5). The VESCs on CAN drive the robot.
 5. **D5. The shield has no HAT+ ID EEPROM.** The ID EEPROM is a small
    memory chip on GPIO 0 and GPIO 1 (header pins 27 and 28). The Pi reads
    it at boot to identify the board and to load its settings. The Raspberry

@@ -5,7 +5,9 @@
 Main runtime (`pi_app/app/main.py`) selects motor backend at startup:
 
 - If `VescCanDriver.detect()` sees `can0`, it uses VESC over CAN.
-- Otherwise it falls back to Arduino Model X serial motor driver.
+- Otherwise it falls back to Arduino Model X serial motor driver. The Model X
+  board is removed (Kevin, 2026-11-13), so without `can0` the robot has no
+  drive path.
 
 Current default IDs in main:
 

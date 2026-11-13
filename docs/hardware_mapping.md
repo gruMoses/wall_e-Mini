@@ -33,7 +33,12 @@ Sketch: `arduino_rc_reader/arduino_rc_reader.ino`.
 - CH4 -> `D5`
 - CH5 -> `D6`
 
-### Motor driver pins (Model X bridge)
+### Motor driver pins (Model X bridge, removed)
+
+The Model X board is removed (Kevin, 2026-11-13). The Arduino only streams
+the RC channels over USB. The sketch still drives these pins as outputs, so
+do not connect an input to them. Refer to `docs/rc_arduino_gps_wiring.md`,
+section 5.
 
 - Left PWM `ENB_L` -> `D10`
 - Left dir `IN3_L` -> `D7`

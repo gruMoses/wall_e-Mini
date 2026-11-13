@@ -12,7 +12,7 @@ optional RTK waypoint navigation.
   arming ceremony, latched e-stop, 250 ms deadman; RC stays the safety authority
 - Bluetooth SPP diagnostics server (`wall-e-spp.service`); its control writes are
   gated OFF by default
-- VESC over CAN (`can0`) with Arduino motor-driver fallback
+- VESC over CAN (`can0`); the old Arduino motor-driver fallback drives nothing (the Model X board is removed)
 - IMU steering hold (OAK-D onboard BMI270; `imu_source = "oak_d"`)
 - OAK-D Lite obstacle avoidance + person-following mode
 - Activity-triggered recording (H.265 + MCAP) and web viewer

@@ -39,7 +39,7 @@ tools/                 # log analyzers, replay tools, bench scripts
 ## Key Subsystems
 
 ### Motor Output
-VESC over CAN (`can0`) is the primary drive path; Arduino motor-driver fallback is wired in. All motor commands are "bytes" (0–254, centre 126 = stop; `pi_app/control/mapping.py`). Left/right are issued separately via `VescCanDriver`. A command-space mixer converts `(v_cmd, yaw_cmd)` floats in `[-1, 1]` into left/right bytes.
+VESC over CAN (`can0`) is the only drive path. The Arduino only streams the RC channels over USB; its old Model X motor-driver board is removed (Kevin, 2026-11-13), so the Model X fallback code drives nothing. Wiring and open checks: `docs/rc_arduino_gps_wiring.md`. All motor commands are "bytes" (0–254, centre 126 = stop; `pi_app/control/mapping.py`). Left/right are issued separately via `VescCanDriver`. A command-space mixer converts `(v_cmd, yaw_cmd)` floats in `[-1, 1]` into left/right bytes.
 
 ### IMU
 - **Sign convention (canonical: `OakImuReader.read` docstring)**: `heading_deg`
