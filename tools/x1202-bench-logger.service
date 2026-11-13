@@ -1,0 +1,19 @@
+# Temporary bench unit for the Geekworm X1202 tests (2026-11-12).
+# Install: sudo cp tools/x1202-bench-logger.service /etc/systemd/system/
+# Remove:  sudo systemctl disable --now x1202-bench-logger &&
+#          sudo rm /etc/systemd/system/x1202-bench-logger.service /home/pi/x1202_bench/ENABLED
+[Unit]
+Description=X1202 bench logger (GPIO 6/16, MAX17040, EXT5V)
+ConditionPathExists=/home/pi/x1202_bench/ENABLED
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+User=pi
+ExecStart=/usr/bin/python3 /home/pi/x1202_bench/x1202_bench_logger.py --charge disable --guard
+Restart=always
+RestartSec=1
+TimeoutStopSec=3
+
+[Install]
+WantedBy=multi-user.target
