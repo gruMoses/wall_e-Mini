@@ -29,7 +29,7 @@ Solid lines are Confirmed. Orange dashed lines are Unknown or Inferred.
 | Part | Model | Confidence and source |
 |---|---|---|
 | Transmitter | HotRC DS600 V3, LCD model, sold as Havcybin | Confirmed, 2026-11-04 (`docs/NEXT_SESSION.md`) |
-| Receiver | HotRC F-06A: 6 channels, PWM, 4 V to 9 V DC | Inferred. Page 6 of the DS600 manual names the F-06A. Nobody read the label on the robot. Kevin, 2026-11-13: the robot's receiver has no power row, but the F-06A has one (section 4). Thus the robot's receiver can be a different model (section 10, check 3). |
+| Receiver | HotRC F-06A (V3): 6 channels, PWM, 4 V to 9 V DC | Confirmed: Kevin read "F-06A" on the label, 2026-11-13. This agrees with the V3 transmitter. Kevin reports no power row, but the published F-06A drawing and photo show a seventh row with a power symbol (section 4). |
 | RC bridge MCU | Arduino Nano clone: ATmega328P at 16 MHz, CH340 USB serial chip, Nano old bootloader (57600 baud) | Confirmed 2026-11-13: `lsusb` shows `1a86:7523`, avrdude reads signature `0x1e950f` at 57600 baud, and the last flash used FQBN `arduino:avr:nano:cpu=atmega328old`. Nobody photographed the board. |
 | Former motor driver | OSOYOO Model X H-bridge | Removed. Kevin, 2026-11-13: the Arduino used to control it. Today the Arduino only streams the RC channels to the Pi over USB. The sketch still has the Model X code (section 5). |
 | USB hub | Genesys Logic, USB IDs 05e3:0610 and 05e3:0626 | Removed (Kevin, 2026-11-13). Before that, the Arduino and the OAK-D Lite were on it, and it had its own supply from the main pack (`docs/ups_hat_b.md`). |
@@ -261,12 +261,13 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    `56d5d39e94132cd8263f413f98879282`). To restore the program, upload the
    `dcc550e` build (the same bytes) at 57600 baud. Do not try to write the
    bootloader area of the image through the bootloader.
-3. **Receiver label, rows and output mode.** Read the model on the label.
-   Howes Models: a V1 receiver has "DS600" on it, a V2 has "C-06A" (input
-   4 V to 12 V), and a V3 has "F-06A". V1, V2 and V3 transmitters and
-   receivers do not work with each other, and the transmitter is a V3.
-   Count the header rows: the F-06A has 7 (6 channels and a power row).
-   Kevin reports no power row. Record the blue LED: off is the 50 Hz mode.
+3. **Receiver label, rows and output mode.** Label done: "F-06A" (Kevin,
+   2026-11-13), the V3 receiver. Howes Models: a V1 receiver has "DS600" on
+   it, a V2 has "C-06A" (input 4 V to 12 V), and a V3 has "F-06A". V1, V2
+   and V3 do not work with each other, and the transmitter is a V3. Open:
+   the published F-06A has 7 header rows (6 channels and a power row), and
+   Kevin reports no power row. Count the rows. Record the blue LED: off is
+   the 50 Hz mode.
 4. **Receiver power feed.** Answered by Kevin, 2026-11-13: the USB 5 V,
    on the Arduino side. Nothing connects to the header 5 V except the RTK
    rover. Open: the exact pin on the Arduino side.
