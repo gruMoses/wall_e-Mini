@@ -292,12 +292,28 @@ Results with hands, 2026-11-13 morning (Kevin at the bench, a 12 V supply on the
 - Kevin set the 12 V supply to off with the Pi in operation. GPIO 6 went low, and the Pi continued on the cells for 66 s until a manual halt: VCELL 3.72 V to 3.77 V, EXT5V 5.10 V to 5.14 V, `get_throttled` 0x0. After the halt, no LED on the board was on. The 5 V output was not measured in this condition.
 - Not done: the drain measurement. Kevin does it on 2026-11-14 with new cells.
 
+Results on the 12 V input, 2026-11-13 09:49 to 10:45 (the same harness, a 12 V supply on the 6 V to 18 V input, switched by a plain Zigbee relay outlet, Hubitat device 435; raw results in `docs/data/x1202_bench_20261113/results_12v_input.jsonl`):
+
+| Test | n | Result |
+|---|---|---|
+| Start when the input is applied | 1 | The Pi booted when Kevin connected the 12 V supply. |
+| T1: input off for 20 s, Pi in operation | 3 | 3 of 3 continue on the cells. GPIO 6 falls 1.22 s to 1.25 s after `off` and rises 2.25 s to 2.35 s after `on`. EXT5V minimum 5.05 V. `get_throttled` 0x0. |
+| T2: input off, `poweroff` after 10 s, input on 30 s after the network stops | 5 | 5 of 5 boot with no other action. The boot starts 12.0 s to 12.1 s after `on`. ssh answers after 21.6 s. |
+| T3: input on 2 s after `poweroff` | 2 | 0 of 2 boot. |
+| T3: input on 10 s after `poweroff` | 2 | 1 of 2 boot. |
+| T3: input on 30 s after `poweroff` | 2 | 2 of 2 boot. |
+| T4: `poweroff` with the input on | 1 | No start in 3 min. An input-off of 30 s starts the Pi. |
+| T5: `reboot` with the input on, and on the cells | 3 and 1 | 4 of 4 come back. |
+| T7: Pi halted with the input on, then input off for N s | 2 | N = 3.0 s: boots. N = 10 s: boots. |
+
+The 12 V input gives the same behaviour as the USB Type-C input. The one difference is the delay of GPIO 6: 1.2 s after the loss and 2.3 s after the return, because the 12 V supply holds its output for a short time. All failures recovered with one input-off of 30 s.
+
 ### 7.6 Status of the tests in 7.2, and the go/no-go
 
 | Test in 7.2 | Status | Result |
 |---|---|---|
 | Mechanical stack | Done | Correct. The NVMe carrier stays on top. |
-| 1. Power cycles | Done without hands, 34 cycles (one after 4 h with the input off) | Normal cycle: 10 of 10. Reboot: 4 of 4. Race at 2 s and at 10 s: the Pi stays off. Race at 30 s: 3 of 3. |
+| 1. Power cycles | Done without hands, 34 cycles on the USB Type-C input (one after 4 h with the input off) and 17 cycles on the 12 V input | Normal cycle: 10 of 10. Reboot: 4 of 4. Race at 2 s and at 10 s: the Pi stays off. Race at 30 s: 3 of 3. |
 | 2. Drain and charge control | Partly done | GPIO 16 stops the charge while Linux drives it. It cannot stop the charge during a boot or with the Pi off. The drain is not measured. The boot with the cells at 3.3 V is not tested. |
 | 3. Full load on the cells at 50 C to 55 C | Partly done, at room temperature | Not passed with these cells: EXT5V is 4.896 V with 4 cores and an NVMe read. The limit is 4.9 V. |
 | 4. Hub power from the board | Not done | Needs hands. |
@@ -306,12 +322,12 @@ Results with hands, 2026-11-13 morning (Kevin at the bench, a 12 V supply on the
 Go/no-go, 2026-11-13: **not yet**. No result rejects option F. The primary functions are correct: the Pi starts when the input returns, there is no poll wake, the power-loss signal is clean, and a reboot does not cut the power. The board does not go on the robot until these items are closed:
 
 1. The cells. The pack resistance is too high (finding 8). The cells are old Moli ICR-18650H laptop cells (7.5, setup). They are sufficient for function tests on the bench with the charge disabled. Do not put them on the robot. Use two cells with a low internal resistance from a known manufacturer, or four cells. Then do T6 again. The vendor permits 2 to 4 cells. One cell is not permitted.
-2. The stay-off condition (findings 1 and 2). This is Kevin's decision. Option 1: accept it, with an operator rule: "If the Pi does not start, set the main switch to off, wait 5 s, and set it to on." A debounce of 10 s on GPIO 6 before the halt prevents the condition for a short interruption. Option 2: add a check of GPIO 6 at the end of the shutdown that changes the power-off into a reboot when the input is back. This needs a shutdown hook, and Kevin must approve a bench test of it. The hook cannot close the last seconds before the board cuts its output.
+2. The stay-off condition (findings 1 and 2). Kevin decided on 2026-11-13 that the debounce on GPIO 6 is 5 s, as in the old watcher. The remaining choice is Kevin's decision. Option 1: accept it, with an operator rule: "If the Pi does not start, set the main switch to off, wait 5 s, and set it to on." A debounce of 10 s on GPIO 6 before the halt prevents the condition for a short interruption. Option 2: add a check of GPIO 6 at the end of the shutdown that changes the power-off into a reboot when the input is back. This needs a shutdown hook, and Kevin must approve a bench test of it. The hook cannot close the last seconds before the board cuts its output.
 3. The charge level. The software cannot hold the cells at 3.8 V in all conditions (finding 3). Each boot charges for approximately 13 s. A halt on the cells discharges for approximately 20 s. With the Pi off and the main switch on, the board charges to 4.2 V. Possible corrections, not tested: a `gpio=16=op,dh` line in `config.txt` (a shorter charge at each boot), and a longer time on the cells before the halt when VCELL is above the target.
 4. The storage drain. Owner reports say that the X1202 has no hardware cutoff for a low cell voltage (7.8). If the drain with the output off is in the milliampere range, months of storage can damage the cells. The soak of 4 h (finding 14) does not answer this. Measure the drain with a meter (7.7), with good cells.
 5. The tests with hands in 7.7.
 6. A plain relay outlet for the bench supply, not a dimmer.
-7. The 6 V to 18 V input. The robot uses this input, and all tests so far used the USB Type-C input. Do T1, T2, T3, T4 and T7 again with a 12 V supply of 3 A or more on the DC input. Never connect the two inputs at the same time.
+7. The 6 V to 18 V input. DONE on 2026-11-13 for the power cycles (7.5, "Results on the 12 V input"): the same behaviour as on the USB Type-C input. Still open on this input: the load test with new cells, and the robot's own converter as the supply. Never connect the two inputs at the same time.
 
 A draft design for the software that replaces `bin/walle_ups.py`, with the install procedure, is in `docs/x1202_power_watcher_design.md`. Grok and an independent Opus reviewer examined it in three rounds. It is not approved, and nothing from it is installed. It adds two items to this list: set the robot's converter from 7.5 V to approximately 12 V before the X1202 goes on the robot, and there is no cell temperature, thus the condition "charge disabled above 45 C" needs a sensor on the cells.
 

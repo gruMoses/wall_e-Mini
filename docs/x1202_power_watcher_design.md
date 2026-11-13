@@ -1,6 +1,6 @@
 # X1202 power watcher: design and install procedure (DRAFT, not approved)
 
-Status: draft 3, 2026-11-13. Nothing is installed or pushed. Grok and an independent Opus reviewer examined this design in three rounds (refer to "Review history"). The bench results that this document calls "the bench" are in `docs/pi_power_architecture.md`, sections 7.5 to 7.8. NOTE, 2026-11-13: those results are for the USB Type-C input of the board with a 5 V supply. The robot uses the 6 V to 18 V input, which is not tested yet. Do bench tests 3 to 5 of section 9 on that input. The install is gated on the bench go/no-go in `docs/pi_power_architecture.md` section 7.6. Kevin decides the items in section 10. "Verify on the bench" marks each item that is not proven on this Raspberry Pi OS image.
+Status: draft 3, 2026-11-13. Nothing is installed or pushed. Grok and an independent Opus reviewer examined this design in three rounds (refer to "Review history"). The bench results that this document calls "the bench" are in `docs/pi_power_architecture.md`, sections 7.5 to 7.8. NOTE, 2026-11-13: the results of the night are for the USB Type-C input of the board with a 5 V supply. The power-cycle tests were done again on the 6 V to 18 V input with a 12 V supply the same morning, with the same results (7.5, "Results on the 12 V input"). The install is gated on the bench go/no-go in `docs/pi_power_architecture.md` section 7.6. Kevin decides the items in section 10. "Verify on the bench" marks each item that is not proven on this Raspberry Pi OS image.
 
 ## 1. Scope and non-goals
 
@@ -10,7 +10,7 @@ Non-goals: no RTC alarm and no wake poll; no gauge state of charge; no second wi
 
 | Feature | Lines (approximate) |
 |---|---|
-| GPIO 6 input with pull-down and read-back, 4 Hz, 10 s cumulative debounce | 20 |
+| GPIO 6 input with pull-down and read-back, 4 Hz, 5 s cumulative debounce | 20 |
 | Low-voltage halt, tiers (a) and (b) | 15 |
 | Halt sequence, re-check, cancel, power-off ladder, `halting` marker | 35 |
 | Gauge VCELL read (lazy `smbus2` import, bus opened for each read) | 15 |
@@ -24,7 +24,7 @@ The loop reads GPIO 6 at 4 Hz and VCELL at 1 Hz, and writes the status file at 1
 
 | State or event | Action |
 |---|---|
-| Input lost | 10 s of GPIO 6 low in the last 15 s: input-loss halt. |
+| Input lost | 5 s of GPIO 6 low in the last 7.5 s: input-loss halt. |
 | Input back during the debounce | The low time ages out. No halt. |
 | Input back after the halt decision | The re-check before `poweroff` cancels, starts `wall-e`, clears the state. |
 | Input back after `poweroff` | The Pi stays off. Operator rule (section 4). |
@@ -48,7 +48,7 @@ The loop reads GPIO 6 at 4 Hz and VCELL at 1 Hz, and writes the status file at 1
 
 ## 3. The halt rule
 
-Debounce: 10 s of low in the last 15 s. The bench needs about 1 s to reject glitches. The other 9 s ride through a switch bounce or a quick off and on. A chattering input cannot reset a cumulative window.
+Debounce: 5 s of low in the last 7.5 s. Kevin decided this value on 2026-11-13, after the reviews (the reviewed draft had 10 s in 15 s). It is the same time as in the old watcher. The bench needs about 1 s to reject glitches. The other 4 s ride through a switch bounce or a quick off and on. A chattering input cannot reset a cumulative window. Kevin's reason for a short time: the converter from the main pack operates down to 30 V or less, thus a low pack under load does not look like an input loss. A shorter time is possible for the signal, but it moves the stay-off window to shorter interruptions (section 4).
 
 GPIO 6 alone decides the input-loss halt. GPIO 6 pull: ExecStartPre and the script start set `pinctrl set 6 ip pd`. The script reads the pin back and shows FAULT `gpio6_cfg` if the pull is not set. The board drives the pin high against the pull-down (bench finding 5), so a lost contact reads low. Verify on the bench: measure the pin voltage with the input on, with the pull-down on and off, and with the Pi pressed down and released (a marginal contact). Pass: the high level stays well above the RP1 input threshold (for example 2.6 V or more) with the pull-down on. If it does not, use no pull (`ip pn`) and accept the residual that a lost contact can read high.
 
@@ -81,13 +81,13 @@ Time and energy budget from the start of the event to the board's cut:
 
 | Step | Input-loss halt, typical / worst | Low-voltage halt, typical / worst |
 |---|---|---|
-| Detection | 10.6 s / 15.6 s | 3 s to 5 s / 5 s |
+| Detection | 6.2 s / 8.7 s (GPIO 6 falls 1.2 s after the loss on the 12 V input) | 3 s to 5 s / 5 s |
 | `wall-e` kill and stop, re-check | 1 s / 16 s | none |
 | Userspace shutdown | 3 s to 8 s / 60 s (`JobTimeoutSec`) | none (`--force`) |
 | Final stage | about 2 s / 30 s (verify) | about 2 s / 30 s (verify) |
 | Board cut after the PMIC turns off | 3 s | 3 s |
-| Total | about 20 s to 25 s / about 125 s | about 10 s / about 38 s |
-| Energy at 7 W (worst) | 875 J (0.24 Wh) | 270 J (0.07 Wh) |
+| Total | about 15 s to 20 s / about 118 s | about 10 s / about 38 s |
+| Energy at 7 W (worst) | 830 J (0.23 Wh) | 270 J (0.07 Wh) |
 
 A queued-job failure adds at most 60 s (the ladder). Two good 3 Ah cells hold about 0.6 Wh to 1.1 Wh at a loaded 3.30 V and about 0.2 Wh at 3.10 V (typical NMC curves, not measured). Both budgets close. The 7 W load is pessimistic after `wall-e` and the OAK stop.
 
@@ -99,7 +99,7 @@ The Pi stays off when the input returns before the board cuts its output, or aft
 2. "After an e-stop, set the main switch to off within some minutes." Else the board charges the cells to 4.2 V with the Pi off.
 3. Flat cells (tier (b) at boot): "If WALL-E does not start and the board shows one or no battery LED, leave the main switch on for at least 15 min, then set it to off for 5 s and to on." A 5 s off time does not charge the cells above 3.10 V. With the Pi off and the input present, the board charges the cells. Verify on the bench: what the battery LEDs show at about 3.1 V with the Pi off, and the charge time from 3.0 V to a rested 3.4 V.
 
-With the 10 s debounce and the re-check, rule 1 applies after an input-off time of about 12 s to 30 s.
+With the 5 s debounce and the re-check, rule 1 applies after an input-off time of about 7 s to 25 s. An input-off time of less than 5 s causes no halt.
 
 Option for Kevin, added on 2026-11-13 after the reviews: an external push button on the 2-pin button connector of the board. On the bench, the button on the board started a halted Pi while the 12 V input was present. A button on the body of the robot can thus start the Pi after an e-stop, and the main switch stays on. Not tested: the external connector, and a push while the Pi is in operation (the vendor says that the button does the same as the power button of the Pi, thus it can start a shutdown).
 
@@ -214,9 +214,9 @@ Bench, before retirement (relay outlet, not the dimmer):
 
 1. Unit tests pass on the Mac and on the Pi.
 2. GPIO 6 pin voltage with the pull-down on and off, input on, Pi pressed and released (section 3).
-3. Input off 5 s, then on: no halt, 5 of 5.
+3. Input off 3 s, then on: no halt, 5 of 5.
 4. Input off 60 s: halt, cut, input on, boot, 10 of 10. Record each step against the budget table. After the halt decision `wall-e` stays `inactive`.
-5. Input off 15 s, 20 s and 25 s: record which cases stay off.
+5. Input off 8 s, 12 s, 16 s and 20 s: record which cases stay off.
 6. `poweroff.target` test unit: dark in about 60 s.
 7. Ladder: a fake `systemctl` first in `PATH` for the script only, failing on the first call. Record `--force` at 30 s.
 8. Watcher hang: `kill -STOP` the script during a manual burst. Within 15 s the watchdog kills it, GPIO 16 reads `op dh`, and the script restarts.
@@ -235,7 +235,7 @@ Stand, before driving: a charge burst plus 4 cores plus the OAK streaming plus m
 
 Robot, after the install:
 
-1. Main switch off: dark in about 25 s. Switch on: `wall-e` up within about 60 s.
+1. Main switch off: dark in about 20 s. Switch on: `wall-e` up within about 60 s.
 2. Main switch off 3 s, then on: no halt.
 3. ch5 e-stop: the Pi stays off. Operator rule 1 starts it.
 4. `/debug` shows the new fields and no banner. The guard is fresh.
@@ -258,7 +258,7 @@ Risks, most serious first:
 Kevin's decisions:
 
 1. Option 1 and the three operator rules.
-2. The debounce: 10 s in 15 s, or longer.
+2. The debounce. DECIDED by Kevin on 2026-11-13: 5 s (5 s of low in the last 7.5 s).
 3. Fail-off on GPIO 6 (D1) and tier (b) unconditional (D2).
 4. A cell temperature sensor (a part to buy), or no temperature rule.
 5. The hardware watchdog (`RebootWatchdogSec`, `RuntimeWatchdogSec`), after bench test 10.
