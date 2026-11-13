@@ -351,7 +351,9 @@ Requirements:
   straight into the Nano. Put the on-board chip's Mini-B socket at the same
   edge, near the same place, so the same cable reaches either one. Kevin's
   photo of the plug in the current Nano:
-  `docs/data/shield_inputs_20261113/nano_mount_and_usb_plug.jpg`.
+  `docs/data/shield_inputs_20261113/nano_mount_and_usb_plug.jpg`. The bend
+  direction of the plug is not a design limit: Kevin buys whichever cable
+  the on-board socket needs (2026-11-13). The shield README says which.
 - **S10. Two 5 V rails that do not connect.** The microcontroller and the
   receiver get their power from the USB VBUS only, as the Arduino and the
   receiver do today: a USB port of the Pi supplies them (Kevin,
