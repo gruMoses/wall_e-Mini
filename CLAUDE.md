@@ -215,7 +215,7 @@ State machine in `pi_app/control/waypoint_nav.py`:
 - API limits (2026-11-10): `/api/nav/start` and `/api/nav/go` clamp `cruise_speed` to 10–80 and `arrival_radius` to 0.3–3.0 (the slider ranges, one definition in `pi_app/web/waypoint_nav_ui.py`). A speed of 0 or less gets HTTP 400. The routes ask the gate before they write, and they restore the mission from `snapshot_mission` if the activation fails, so a refused start does not change a mission that is in progress.
 
 ### BMS
-Daly SPIM08HP over BLE (`bleak`). Polls SOC / cell voltages / temp / MOSFET status. Auto-reconnect. `is_charging()` feeds charger-inhibit into controller every loop tick. Fail-open after 30 s BLE dropout.
+JHB-R24TH-V1.3 (Daly-app compatible, 24S 40 A hardware; `docs/battery_settings.md`) over BLE (`bleak`); the Bluetooth radio is built into the BMS. The `config.py` docstring still says "SPIM08HP", which is wrong. Polls SOC / cell voltages / temp / MOSFET status. Auto-reconnect. `is_charging()` feeds charger-inhibit into controller every loop tick. Fail-open after 30 s BLE dropout. The long dark periods match the BMS's own sleep (default 3600 s with no current; it wakes on current). Setting the sleep to 65535 in the Daly app would stop them at about 25 mA of standby drain; Kevin, 2026-11-13: not yet (`docs/rc_arduino_gps_wiring.md`, section 11).
 
 ## Known Issues
 

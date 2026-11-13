@@ -53,7 +53,7 @@ Scope: Bug fixes and features tracked here; see `docs/performance_optimization_t
 ### P2 (Medium Priority)
 
 - [x] **Daly BMS Bluetooth communication**
-  - `pi_app/hardware/bms.py`: threaded `BmsService` connects to Daly SPIM08HP over BLE (bleak), polls SOC / cell voltages / temperature / MOSFET status / errors every 8 s.
+  - `pi_app/hardware/bms.py`: threaded `BmsService` connects to the JHB-R24TH-V1.3 BMS (Daly-app compatible) over BLE (bleak), polls SOC / cell voltages / temperature / MOSFET status / errors every 8 s.
   - Auto-reconnect with exponential backoff (5 s → 60 s cap). BLE failures never block the main control loop.
   - `BmsConfig` in `config.py`: `bms_mac_address`, `bms_poll_interval_s`, `bms_timeout_s`, `charger_inhibit_enabled`.
   - BMS state surfaced in the structured JSON telemetry log each loop tick.
