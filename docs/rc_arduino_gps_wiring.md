@@ -12,8 +12,8 @@ check.
 
 ## 1. Confidence levels
 
-- **Confirmed:** the code reads the part, a log shows the behaviour, or the
-  maker's manual gives the value.
+- **Confirmed:** the code reads the part, a log shows the behaviour, the
+  maker's manual gives the value, or Kevin states it.
 - **Inferred:** the code or the documents make the item necessary, but
   nobody saw it.
 - **Unknown:** no source has the item.
@@ -49,7 +49,7 @@ DFRobot wiki: <https://wiki.dfrobot.com/kit0198-us/>.
 | CH4 signal | D5 | FOLLOW_ME | Start at 1800 µs or more while armed. Stop at 1200 µs or less. |
 | CH5 signal | D6 | E-stop | 1800 µs or more: stop, latch DISARMED, power the Pi off after 5 s. |
 | CH6 signal | none | Not used | Inferred: the sketch reads 5 channels. |
-| + and − | Unknown | Receiver power | Section 6 |
+| + and − | Arduino side, on the USB 5 V | Receiver power | Section 6 (Kevin, 2026-11-13) |
 
 Electrical facts:
 
@@ -90,10 +90,13 @@ right-side direction.
   supply from the main pack. The Pi-to-hub cable has its 5 V wire cut
   (2026-11-05). Thus the Pi does not supply the hub, and the hub does not
   supply the Pi.
-- The receiver power feed is Unknown. The F-06A takes 4 V to 9 V DC on its
-  power row (manual page 5). The manual note gives 12 V as the maximum. An
-  October note in `docs/NEXT_SESSION.md` assumed the Arduino 5 V pin. Nobody
-  checked it.
+- The receiver gets its power from the same USB 5 V as the Arduino (Kevin,
+  2026-11-13). The Arduino and the receiver do not connect to the 5 V of the
+  Pi header. The exact pin on the Arduino side is not recorded. The F-06A
+  takes 4 V to 9 V DC on its power row (manual page 5). The manual note
+  gives 12 V as the maximum.
+- The RTK rover is the only part in this document on the 5 V of the Pi
+  header (Kevin, 2026-11-13).
 - The receiver and the Arduino must have a common ground for the PWM
   signals. The USB ground connects the Arduino ground to the Pi ground.
 - The RTK rover gets 5 V from the Pi header (section 8).
@@ -115,7 +118,7 @@ right-side direction.
 
 | Rover pin | Signal | Pi header | Confidence |
 |---|---|---|---|
-| + | Supply | Pin 2 or pin 4, 5 V | 5 V header supply is Confirmed. The pin number is Unknown. |
+| + | Supply | Pin 2 or pin 4, 5 V | 5 V header supply is Confirmed (Kevin, 2026-11-13). The pin number is Unknown. |
 | − | GND | A GND pin | The pin number is Unknown. |
 | C | SCL | Pin 5, GPIO3, SCL1 | Confirmed: the driver uses bus 1. |
 | D | SDA | Pin 3, GPIO2, SDA1 | Confirmed |
@@ -179,8 +182,9 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    2026-11-13. Its result goes here.
 3. **Receiver label and output mode.** Read the label. Record the blue LED:
    off is the 50 Hz mode.
-4. **Receiver power feed.** Follow the + and − leads of the receiver.
-   Record where they go.
+4. **Receiver power feed.** Answered by Kevin, 2026-11-13: the USB 5 V,
+   on the Arduino side. Nothing connects to the header 5 V except the RTK
+   rover. Open: the exact pin on the Arduino side.
 5. **Signal voltage.** Measure the CH1 signal pin with a meter or a scope,
    transmitter on.
 6. **Link loss with the transmitter on.** Run
@@ -220,11 +224,14 @@ Requirements:
   pitch) for each of CH1 to CH6, so that the existing receiver leads
   connect.
 - **S6. RTK rover connector.** One Gravity PH2.0 4-pin socket on I2C bus 1
-  (GPIO2, GPIO3). The rover supply goes off when the Pi halts: use the Pi's
-  3.3 V, or a 5 V that the Pi's 3.3 V switches. The pull-up voltage at the
-  Pi pins must not be more than 3.3 V. Nothing on the shield may keep the
-  Pi's 3.3 V rail up after a halt (refer to "Sneak feeds" in
-  `docs/power_module_spec.md`).
+  (GPIO2, GPIO3). Supply: the 5 V of the Pi header, as today (Kevin,
+  2026-11-13). That 5 V must go off when the Pi halts, so that the rover
+  does not drain the cells in storage. The X1202 does this (0 V after a
+  halt with the input present, measured 2026-11-13; the halt with the
+  input off is still open in `docs/pi_power_architecture.md`). The UPS
+  HAT (B) does not. The pull-up voltage at the Pi pins must not be more
+  than 3.3 V (check 9). Nothing on the shield may keep the Pi's 3.3 V rail
+  up after a halt (refer to "Sneak feeds" in `docs/power_module_spec.md`).
 - **S7. Pins and addresses that are in use.** Do not use GPIO 6 (X1202 power
   loss), GPIO 16 (X1202 charge control) or GPIO2 and GPIO3 for other
   functions. Do not use I2C addresses 0x20, 0x36 and 0x42 on bus 1.
@@ -232,14 +239,16 @@ Requirements:
   pins, and the NVMe carrier is on top. The shield must stack above the
   NVMe carrier on a stacking header and keep the PCIe ribbon and the fan
   clear. VERIFY the carrier model and its height.
-
 - **S9. USB link.** The 40-pin header has no USB lines. The shield needs a
-  USB connector and a short cable to a USB port of the Pi (D4).
-- **S10. One 5 V source.** Supply the microcontroller and the receiver from
-  one 5 V source. Do not connect the VBUS of the USB cable to that 5 V.
+  USB connector. Kevin has a short USB cable for it (D4).
+- **S10. Two 5 V rails that do not connect.** The microcontroller and the
+  receiver get their power from the USB VBUS only, as the Arduino and the
+  receiver do today (Kevin, 2026-11-13). The RTK rover gets its power from
+  the header 5 V only (S6). The two rails share ground and nothing else.
   Reason: on 2026-11-04 the USB hub fed 5 V in both directions through its
   cable, and the Pi carried the hub, the OAK and the Arduino
-  (`docs/ups_hat_b.md`).
+  (`docs/ups_hat_b.md`). A shield that connects VBUS to the header 5 V
+  makes that path again.
 
 Decisions (Kevin, 2026-11-13):
 

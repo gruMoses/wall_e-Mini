@@ -55,8 +55,8 @@
     <line x1="250" y1="360" x2="410" y2="360" stroke="#1f4e8c"/>
     <line x1="250" y1="390" x2="410" y2="390" stroke="#c0392b"/>
     <line x1="250" y1="420" x2="275" y2="420" stroke="#888"/>
-    <line x1="250" y1="450" x2="410" y2="450" stroke="#d9822b" stroke-dasharray="6,4"/>
-    <line x1="250" y1="475" x2="410" y2="475" stroke="#d9822b" stroke-dasharray="6,4"/>
+    <line x1="250" y1="450" x2="410" y2="450" stroke="#c0392b"/>
+    <line x1="250" y1="475" x2="410" y2="475" stroke="#111"/>
   </g>
   <g font-size="11">
     <text x="262" y="265" fill="#1f4e8c">CH1 signal: left track</text>
@@ -65,8 +65,8 @@
     <text x="262" y="355" fill="#1f4e8c">CH4 signal: FOLLOW_ME</text>
     <text x="262" y="385" fill="#c0392b">CH5 signal: e-stop</text>
     <text x="281" y="424" fill="#888">not connected</text>
-    <text x="262" y="445" fill="#d9822b">+ feed: source not recorded</text>
-    <text x="262" y="470" fill="#d9822b">&#8722; ground: not recorded</text>
+    <text x="262" y="445" fill="#c0392b">+ USB 5 V, Arduino side</text>
+    <text x="262" y="470" fill="#111">&#8722; ground, Arduino side</text>
   </g>
 
   <!-- ===== Arduino ===== -->
@@ -80,8 +80,8 @@
     <text x="420" y="334">D4</text>
     <text x="420" y="364">D5</text>
     <text x="420" y="394">D6</text>
-    <text x="420" y="454" fill="#d9822b">5V</text>
-    <text x="420" y="479" fill="#d9822b">GND</text>
+    <text x="420" y="454">5V</text>
+    <text x="420" y="479">GND</text>
   </g>
   <g fill="#222" font-size="11">
     <text x="470" y="274">INPUT_PULLUP,</text>
@@ -94,6 +94,9 @@
     <text x="470" y="406" fill="#c0392b" font-weight="bold">a lost pulse keeps the</text>
     <text x="470" y="420" fill="#c0392b" font-weight="bold">last width</text>
   </g>
+  <text x="470" y="454" font-size="11" fill="#222">Arduino and receiver run on</text>
+  <text x="470" y="468" font-size="11" fill="#222">the USB 5 V only, not the</text>
+  <text x="470" y="482" font-size="11" fill="#222">Pi header 5 V</text>
   <text x="422" y="508" font-size="11" fill="#222">D7-D12 to the Model X (below)</text>
 
   <!-- Arduino USB to hub -->
@@ -127,7 +130,7 @@
   <text x="732" y="342" font-size="13" font-weight="bold" fill="#111">Raspberry Pi 5</text>
   <text x="732" y="358" font-size="11" fill="#c0392b">GPIO is 3.3 V, not 5 V tolerant</text>
   <g fill="#222">
-    <text x="732" y="378">pin 2 or 4: 5 V</text>
+    <text x="732" y="378">pin 2 or 4: 5 V, RTK rover only</text>
     <text x="732" y="394">pin 3: GPIO2, SDA1</text>
     <text x="732" y="410">pin 5: GPIO3, SCL1</text>
     <text x="732" y="426">GND pin: not recorded</text>
@@ -172,7 +175,7 @@
   <rect x="20" y="600" width="370" height="135" rx="6" fill="#ffffff" stroke="#bbb"/>
   <text x="32" y="621" font-size="13" font-weight="bold" fill="#111">Legend</text>
   <line x1="32" y1="640" x2="82" y2="640" stroke="#1f4e8c" stroke-width="2"/>
-  <text x="92" y="644" fill="#222">Confirmed by code, log or maker's manual</text>
+  <text x="92" y="644" fill="#222">Confirmed by code, log, manual or Kevin</text>
   <line x1="32" y1="662" x2="82" y2="662" stroke="#d9822b" stroke-width="2" stroke-dasharray="6,4"/>
   <text x="92" y="666" fill="#222">Not confirmed: check on the robot</text>
   <line x1="32" y1="684" x2="82" y2="684" stroke="#888" stroke-width="2"/>
