@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 650" width="760" height="650" font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <title>Arduino Nano pin use on WALL-E</title>
+  <rect x="0" y="0" width="760" height="650" fill="#ffffff"/>
+
+  <text x="20" y="28" font-size="18" font-weight="bold" fill="#111">Arduino Nano (CH340 clone): pin use on WALL-E</text>
+  <text x="20" y="47" fill="#444">Top view, USB at the top. Standard Nano pin order; check the clone's silkscreen before you solder.</text>
+
+  <!-- Board -->
+  <rect x="290" y="80" width="180" height="470" rx="8" fill="#1f5f8b" stroke="#123"/>
+  <rect x="350" y="62" width="60" height="38" rx="3" fill="#c9ced6" stroke="#555"/>
+  <text x="380" y="86" font-size="10" text-anchor="middle" fill="#222">USB</text>
+  <text x="380" y="122" font-size="10" text-anchor="middle" fill="#dfe8f0">CH340</text>
+  <rect x="345" y="140" width="70" height="70" fill="#123" stroke="#0b2233"/>
+  <text x="380" y="179" font-size="10" text-anchor="middle" fill="#dfe8f0">ATmega328P</text>
+  <!-- ICSP -->
+  <g fill="#e6c200">
+    <circle cx="368" cy="512" r="4"/><circle cx="380" cy="512" r="4"/><circle cx="392" cy="512" r="4"/>
+    <circle cx="368" cy="526" r="4"/><circle cx="380" cy="526" r="4"/><circle cx="392" cy="526" r="4"/>
+  </g>
+  <text x="380" y="545" font-size="10" text-anchor="middle" fill="#dfe8f0">ICSP</text>
+
+  <!-- Pin pads: left x=300, right x=460, pitch 25.4 from y=130 -->
+  <g fill="#e6c200" stroke="#8a7300">
+    <circle cx="300" cy="130" r="6"/><circle cx="300" cy="155.4" r="6"/><circle cx="300" cy="180.8" r="6"/>
+    <circle cx="300" cy="206.2" r="6"/><circle cx="300" cy="231.6" r="6"/><circle cx="300" cy="257" r="6"/>
+    <circle cx="300" cy="282.4" r="6"/><circle cx="300" cy="307.8" r="6"/><circle cx="300" cy="333.2" r="6"/>
+    <circle cx="300" cy="358.6" r="6"/><circle cx="300" cy="384" r="6"/><circle cx="300" cy="409.4" r="6"/>
+    <circle cx="300" cy="434.8" r="6"/><circle cx="300" cy="460.2" r="6"/><circle cx="300" cy="485.6" r="6"/>
+    <circle cx="460" cy="130" r="6"/><circle cx="460" cy="155.4" r="6"/><circle cx="460" cy="180.8" r="6"/>
+    <circle cx="460" cy="206.2" r="6"/><circle cx="460" cy="231.6" r="6"/><circle cx="460" cy="257" r="6"/>
+    <circle cx="460" cy="282.4" r="6"/><circle cx="460" cy="307.8" r="6"/><circle cx="460" cy="333.2" r="6"/>
+    <circle cx="460" cy="358.6" r="6"/><circle cx="460" cy="384" r="6"/><circle cx="460" cy="409.4" r="6"/>
+    <circle cx="460" cy="434.8" r="6"/><circle cx="460" cy="460.2" r="6"/><circle cx="460" cy="485.6" r="6"/>
+  </g>
+
+  <!-- Pin names inside the board -->
+  <g fill="#ffffff" font-size="11" font-weight="bold">
+    <text x="312" y="134">D13</text>
+    <text x="312" y="159.4">3V3</text>
+    <text x="312" y="184.8">AREF</text>
+    <text x="312" y="210.2">A0</text>
+    <text x="312" y="235.6">A1</text>
+    <text x="312" y="261">A2</text>
+    <text x="312" y="286.4">A3</text>
+    <text x="312" y="311.8">A4</text>
+    <text x="312" y="337.2">A5</text>
+    <text x="312" y="362.6">A6</text>
+    <text x="312" y="388">A7</text>
+    <text x="312" y="413.4">5V</text>
+    <text x="312" y="438.8">RST</text>
+    <text x="312" y="464.2">GND</text>
+    <text x="312" y="489.6">VIN</text>
+  </g>
+  <g fill="#ffffff" font-size="11" font-weight="bold" text-anchor="end">
+    <text x="448" y="134">D12</text>
+    <text x="448" y="159.4">D11</text>
+    <text x="448" y="184.8">D10</text>
+    <text x="448" y="210.2">D9</text>
+    <text x="448" y="235.6">D8</text>
+    <text x="448" y="261">D7</text>
+    <text x="448" y="286.4">D6</text>
+    <text x="448" y="311.8">D5</text>
+    <text x="448" y="337.2">D4</text>
+    <text x="448" y="362.6">D3</text>
+    <text x="448" y="388">D2</text>
+    <text x="448" y="413.4">GND</text>
+    <text x="448" y="438.8">RST</text>
+    <text x="448" y="464.2">RX0 (D0)</text>
+    <text x="448" y="489.6">TX1 (D1)</text>
+  </g>
+
+  <!-- Use, left side -->
+  <g font-size="11" text-anchor="end">
+    <text x="285" y="134" fill="#888">on-board LED</text>
+    <text x="285" y="210.2" fill="#d9822b" font-weight="bold">&#8592; CH6 signal (wire now; not read yet)</text>
+    <text x="285" y="413.4" fill="#c0392b">receiver + (probably; pin not recorded)</text>
+    <text x="285" y="464.2" fill="#111">receiver &#8722; (this GND or the other)</text>
+    <text x="285" y="489.6" fill="#888">not used</text>
+  </g>
+
+  <!-- Use, right side -->
+  <g font-size="11">
+    <text x="475" y="134" fill="#888">old Model X IN1: output, nothing connected</text>
+    <text x="475" y="159.4" fill="#888">old Model X IN2: output, nothing connected</text>
+    <text x="475" y="184.8" fill="#888">old Model X ENB (PWM): output, unused</text>
+    <text x="475" y="210.2" fill="#888">old Model X ENA (PWM): output, unused</text>
+    <text x="475" y="235.6" fill="#888">old Model X IN4: output, nothing connected</text>
+    <text x="475" y="261" fill="#888">old Model X IN3: output, nothing connected</text>
+    <text x="475" y="286.4" fill="#c0392b" font-weight="bold">&#8592; CH5 signal: e-stop</text>
+    <text x="475" y="311.8" fill="#1f4e8c" font-weight="bold">&#8592; CH4 signal: FOLLOW_ME</text>
+    <text x="475" y="337.2" fill="#1f4e8c" font-weight="bold">&#8592; CH3 signal: arm switch</text>
+    <text x="475" y="362.6" fill="#1f4e8c" font-weight="bold">&#8592; CH2 signal: right track</text>
+    <text x="475" y="388" fill="#1f4e8c" font-weight="bold">&#8592; CH1 signal: left track</text>
+    <text x="475" y="413.4" fill="#111">GND</text>
+    <text x="475" y="464.2" fill="#888">USB serial to the Pi: do not use</text>
+    <text x="475" y="489.6" fill="#888">USB serial to the Pi: do not use</text>
+  </g>
+
+  <!-- Footer -->
+  <rect x="20" y="565" width="720" height="72" rx="6" fill="#f4f6fa" stroke="#bbb"/>
+  <text x="32" y="585" fill="#222">Footprint: 2 rows of 15 pins, 2.54 mm pitch, rows 15.24 mm (0.6 in) apart (DIP-30). Board about 18 x 45 mm.</text>
+  <text x="32" y="603" fill="#222">Shield socket: two 1x15 female headers at that spacing. The USB connector type on this clone is not recorded.</text>
+  <text x="32" y="621" fill="#222">D2-D6 use pin-change interrupts. A0-A5 can also take a pin-change interrupt; A6 and A7 are analogue only.</text>
+</svg>

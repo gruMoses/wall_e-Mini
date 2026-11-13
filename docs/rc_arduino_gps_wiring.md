@@ -29,7 +29,7 @@ Solid lines are Confirmed. Orange dashed lines are Unknown or Inferred.
 | Part | Model | Confidence and source |
 |---|---|---|
 | Transmitter | HotRC DS600 V3, LCD model, sold as Havcybin | Confirmed, 2026-11-04 (`docs/NEXT_SESSION.md`) |
-| Receiver | HotRC F-06A: 6 channels, PWM, 4 V to 9 V DC | Inferred. Page 6 of the DS600 manual names the F-06A. Nobody read the label on the robot. |
+| Receiver | HotRC F-06A: 6 channels, PWM, 4 V to 9 V DC | Inferred. Page 6 of the DS600 manual names the F-06A. Nobody read the label on the robot. Kevin, 2026-11-13: the robot's receiver has no power row, but the F-06A has one (section 4). Thus the robot's receiver can be a different model (section 10, check 3). |
 | RC bridge MCU | Arduino Nano clone: ATmega328P at 16 MHz, CH340 USB serial chip, Nano old bootloader (57600 baud) | Confirmed 2026-11-13: `lsusb` shows `1a86:7523`, avrdude reads signature `0x1e950f` at 57600 baud, and the last flash used FQBN `arduino:avr:nano:cpu=atmega328old`. Nobody photographed the board. |
 | Former motor driver | OSOYOO Model X H-bridge | Removed. Kevin, 2026-11-13: the Arduino used to control it. Today the Arduino only streams the RC channels to the Pi over USB. The sketch still has the Model X code (section 5). |
 | USB hub | Genesys Logic, USB IDs 05e3:0610 and 05e3:0626 | Removed (Kevin, 2026-11-13). Before that, the Arduino and the OAK-D Lite were on it, and it had its own supply from the main pack (`docs/ups_hat_b.md`). |
@@ -51,6 +51,24 @@ DFRobot wiki: <https://wiki.dfrobot.com/kit0198-us/>.
 | CH5 signal | D6 | E-stop | 1800 µs or more: stop, latch DISARMED, power the Pi off after 5 s. |
 | CH6 signal | A0 | Not used yet | Kevin, 2026-11-13: connect the lead now. The sketch does not read A0, and A0 stays an input. Do not use D7 to D12: the sketch drives them as outputs. |
 | + and − | Arduino side, on the USB 5 V | Receiver power | Section 6 (Kevin, 2026-11-13) |
+
+Receiver header (HotRC wiring guide for the F-06A, Howes Models, and the
+manual drawing):
+
+- Male pin header, 2.54 mm (0.1 in) pitch. Each channel is one row of 3
+  pins: signal, +, −. Signal is next to the label, and − is on the outer
+  edge. A servo lead has the same order: orange or white is signal, red is
+  +, brown or black is −.
+- The F-06A has 7 rows: CH1 to CH6, and a seventh row with a power symbol
+  under CH6. Kevin, 2026-11-13: the robot's receiver has no power row. On
+  most RC receivers, the + pins of all rows connect together, and the −
+  pins also, so power can go in on any channel row. VERIFY this on the
+  robot's receiver with a meter (continuity, power off).
+- Photo and pin drawing:
+  <https://howesmodels.co.uk/product/ds600-6-channel-2-4ghz-receiver-for-single-hand-radio-control/>.
+
+The Arduino Nano layout, with the pin use on this robot, is in
+`docs/arduino_nano_pinout.svg`.
 
 Electrical facts:
 
@@ -109,9 +127,10 @@ Remove the Model X code with the next change to the sketch.
   current.
 - The receiver gets its power from the same USB 5 V as the Arduino (Kevin,
   2026-11-13). The Arduino and the receiver do not connect to the 5 V of the
-  Pi header. The exact pin on the Arduino side is not recorded. The F-06A
-  takes 4 V to 9 V DC on its power row (manual page 5). The manual note
-  gives 12 V as the maximum.
+  Pi header. The exact pin on the Arduino side is not recorded; the 5V pin
+  is the probable one. The receiver has no power row (Kevin), so the power
+  goes in on the + and − pins of a channel row. The F-06A takes 4 V to 9 V
+  DC (manual page 5). The manual note gives 12 V as the maximum.
 - The RTK rover is the only part in this document on the 5 V of the Pi
   header (Kevin, 2026-11-13).
 - The receiver and the Arduino must have a common ground for the PWM
@@ -242,8 +261,12 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    `56d5d39e94132cd8263f413f98879282`). To restore the program, upload the
    `dcc550e` build (the same bytes) at 57600 baud. Do not try to write the
    bootloader area of the image through the bootloader.
-3. **Receiver label and output mode.** Read the label. Record the blue LED:
-   off is the 50 Hz mode.
+3. **Receiver label, rows and output mode.** Read the model on the label.
+   Howes Models: a V1 receiver has "DS600" on it, a V2 has "C-06A" (input
+   4 V to 12 V), and a V3 has "F-06A". V1, V2 and V3 transmitters and
+   receivers do not work with each other, and the transmitter is a V3.
+   Count the header rows: the F-06A has 7 (6 channels and a power row).
+   Kevin reports no power row. Record the blue LED: off is the 50 Hz mode.
 4. **Receiver power feed.** Answered by Kevin, 2026-11-13: the USB 5 V,
    on the Arduino side. Nothing connects to the header 5 V except the RTK
    rover. Open: the exact pin on the Arduino side.
@@ -286,9 +309,10 @@ Requirements:
   and 5 V signals, and each signal to the Pi must be 3.3 V.
 - **S4. Receiver power.** Supply 5 V through a fuse, with a common ground.
   The receiver range is 4 V to 9 V DC, 12 V maximum. The current is Unknown.
-- **S5. Receiver connectors.** One 3-pin servo header (S, +, −; 2.54 mm
-  pitch) for each of CH1 to CH6, so that the existing receiver leads
-  connect.
+- **S5. Receiver connectors.** One 3-pin male servo header (2.54 mm pitch)
+  for each of CH1 to CH6, so that standard servo leads connect. Pin order:
+  signal, +, −, the same as the receiver (section 4). Mark the − pin on the
+  silkscreen.
 - **S6. RTK rover connector.** One Gravity PH2.0 4-pin socket on I2C bus 1
   (GPIO2, GPIO3). Supply: the 5 V of the Pi header, as today (Kevin,
   2026-11-13). That 5 V must go off when the Pi halts, so that the rover
@@ -319,7 +343,9 @@ Requirements:
   and the Pi carried the hub, the OAK and the Arduino
   (`docs/ups_hat_b.md`).
 - **S11. Two microcontroller positions, one in use at a time.** (a) A
-  socket for an Arduino Nano: the current board or a spare. (b) An on-board
+  socket for an Arduino Nano: the current board or a spare. The socket is
+  two 1x15 female headers, 2.54 mm pitch, 15.24 mm (0.6 in) apart
+  (`docs/arduino_nano_pinout.svg`). (b) An on-board
   replacement chip: an ATmega328P at 16 MHz with a CH340C USB serial chip,
   the same parts as the Nano, so the sketch and the Pi port discovery do not
   change. Both positions connect to the same receiver headers with the same
@@ -389,7 +415,8 @@ VCC, MCU, deadband, failsafe, e-stop, FOLLOW_ME, MANUAL, `wall-e`,
 pin, pull-up, sketch, firmware, stand, rubber band, microwave oven, ID
 EEPROM, GPIO 0, GPIO 1, VBUS, USB hub, OAK, prototype, A0, avrdude,
 `arduino-builder`, avr-gcc, FQBN, bootloader, ICSP, DTR, CH340C, RP2040,
-Pico, Grok, flash image, MD5, `millis()`.
+Pico, Grok, flash image, MD5, `millis()`, Howes Models, C-06A, servo lead,
+pin header, female header, DIP-30, continuity, meter, power row.
 
 **Technical Verbs:** arm, disarm, enumerate, latch, mix, parse, power off,
 stack.
