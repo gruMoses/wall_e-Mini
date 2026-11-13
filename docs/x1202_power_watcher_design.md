@@ -101,6 +101,8 @@ The Pi stays off when the input returns before the board cuts its output, or aft
 
 With the 10 s debounce and the re-check, rule 1 applies after an input-off time of about 12 s to 30 s.
 
+Option for Kevin, added on 2026-11-13 after the reviews: an external push button on the 2-pin button connector of the board. On the bench, the button on the board started a halted Pi while the 12 V input was present. A button on the body of the robot can thus start the Pi after an e-stop, and the main switch stays on. Not tested: the external connector, and a push while the Pi is in operation (the vendor says that the button does the same as the power button of the Pi, thus it can start a shutdown).
+
 Option 2 (a hook in `systemd-shutdown` that turns the power-off into a reboot) was dropped. Its marker survived a cancelled halt, so a later e-stop became a reboot; a flapping input could cause a reboot loop; the mechanism was not verified; and it did not remove the operator rules.
 
 ## 5. Charge policy

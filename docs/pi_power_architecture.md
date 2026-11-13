@@ -284,6 +284,14 @@ Notes:
 - At 21:44 on 2026-11-12, VCELL stepped to 3.65 V one time for less than 2 min with the input present. This did not occur again in 38 min. Its cause is not known. A low dimmer level is a possible cause.
 - After a power-off on the bench, the wall clock of the Pi shows 2025-05-29 until the network time is available. The X1202 cuts the 5 V, and the RTC has no cell.
 
+Results with hands, 2026-11-13 morning (Kevin at the bench, a 12 V supply on the 6 V to 18 V input, the USB Type-C cable removed, the same old cells):
+
+- The 5 V output with the Pi in operation on the 12 V input: 5.24 V on Kevin's meter. On the USB Type-C input the Pi read 5.17 V (EXT5V).
+- The 5 V output after a halt with the 12 V input present: 0 V on the meter. The board cuts the output.
+- The button on the board starts a halted Pi while the input is present. Kevin pushed it approximately 2 min after the halt, and the Pi booted. The board has a 2-pin connector for an external button.
+- Kevin set the 12 V supply to off with the Pi in operation. GPIO 6 went low, and the Pi continued on the cells for 66 s until a manual halt: VCELL 3.72 V to 3.77 V, EXT5V 5.10 V to 5.14 V, `get_throttled` 0x0. After the halt, no LED on the board was on. The 5 V output was not measured in this condition.
+- Not done: the drain measurement. Kevin does it on 2026-11-14 with new cells.
+
 ### 7.6 Status of the tests in 7.2, and the go/no-go
 
 | Test in 7.2 | Status | Result |
@@ -312,7 +320,7 @@ A draft design for the software that replaces `bin/walle_ups.py`, with the insta
 Kevin does the physical steps. The harness and the logger continue to record.
 
 1. Record the brand, the model and the age of the cells. Record the voltage and the current rating of the supply.
-2. The 5 V after a halt. Connect a voltmeter to a USB Type-A socket of the X1202. Remove the input and halt the Pi (`halt-off` in the harness). Read the voltage 15 s after the Pi stops. The correct value is 0 V. Do the same with the input present (`sudo poweroff`).
+2. The 5 V after a halt. Done on 2026-11-13 for a halt with the 12 V input present: 0 V. Not measured yet for a halt with the input off. Connect a voltmeter to a USB Type-A socket of the X1202. Remove the input and halt the Pi (`halt-off` in the harness). Read the voltage 15 s after the Pi stops. The correct value is 0 V. Do the same with the input present (`sudo poweroff`).
 3. The drain. Halt the Pi and remove the input. Remove one cell. Put an ammeter between the positive end of the other cell and its holder contact. Start on the 10 A range, then go to the microampere range. Record the current after 1 min.
 4. The load test with good cells. Do T6 again (`t6` in the harness). Then make the cells warm (50 C to 55 C) and do T6 again. Record the cell temperature during a charge.
 5. The 5 V outputs (test 4 in 7.2). Connect the hub, or the camera with the cut 5 V wire, to an output of the board. Check that the output goes off after a halt, that the voltage stays at 4.9 V or more with the camera in operation, and that the total current stays below 5 A.
