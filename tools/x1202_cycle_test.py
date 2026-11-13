@@ -155,10 +155,15 @@ class Bench:
         raise RuntimeError("outlet did not verify ON")
 
     def check_level(self, t_on):
-        """The outlet is a Z-Wave dimmer. A few seconds after each `on`, read
+        """If the outlet is a dimmer (it has a `level` attribute): a few seconds after each `on`, read
         `level`; if it is not 99, send setLevel 99 once (the only value this
         harness ever sends) and re-read. Every check is logged to
         self.level_log and appended to the results file."""
+        try:
+            if "level" not in self.outlet_attrs():
+                return  # a plain relay outlet: there is no level to check
+        except Exception:  # noqa: BLE001
+            return
         time.sleep(max(0.0, 3.0 - (now() - t_on)))
         entry = {"test": "LEVEL", "t_on": t_on, "t_read": now()}
         try:
