@@ -215,7 +215,7 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    larger build of the same reader (they contain `RC Reader initialized`).
    The bootloader writes only the pages of the new program, so old pages
    stay. The program never runs them. The full image is saved as
-   `arduino_rc_reader/backup/flash_readback_20261113.hex` (MD5
+   `docs/data/arduino_flash_20261113/flash_readback_20261113.hex` (MD5
    `56d5d39e94132cd8263f413f98879282`). To restore the program, upload the
    `dcc550e` build (the same bytes) at 57600 baud. Do not try to write the
    bootloader area of the image through the bootloader.
