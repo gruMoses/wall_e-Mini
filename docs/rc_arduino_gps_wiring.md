@@ -346,7 +346,10 @@ Requirements:
   (`dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25` in the Pi's
   `config.txt`, read 2026-11-13). Its RS485 side uses the UART (GPIO 14 and
   GPIO 15) and, on some versions, GPIO 4. VERIFY the RS485 pins on the
-  Waveshare page for the fitted version.
+  Waveshare page for the fitted version. The shield's own footprints take
+  GPIO 12 and 13 (UART4, BMS link), GPIO 17 (rover 5 V switch) and GPIO 24
+  (charger-present input) (S15); VERIFY each is free on the Pi 5 and the
+  X1202.
 - **S8. Mechanical.** Pi 5 HAT+ outline. Kevin, 2026-11-13: the shield
   mounts on top of the Waveshare RS485 CAN HAT, which is on the Pi's
   header. The CAN HAT passes the 40 pins up through its top, so the shield
@@ -401,7 +404,75 @@ Requirements:
   for the clip design. Leave a path for the receiver's antenna lead to
   reach the board edge, away from the USB and the crystal of the Nano. If
   it does not fit the HAT outline, say so and give the space that is
-  free.
+  free. Radio (Grok, 2026-11-13): a 2.4 GHz receiver on top of the Pi, the
+  UPS and the motor controllers is a poor radio site, and RC is the safety
+  link. Kevin: keep the mount, with the antenna lead routed out of the
+  stack; if the range is poor, the receiver moves outside on longer leads
+  (the servo headers allow it). Do an RC range test before relying on it.
+- **S14. Spare Nano pin header (fitted in v1).** Break out the spare Nano
+  pins to a header for later inputs (for example bump switches): A1 to
+  A5, D7 to D12, 5 V (USB side) and GND. Label D7 to D12 "outputs in
+  today's firmware" until the Model X code is removed.
+- **S15. Footprints only, no parts fitted (Kevin, 2026-11-13).** Copper
+  and silkscreen, so the parts and the code can come later:
+  1. Charger-present input: an opto from the charge inlet to a free Pi
+     GPIO (the research proposes GPIO 24), with a 2-pin pack-side
+     connector. It works only if the inlet can be told apart from the pack
+     bus (open fact: how the inlet is wired). This is a live input, not
+     the rejected charger latch or "charger unplugged" button.
+  2. Isolated wired BMS link: a 2-channel isolator between the Pi's UART4
+     (GPIO 12 and 13) and the BMS UART port, plus an opto on the BMS's S1
+     "activate" pin, and a 6-pin connector. The BMS UART ground is battery
+     B−, not the BMS output, so the link must be isolated. Fit it only
+     after a wake test shows that UART traffic or S1 wakes a sleeping BMS.
+     Read-only: the same polls as today; BMS writes stay in the Daly app.
+  3. Rover 5 V switch: a P-FET from a free Pi GPIO (the research proposes
+     GPIO 17), on by default, so the Pi can power-cycle the RTK rover
+     after an I2C bus lock-up.
+- **S16. VESC kill line, footprint only, marked EXPERIMENTAL.** A
+  Nano-driven stop input into each VESC (PPM or ADC2, VESC firmware 6.05),
+  so the Nano can stop the motors without the Pi. Rules (Grok review):
+  one opto per VESC, never one shared driver (a single tripped track
+  pivots the robot); the Nano pin released means kill (fail-safe); a
+  series resistor and a jumper in each LED path, default open; the
+  phototransistor referred to that VESC's own ground. It is not counted as
+  a safety function until a bench test shows that on firmware 6.05 the
+  kill input wins over CAN current and duty commands. Price in before
+  fitting: each Nano reset or upload releases the line and drops drive; a
+  frozen Nano that holds the pin OK does not kill; a kill coasts unless a
+  modest timeout brake current is set, and a long regenerative brake can
+  open the BMS charge FET.
+- **S17. Stay off the CAN HAT's pins (layout rule).** No copper on the
+  shield connects to SPI0 (GPIO 8 to 11) or GPIO 25, and nothing on the
+  shield can load them. A solder bridge or a clamped interrupt line there
+  takes the only drive path down even though the shield has no CAN parts.
+  The HAT's RS485 driver uses UART0 (GPIO 14 and 15), so the BMS link in
+  S15 uses UART4, not UART0.
+
+Research on extra roles (Opus agent and Grok, 2026-11-13), in short:
+- CAN: keep the HAT (D10). The Nano as a USB-to-CAN bridge is rejected:
+  about 360 frames per second (2 VESCs, 3 status types at about 50 Hz,
+  plus 60 commands) would take about 70 percent of the 115200 baud link
+  in ASCII slcan, the MCP2515 has only 2 receive buffers, CAN interrupts
+  would skew the RC pulse timing, and arm, e-stop and drive would share
+  one chip and one USB cable. Moving the HAT's MCP2515 and transceiver
+  onto a later board is possible with the same overlay; then use a
+  ready-made 3.3 V module on pads rather than a hand-laid crystal and PHY.
+- Watchdog: no Nano watchdog. No recorded stall was a hung Pi; each was a
+  peripheral or a thread with its own software fix. A hung Pi already
+  stops the motors (VESC timeout and the RC stale timeout, about 1 s each).
+  The Pi 5's own hardware watchdog (15 s) exists but is off
+  (`RuntimeWatchdogSec` 0); turning it on is a separate config decision.
+- BMS: the dark periods match the BMS's own sleep (default 3600 s with no
+  current; it wakes on current). The BMS is a JHB-R24TH-V1.3
+  (`docs/battery_settings.md`), not the SPIM08HP that `config.py` and
+  CLAUDE.md name. Setting its sleep to 65535 in the Daly app would stop
+  the dark periods at about 25 mA of standby drain instead of about
+  0.5 mA. Kevin, 2026-11-13: not yet.
+- Not taken: a status LED and buzzer (Kevin did not choose it), pack
+  voltage sense and a current shunt (the VESCs and the BMS already report
+  them), and the F-06A EXT-V voltage return (its input range is not
+  published, and it would bring pack voltage onto the RC side).
 
 Second opinion on the first S11, the on-board chip, now removed (Grok,
 session `6f2eb58a-e096-4a22-a90d-751115f951fb`, 2026-11-13):
@@ -449,6 +520,14 @@ Decisions (Kevin, 2026-11-13):
 9. **D9. The shield mounts on the Waveshare RS485 CAN HAT** (S8), which
    passes the pins up. The Nano sits on the side of the Pi's USB ports,
    and its own USB port takes Kevin's 90° Mini-B cable (S9).
+10. **D10. Keep the Waveshare CAN HAT for v1** (S17). Revisit on a later
+    board with a ready-made MCP2515 module.
+11. **D11. v1 extras:** the spare Nano pin header is fitted (S14); the
+    charger-present input, the isolated BMS link, the rover 5 V switch
+    (S15) and the experimental VESC kill line (S16) are footprints only.
+    No status LED or buzzer.
+12. **D12. The receiver mount stays,** with the antenna out of the stack;
+    the fallback is the receiver outside on longer leads (S13).
 
 ## Appendix: Technical Names and Technical Verbs
 
