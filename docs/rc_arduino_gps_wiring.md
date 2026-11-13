@@ -357,12 +357,9 @@ Requirements:
   has a 90° Mini-B plug: the cable leaves at a right angle to the plug.
   Kevin, 2026-11-13: mount the Nano so that its own Mini-B port sticks out
   of the side of the case, as it does today, and the existing cable plugs
-  straight into the Nano. Put the on-board chip's Mini-B socket at the same
-  edge, near the same place, so the same cable reaches either one. Kevin's
-  photo of the plug in the current Nano:
-  `docs/data/shield_inputs_20261113/nano_mount_and_usb_plug.jpg`. The bend
-  direction of the plug is not a design limit: Kevin buys whichever cable
-  the on-board socket needs (2026-11-13). The shield README says which.
+  straight into the Nano. The Nano's own USB port is the only USB
+  connection on the shield (D6). Kevin's photo of the plug in the current
+  Nano: `docs/data/shield_inputs_20261113/nano_mount_and_usb_plug.jpg`.
 - **S10. Two 5 V rails that do not connect.** The microcontroller and the
   receiver get their power from the USB VBUS only, as the Arduino and the
   receiver do today: a USB port of the Pi supplies them (Kevin,
@@ -374,25 +371,23 @@ Requirements:
   Pi: on 2026-11-04 the hub fed 5 V in both directions through its cable,
   and the Pi carried the hub, the OAK and the Arduino
   (`docs/ups_hat_b.md`).
-- **S11. Two microcontroller positions, one in use at a time.** (a) A
-  socket for an Arduino Nano: the current board or a spare. The socket is
-  two 1x15 female headers, 2.54 mm pitch, 15.24 mm (0.6 in) apart
-  (`docs/arduino_nano_pinout.svg`). (b) An on-board
-  replacement chip: an ATmega328P at 16 MHz with a CH340C USB serial chip,
-  the same parts as the Nano, so the sketch and the Pi port discovery do not
-  change. Both positions connect to the same receiver headers with the same
-  pin map: CH1 to CH5 on D2 to D6, CH6 on A0. Thus one firmware operates on
-  both. The on-board chip needs a 16 MHz crystal, a reset circuit with the
-  DTR auto-reset capacitor, and a 6-pin ICSP header to load the bootloader
-  the first time. WARNING: Never fit the Nano and the on-board chip at the
-  same time. Each one has its own USB VBUS, and the two would connect
-  through the receiver 5 V rail (S10).
+- **S11. One microcontroller: an off-the-shelf Arduino Nano in a socket.**
+  Kevin, 2026-11-13: "If we're still going to have an Arduino, might as
+  well just buy one off the shelf and make this board a whole lot simpler.
+  Let's remove the small chip to replace the Arduino." The socket is two
+  1x15 female headers, 2.54 mm pitch, 15.24 mm (0.6 in) apart
+  (`docs/arduino_nano_pinout.svg`). Pin map: CH1 to CH5 on D2 to D6, CH6 on
+  A0, so the existing sketch runs unchanged. Buy a Nano with straight
+  headers on both rows: the robot's present Nano has one right-angle row
+  and does not fit the socket as it is. The robot's Nano measures about
+  43.2 mm overall (section 10, check 1). Superseded: the on-board
+  ATmega328P + CH340C position of the first design (old D6).
 - **S12. The Pi changes first.** The Pi parser must accept 6 fields and the
   "no signal" value before a firmware sends them (section 7). Kevin,
   2026-11-13: the code can come later, but the CH6 wire must exist now.
 
-Second opinion on S11 (Grok, session
-`6f2eb58a-e096-4a22-a90d-751115f951fb`, 2026-11-13):
+Second opinion on the first S11, the on-board chip, now removed (Grok,
+session `6f2eb58a-e096-4a22-a90d-751115f951fb`, 2026-11-13):
 
 - It agrees with the AVR family and the existing sketch.
 - It objects to a bare chip: a bare ATmega328P needs a crystal, a reset
@@ -426,17 +421,17 @@ Decisions (Kevin, 2026-11-13):
    nothing here. If the NVMe carrier has an ID EEPROM, a second one at the
    same address on the same pins would conflict. Do not use GPIO 0 and
    GPIO 1 on the shield.
-6. **D6. The shield has both microcontroller positions** (S11): a new
-   on-board chip, and a Nano socket in case the new chip fails.
-7. **D7. CH6 is wired now:** to A0 on the current Arduino, and to the
-   microcontroller on the shield. The code reads it later.
-8. **D8. Hand-soldered build:** an ATmega328P (DIP-28) in a socket, a
-   CH340C (SOP-16) as the only surface-mount chip, and through-hole parts
-   for the rest, like the other boards in `~/Documents/KiCad/pcb-lessons`.
+6. **D6. Only a Nano socket; no on-board microcontroller** (S11). Changed
+   on 2026-11-13: the first design had both an on-board ATmega328P +
+   CH340C and the socket. Kevin removed the on-board chip to make the board
+   simpler, and buys an off-the-shelf Nano.
+7. **D7. CH6 is wired now:** to A0 on the current Arduino, and to A0 of the
+   Nano socket on the shield. The code reads it later.
+8. **D8. Hand-soldered build,** through-hole where a part allows it, like
+   the other boards in `~/Documents/KiCad/pcb-lessons`.
 9. **D9. The shield mounts on the Waveshare RS485 CAN HAT** (S8), which
    passes the pins up. The Nano's own USB port sticks out of the side of
-   the case for Kevin's 90° Mini-B cable, and the on-board chip's Mini-B
-   socket sits at the same edge (S9).
+   the case for Kevin's 90° Mini-B cable (S9).
 
 ## Appendix: Technical Names and Technical Verbs
 
