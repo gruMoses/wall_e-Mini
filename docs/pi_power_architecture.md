@@ -4,6 +4,8 @@ Status: decision draft, 2026-11-04. Research by three agents (off-the-shelf
 boards, how robot builders do it, an always-on tap from the main pack) and a
 Grok second opinion (session 01a1a8bd). Nothing is bought.
 
+UPDATE 2026-11-13: the first bench results of the X1202 are in 7.5 to 7.8.
+
 UPDATE 2026-11-10: read section 7 first. It proposes a bought UPS board
 behind the switched-side converter (option F) in place of the custom
 board. Kevin orders one for a bench test.
@@ -165,7 +167,9 @@ about 12 months with it off. (CORRECTION: the pack is 7 Ah, refer to `docs/batte
 
 ## 7. Review, 2026-11-10: a bought UPS board behind the switched converter (option F)
 
-Status: Kevin decided on 2026-11-10 to order one X1202 for the bench tests in 7.2. Kevin buys it. No more work on the custom board (`docs/power_module_spec.md`) until the bench result is known.
+Status, 2026-11-13: the X1202 is on the bench. The tests without hands are done (7.5). The go/no-go is "not yet" (7.6). The tests with hands are in 7.7.
+
+Status before: Kevin decided on 2026-11-10 to order one X1202 for the bench tests in 7.2. Kevin buys it. No more work on the custom board (`docs/power_module_spec.md`) until the bench result is known.
 
 Kevin, 2026-11-10: "We shouldn't have to build our own." "Other people are using robots that are Pi-powered." His conditions for a bought part:
 
@@ -236,6 +240,113 @@ Also check first: the mechanical stack (the X1202 goes under the Pi; find out wh
 
 Grok timed out after 900 s on this question. An independent Opus review agreed with option F and against the custom board ("215 USD and 31 risks to replace a 49 USD board"). It added the race test, the fail-safe for GPIO 16, the heat check, the mechanical check and the retirement of the old watcher. A research agent ranked the minimum option A first and warned that a UPS board "keeps the small-battery design that currently fails"; the answer to that warning is that the present failure comes from the HAT (B)'s missing input sense and output switch, which the X1202 has.
 
+### 7.5 Bench results, 2026-11-12 and 2026-11-13 (tests without hands)
+
+Setup: the robot's Pi 5 is on a bench, off the robot. It is on one Geekworm X1202 with two 18650 cells (brand not known yet). The NVMe carrier stays on top of the Pi, and the root file system is on the NVMe drive. Thus the mechanical stack is correct: the X1202 is below the Pi and the NVMe carrier is above it. A 12 V supply feeds the board. A Z-Wave dimmer outlet (Hubitat device 98, "Christmas Tree") switches the supply. Kevin was not at the bench. The logger `tools/x1202_bench_logger.py` records GPIO 6, GPIO 16, VCELL, EXT5V, `get_throttled` and the SoC temperature at 4 Hz. The harness `tools/x1202_cycle_test.py` operates the outlet and the Pi. The raw results are in `docs/data/x1202_bench_20261113/results.jsonl`. The logs of the Pi are in `/home/pi/x1202_bench/logs/` (one file for each boot).
+
+Results:
+
+| Test | n | Result |
+|---|---|---|
+| T0: 38 min with the input on | 1 | No VCELL drop with GPIO 6 high. No GPIO 6 glitch. |
+| T1: input off for 20 s, Pi in operation | 3 | 3 of 3 continue on the cells. GPIO 6 falls 0.44 s to 0.60 s after `off` and rises 1.08 s to 1.18 s after `on`. |
+| T2: input off, `poweroff` after 10 s, input on 30 s after the network stops | 10 | 10 of 10 boot with no other action. The boot starts 10.9 s to 11.1 s after `on`. ssh answers after 20 s. |
+| T3: input on 2 s after `poweroff` | 3 | 0 of 3 boot. |
+| T3: input on 10 s after `poweroff` | 3 | 1 of 3 boot. |
+| T3: input on 30 s after `poweroff` | 3 | 3 of 3 boot. |
+| T4: `poweroff` with the input on | 2 | 0 of 2 start again in 3 min. An input-off of 30 s starts the Pi (2 of 2). |
+| T5: `reboot` with the input on | 3 | 3 of 3 come back. |
+| T5: `reboot` on the cells | 1 | The board keeps the Pi powered through the reboot. |
+| T6: load on the cells | 1 | Aborted at 4 cores plus an NVMe read: EXT5V 4.896 V. |
+| T7: Pi halted with the input on, then input off for N s | 4 | N = 3.8 s: 2 of 2 boot. N = 10 s: 2 of 2 boot. |
+
+Findings:
+
+1. The board does not start the Pi when the input returns during a shutdown. The Pi then stays off with the input present. This occurs when the input returns before the board cuts its output, which is approximately 10 s after the `poweroff` command. An input-off of 3.8 s or more starts the Pi.
+2. The board does not start the Pi after a halt with the input present. The ch5 e-stop causes this condition on the robot. An input-off of 3.8 s or more starts the Pi. This is the same as the behaviour of the robot today after an e-stop.
+3. The board charges the cells each time that Linux does not drive GPIO 16. The board has a pull-down on GPIO 16 that is stronger than the internal pull-up of the Pi. At each boot, GPIO 16 has no function until the logger sets it, 2.5 s after the kernel starts. At the first sample of each boot after a period with the input present and the Pi off, VCELL is 4.20 V. During the tests the rested VCELL increased from 3.78 V to 3.99 V for this reason.
+4. `pinctrl set 16 op dh` stops the charge. VCELL decreases from 4.20 V to 3.97 V immediately, and it relaxes to 3.83 V in 5 min. The pin must be an output. The internal pull-up of the Pi is not sufficient.
+5. GPIO 6 is clean. In 38 min with the input on it has no low sample at 4 Hz and no kernel edge event. Each input change gives one edge. The board drives the pin (it reads high with the pull-down of the Pi on).
+6. With GPIO 16 high and the input on, VCELL drifts by -7 mV in 10 min after the first 5 min. A measurement of some hours and a soak of 4 h with the Pi off started at 00:40 on 2026-11-13. Their results are not in this document yet.
+7. The cells sag under load. From a rested 3.96 V, VCELL is 3.76 V at idle, 3.64 V with 1 core, 3.55 V with 2 cores and 3.42 V with 4 cores (60 s for each step). EXT5V is 5.12 V, 5.07 V, 5.02 V and 4.96 V. With 4 cores and the NVMe read, EXT5V is 4.896 V and VCELL is 3.385 V after 6 s. `get_throttled` stays 0x0 in all steps. The SoC temperature increases to 67 C. No USB device was connected.
+8. The implied resistance of the pack is approximately 0.23 ohm. This value uses an assumed Pi power of 2.7 W at idle and 7.0 W with 4 cores, and a converter efficiency of 90 percent. A good pair of 18650 cells has less than 0.05 ohm. The cells, their holder contacts or the board path have too much resistance.
+9. The abort of T6 ended in a clean halt. It was not a power loss. A defect in the harness switched the outlet on 11.7 s after the abort. In that time the bench guard of the logger saw GPIO 6 low for 203 s and halted the Pi, 1.5 s before the input returned. The Pi then stayed off (finding 1). The minimum VCELL was 3.31 V. The next boot shows no ext4 journal replay and no file system error. The harness is corrected. The correction is not tested on the hardware.
+10. In the T3 failures with a delay of 2 s, GPIO 6 was high again 3.3 s to 7.0 s before the logger stopped. A check of GPIO 6 late in the shutdown can thus see that the input is back. In the failures with a delay of 10 s, GPIO 6 was still low when the logger stopped.
+11. EXT5V is 5.17 V on the input and 5.12 V on the cells at idle. No boot shows an undervoltage line, an I2C error or a file system error in the journal.
+12. The fuel gauge answers at 0x36 (version register 0x0002). Its state of charge is not correct: it read 24 percent to 31 percent with the cells at 3.83 V. Use VCELL.
+
+Notes:
+
+- The time from `on` to the first ssh has two values, approximately 21 s and 43 s. The boot start is the same in both. The difference agrees with the 20 s ARP hold-down of the Mac. It is probably not a property of the board.
+- The dimmer outlet is not a good switch for a power supply. After an input-off of 3.8 s, the dashboard reported the dimmer level as 82 and as 84. The level was 99 before. The harness now sets the level to 99 after each `on`.
+- At 21:44 on 2026-11-12, VCELL stepped to 3.65 V one time for less than 2 min with the input present. This did not occur again in 38 min. Its cause is not known. A low dimmer level is a possible cause.
+- After a power-off on the bench, the wall clock of the Pi shows 2025-05-29 until the network time is available. The X1202 cuts the 5 V, and the RTC has no cell.
+
+### 7.6 Status of the tests in 7.2, and the go/no-go
+
+| Test in 7.2 | Status | Result |
+|---|---|---|
+| Mechanical stack | Done | Correct. The NVMe carrier stays on top. |
+| 1. Power cycles | Done without hands, 33 cycles | Normal cycle: 10 of 10. Reboot: 4 of 4. Race at 2 s and at 10 s: the Pi stays off. Race at 30 s: 3 of 3. |
+| 2. Drain and charge control | Partly done | GPIO 16 stops the charge while Linux drives it. It cannot stop the charge during a boot or with the Pi off. The drain is not measured. The boot with the cells at 3.3 V is not tested. |
+| 3. Full load on the cells at 50 C to 55 C | Partly done, at room temperature | Not passed with these cells: EXT5V is 4.896 V with 4 cores and an NVMe read. The limit is 4.9 V. |
+| 4. Hub power from the board | Not done | Needs hands. |
+| RTK fix quality | Not done | Needs the robot. |
+
+Go/no-go, 2026-11-13: **not yet**. No result rejects option F. The primary functions are correct: the Pi starts when the input returns, there is no poll wake, the power-loss signal is clean, and a reboot does not cut the power. The board does not go on the robot until these items are closed:
+
+1. The cells. The pack resistance is too high (finding 8). Kevin: record the brand and the model of the cells. Use two cells with a low internal resistance from a known manufacturer, or four cells. Then do T6 again. The vendor permits 2 to 4 cells. One cell is not permitted.
+2. The stay-off condition (findings 1 and 2). This is Kevin's decision. Option 1: accept it, with an operator rule: "If the Pi does not start, set the main switch to off, wait 5 s, and set it to on." A debounce of 10 s on GPIO 6 before the halt prevents the condition for a short interruption. Option 2: add a check of GPIO 6 at the end of the shutdown that changes the power-off into a reboot when the input is back. This needs a shutdown hook, and Kevin must approve a bench test of it. The hook cannot close the last seconds before the board cuts its output.
+3. The charge level. The software cannot hold the cells at 3.8 V in all conditions (finding 3). Each boot charges for approximately 13 s. A halt on the cells discharges for approximately 20 s. With the Pi off and the main switch on, the board charges to 4.2 V. Possible corrections, not tested: a `gpio=16=op,dh` line in `config.txt` (a shorter charge at each boot), and a longer time on the cells before the halt when VCELL is above the target.
+4. The storage drain. Owner reports say that the X1202 has no hardware cutoff for a low cell voltage (7.8). If the drain with the output off is in the milliampere range, months of storage can damage the cells. Measure the drain with a meter (7.7).
+5. The tests with hands in 7.7.
+6. A plain relay outlet for the bench supply, not a dimmer.
+
+### 7.7 Bench procedure for the tests that need hands
+
+Kevin does the physical steps. The harness and the logger continue to record.
+
+1. Record the brand, the model and the age of the cells. Record the voltage and the current rating of the supply.
+2. The 5 V after a halt. Connect a voltmeter to a USB Type-A socket of the X1202. Remove the input and halt the Pi (`halt-off` in the harness). Read the voltage 15 s after the Pi stops. The correct value is 0 V. Do the same with the input present (`sudo poweroff`).
+3. The drain. Halt the Pi and remove the input. Remove one cell. Put an ammeter between the positive end of the other cell and its holder contact. Start on the 10 A range, then go to the microampere range. Record the current after 1 min.
+4. The load test with good cells. Do T6 again (`t6` in the harness). Then make the cells warm (50 C to 55 C) and do T6 again. Record the cell temperature during a charge.
+5. The 5 V outputs (test 4 in 7.2). Connect the hub, or the camera with the cut 5 V wire, to an output of the board. Check that the output goes off after a halt, that the voltage stays at 4.9 V or more with the camera in operation, and that the total current stays below 5 A.
+6. The low-cell boot. Discharge the cells to approximately 3.3 V (Pi in operation, input off, logger guard on). Halt the Pi. Apply the input. The Pi must boot.
+
+The harness commands (the outlet URL is the home dashboard URL of Hubitat device 98):
+
+```bash
+python3 tools/x1202_cycle_test.py --pi pi@192.168.86.54 --outlet-url <outlet-url> --results <file> status
+python3 tools/x1202_cycle_test.py --pi pi@192.168.86.54 --outlet-url <outlet-url> --results <file> t6
+python3 tools/x1202_cycle_test.py --pi pi@192.168.86.54 --outlet-url <outlet-url> --results <file> halt-off
+python3 tools/x1202_cycle_test.py --pi pi@192.168.86.54 --outlet-url <outlet-url> --results <file> on-wait
+```
+
+The bench logger is a temporary service on the Pi (`x1202-bench-logger`). It operates only while the file `/home/pi/x1202_bench/ENABLED` is there. It holds GPIO 16 high (charge disabled). Its guard halts the Pi when GPIO 6 is low for 180 s, or when VCELL is 3.30 V or less for 5 s with GPIO 6 low. WARNING: remove this service before the Pi goes back on the robot:
+
+```bash
+sudo systemctl disable --now x1202-bench-logger && sudo rm /etc/systemd/system/x1202-bench-logger.service /home/pi/x1202_bench/ENABLED
+```
+
+NOTE: `walle-ups.service` is still installed on the Pi. Its sensor (the INA219 of the HAT (B)) is not there, thus it records I2C errors and it does not halt the Pi. The I2C bus guard has no witness in this condition and does not recover a locked bus. Do not put the Pi on the robot in this condition.
+
+### 7.8 Facts from the vendor and from other owners (read 2026-11-12)
+
+These facts are not from our tests. "Reported" means one owner report.
+
+- The manufacturer (SupTronics) requires 2 to 4 cells, unprotected, with a flat top. The cells are in parallel.
+- The board finds the Pi through the 3.3 V rail on a pogo pin. With `POWER_OFF_ON_HALT=1` it cuts its output approximately 3 s after the halt.
+- The charger is probably an Injoinic IP2312 (reported). This part is a charger only. It has an input for a temperature sensor, but no page says that the board has a sensor. Assume that there is no protection for the cell temperature.
+- No hardware cutoff voltage is published. One X1202 owner says that the board does not go off below 3.4 V (reported). On a larger board of the same family, the cells went down to 2.54 V and were destroyed (reported). The only vendor cutoff is a script at 3.20 V.
+- No standby current is published. A larger board of the same family used approximately 13 mW with the charger idle (reported).
+- An owner of the X1201 reports the stay-off condition of finding 1: "the Raspberry Pi remains powered off".
+- The vendor scripts and the third-party drivers stop the charge with the internal pull-up of the Pi. On our board this does not work (finding 4). One X1202 owner reports that a high GPIO 16 did not stop the charge on his board. Our board stops.
+- The vendor script halts the Pi 2 min to 3 min after the input fails. It has no debounce in seconds.
+- Owner reports of bad pogo contact: GPIO 6 read "good" until the Pi was pushed down, and one board had no I2C. One owner reports undervoltage (4.9 V to 5.05 V) under load.
+- The fuel gauge needs a quick-start (0x4000 to register 0x06) after 30 min with no cell current. The vendor scripts do not send it.
+
+Pages: `suptronics.com/Raspberrypi/Power_mgmt/x1202-v1.1.html`, `suptronics.com/Raspberrypi/Power_mgmt/x1202-v1.1_hardware.html`, `wiki.geekworm.com/X120X_Software`, `wiki.geekworm.com/Template:X120x-FAQ`, `github.com/suptronics/x120x`, `github.com/mor-lock/x120x-dkms` (issues 5 and 6, incident notes), `github.com/ArjenR/x120x_upsd`, `geekworm.com/community/forum/topic/200327/x1202-raspi-does-not-switch-back-on`, the IP2312 data sheet.
+
 ## Sources
 
 Raspberry Pi documentation (`POWER_OFF_ON_HALT`, `WAKE_ON_GPIO`, power
@@ -252,6 +363,6 @@ Raspberry Pi 5, PMIC, RTC, J2, PWR_BUT, `POWER_OFF_ON_HALT`, `WAKE_ON_GPIO`,
 3V3, GPIO, Waveshare UPS HAT (B), Witty Pi 5, UUGear, AQEX qUPS, Geekworm
 UPS_Scap, Pololu D42V55F5, TI LM5013, LM5164, TPL5110, Daly BMS, VESC,
 OAK-D, 13S, 2S, 18650, supercap, ESR, TVS, opto, crowbar, buck, ENABLE,
-overlayfs, read-only root, Clearpath Jackal, Husarion ROSbot, Duckietown,
+overlayfs, read-only root, Geekworm X1202, SupTronics, MAX17040, Injoinic IP2312, VCELL, EXT5V, `get_throttled`, `pinctrl`, `poweroff`, `reboot`, ssh, ARP, Z-Wave, Hubitat, NVMe, SoC, ext4, pogo pin, pull-up, pull-down, debounce, harness, logger, Clearpath Jackal, Husarion ROSbot, Duckietown,
 TRACO TEN 30-4811WIN, TEN 20-4811WIN, RECOM RP30-4805SFW/N, Mean Well RSD-60L-5,
 SMBJ58A, LTC4368, P-FET, VESC Tool, Trampa, Grok, Kevin, WALL-E.
