@@ -201,7 +201,7 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
 ## 11. Inputs for the Pi 5 shield specification
 
 Kevin, 2026-11-13: the target is a Pi 5 shield. This section gives the
-requirements, the constraints and the open decisions. It does not design the
+requirements, the constraints and Kevin's decisions. It does not design the
 shield.
 
 Requirements:
@@ -247,21 +247,18 @@ Decisions (Kevin, 2026-11-13):
    Arduino does today. The Pi does not read the PWM directly.
 2. **D3. The CAN interface stays separate** for now.
 3. **D4. The microcontroller connects to the Pi by USB.**
-
-Open decisions:
-
-1. **D2. Model X outputs.** Recommendation: remove them. The Model X is a
-   hobby motor driver board from the first prototype. Its code is in the
-   initial commit (2025-08-15), before the VESCs. Kevin does not know the
-   board, so it is probably not fitted (check 8).
-2. **D5. HAT+ ID EEPROM.** Recommendation: do not fit one. The ID EEPROM
-   is a small memory chip on GPIO 0 and GPIO 1 (header pins 27 and 28).
-   The Pi reads it at boot to identify the board and to load its settings.
-   The Raspberry Pi HAT+ specification requires it only for a board that
-   uses the HAT+ name. The robot's own code sets up each device, so the
-   EEPROM gives nothing here. If the NVMe carrier has an ID EEPROM, a
-   second one at the same address on the same pins conflicts (VERIFY the
-   carrier).
+4. **D2. The shield has no Model X outputs.** The Model X is a hobby motor
+   driver board from the first prototype. Its code is in the initial commit
+   (2025-08-15), before the VESCs. Kevin does not know the board, so it is
+   probably not fitted (check 8).
+5. **D5. The shield has no HAT+ ID EEPROM.** The ID EEPROM is a small
+   memory chip on GPIO 0 and GPIO 1 (header pins 27 and 28). The Pi reads
+   it at boot to identify the board and to load its settings. The Raspberry
+   Pi HAT+ specification requires it only for a board that uses the HAT+
+   name. The robot's own code sets up each device, so the EEPROM gives
+   nothing here. If the NVMe carrier has an ID EEPROM, a second one at the
+   same address on the same pins would conflict. Do not use GPIO 0 and
+   GPIO 1 on the shield.
 
 ## Appendix: Technical Names and Technical Verbs
 
