@@ -173,9 +173,12 @@ Remove the Model X code with the next change to the sketch.
 | C | SCL | Pin 5, GPIO3, SCL1 | Confirmed: the driver uses bus 1. |
 | D | SDA | Pin 3, GPIO2, SDA1 | Confirmed |
 
-- Connector: Gravity 4-pin, PH2.0 (2.0 mm pitch). The kit has a PH2.0-4P
-  cable (Inferred from the kit listing). The wiki does not give the pin
-  order. Read the order on the board silkscreen.
+- Connector: Gravity 4-pin, PH2.0 (2.0 mm pitch), white housing with a
+  latch. Pin order, Kevin, 2026-11-13: red = +, black = −, blue = SCL/RX
+  (C), green = SDA/TX (D). That is `+ − C D`, the same order as the
+  DFRobot Gravity standard. Photos of the cable end:
+  `docs/data/shield_inputs_20261113/rover_cable_front.jpg` and
+  `rover_cable_back.jpg`.
 - Mode switch: I2C. Confirmed: the driver reads the rover at 0x20 on I2C.
 - Supply range: 3.3 V to 5 V (DFRobot wiki). This answers the "VERIFY" in
   `docs/ups_hat_b.md`: the rover can operate from the Pi's 3.3 V pin. Nobody
@@ -284,8 +287,9 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    expects ch3 to stay near 2000 µs.
 8. **Model X.** Done. Kevin, 2026-11-13: the board is removed. The Arduino
    used to control it.
-9. **Rover pin order and pull-ups.** Read the silkscreen. With the rover on
-   5 V and the Pi on, measure the SDA and SCL voltage at rest.
+9. **Rover pin order and pull-ups.** Pin order done (Kevin, 2026-11-13):
+   red +, black −, blue SCL/RX, green SDA/TX (section 8). Open: with the
+   rover on 5 V and the Pi on, measure the SDA and SCL voltage at rest.
 10. **Rover current.** Measure it at 5 V and at 3.3 V.
 11. **Header pins.** Record which 5 V pin and which GND pin the rover uses.
 
