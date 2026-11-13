@@ -1,5 +1,8 @@
 # Hardware and Channel Mapping
 
+The wiring diagram, the part models, the RTK GPS connection and the open
+checks are in `docs/rc_arduino_gps_wiring.md`.
+
 ## RC Channel Semantics (Runtime)
 
 Controller/safety expects 5 RC channels:

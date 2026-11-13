@@ -1,0 +1,183 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 750" width="1000" height="750" font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <title>WALL-E Mini: RC receiver, Arduino and RTK GPS wiring</title>
+  <rect x="0" y="0" width="1000" height="750" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="20" y="30" font-size="18" font-weight="bold" fill="#111">WALL-E Mini: RC receiver, Arduino and RTK GPS wiring</text>
+  <text x="20" y="50" fill="#444">As built before the X1202 bench. Draft 2026-11-13. Source: docs/rc_arduino_gps_wiring.md</text>
+
+  <!-- ===== Transmitter ===== -->
+  <rect x="20" y="70" width="230" height="66" rx="6" fill="#f4f6fa" stroke="#333"/>
+  <text x="32" y="91" font-size="13" font-weight="bold" fill="#111">HotRC DS600 V3 transmitter</text>
+  <text x="32" y="108" fill="#222">2.4 GHz FHSS, LCD icon 1 only</text>
+  <text x="32" y="124" fill="#222">CH1/CH2 tank mix; off after 15 min idle</text>
+
+  <!-- radio link -->
+  <line x1="135" y1="136" x2="135" y2="175" stroke="#1f4e8c" stroke-width="2" stroke-dasharray="3,4"/>
+  <text x="145" y="160" fill="#1f4e8c">2.4 GHz link</text>
+
+  <!-- ===== Receiver ===== -->
+  <rect x="20" y="175" width="230" height="345" rx="6" fill="#f4f6fa" stroke="#333"/>
+  <text x="32" y="197" font-size="13" font-weight="bold" fill="#111">HotRC F-06A receiver</text>
+  <text x="32" y="213" fill="#222">6 ch PWM, input 4-9 V DC</text>
+  <text x="32" y="229" fill="#d9822b">Model from the manual; label not read</text>
+  <text x="163" y="252" font-weight="bold" fill="#444">S</text>
+  <text x="189" y="252" font-weight="bold" fill="#444">+</text>
+  <text x="215" y="252" font-weight="bold" fill="#444">&#8722;</text>
+
+  <g fill="#222">
+    <text x="32" y="274">CH1</text>
+    <text x="32" y="304">CH2</text>
+    <text x="32" y="334">CH3</text>
+    <text x="32" y="364">CH4</text>
+    <text x="32" y="394">CH5</text>
+    <text x="32" y="424">CH6</text>
+    <text x="32" y="454">Power row</text>
+  </g>
+  <g fill="#555">
+    <circle cx="167" cy="270" r="4"/><circle cx="193" cy="270" r="4"/><circle cx="219" cy="270" r="4"/>
+    <circle cx="167" cy="300" r="4"/><circle cx="193" cy="300" r="4"/><circle cx="219" cy="300" r="4"/>
+    <circle cx="167" cy="330" r="4"/><circle cx="193" cy="330" r="4"/><circle cx="219" cy="330" r="4"/>
+    <circle cx="167" cy="360" r="4"/><circle cx="193" cy="360" r="4"/><circle cx="219" cy="360" r="4"/>
+    <circle cx="167" cy="390" r="4"/><circle cx="193" cy="390" r="4"/><circle cx="219" cy="390" r="4"/>
+    <circle cx="167" cy="420" r="4"/><circle cx="193" cy="420" r="4"/><circle cx="219" cy="420" r="4"/>
+    <circle cx="193" cy="450" r="4"/><circle cx="219" cy="450" r="4"/>
+  </g>
+  <text x="32" y="486" fill="#222">BIND: short = bind, 3 s = 50/333 Hz</text>
+  <text x="32" y="502" fill="#222">Green LED solid = linked</text>
+  <text x="32" y="514" font-size="11" fill="#666">EXT-V voltage return: not used</text>
+
+  <!-- ===== Receiver -> Arduino signal wires ===== -->
+  <g stroke-width="2" fill="none">
+    <line x1="250" y1="270" x2="410" y2="270" stroke="#1f4e8c"/>
+    <line x1="250" y1="300" x2="410" y2="300" stroke="#1f4e8c"/>
+    <line x1="250" y1="330" x2="410" y2="330" stroke="#1f4e8c"/>
+    <line x1="250" y1="360" x2="410" y2="360" stroke="#1f4e8c"/>
+    <line x1="250" y1="390" x2="410" y2="390" stroke="#c0392b"/>
+    <line x1="250" y1="420" x2="275" y2="420" stroke="#888"/>
+    <line x1="250" y1="450" x2="410" y2="450" stroke="#d9822b" stroke-dasharray="6,4"/>
+    <line x1="250" y1="475" x2="410" y2="475" stroke="#d9822b" stroke-dasharray="6,4"/>
+  </g>
+  <g font-size="11">
+    <text x="262" y="265" fill="#1f4e8c">CH1 signal: left track</text>
+    <text x="262" y="295" fill="#1f4e8c">CH2 signal: right track</text>
+    <text x="262" y="325" fill="#1f4e8c">CH3 signal: arm switch</text>
+    <text x="262" y="355" fill="#1f4e8c">CH4 signal: FOLLOW_ME</text>
+    <text x="262" y="385" fill="#c0392b">CH5 signal: e-stop</text>
+    <text x="281" y="424" fill="#888">not connected</text>
+    <text x="262" y="445" fill="#d9822b">+ feed: source not recorded</text>
+    <text x="262" y="470" fill="#d9822b">&#8722; ground: not recorded</text>
+  </g>
+
+  <!-- ===== Arduino ===== -->
+  <rect x="410" y="175" width="250" height="345" rx="6" fill="#f4f6fa" stroke="#333"/>
+  <text x="422" y="197" font-size="13" font-weight="bold" fill="#111">Arduino, ATmega328P</text>
+  <text x="422" y="213" fill="#d9822b">Probably a Nano clone (CH340)</text>
+  <text x="422" y="229" fill="#222">arduino_rc_reader.ino</text>
+  <g fill="#111" font-weight="bold">
+    <text x="420" y="274">D2</text>
+    <text x="420" y="304">D3</text>
+    <text x="420" y="334">D4</text>
+    <text x="420" y="364">D5</text>
+    <text x="420" y="394">D6</text>
+    <text x="420" y="454" fill="#d9822b">5V</text>
+    <text x="420" y="479" fill="#d9822b">GND</text>
+  </g>
+  <g fill="#222" font-size="11">
+    <text x="470" y="274">INPUT_PULLUP,</text>
+    <text x="470" y="289">pin-change interrupts</text>
+    <text x="470" y="315">Clamp: outside 800-2200 us</text>
+    <text x="470" y="329">reads as 1500 us</text>
+    <text x="470" y="355">CSV ch1..ch5 every 20 ms</text>
+    <text x="470" y="369">115200 baud</text>
+    <text x="470" y="392" fill="#c0392b" font-weight="bold">No pulse timeout:</text>
+    <text x="470" y="406" fill="#c0392b" font-weight="bold">a lost pulse keeps the</text>
+    <text x="470" y="420" fill="#c0392b" font-weight="bold">last width</text>
+  </g>
+  <text x="422" y="508" font-size="11" fill="#222">D7-D12 to the Model X (below)</text>
+
+  <!-- Arduino USB to hub -->
+  <line x1="660" y1="200" x2="720" y2="200" stroke="#1f4e8c" stroke-width="2"/>
+  <text x="664" y="193" font-size="11" fill="#1f4e8c">USB 2</text>
+
+  <!-- ===== Model X ===== -->
+  <line x1="535" y1="520" x2="535" y2="600" stroke="#888" stroke-width="5"/>
+  <text x="545" y="548" font-size="11" fill="#666">6 wires: D9, D10 PWM;</text>
+  <text x="545" y="562" font-size="11" fill="#666">D7, D8, D11, D12 direction</text>
+  <rect x="410" y="600" width="250" height="72" rx="6" fill="#fbfbfb" stroke="#d9822b" stroke-dasharray="6,4"/>
+  <text x="422" y="621" font-size="13" font-weight="bold" fill="#555">OSOYOO Model X H-bridge</text>
+  <text x="422" y="638" fill="#555">Fallback only; VESCs on CAN drive</text>
+  <text x="422" y="655" fill="#d9822b">Fitted on the robot: not recorded</text>
+
+  <!-- ===== USB hub ===== -->
+  <rect x="720" y="175" width="260" height="95" rx="6" fill="#f4f6fa" stroke="#333"/>
+  <text x="732" y="197" font-size="13" font-weight="bold" fill="#111">USB hub, own supply</text>
+  <text x="732" y="213" fill="#222">Genesys 05e3:0610 / 05e3:0626</text>
+  <text x="732" y="229" fill="#222">Power: from the main pack</text>
+  <text x="732" y="245" fill="#222">Port 2: Arduino, /dev/ttyUSB0</text>
+  <text x="732" y="261" fill="#888">Also on the hub: OAK-D Lite</text>
+
+  <!-- hub to Pi -->
+  <line x1="850" y1="270" x2="850" y2="320" stroke="#1f4e8c" stroke-width="2"/>
+  <text x="858" y="291" font-size="11" fill="#1f4e8c">USB data only:</text>
+  <text x="858" y="305" font-size="11" fill="#1f4e8c">5 V wire cut</text>
+
+  <!-- ===== Pi 5 ===== -->
+  <rect x="720" y="320" width="260" height="212" rx="6" fill="#f4f6fa" stroke="#333"/>
+  <text x="732" y="342" font-size="13" font-weight="bold" fill="#111">Raspberry Pi 5</text>
+  <text x="732" y="358" font-size="11" fill="#c0392b">GPIO is 3.3 V, not 5 V tolerant</text>
+  <g fill="#222">
+    <text x="732" y="378">pin 2 or 4: 5 V</text>
+    <text x="732" y="394">pin 3: GPIO2, SDA1</text>
+    <text x="732" y="410">pin 5: GPIO3, SCL1</text>
+    <text x="732" y="426">GND pin: not recorded</text>
+  </g>
+  <text x="732" y="444" font-size="11" fill="#222">1.8 kOhm pull-ups to 3.3 V on GPIO2/3</text>
+  <text x="732" y="464" font-size="11" fill="#888">Also on I2C bus 1:</text>
+  <text x="732" y="478" font-size="11" fill="#888">UPS HAT (B) INA219 0x42 (robot)</text>
+  <text x="732" y="492" font-size="11" fill="#888">X1202 gauge 0x36; GPIO 6, 16 (bench)</text>
+  <text x="732" y="506" font-size="11" fill="#888">i2c-bus-guard unlocks a stuck bus</text>
+  <text x="732" y="522" font-size="11" fill="#888">NVMe carrier on top, X1202 below</text>
+
+  <!-- ===== Pi to DFRobot rover, 4 wires ===== -->
+  <g stroke-width="2">
+    <line x1="760" y1="532" x2="760" y2="610" stroke="#c0392b"/>
+    <line x1="810" y1="532" x2="810" y2="610" stroke="#111"/>
+    <line x1="870" y1="532" x2="870" y2="610" stroke="#2e8b57"/>
+    <line x1="930" y1="532" x2="930" y2="610" stroke="#1f4e8c"/>
+  </g>
+  <g font-size="11">
+    <text x="765" y="566" fill="#c0392b">5 V</text>
+    <text x="815" y="566" fill="#111">GND</text>
+    <text x="875" y="566" fill="#2e8b57">SCL</text>
+    <text x="935" y="566" fill="#1f4e8c">SDA</text>
+  </g>
+
+  <!-- ===== DFRobot rover ===== -->
+  <rect x="720" y="610" width="260" height="125" rx="6" fill="#f4f6fa" stroke="#333"/>
+  <g font-weight="bold" fill="#111">
+    <text x="756" y="627">+</text>
+    <text x="806" y="627">&#8722;</text>
+    <text x="866" y="627">C</text>
+    <text x="926" y="627">D</text>
+  </g>
+  <text x="732" y="648" font-size="13" font-weight="bold" fill="#111">DFRobot KIT0198 RTK rover</text>
+  <text x="732" y="664" fill="#222">LC29HDA + LoRa 915 MHz, I2C 0x20</text>
+  <text x="732" y="680" fill="#222">Gravity 4-pin PH2.0; switch on I2C</text>
+  <text x="732" y="696" fill="#222">Supply 3.3-5 V (wiki); today 5 V</text>
+  <text x="732" y="712" fill="#d9822b">Pin order: read the silkscreen</text>
+  <text x="732" y="728" fill="#d9822b">Pull-up voltage: not measured</text>
+
+  <!-- ===== Legend ===== -->
+  <rect x="20" y="600" width="370" height="135" rx="6" fill="#ffffff" stroke="#bbb"/>
+  <text x="32" y="621" font-size="13" font-weight="bold" fill="#111">Legend</text>
+  <line x1="32" y1="640" x2="82" y2="640" stroke="#1f4e8c" stroke-width="2"/>
+  <text x="92" y="644" fill="#222">Confirmed by code, log or maker's manual</text>
+  <line x1="32" y1="662" x2="82" y2="662" stroke="#d9822b" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="92" y="666" fill="#222">Not confirmed: check on the robot</text>
+  <line x1="32" y1="684" x2="82" y2="684" stroke="#888" stroke-width="2"/>
+  <text x="92" y="688" fill="#222">Context or not in use</text>
+  <line x1="32" y1="706" x2="82" y2="706" stroke="#c0392b" stroke-width="2"/>
+  <text x="92" y="710" fill="#222">E-stop channel or 5 V supply</text>
+  <text x="32" y="728" font-size="11" fill="#666">Receiver header order S, +, &#8722; is from the manual drawing.</text>
+</svg>

@@ -469,7 +469,9 @@ recovery; after a change to `bin/i2c_bus_guard.py` run
   cells, the whole time the Pi is in standby. Measure its draw. If the
   module accepts 3.3 V (VERIFY on its datasheet), move its power to the
   Pi's 3V3 pin, which switches off at the halt. For storage, switch the HAT
-  off either way.
+  off either way. 2026-11-13: the DFRobot wiki gives the rover's supply as
+  3.3 V to 5 V, so 3.3 V is in range; its draw is still not measured
+  (`docs/rc_arduino_gps_wiring.md`, section 8).
 - Wake-check lockout, 2026-11-06 08:42-09:13. Kevin switched main power off
   to fit new, charged 18650s (hard halt at 6.68 V, -773 mA on the old
   cells, chain open). After the swap, the 5 V came up slowly and the Pi

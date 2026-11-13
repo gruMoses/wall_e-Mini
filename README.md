@@ -117,6 +117,7 @@ GPS COG heading alignment is **implemented** (software); field validation is pen
 
 - `docs/services.md`: systemd services, startup flow, logs
 - `docs/hardware_mapping.md`: RC channels, Arduino pins, motor pin map
+- `docs/rc_arduino_gps_wiring.md`: wiring diagram for the RC receiver, Arduino and RTK GPS, safety findings, inputs for the Pi 5 shield spec
 - `docs/can_vesc.md`: CAN/VESC protocol and configuration
 - `docs/testing.md`: unit + hardware-in-loop test workflow
 - `docs/bluetooth_setup.md`: SPP pairing and transport details
