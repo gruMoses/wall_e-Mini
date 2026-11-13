@@ -4,7 +4,7 @@
 
   <!-- Title -->
   <text x="20" y="30" font-size="18" font-weight="bold" fill="#111">WALL-E Mini: RC receiver, Arduino and RTK GPS wiring</text>
-  <text x="20" y="50" fill="#444">As built before the X1202 bench. Draft 2026-11-13. Source: docs/rc_arduino_gps_wiring.md</text>
+  <text x="20" y="50" fill="#444">As of 2026-11-13: no USB hub. Draft. Source: docs/rc_arduino_gps_wiring.md</text>
 
   <!-- ===== Transmitter ===== -->
   <rect x="20" y="70" width="230" height="66" rx="6" fill="#f4f6fa" stroke="#333"/>
@@ -97,14 +97,16 @@
     <text x="470" y="434" fill="#666">A0: input, not read yet</text>
   </g>
   <text x="470" y="454" font-size="11" fill="#222">Arduino and receiver run on</text>
-  <text x="470" y="468" font-size="11" fill="#222">the USB 5 V only, not the</text>
-  <text x="470" y="482" font-size="11" fill="#222">Pi header 5 V</text>
-  <text x="422" y="500" font-size="11" fill="#222">Streams RC to USB only.</text>
+  <text x="470" y="468" font-size="11" fill="#222">the 5 V of a Pi USB port,</text>
+  <text x="470" y="482" font-size="11" fill="#222">not the Pi header 5 V</text>
+  <text x="422" y="500" font-size="11" fill="#222">Streams RC to a Pi USB port only.</text>
   <text x="422" y="514" font-size="11" fill="#222">D7-D12: outputs in the code, nothing connected</text>
 
-  <!-- Arduino USB to hub -->
-  <line x1="660" y1="200" x2="720" y2="200" stroke="#1f4e8c" stroke-width="2"/>
-  <text x="664" y="193" font-size="11" fill="#1f4e8c">USB 2</text>
+  <!-- Arduino USB straight to a Pi USB port -->
+  <polyline points="660,200 690,200 690,345 720,345" fill="none" stroke="#1f4e8c" stroke-width="2"/>
+  <text x="664" y="193" font-size="11" fill="#1f4e8c">USB</text>
+  <text x="697" y="292" font-size="10" fill="#1f4e8c">VBUS from</text>
+  <text x="697" y="304" font-size="10" fill="#1f4e8c">the Pi port</text>
 
   <!-- ===== Model X ===== -->
   <line x1="535" y1="520" x2="535" y2="600" stroke="#bbb" stroke-width="2" stroke-dasharray="4,4"/>
@@ -115,18 +117,18 @@
   <text x="422" y="638" fill="#888">The Arduino used to drive it</text>
   <text x="422" y="655" fill="#888">VESCs on CAN drive the robot</text>
 
-  <!-- ===== USB hub ===== -->
-  <rect x="720" y="175" width="260" height="95" rx="6" fill="#f4f6fa" stroke="#333"/>
-  <text x="732" y="197" font-size="13" font-weight="bold" fill="#111">USB hub, own supply</text>
-  <text x="732" y="213" fill="#222">Genesys 05e3:0610 / 05e3:0626</text>
-  <text x="732" y="229" fill="#222">Power: from the main pack</text>
-  <text x="732" y="245" fill="#222">Port 2: Arduino, /dev/ttyUSB0</text>
-  <text x="732" y="261" fill="#888">Also on the hub: OAK-D Lite</text>
+  <!-- ===== OAK-D Lite (context) ===== -->
+  <rect x="720" y="175" width="260" height="95" rx="6" fill="#fbfbfb" stroke="#888"/>
+  <text x="732" y="197" font-size="13" font-weight="bold" fill="#555">OAK-D Lite camera (context)</text>
+  <text x="732" y="213" fill="#555">USB data to a Pi USB port</text>
+  <text x="732" y="229" fill="#555">5 V from the UPS, not the Pi</text>
+  <text x="732" y="245" fill="#555">USB 2 speed cap in config.py</text>
+  <text x="732" y="261" fill="#888">USB hub removed 2026-11-13</text>
 
-  <!-- hub to Pi -->
-  <line x1="850" y1="270" x2="850" y2="320" stroke="#1f4e8c" stroke-width="2"/>
-  <text x="858" y="291" font-size="11" fill="#1f4e8c">USB data only:</text>
-  <text x="858" y="305" font-size="11" fill="#1f4e8c">5 V wire cut</text>
+  <!-- OAK to Pi -->
+  <line x1="850" y1="270" x2="850" y2="320" stroke="#888" stroke-width="2"/>
+  <text x="858" y="291" font-size="11" fill="#666">USB data only:</text>
+  <text x="858" y="305" font-size="11" fill="#666">5 V wire cut</text>
 
   <!-- ===== Pi 5 ===== -->
   <rect x="720" y="320" width="260" height="212" rx="6" fill="#f4f6fa" stroke="#333"/>

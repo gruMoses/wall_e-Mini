@@ -1,14 +1,14 @@
 # RC receiver, Arduino and RTK GPS wiring
 
-Status: draft, 2026-11-13. This document records the wiring as built on the
-robot before the X1202 bench work. It is the input for a Pi 5 shield
-specification (section 11). It does not design the shield.
+Status: draft, 2026-11-13. This document records the wiring as of
+2026-11-13: the USB hub is removed, the Arduino is on a USB port of the Pi,
+and the OAK-D Lite takes its 5 V from the UPS. It is the input for a Pi 5
+shield specification (section 11). It does not design the shield.
 
-WARNING: Nobody measured the robot for this document. The robot's Pi is on
-the X1202 bench, and the Arduino is not connected to it (`lsusb` on
-2026-11-13 12:52 shows only the root hubs). The sources are the code, the
-logs, the HotRC DS600 manual and the DFRobot wiki. Section 10 lists each open
-check.
+WARNING: Few items in this document are measured. On 2026-11-13 the Arduino
+was connected to the Pi for a flash read (section 10, check 2). The other
+sources are Kevin's statements, the code, the logs, the HotRC DS600 manual
+and the DFRobot wiki. Section 10 lists each open check.
 
 ## 1. Confidence levels
 
@@ -32,7 +32,8 @@ Solid lines are Confirmed. Orange dashed lines are Unknown or Inferred.
 | Receiver | HotRC F-06A: 6 channels, PWM, 4 V to 9 V DC | Inferred. Page 6 of the DS600 manual names the F-06A. Nobody read the label on the robot. |
 | RC bridge MCU | Arduino Nano clone: ATmega328P at 16 MHz, CH340 USB serial chip, Nano old bootloader (57600 baud) | Confirmed 2026-11-13: `lsusb` shows `1a86:7523`, avrdude reads signature `0x1e950f` at 57600 baud, and the last flash used FQBN `arduino:avr:nano:cpu=atmega328old`. Nobody photographed the board. |
 | Former motor driver | OSOYOO Model X H-bridge | Removed. Kevin, 2026-11-13: the Arduino used to control it. Today the Arduino only streams the RC channels to the Pi over USB. The sketch still has the Model X code (section 5). |
-| USB hub | Genesys Logic, USB IDs 05e3:0610 and 05e3:0626, own supply from the main pack | Confirmed (`docs/ups_hat_b.md`) |
+| USB hub | Genesys Logic, USB IDs 05e3:0610 and 05e3:0626 | Removed (Kevin, 2026-11-13). Before that, the Arduino and the OAK-D Lite were on it, and it had its own supply from the main pack (`docs/ups_hat_b.md`). |
+| Camera (context) | Luxonis OAK-D Lite | USB data to the Pi. The 5 V wire of its cord is cut, and it takes 5 V from the UPS (Kevin, 2026-11-13). Not part of the shield. |
 | RTK rover | DFRobot KIT0198: Quectel LC29HDA, LoRa 915 MHz, I2C address 0x20 | Confirmed (`docs/rtk_gps_module.md`) |
 
 DS600 manual (V3, text as outlines, read as images):
@@ -99,10 +100,13 @@ Remove the Model X code with the next change to the sketch.
 
 ## 6. Power and ground
 
-- The Arduino gets 5 V from port 2 of the USB hub. The hub has its own
-  supply from the main pack. The Pi-to-hub cable has its 5 V wire cut
-  (2026-11-05). Thus the Pi does not supply the hub, and the hub does not
-  supply the Pi.
+- The Arduino connects to a USB port of the Pi with a normal cable. The Pi
+  supplies its 5 V through that port (Kevin, 2026-11-13). The USB hub is
+  removed.
+- The Pi 5 limits the current of all its USB ports together to 600 mA,
+  unless its firmware knows that the supply gives 5 A. The Arduino and the
+  receiver must stay below that limit. Nobody measured the receiver
+  current.
 - The receiver gets its power from the same USB 5 V as the Arduino (Kevin,
   2026-11-13). The Arduino and the receiver do not connect to the 5 V of the
   Pi header. The exact pin on the Arduino side is not recorded. The F-06A
@@ -113,10 +117,14 @@ Remove the Model X code with the next change to the sketch.
 - The receiver and the Arduino must have a common ground for the PWM
   signals. The USB ground connects the Arduino ground to the Pi ground.
 - The RTK rover gets 5 V from the Pi header (section 8).
+- Context: the OAK-D Lite takes its 5 V from the UPS through the cut 5 V
+  wire of its cord, not from the Pi (Kevin, 2026-11-13). This is the
+  "variant without the hub" in `docs/pi_power_architecture.md`.
 
 ## 7. Arduino to Pi (USB serial)
 
-- Port: `/dev/ttyUSB0`. The reader tries `/dev/ttyUSB*` first, then
+- Port: `/dev/ttyUSB0`, on a USB port of the Pi with no hub (USB path 3-2
+  on 2026-11-13). The reader tries `/dev/ttyUSB*` first, then
   `/dev/ttyACM*`.
 - Rate: 115200 baud. 8N1 is Inferred (the Arduino default).
 - Arduino to Pi: one line each 20 ms, `ch1,ch2,ch3,ch4,ch5`, in µs. The
@@ -301,12 +309,15 @@ Requirements:
   USB connector. Kevin has a short USB cable for it (D4).
 - **S10. Two 5 V rails that do not connect.** The microcontroller and the
   receiver get their power from the USB VBUS only, as the Arduino and the
-  receiver do today (Kevin, 2026-11-13). The RTK rover gets its power from
-  the header 5 V only (S6). The two rails share ground and nothing else.
-  Reason: on 2026-11-04 the USB hub fed 5 V in both directions through its
-  cable, and the Pi carried the hub, the OAK and the Arduino
-  (`docs/ups_hat_b.md`). A shield that connects VBUS to the header 5 V
-  makes that path again.
+  receiver do today: a USB port of the Pi supplies them (Kevin,
+  2026-11-13). The RTK rover gets its power from the header 5 V only (S6).
+  On the shield the two rails share ground and nothing else. Today both
+  come from the Pi's 5 V rail, but the VBUS side goes through the Pi's USB
+  current limit. A shield that joins them goes around that limit. If the
+  cable ever goes to a powered hub again, it also feeds 5 V back into the
+  Pi: on 2026-11-04 the hub fed 5 V in both directions through its cable,
+  and the Pi carried the hub, the OAK and the Arduino
+  (`docs/ups_hat_b.md`).
 - **S11. Two microcontroller positions, one in use at a time.** (a) A
   socket for an Arduino Nano: the current board or a spare. (b) An on-board
   replacement chip: an ATmega328P at 16 MHz with a CH340C USB serial chip,
