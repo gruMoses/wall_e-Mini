@@ -77,8 +77,10 @@ Electrical facts:
 | D12 | IN1 | Right direction 1 |
 | D11 | IN2 | Right direction 2 |
 
-The VESCs on CAN are the drive path. The Pi uses the Model X path only when
-`can0` does not exist. A comment in the sketch says that the IN1/IN2
+The Model X is a hobby motor driver board from the first prototype. Its code
+is in the initial commit (2025-08-15), before the VESCs. The VESCs on CAN are
+the drive path. The Pi uses the Model X path only when `can0` does not exist
+(`pi_app/app/main.py`, "VESC not detected"). A comment in the sketch says that the IN1/IN2
 polarity "may need swap depending on wiring". Nobody recorded a check of the
 right-side direction.
 
@@ -189,7 +191,8 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
 7. **Lead loss.** Run `python3 -m pi_app.cli.monitor_rc`. Put the arm switch
    up. Disconnect the CH3 signal lead at the Arduino. Record ch3. Finding 1
    expects ch3 to stay near 2000 µs.
-8. **Model X.** Record whether the board is fitted.
+8. **Model X.** Record whether the board is fitted. Kevin did not know the
+   board on 2026-11-13, so it is probably not fitted.
 9. **Rover pin order and pull-ups.** Read the silkscreen. With the rover on
    5 V and the Pi on, measure the SDA and SCL voltage at rest.
 10. **Rover current.** Measure it at 5 V and at 3.3 V.
@@ -230,18 +233,35 @@ Requirements:
   NVMe carrier on a stacking header and keep the PCIe ribbon and the fan
   clear. VERIFY the carrier model and its height.
 
-Open decisions (Kevin):
+- **S9. USB link.** The 40-pin header has no USB lines. The shield needs a
+  USB connector and a short cable to a USB port of the Pi (D4).
+- **S10. One 5 V source.** Supply the microcontroller and the receiver from
+  one 5 V source. Do not connect the VBUS of the USB cable to that 5 V.
+  Reason: on 2026-11-04 the USB hub fed 5 V in both directions through its
+  cable, and the Pi carried the hub, the OAK and the Arduino
+  (`docs/ups_hat_b.md`).
 
-1. **D1. Who reads the PWM:** a microcontroller on the shield (as the
-   Arduino does today), or the Pi directly. The answer sets what the RC
-   safety path does when Linux stops.
-2. **D2. Model X outputs:** keep the 6 fallback drive outputs, or remove
-   them. The VESCs on CAN drive the robot.
-3. **D3. CAN interface:** put it on the shield, or keep it separate. Its
-   model is not recorded.
-4. **D4. Link to the Pi (if D1 is a microcontroller):** UART on the header,
-   I2C, or USB.
-5. **D5. HAT+ ID EEPROM:** fit one, or not.
+Decisions (Kevin, 2026-11-13):
+
+1. **D1. A microcontroller on the shield reads the RC channels**, as the
+   Arduino does today. The Pi does not read the PWM directly.
+2. **D3. The CAN interface stays separate** for now.
+3. **D4. The microcontroller connects to the Pi by USB.**
+
+Open decisions:
+
+1. **D2. Model X outputs.** Recommendation: remove them. The Model X is a
+   hobby motor driver board from the first prototype. Its code is in the
+   initial commit (2025-08-15), before the VESCs. Kevin does not know the
+   board, so it is probably not fitted (check 8).
+2. **D5. HAT+ ID EEPROM.** Recommendation: do not fit one. The ID EEPROM
+   is a small memory chip on GPIO 0 and GPIO 1 (header pins 27 and 28).
+   The Pi reads it at boot to identify the board and to load its settings.
+   The Raspberry Pi HAT+ specification requires it only for a board that
+   uses the HAT+ name. The robot's own code sets up each device, so the
+   EEPROM gives nothing here. If the NVMe carrier has an ID EEPROM, a
+   second one at the same address on the same pins conflicts (VERIFY the
+   carrier).
 
 ## Appendix: Technical Names and Technical Verbs
 
@@ -256,7 +276,8 @@ LCD, LED, BIND, EXT-V, CH1 to CH6, D2 to D12, ENA, ENB, IN1 to IN4,
 VCC, MCU, deadband, failsafe, e-stop, FOLLOW_ME, MANUAL, `wall-e`,
 `monitor_rc`, `lsusb`, `i2c-bus-guard.service`, `RC_STALE_TIMEOUT_S`,
 `ArduinoRCReader`, journal, silkscreen, servo header, stacking header, pogo
-pin, pull-up, sketch, firmware, stand, rubber band, microwave oven.
+pin, pull-up, sketch, firmware, stand, rubber band, microwave oven, ID
+EEPROM, GPIO 0, GPIO 1, VBUS, USB hub, OAK, prototype.
 
 **Technical Verbs:** arm, disarm, enumerate, latch, mix, parse, power off,
 stack.
