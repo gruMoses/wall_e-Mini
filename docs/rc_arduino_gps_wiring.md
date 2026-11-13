@@ -310,10 +310,16 @@ Requirements:
   and 5 V signals, and each signal to the Pi must be 3.3 V.
 - **S4. Receiver power.** Supply 5 V through a fuse, with a common ground.
   The receiver range is 4 V to 9 V DC, 12 V maximum. The current is Unknown.
+  No separate receiver power connector (Kevin, 2026-11-13): the 5 V and the
+  ground reach the receiver on the + and − pins of the channel headers
+  (S5), and one channel lead is enough, because the receiver connects its +
+  rows together and its − rows together.
 - **S5. Receiver connectors.** One 3-pin male servo header (2.54 mm pitch)
   for each of CH1 to CH6, so that standard servo leads connect. Pin order:
-  signal, +, −, the same as the receiver (section 4). Mark the − pin on the
-  silkscreen.
+  signal, +, −, the same as the receiver (section 4). The + pin of each
+  header is the fused receiver 5 V (S4), and the − pin is ground, as on a
+  standard servo header. Thus any one lead powers the receiver. Mark the −
+  pin on the silkscreen.
 - **S6. RTK rover connector.** One Gravity PH2.0 4-pin socket on I2C bus 1
   (GPIO2, GPIO3). Supply: the 5 V of the Pi header, as today (Kevin,
   2026-11-13). That 5 V must go off when the Pi halts, so that the rover
