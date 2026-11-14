@@ -19,7 +19,9 @@ This module turns the reader's ``vision_hung`` health flag into actions:
   so a switch flipped high a moment ago already blocks). A short dropout
   blocks (the switch may still be up). A long silence, or no RC ever,
   allows: the transmitter is off, RC-stale forces disarm and phone teleop
-  needs RC armed, so nobody can be driving.
+  needs RC armed, so nobody can be driving. No signal on ch3 on a fresh
+  link is the same: a short run blocks, a run of ``rc_off_s`` permits
+  (``NoSignalRun`` measures it).
 * ``VisionHangMonitor`` -- ``onset`` prints and writes a JSON event;
   ``log_now`` every ``log_interval_s``; ``restart`` fires once, after
   ``hang_restart_s`` hung AND the gate has held continuously for
@@ -39,6 +41,26 @@ from pathlib import Path
 from pi_app.control.rc_signal import rc_signal_ok, rc_switch_low
 
 
+class NoSignalRun:
+    """How long ch3 has had no signal without a break (monotonic clock).
+
+    ``update`` returns the seconds since the first no-signal tick of the
+    current run, or None while ch3 is a measured width. Any measured width
+    ends the run; None (no value) also ends it.
+    """
+
+    def __init__(self) -> None:
+        self._since: float | None = None
+
+    def update(self, now_mono_s: float, ch3_us: int | None) -> float | None:
+        if ch3_us is None or rc_signal_ok(ch3_us):
+            self._since = None
+            return None
+        if self._since is None:
+            self._since = now_mono_s
+        return max(0.0, now_mono_s - self._since)
+
+
 def restart_permitted(
     is_armed: bool,
     rc_age_s: float | None,
@@ -46,10 +68,13 @@ def restart_permitted(
     arm_low_threshold_us: int,
     rc_fresh_s: float = 1.0,
     rc_off_s: float = 30.0,
+    ch3_no_signal_s: float | None = None,
 ) -> tuple[bool, str]:
     """Return (may_restart, reason) for this tick.
 
     ``rc_age_s`` None means no RC frame has ever been seen.
+    ``ch3_no_signal_s``: how long ch3 has had no signal without a break
+    (NoSignalRun), or None.
     """
     if is_armed:
         return False, "armed"
@@ -57,10 +82,22 @@ def restart_permitted(
         return True, "no RC ever"
     if rc_age_s <= rc_fresh_s:
         # No signal on ch3 (pi_app/control/rc_signal.py) is not "switch
-        # low": the switch position is unknown, so it blocks.
+        # low": the switch position is unknown, so a short run blocks, like
+        # a short RC dropout. A run of rc_off_s or more permits, like a long
+        # silence: with the new firmware a parked robot with the transmitter
+        # off (a receiver that stops its outputs) reads no signal on every
+        # fresh line, and blocking would bring back the 2026-10-04 four-day
+        # hang. Safe: no signal on ch3 has already disarmed and set the
+        # re-arm latch, and phone teleop needs RC armed.
         if rc_switch_low(ch3_us, arm_low_threshold_us):
             return True, "disarmed, switch low"
         if ch3_us is not None and not rc_signal_ok(ch3_us):
+            if (
+                rc_off_s > 0.0
+                and ch3_no_signal_s is not None
+                and ch3_no_signal_s >= rc_off_s
+            ):
+                return True, f"disarmed, ch3 no signal for {ch3_no_signal_s:.0f} s"
             return False, "ch3 no signal"
         return False, "switch up"
     if rc_off_s > 0.0 and rc_age_s >= rc_off_s:

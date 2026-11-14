@@ -48,7 +48,7 @@ try:
         should_print_console_line, _session_header, build_log_obj,
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
-    from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted
+    from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, NoSignalRun, restart_permitted
     from pi_app.app.imu_stall import ImuStallMonitor, imu_status_text
     from pi_app.app.phone_override import fresh_override_bytes
     from pi_app.control.netting_mute import near_share, detection_drops_mute
@@ -84,7 +84,7 @@ except ModuleNotFoundError:
         should_print_console_line, _session_header, build_log_obj,
         build_slow_obj, should_write_slow_line, animal_log_entries,
     )
-    from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, restart_permitted  # type: ignore
+    from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, NoSignalRun, restart_permitted  # type: ignore
     from pi_app.app.imu_stall import ImuStallMonitor, imu_status_text  # type: ignore
     from pi_app.app.phone_override import fresh_override_bytes  # type: ignore
     from pi_app.control.netting_mute import near_share, detection_drops_mute  # type: ignore
@@ -539,6 +539,7 @@ def run() -> int:
             settle_s=float(getattr(_det_cfg_for_hang, "vision_hang_restart_settle_s", 10.0) or 0.0),
         )
         vision_hang_rc_off_s = float(getattr(_det_cfg_for_hang, "vision_hang_rc_off_s", 30.0) or 0.0)
+        _ch3_no_signal_run = NoSignalRun()
         vision_hang_budget = RestartBudget(
             logs_dir / "vision_hang_restarts.json",
             max_restarts=int(getattr(_det_cfg_for_hang, "vision_hang_restart_budget", 3) or 0),
@@ -780,6 +781,9 @@ def run() -> int:
             # armed robot keeps running: MANUAL stays at the stale-depth
             # floor and the autonomous modes are already halted by the stale
             # depth, so the restart waits for the disarm.
+            # The ch3 no-signal run is measured on every tick (monotonic), so
+            # the gate can permit after vision_hang_rc_off_s of no signal.
+            _ch3_no_signal_s = _ch3_no_signal_run.update(time.monotonic(), rc.ch3_us)
             if isinstance(oak_camera_health, dict):
                 _rc_age_s = (
                     (time.monotonic() - rc.last_update_mono_s)
@@ -792,6 +796,7 @@ def run() -> int:
                     arm_low_threshold_us=controller.arm_low_threshold_us,
                     rc_fresh_s=RC_STALE_TIMEOUT_S,
                     rc_off_s=vision_hang_rc_off_s,
+                    ch3_no_signal_s=_ch3_no_signal_s,
                 )
                 _hang_act = vision_hang_mon.update(
                     time.monotonic(),
