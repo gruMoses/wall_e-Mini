@@ -80,15 +80,52 @@ static void test_range_edges() {
   }
 }
 
-static void test_out_of_range_is_no_signal_not_1500() {
-  // Finding 5: a CH5 pulse above the old 2200 limit used to read 1500.
+static void test_single_bad_pulse_holds_last_good() {
+  // Hold last good (Kevin, 2026-11-13): one out-of-range pulse changes
+  // nothing. Finding 5: it used to read 1500; it must never read as a value.
   Channel c;
-  c.pulse(0, 2000);
+  c.pulse(0, 2000);  // valid, ends at 2000
   CHECK_EQ(c.poll(2100), 2000);
-  c.pulse(20000, 2600);
-  CHECK_EQ(c.poll(22700), RC_NO_SIGNAL_US);
-  c.pulse(40000, 2000);
-  CHECK_EQ(c.poll(42100), 2000);
+  c.pulse(20000, 2600);  // too long
+  CHECK_EQ(c.poll(22700), 2000);
+  CHECK_EQ((unsigned long)c.shared.seq, 1);  // not published
+  c.pulse(40000, 300);  // too short (a runt)
+  CHECK_EQ(c.poll(40400), 2000);
+  c.pulse(60000, 1000);  // valid again
+  CHECK_EQ(c.poll(61100), 1000);
+}
+
+static void test_bad_pulse_stream_is_no_signal_after_100ms() {
+  // A stream of out-of-range pulses at 50 Hz: the last valid width until
+  // 100 ms after the END of the last valid pulse, then no signal.
+  Channel c;
+  c.pulse(0, 1500);  // last valid pulse ends at 1500
+  int bad_before = 0;
+  int bad_after = 0;
+  for (uint32_t t = 20000; t < 400000UL; t += 20000UL) {
+    c.pulse(t, 2700);
+    for (uint32_t now = t + 2700; now < t + 20000UL; now += 1000UL) {
+      const uint16_t v = c.poll(now);
+      if (now - 1500 <= RC_TIMEOUT_US) {
+        if (v != 1500) ++bad_before;
+      } else {
+        if (v != RC_NO_SIGNAL_US) ++bad_after;
+      }
+    }
+  }
+  CHECK_EQ(bad_before, 0);
+  CHECK_EQ(bad_after, 0);
+  // A valid pulse brings it back at once.
+  c.pulse(400000UL, 1600);
+  CHECK_EQ(c.poll(401700UL), 1600);
+}
+
+static void test_bad_pulses_only_since_reset_is_no_signal() {
+  Channel c;
+  for (uint32_t t = 0; t < 200000UL; t += 20000UL) {
+    c.pulse(t, 3000);
+    CHECK_EQ(c.poll(t + 3100), RC_NO_SIGNAL_US);
+  }
 }
 
 static void test_pulse_longer_than_16_bits() {
@@ -144,6 +181,9 @@ static void test_dead_channel_stays_no_signal_after_the_wrap() {
   const uint32_t wrapped = end + 50;
   CHECK_EQ(c.poll(wrapped), RC_NO_SIGNAL_US);
   CHECK_EQ(c.poll(wrapped + 1000), RC_NO_SIGNAL_US);
+  // A bad pulse is not a pulse: it cannot revive the ancient one.
+  c.pulse(wrapped + 2000, 2700);
+  CHECK_EQ(c.poll(wrapped + 4800), RC_NO_SIGNAL_US);
 }
 
 static void test_50hz_train_with_missed_frames() {
@@ -250,7 +290,9 @@ int main() {
   test_no_pulse_since_reset_is_no_signal();
   test_valid_pulse_then_timeout();
   test_range_edges();
-  test_out_of_range_is_no_signal_not_1500();
+  test_single_bad_pulse_holds_last_good();
+  test_bad_pulse_stream_is_no_signal_after_100ms();
+  test_bad_pulses_only_since_reset_is_no_signal();
   test_pulse_longer_than_16_bits();
   test_fall_without_rise_is_not_a_pulse();
   test_stuck_high_times_out();

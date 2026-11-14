@@ -2,12 +2,15 @@
 // calls so that tools/arduino_rc_reader_host_test/ can compile and test it
 // on a host computer.
 //
-// Safety findings 1 and 5 (docs/rc_arduino_gps_wiring.md, section 9):
-// - A channel reports RC_NO_SIGNAL_US when it has had no complete pulse for
-//   RC_TIMEOUT_US (a dead signal lead, a receiver without power, a receiver
-//   that stops its outputs). Before, it held its last width forever.
-// - A channel reports RC_NO_SIGNAL_US while its last pulse is outside
-//   RC_VALID_MIN_US..RC_VALID_MAX_US. Before, it reported 1500 us.
+// Safety findings 1 and 5 (docs/rc_arduino_gps_wiring.md, section 9). One
+// rule: a channel reports the width of its last VALID pulse (RC_VALID_MIN_US
+// to RC_VALID_MAX_US) until RC_TIMEOUT_US after that pulse ended, then
+// RC_NO_SIGNAL_US; before its first valid pulse it reports RC_NO_SIGNAL_US.
+// - A dead signal lead, a receiver without power or a receiver that stops
+//   its outputs thus reads no signal after 100 ms. Before, the channel held
+//   its last width forever.
+// - An out-of-range pulse is ignored (hold last good, Kevin 2026-11-13), and
+//   a stream of them reads no signal after 100 ms. Before, it read 1500 us.
 //
 // All types have explicit widths: int is 16 bits on the AVR and 32 bits on
 // the host, so the host test would not see an AVR overflow otherwise.
@@ -34,9 +37,9 @@ const uint32_t RC_TIMEOUT_US = 100000UL;
 // Written by the pin-change ISR only. The loop copies it with interrupts
 // off (multi-byte values), see rcCopyPulse().
 struct RcPulseShared {
-  uint16_t widthUs;  // width of the last complete pulse, 0xFFFF if longer
-  uint32_t endUs;    // micros() at the falling edge that ended it
-  uint16_t seq;      // +1 for each complete pulse
+  uint16_t widthUs;  // width of the last VALID pulse (rcOnEdge drops the others)
+  uint32_t endUs;    // micros() at the falling edge that ended that pulse
+  uint16_t seq;      // +1 for each valid pulse
 };
 
 // ISR-only edge state.
@@ -50,7 +53,7 @@ struct RcChannelState {
   uint16_t lastSeq;
   uint16_t widthUs;
   uint32_t endUs;
-  bool havePulse;  // a complete pulse was seen since reset
+  bool havePulse;  // a valid pulse was seen since reset
   bool timedOut;   // latched until the next pulse, so the micros() wrap
                    // (71.6 min) cannot make an old pulse look fresh again
 };
@@ -88,7 +91,14 @@ inline void rcOnEdge(RcEdgeState &e, volatile RcPulseShared &out, bool levelHigh
   }
   e.risen = false;
   const uint32_t w = nowUs - e.riseUs;  // unsigned: right across the micros() wrap
-  out.widthUs = (w > 0xFFFFUL) ? (uint16_t)0xFFFF : (uint16_t)w;
+  // Hold last good (Kevin, 2026-11-13): an out-of-range pulse changes
+  // nothing, neither the width nor the time of the last valid pulse. So one
+  // glitch is ignored, and a stream of bad pulses reads as no signal 100 ms
+  // after the last valid one.
+  if (w < RC_VALID_MIN_US || w > RC_VALID_MAX_US) {
+    return;
+  }
+  out.widthUs = (uint16_t)w;
   out.endUs = nowUs;
   out.seq = (uint16_t)(out.seq + 1);
 }
@@ -120,6 +130,7 @@ inline uint16_t rcChannelOutput(RcChannelState &st, const RcPulseShared &snap, u
   if (st.timedOut) {
     return RC_NO_SIGNAL_US;
   }
+  // A second guard only: rcOnEdge publishes valid widths only.
   if (st.widthUs < RC_VALID_MIN_US || st.widthUs > RC_VALID_MAX_US) {
     return RC_NO_SIGNAL_US;
   }
@@ -139,12 +150,13 @@ inline uint8_t rcCrc8Update(uint8_t crc, uint8_t data) {
 }
 
 // Size for rcFormatLine(): 6 fields of at most 5 digits, 5 commas, "*HH",
-// and the NUL.
+// and the NUL (6 * 6 + 3 = 39).
 const uint8_t RC_LINE_BUF_SIZE = 6 * 5 + 5 + 3 + 1;
 
 // Writes "v0,v1,...,v(count-1)*HH" and a NUL into buf, where HH is the
 // CRC-8 of the text before '*' in upper-case hex. Returns the length
-// without the NUL. buf needs 6 * count + 4 bytes (RC_LINE_BUF_SIZE for 6).
+// without the NUL. buf needs 6 * count + 3 bytes with the NUL
+// (RC_LINE_BUF_SIZE for count 6).
 inline uint8_t rcFormatLine(char *buf, const uint16_t *vals, uint8_t count) {
   static const char hex[] = "0123456789ABCDEF";
   uint8_t pos = 0;

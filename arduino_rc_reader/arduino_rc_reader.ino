@@ -6,10 +6,10 @@
 
 // Line to the Pi, every 20 ms at 115200 baud (docs/rc_arduino_gps_wiring.md,
 // section 7): ch1,ch2,ch3,ch4,ch5,ch6*HH in us, HH = CRC-8 of the text
-// before '*'. A channel with no complete pulse for 100 ms, or with an
-// out-of-range last pulse, sends 0 (RC_NO_SIGNAL_US, rc_channel.h). The Pi
-// must accept this format first (requirement S12):
-// pi_app/hardware/arduino_rc.py.
+// before '*'. A channel sends the width of its last valid pulse (500 to
+// 2500 us) until 100 ms after that pulse ended, then 0 (RC_NO_SIGNAL_US,
+// rc_channel.h); an out-of-range pulse is ignored. The Pi must accept this
+// format first (requirement S12): pi_app/hardware/arduino_rc.py.
 //
 // Ch1..Ch5 on D2..D6. Ch6 on A0 (Kevin, 2026-11-13: wired now, not used by
 // the Pi yet). A0 stays an input. Do not use D7..D12: the Model X code
@@ -188,7 +188,7 @@ void loop() {
   nowUs = micros();
   interrupts();
 
-  // 2) Width, or RC_NO_SIGNAL_US for a timed-out or out-of-range channel.
+  // 2) Last valid width, or RC_NO_SIGNAL_US 100 ms after the last valid pulse.
   for (byte i = 0; i < NUM_CHANNELS; i++) {
     out[i] = rcChannelOutput(chState[i], snap[i], nowUs);
   }
