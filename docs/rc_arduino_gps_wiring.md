@@ -604,6 +604,18 @@ Requirements:
   Research, 2026-11-13: Waveshare publishes only the 65 x 30 mm outline and 3.0 mm
   holes. It does not give the part heights, the header type or a standoff
   length. Measure the HAT.
+  Measured 2026-11-14 (Kevin's caliper, read on the beam scale, about
+  +/- 0.5 mm; photos `docs/data/shield_inputs_20261113/*_20261114.jpg`).
+  The stack, bottom to top: the X1202, the Pi 5 with its active cooler,
+  the dual M.2 NVMe carrier on brass standoffs (PCIe ribbon under it, SSD
+  in slot 1, slot 2 empty), then the CAN HAT on a stacking header. The
+  CAN HAT's pins stand about 8 mm above its top face (a standard stacking
+  header). The terminal block is about the same height. Pi top face to
+  CAN HAT top face: about 32 mm (1.25 in). Thus, with J1 seated (8.5 mm
+  body), the shield's underside is about 8.5 mm above the CAN HAT and
+  about 21 mm above the NVMe carrier. The south standoffs (H3, H4) land on
+  the carrier, not on the Pi. The SSD in slot 1 appears to cover one of
+  the carrier's two holes on that side.
 - **S9. USB link.** The 40-pin header has no USB lines. Kevin's short cable
   has a 90° Mini-B plug: the cable leaves at a right angle to the plug.
   Kevin, 2026-11-13: mount the Nano so that its own Mini-B port sticks out
