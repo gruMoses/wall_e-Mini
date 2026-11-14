@@ -316,7 +316,13 @@ Requirements:
   a disarm. This closes finding 1.
 - **S3. Signal levels.** The Pi 5 GPIO is 3.3 V and is not 5 V tolerant.
   The receiver signal level is Unknown. Each RC input must thus accept 3.3 V
-  and 5 V signals, and each signal to the Pi must be 3.3 V.
+  and 5 V signals, and each signal to the Pi must be 3.3 V. Changed by D13:
+  no buffer. Each receiver signal goes through a 1 kOhm series resistor
+  straight to its Nano pin, as today (no resistor today). This holds only
+  while the Nano's 5 V stays on the Pi USB rail after its Schottky (about
+  4.5 to 4.8 V, so VIH is about 2.8 V and a 3.3 V signal keeps about 0.5 V
+  of margin); S10 already keeps the header 5 V off the Nano. Confirm with
+  check 5 (scope the receiver high level).
 - **S4. Receiver power.** Supply 5 V through a fuse, with a common ground.
   The receiver range is 4 V to 9 V DC, 12 V maximum. The current is Unknown.
   No separate receiver power connector (Kevin, 2026-11-13): the 5 V and the
@@ -413,7 +419,8 @@ Requirements:
   pins to a header for later inputs (for example bump switches): A1 to
   A5, D7 to D12, 5 V (USB side) and GND. Label D7 to D12 "outputs in
   today's firmware" until the Model X code is removed.
-- **S15. Footprints only, no parts fitted (Kevin, 2026-11-13).** Copper
+- **S15. REMOVED from v1 (D13).** Kept for the record. Footprints only, no
+  parts fitted (Kevin, 2026-11-13). Copper
   and silkscreen, so the parts and the code can come later:
   1. Charger-present input: an opto from the charge inlet to a free Pi
      GPIO (the research proposes GPIO 24), with a 2-pin pack-side
@@ -429,7 +436,8 @@ Requirements:
   3. Rover 5 V switch: a P-FET from a free Pi GPIO (the research proposes
      GPIO 17), on by default, so the Pi can power-cycle the RTK rover
      after an I2C bus lock-up.
-- **S16. VESC kill line, footprint only, marked EXPERIMENTAL.** A
+- **S16. REMOVED from v1 (D13).** Kept for the record. VESC kill line,
+  footprint only, marked EXPERIMENTAL. A
   Nano-driven stop input into each VESC (PPM or ADC2, VESC firmware 6.05),
   so the Nano can stop the motors without the Pi. Rules (Grok review):
   one opto per VESC, never one shared driver (a single tripped track
@@ -528,6 +536,31 @@ Decisions (Kevin, 2026-11-13):
     No status LED or buzzer.
 12. **D12. The receiver mount stays,** with the antenna out of the stack;
     the fallback is the receiver outside on longer leads (S13).
+13. **D13. Trimmed v1 (Kevin, 2026-11-13: "I think I got greedy").** The
+    board matches today's proven wiring and the verified firmware
+    (`dcc550e`: CH1 to CH5 on D2 to D6, `INPUT_PULLUP`), plus CH6 on A0.
+    Removed:
+    - the 74HCT541 buffer, its socket, its capacitor and the bypass links
+      (Grok, session `0619778f-1c3f-4ea7-80de-831a01a7bfde`: drop it while
+      the Nano stays on the Schottky rail; it ran below its own 4.5 V
+      minimum and was what clashed with the CAN HAT's terminal block);
+    - the 100 kOhm pull-downs (they would fight the sketch's
+      `INPUT_PULLUP` once wired straight to the Nano);
+    - the BSS138 I2C level shifter and its pull-up positions: the rover
+      goes straight onto the Pi's I2C bus 1, as today;
+    - the cut jumpers on the RC channels (the pin map is checked against
+      the firmware and the Nano's silkscreen);
+    - all of S15 (charger sense, wired BMS link, rover power switch) and
+      S16 (VESC kill line). The wired BMS link is held for later, possibly
+      over I2C.
+    Kept: the Pi header socket, the Nano socket, six servo headers with a
+    1 kOhm series resistor per signal, the rover connector, the two PTC
+    fuses, the spare Nano pin header (S14), the receiver bay (S13), and
+    the S17 layout rule (no copper on SPI0 or GPIO 25, and keep
+    through-hole tails off the CAN HAT's terminal block and 4-pin header).
+    Added: a 3-pad solder jumper that selects the rover's supply, 5 V by
+    default or the Pi's 3.3 V, in case check 9 shows the rover pulls I2C
+    up to 5 V. The rover is rated 3.3 to 5 V.
 
 ## Appendix: Technical Names and Technical Verbs
 
