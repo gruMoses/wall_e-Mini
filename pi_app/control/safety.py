@@ -77,6 +77,11 @@ class SafetyState:
     # Safety clock of the last tick on which ch3 was held high (that run
     # had lasted arm_high_persist_s); None before the first such tick.
     ch3_held_high_mono_s: Optional[float] = None
+    # Set when ch4 had no signal: Follow Me cannot start until ch4 is seen
+    # at or below follow_me_low_threshold_us (a measured width). Without it,
+    # ch4 high -> no signal -> mid-band -> high restarted Follow Me with the
+    # switch up all the time (Grok review 2026-11-13).
+    ch4_requires_low: bool = False
 
     def set_follow_me_active(self, active: bool) -> None:
         """Allow external callers (e.g. web UI) to sync follow-me state."""
@@ -128,8 +133,8 @@ def update_safety(
       It never triggers the emergency: only a measured ch5 width at or
       above emergency_threshold_us does, on its rising edge (a ch5 that
       comes back high after no signal is such an edge). No signal on ch4
-      ends Follow Me, and counts as high for the ch4 edge, so a ch4 that
-      comes back high does not start Follow Me until it has been not high.
+      ends Follow Me and sets ch4_requires_low: Follow Me cannot start
+      again until ch4 is seen at or below follow_me_low_threshold_us.
     """
     events: List[SafetyEvent] = []
     now = now_epoch_s if now_mono_s is None else now_mono_s
@@ -146,14 +151,18 @@ def update_safety(
         last_ch5_high=ch5_high,
         emergency_active=state.emergency_active,
         follow_me_active=state.follow_me_active,
-        # A ch4 with no signal counts as high for the Follow Me edge only:
-        # a lead that comes back with the switch up must not start Follow Me
-        # without the operator (the switch must be not high first).
-        last_ch4_high=ch4_high or ch4_no_signal,
+        last_ch4_high=ch4_high,
         rearm_requires_switch_cycle=state.rearm_requires_switch_cycle,
         ch3_high_since_mono_s=state.ch3_high_since_mono_s,
         ch3_held_high_mono_s=state.ch3_held_high_mono_s,
+        ch4_requires_low=state.ch4_requires_low,
     )
+    # Follow Me latch: no signal on ch4 sets it on every tick (armed or not,
+    # before any early return below); only a measured ch4 low clears it.
+    if ch4_no_signal:
+        new_state.ch4_requires_low = True
+    elif rc_switch_low(ch4_us, params.follow_me_low_threshold_us):
+        new_state.ch4_requires_low = False
 
     # --- Emergency detection (rising edge) ---
     if not state.emergency_active and (not state.last_ch5_high and ch5_high):
@@ -276,7 +285,12 @@ def update_safety(
 
     # --- Follow Me from ch4 (only while armed) ---
     if new_state.is_armed:
-        if not state.last_ch4_high and ch4_high and not state.follow_me_active:
+        if (
+            not state.last_ch4_high
+            and ch4_high
+            and not state.follow_me_active
+            and not new_state.ch4_requires_low
+        ):
             new_state.follow_me_active = True
             events.append(SafetyEvent.FOLLOW_ME_ENTERED)
         elif state.follow_me_active and (
@@ -317,5 +331,6 @@ def force_disarm(
         follow_me_active=False,
         last_ch4_high=state.last_ch4_high,
         rearm_requires_switch_cycle=True,
+        ch4_requires_low=state.ch4_requires_low,
     )
     return new_state, events

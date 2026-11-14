@@ -187,6 +187,37 @@ def test_ch4_back_high_after_no_signal_does_not_restart_follow_me():
     assert ev == [SafetyEvent.FOLLOW_ME_ENTERED] and s.follow_me_active
 
 
+@pytest.mark.parametrize("between", [MID, 1300, 1799])
+def test_ch4_no_signal_then_mid_then_high_does_not_restart_follow_me(between):
+    """Grok review 2026-11-13: high -> no signal -> a measured value that is
+    not high (failsafe neutral, a corrupt field) -> high again was a rising
+    edge, so Follow Me restarted with the switch up all the time. Only a
+    measured ch4 low clears the latch."""
+    s, t = follow_me_state()
+    s, ev = tick(s, t + DT, HIGH, ch4=NS)
+    assert ev == [SafetyEvent.FOLLOW_ME_EXITED] and s.ch4_requires_low
+    s, ev = tick(s, t + 2 * DT, HIGH, ch4=between)
+    assert ev == [] and s.ch4_requires_low
+    s, ev = tick(s, t + 3 * DT, HIGH, ch4=CH4_HIGH)
+    assert ev == [] and not s.follow_me_active and s.is_armed
+    s, ev = tick(s, t + 4 * DT, HIGH, ch4=CH4_LOW)
+    assert ev == [] and not s.ch4_requires_low
+    s, ev = tick(s, t + 5 * DT, HIGH, ch4=CH4_HIGH)
+    assert ev == [SafetyEvent.FOLLOW_ME_ENTERED]
+
+
+def test_ch4_latch_survives_a_disarm_and_rearm():
+    s, t = follow_me_state()
+    s, _ = tick(s, t + DT, HIGH, ch4=NS)
+    s, _ = tick(s, t + 0.5, LOW, ch4=MID)  # disarm
+    assert not s.is_armed and s.ch4_requires_low
+    s, _ = tick(s, t + 1.0, HIGH, ch4=MID)
+    s, ev = tick(s, t + 1.25, HIGH, ch4=MID)
+    assert s.is_armed and ev == [SafetyEvent.ARMED]
+    s, ev = tick(s, t + 1.25 + DT, HIGH, ch4=CH4_HIGH)
+    assert ev == [] and not s.follow_me_active
+
+
 def test_ch4_no_signal_never_starts_follow_me():
     s, t = armed_state()
     s, _ = tick(s, t + DT, HIGH, ch4=CH4_LOW)

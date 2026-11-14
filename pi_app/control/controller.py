@@ -2192,6 +2192,8 @@ class Controller:
                 last_transition_mono_s=mono_now,
                 emergency_active=self._safety_state.emergency_active,
                 rearm_requires_switch_cycle=held_rearm_latch,
+                # Likewise the ch4 no-signal latch (Follow Me needs ch4 low).
+                ch4_requires_low=self._safety_state.ch4_requires_low,
             )
             self._mode = "MANUAL"
             self._armed_idle_since = None
