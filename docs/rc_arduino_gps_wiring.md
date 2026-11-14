@@ -245,6 +245,17 @@ the next flash (section 9.1).
   - CH4: FOLLOW_ME stops. The robot stays armed in MANUAL (Kevin accepted
     this, 2026-11-13). FOLLOW_ME cannot start again until CH4 is held low.
     A middle-band value is not sufficient.
+  - Every FOLLOW_ME exit sets the CH4 latch (Kevin, 2026-11-13: "Yes, held
+    low"), not only a CH4 no signal. The exits are: CH4 low (one frame is
+    enough), CH4 no signal, a disarm (CH3 low, CH3 or CH5 no signal, the
+    middle-band disarm), the e-stop, an RC-stale link, a
+    stale camera stream, the pack guard, the web or phone stop, the
+    gesture stop, the calibration wizard, and a start that the controller
+    refuses (no target, pack guard). A later start by CH4 then needs CH4
+    held low for 0.2 s after the exit, then a rising edge. A low that
+    started before the exit does not count. Thus one bounced low frame cannot
+    stop FOLLOW_ME and start it again. A start from the web page or by a
+    hand gesture is an operator act and is not blocked.
   - "Held low" (Kevin, 2026-11-13): a measured low (1200 µs or less) on
     each control tick for 0.2 s (`SafetyParams.latch_clear_low_persist_s`).
     Only a held low clears the re-arm latch (every cause: start-up, auto
@@ -271,7 +282,19 @@ the next flash (section 9.1).
     CH6 is not used, so it gets no journal line, only the JSON events.
 - The Pi puts a monotonic time stamp on each line that it parses. An RC
   frame older than 1.0 s is stale (`RC_STALE_TIMEOUT_S` in
-  `pi_app/control/controller.py`).
+  `pi_app/control/controller.py`). A stale link is a gap in the serial
+  lines (the USB cable, the Arduino), not a receiver "no signal". It
+  disarms the robot and, since 2026-11-13, sets the re-arm latch (Kevin:
+  "Latch it"). Before, the robot armed again by itself when the lines came
+  back with the arm switch still up. Now it needs CH3 held low for 0.2 s,
+  then held high. The phone cannot go around the latch: the controller
+  sends neutral while it is disarmed, and only the RC arm switch arms it.
+- Known residual (check 6): when the transmitter is switched off, the
+  receiver's failsafe sends about 1000 µs on CH3 (stand test, 2026-11-11).
+  To the Pi this is the same as the operator putting the arm switch OFF.
+  The robot disarms, the low is held for more than 0.2 s, so the latch
+  clears, and the robot arms again when the transmitter comes back with the
+  arm switch up. This case is not latched.
 - `python3 -m pi_app.cli.monitor_rc` shows `NOSIG` for a channel with no
   signal, and shows CH6 when the firmware sends it.
 
@@ -315,7 +338,8 @@ branch, not on `main`. Nothing in this section ran on the robot. The
 deploy order is in section 9.1. Kevin's decisions of 2026-11-13 are in the
 code: hold last good (100 ms), held low 0.2 s to clear a latch, CH4 loss
 gives MANUAL armed, CH5 back high is the e-stop, the CRC, and the Model X
-code removed.
+code removed. Later the same day: every FOLLOW_ME exit sets the CH4 latch,
+and an RC-stale link sets the re-arm latch (section 7).
 
 1. **A lost pulse keeps its last value.** The interrupt routines change a
    channel only on a pulse edge. Nothing times out a channel. The sketch
@@ -425,7 +449,12 @@ disarms. That is safe, but the robot cannot be driven.
    power-off.
 7. Connect and disconnect the CH4 lead in FOLLOW_ME. Expect FOLLOW_ME to
    stop, the robot to stay armed in MANUAL, and no new FOLLOW_ME start
-   until the CH4 switch goes low for at least 0.2 s and then high.
+   until the CH4 switch goes low for at least 0.2 s and then high. Do the
+   same after a stop from the web page: a quick CH4 flick (less than
+   0.2 s low) must not start FOLLOW_ME.
+8. Arm, then pull the Arduino USB cable for 2 s with the arm switch up.
+   Expect a disarm (`RC_STALE`). Connect the cable with the switch still up.
+   Expect no arm until the switch goes OFF for at least 0.2 s and then ON.
 
 ## 10. Open checks
 
@@ -475,7 +504,10 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    (an unplugged microwave oven is sufficient) for 5 s. Record ch1 to ch5.
    Do it again with the stick released. With the new firmware, `NOSIG`
    means that the receiver stops its outputs at a link loss. Values mean
-   that it sends failsafe positions: record them.
+   that it sends failsafe positions: record them. Known residual: a
+   failsafe CH3 of about 1000 µs looks to the Pi exactly like the operator
+   switching off, so it clears the re-arm latch, and the robot can arm
+   again when the link returns with the arm switch up (section 7).
 7. **Lead loss.** Run `python3 -m pi_app.cli.monitor_rc`. Put the arm switch
    up. Disconnect the CH3 signal lead at the Arduino. Record ch3. With the
    flashed firmware (`dcc550e`), finding 1 expects ch3 to stay near
