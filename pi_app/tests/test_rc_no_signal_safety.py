@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pi_app.app.vision_hang import restart_permitted
+from pi_app.app.vision_hang import NoSignalRun, restart_permitted
 from pi_app.control.controller import Controller, RCInputs
 from pi_app.control.rc_signal import (
     RC_NO_SIGNAL_US,
@@ -254,6 +254,32 @@ def test_vision_hang_gate_does_not_read_no_signal_as_switch_off():
     assert restart_permitted(False, 0.1, None, 1200) == (False, "switch up")
 
 
+def test_vision_hang_gate_permits_after_30_s_of_ch3_no_signal():
+    """Review S2: a parked robot, transmitter off, a receiver that stops its
+    outputs: ch3 reads no signal on every fresh line. Blocking forever would
+    bring back the 2026-10-04 four-day hang."""
+    run = NoSignalRun()
+    gate = lambda ch3, ns_s: restart_permitted(False, 0.02, ch3, 1200, ch3_no_signal_s=ns_s)
+    t = 100.0
+    assert run.update(t, NS) == 0.0
+    assert gate(NS, run.update(t + 29.9, NS)) == (False, "ch3 no signal")
+    assert gate(NS, run.update(t + 30.0, NS)) == (True, "disarmed, ch3 no signal for 30 s")
+    assert gate(NS, run.update(t + 400.0, NS)) == (True, "disarmed, ch3 no signal for 400 s")
+    # Any measured width ends the run; the next no signal starts again.
+    assert run.update(t + 401.0, 2000) is None
+    assert gate(2000, None) == (False, "switch up")  # measured high still blocks
+    assert run.update(t + 401.02, NS) == 0.0
+    assert gate(NS, run.update(t + 420.0, NS)) == (False, "ch3 no signal")
+    assert run.update(t + 421.0, 1600) is None  # mid-band also ends it
+    assert run.update(t + 421.02, NS) == 0.0
+    # Armed always blocks, whatever the run.
+    assert restart_permitted(True, 0.02, NS, 1200, ch3_no_signal_s=999.0) == (False, "armed")
+    # rc_off_s <= 0 never permits on no signal.
+    assert restart_permitted(False, 0.02, NS, 1200, rc_off_s=0.0, ch3_no_signal_s=999.0) == (
+        False, "ch3 no signal",
+    )
+
+
 # --- RcNoSignalMonitor ------------------------------------------------------------
 
 
@@ -423,28 +449,61 @@ def _drive(step, t0, ticks, **kw):
 
 
 @pytest.mark.parametrize("dead, live", [("ch1", "ch2"), ("ch2", "ch1")])
-def test_controller_no_signal_track_is_neutral(dead, live):
-    """A dead track lead gives exactly what a centred stick gives."""
-    results = []
-    for dead_value in (NS, 1500):
-        clock = {"t": 0.0}
-        with patch("pi_app.control.controller.time.monotonic", side_effect=lambda: clock["t"]):
-            c = Controller(motor_driver=_Motor(), arm_relay=_Relay(), shutdown_scheduler=_Shutdown())
+def test_controller_one_dead_track_makes_both_tracks_neutral(ctrl, dead, live):
+    """Contract changed on review (2026-11-13): one dead track lead makes
+    BOTH tracks neutral. With only the dead one neutral, a held stick on the
+    other turned the robot in place."""
+    c, step, _, _ = ctrl
+    t = _arm(step)
+    out = _drive(step, t + DT, 40, **{dead: NS, live: 1800})
+    assert all(pair == (c.NEUTRAL, c.NEUTRAL) for pair in out)
 
-            def step(t, **kw):
-                clock["t"] = t
-                vals = dict(ch1_us=1500, ch2_us=1500, ch3_us=HIGH, ch4_us=CH4_LOW, ch5_us=CH5_LOW)
-                vals.update({f"{k}_us": v for k, v in kw.items()})
-                return c.process(RCInputs(last_update_mono_s=t, **vals), now_epoch_s=t)
 
-            t = _arm(step)
-            out = _drive(step, t + DT, 40, **{dead: dead_value, live: 1800})
-        results.append(out)
-    assert results[0] == results[1]
-    # And the live track did drive while the dead one stayed at neutral.
-    idx_dead = 0 if dead == "ch1" else 1
-    assert all(pair[idx_dead] == Controller.NEUTRAL for pair in results[0])
-    assert any(pair[1 - idx_dead] != Controller.NEUTRAL for pair in results[0])
+def _ramp_limit_bytes():
+    from config import config
+    return float(config.slew_limiter.manual_accel_bps) * DT + 1.0
+
+
+def test_track_signal_back_under_a_held_stick_ramps_not_snaps(ctrl):
+    """Note 3 of the review: armed, sticks centred since the arm (the slew
+    has seen no motion), a track lead dies, then comes back with both sticks
+    held forward. The first command must be one ramp step from neutral, not
+    the full stick (snap_first_command)."""
+    c, step, _, _ = ctrl
+    t = _arm(step)
+    _drive(step, t + DT, 5)  # centred sticks
+    _drive(step, t + 6 * DT, 5, ch1=NS, ch2=1500)  # lead dead
+    out = _drive(step, t + 11 * DT, 30, ch1=1900, ch2=1900)  # back, held
+    # The return tick pins the slew at neutral (dt 0, so it stays at 126);
+    # from the next tick it ramps. Without the fix it snapped to the stick.
+    first_left, first_right = out[0]
+    assert 0 <= first_left - c.NEUTRAL <= _ramp_limit_bytes()
+    assert 0 <= first_right - c.NEUTRAL <= _ramp_limit_bytes()
+    # It keeps ramping up, one step per tick.
+    lefts = [p[0] for p in out]
+    assert all(0 <= b - a <= _ramp_limit_bytes() for a, b in zip(lefts, lefts[1:]))
+    assert lefts[-1] > lefts[0]
+
+
+def test_first_command_after_a_rearm_still_snaps(ctrl):
+    """Kevin's ruling 2026-11-10: the first command after a re-arm stays as
+    it is (snap_first_command). The track-return ramp does not change it."""
+    c, step, _, _ = ctrl
+    t = _arm(step)
+    out = _drive(step, t + DT, 1, ch1=1900, ch2=1900)
+    assert out[0][0] - c.NEUTRAL > _ramp_limit_bytes()
+
+
+def test_track_signal_back_while_ramping_down_does_not_step_to_neutral(ctrl):
+    c, step, _, _ = ctrl
+    t = _arm(step)
+    out = _drive(step, t + DT, 20, ch1=1900, ch2=1900)  # driving
+    high = out[-1][0]
+    out = _drive(step, t + 21 * DT, 2, ch1=NS, ch2=1900)  # 2 dead ticks: ramping down
+    mid = out[-1][0]
+    assert c.NEUTRAL < mid < high
+    out = _drive(step, t + 23 * DT, 1, ch1=1900, ch2=1900)  # back
+    assert out[0][0] >= mid  # ramps on from where it was, no step to 126
 
 
 def test_controller_both_tracks_dead_is_full_neutral(ctrl):
@@ -466,6 +525,16 @@ def test_controller_ch4_no_signal_leaves_follow_me_armed(ctrl):
     assert SafetyEvent.FOLLOW_ME_EXITED in ev
     assert telem["mode"] == "MANUAL"
     assert [e["channel"] for e in telem["rc_no_signal_events"]] == [4]
+
+
+def test_controller_ch6_no_signal_has_a_json_event_but_no_journal_line(ctrl, caplog):
+    """Review note 6: CH6 is not used, so no journal WARNING (it would fire
+    on every boot without a CH6 lead). The JSON event stays."""
+    c, step, _, _ = ctrl
+    with caplog.at_level(logging.WARNING, logger="pi_app.control.controller"):
+        _cmd, _ev, telem = step(100.0, ch6=NS)
+    assert [e["channel"] for e in telem["rc_no_signal_events"]] == [6]
+    assert not [r for r in caplog.records if "CH6" in r.getMessage()]
 
 
 def test_controller_todays_values_have_no_no_signal_events(ctrl):

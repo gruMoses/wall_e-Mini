@@ -20,7 +20,7 @@ from pi_app.control.safety import (
     update_safety, force_disarm, SafetyState, SafetyParams, SafetyEvent,
 )
 from pi_app.control.rc_signal import (
-    RcNoSignalMonitor, rc_signal_ok, rc_switch_low, rc_track_us,
+    RC_NEUTRAL_US, RcNoSignalMonitor, rc_signal_ok, rc_switch_low,
 )
 from pi_app.control.state import DriveCommand, AutonomyCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
@@ -179,6 +179,8 @@ class Controller:
         self._safety_params = safety_params or SafetyParams()
         # Journal + JSON events when a channel loses or regains its signal.
         self._rc_no_signal_monitor = RcNoSignalMonitor()
+        # True while CH1 or CH2 has no signal and both tracks read neutral.
+        self._rc_tracks_forced_neutral = False
         # Monotonic start of the current armed-idle stretch. None when this
         # tick is not idle. Compared against process()'s mono_now — do not
         # call time.monotonic() for it (controller tests pin that count).
@@ -1854,18 +1856,52 @@ class Controller:
             return []
         out: List[dict] = []
         for ev in events:
-            _logger.warning("%s", ev.journal_line())
+            # CH6 is not used yet: no journal WARNING for it (it would fire on
+            # every boot without a CH6 lead); the JSON event stays, at most
+            # one per 5 s.
+            if ev.channel != 6:
+                _logger.warning("%s", ev.journal_line())
             out.append(ev.as_log_dict())
         return out
 
     @staticmethod
-    def _rc_with_neutral_tracks(rc: RCInputs) -> RCInputs:
-        """CH1 / CH2 with no signal read neutral (1500 us); the rest is unchanged."""
+    def _rc_with_neutral_tracks(rc: RCInputs) -> Tuple[RCInputs, bool]:
+        """Both tracks neutral (1500 us) when CH1 or CH2 has no signal.
+
+        Returns (rc, forced). Both, not only the dead one (review
+        2026-11-13): with one track neutral and a held stick on the other,
+        the tank mix turns the robot in place. The rest is unchanged.
+        """
         if rc_signal_ok(rc.ch1_us) and rc_signal_ok(rc.ch2_us):
-            return rc
-        return dataclass_replace(
-            rc, ch1_us=rc_track_us(rc.ch1_us), ch2_us=rc_track_us(rc.ch2_us)
-        )
+            return rc, False
+        return dataclass_replace(rc, ch1_us=RC_NEUTRAL_US, ch2_us=RC_NEUTRAL_US), True
+
+    def _ramp_after_track_signal_returns(self, forced: bool, mono_now: float,
+                                         bt_override_bytes) -> None:
+        """No snap when the track signal comes back under a held stick.
+
+        Armed in MANUAL on the RC sticks: on the tick the tracks go from
+        forced neutral back to measured widths, pin the slew at neutral so
+        the held stick ramps at the mode rate. Without it,
+        snap_first_command passes the stick in one tick when the slew had
+        seen no motion since the arm (same rule as the 2026-11-10 armed
+        release, cce9b06). Only when the slew output is at neutral: if it is
+        still ramping down, it has seen motion and already ramps from there,
+        and a reset would step it to neutral. The first command after a
+        re-arm is not touched (Kevin's ruling).
+        """
+        was_forced = self._rc_tracks_forced_neutral
+        self._rc_tracks_forced_neutral = forced
+        if (
+            was_forced
+            and not forced
+            and self._safety_state.is_armed
+            and self._mode == "MANUAL"
+            and bt_override_bytes is None
+            and self._slew_last_left == CENTER_OUTPUT_VALUE
+            and self._slew_last_right == CENTER_OUTPUT_VALUE
+        ):
+            self._hold_slew_at_neutral(mono_now)
 
     def _sticks_within_auto_disarm_deadband(self, rc: RCInputs) -> bool:
         deadband = self._auto_disarm_stick_deadband_us()
@@ -2223,11 +2259,12 @@ class Controller:
 
         # No signal on a channel (safety findings 1 and 5,
         # docs/rc_arduino_gps_wiring.md): journal and JSON events on entry and
-        # exit, then a dead track channel reads neutral for everything below
-        # (the mixer would map the 0 us sentinel to full reverse).
-        # update_safety handles ch3 / ch4 / ch5.
+        # exit, then a dead track channel makes both tracks neutral for
+        # everything below (the mixer would map the 0 us sentinel to full
+        # reverse). update_safety handles ch3 / ch4 / ch5.
         rc_no_signal_events = self._log_rc_no_signal(rc, mono_now)
-        rc = self._rc_with_neutral_tracks(rc)
+        rc, tracks_forced = self._rc_with_neutral_tracks(rc)
+        self._ramp_after_track_signal_returns(tracks_forced, mono_now, bt_override_bytes)
 
         # Auto-disarm before update_safety so this tick's DISARMED handling
         # (motor stop, relay off, slew reset, follow-me exit) still runs.

@@ -71,8 +71,8 @@ def rc_line_crc8(payload: bytes) -> int:
 
 # What the robot does while a channel has no signal. Used in the journal.
 _NO_SIGNAL_EFFECT = {
-    1: "left track held at neutral",
-    2: "right track held at neutral",
+    1: "both tracks held at neutral",
+    2: "both tracks held at neutral",
     3: "arm switch unknown: disarmed and latched, flip the arm switch off and on to re-arm",
     4: "FOLLOW_ME switch unknown: FOLLOW_ME off",
     5: "e-stop switch unknown: disarmed and latched (no e-stop power-off)",
