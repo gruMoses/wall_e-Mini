@@ -151,7 +151,10 @@ the next flash (section 9.1).
   2026-11-13). The Arduino and the receiver do not connect to the 5 V of the
   Pi header. The exact pin on the Arduino side is not recorded; the 5V pin
   is the probable one. The receiver has no power row (Kevin), so the power
-  goes in on the + and − pins of a channel row. The F-06A takes 4 V to 9 V
+  goes in on the + and − pins of a channel row. Kevin, 2026-11-14: the
+  receiver's + lead is on the Nano's 5V pin (photo
+  `docs/data/shield_inputs_20261113/nano_receiver_power_5v_20261114.jpg`),
+  thus after the Nano's USB diode, not on VIN. The F-06A takes 4 V to 9 V
   DC (manual page 5). The manual note gives 12 V as the maximum.
 - The RTK rover is the only part in this document on the 5 V of the Pi
   header (Kevin, 2026-11-13).
@@ -494,7 +497,7 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    listing gives 32 x 19 x 13 mm. Both sizes fit the shield's receiver bay.
 4. **Receiver power feed.** Answered by Kevin, 2026-11-13: the USB 5 V,
    on the Arduino side. Nothing connects to the header 5 V except the RTK
-   rover. Open: the exact pin on the Arduino side.
+   rover. The pin on the Arduino side: 5V (Kevin, 2026-11-14).
 5. **Signal voltage.** Measure the high level of the CH1 signal with a
    scope, transmitter on. A meter shows the average of the pulse, not its
    high level. Research found no published value (section 4).
@@ -611,9 +614,10 @@ Requirements:
   in slot 1, slot 2 empty), then the CAN HAT on a stacking header. The
   CAN HAT's pins stand about 8 mm above its top face (a standard stacking
   header). The terminal block is about the same height. Pi top face to
-  CAN HAT top face: about 32 mm (1.25 in). Thus, with J1 seated (8.5 mm
-  body), the shield's underside is about 8.5 mm above the CAN HAT and
-  about 21 mm above the NVMe carrier. The south standoffs (H3, H4) land on
+  CAN HAT top face: 1.230 in (31.2 mm), read on the dial. Thus, with J1
+  seated (8.5 mm body), the shield's underside is about 8.5 mm above the
+  CAN HAT and about 21 mm above the NVMe carrier (estimate from the photo:
+  carrier top face to CAN HAT top face about 12.5 mm). The south standoffs (H3, H4) land on
   the carrier, not on the Pi. The SSD in slot 1 appears to cover one of
   the carrier's two holes on that side.
 - **S9. USB link.** The 40-pin header has no USB lines. Kevin's short cable
