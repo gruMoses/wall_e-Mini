@@ -560,7 +560,40 @@ Decisions (Kevin, 2026-11-13):
     through-hole tails off the CAN HAT's terminal block and 4-pin header).
     Added: a 3-pad solder jumper that selects the rover's supply, 5 V by
     default or the Pi's 3.3 V, in case check 9 shows the rover pulls I2C
-    up to 5 V. The rover is rated 3.3 to 5 V.
+    up to 5 V. The rover is rated 3.3 to 5 V. (Changed by D14.)
+14. **D14. Rover on 5 V with the level shifter; no JP2; no I2C cut
+    jumpers (Kevin, 2026-11-13).** Facts from DFRobot's TEL0171 rover
+    schematic (V1.0, 2024-05-09,
+    `img.dfrobot.com.cn/wiki/5ea64bf6cf1d8c7738ad2881/87f50e19ace99aae86a93d8d35a0f130.pdf`):
+    - The Gravity port P3 is pin 1 SDA/TX, pin 2 SCL/RX, pin 3 GND, pin 4
+      VCC. This agrees with Kevin's cable (red +, black −, blue SCL, green
+      SDA), with the JST pin numbering, and with J2 (pad 1 SDA, pad 2 SCL,
+      pad 3 GND, pad 4 supply). Check 9's pin-order half is closed.
+    - The port has its own 2N7002 level shifters (Q4, Q5). On the
+      connector side, R16 and R17 (10 kOhm) pull SDA and SCL up to the
+      rover's VCC. VCC also feeds an HM6245 3.3 V regulator for the
+      Quectel LC29H, whose supply range is 3.1 to 3.6 V.
+    Consequences:
+    - The rover stays on 5 V. At 3.3 V in, the regulator leaves the
+      LC29H at or below its 3.1 V minimum, so the 3.3 V position of JP2
+      is not a usable fallback. JP2 is removed, and the rover supply is
+      the header 5 V through F3.
+    - On 5 V without a shifter, as on the robot today, the Pi's GPIO2 and
+      GPIO3 rest at about 3.56 V (10 kOhm to 5 V against the Pi's
+      1.8 kOhm to 3.3 V). That is above the Pi's 3.3 V rating all the
+      time. A rover that has 5 V while the Pi's 3.3 V rail is off also
+      feeds about 0.5 mA per line into that rail. Grok (session
+      `4c54ea57-0a48-487f-aff6-09658bef08de`) agreed, and said the old
+      bus lock-up is not explained by this.
+    - So the two-BSS138 shifter (NXP AN10441 topology, gates on the Pi's
+      3.3 V, the Pi on the low side) goes back, as audited in the first
+      design. No extra high-side pull-ups: the rover's 10 kOhm to 5 V is
+      the high side. At the Pi's default 100 kHz the edges are fine.
+    - The two I2C cut jumpers are removed: the pinout is confirmed four
+      ways above.
+    - Residual (electrical audit item 4): if F3 trips, the rover's rail
+      falls and the shifter conducts, so the rover's pull-ups to a dead
+      rail load I2C bus 1, which the UPS gauge shares. Fault case only.
 
 ## Appendix: Technical Names and Technical Verbs
 
