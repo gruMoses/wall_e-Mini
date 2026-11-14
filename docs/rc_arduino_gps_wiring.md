@@ -163,12 +163,21 @@ Remove the Model X code with the next change to the sketch.
   - **5 fields, `ch1,ch2,ch3,ch4,ch5`.** The flashed firmware (`dcc550e`,
     section 10, check 2) sends this format. Each field is 800 µs to
     2200 µs, or 1500 µs for any other width (finding 5).
-  - **6 fields, `ch1,ch2,ch3,ch4,ch5,ch6`.** The repo sketch sends this
-    format since 2026-11-13 (not flashed). CH6 is the A0 input. Each field
+  - **6 fields and a CRC, `ch1,ch2,ch3,ch4,ch5,ch6*HH`.** The repo sketch
+    sends this format since 2026-11-13 (not flashed). Example:
+    `1500,1500,2000,1000,1000,1500*25`. CH6 is the A0 input. Each field
     is a width from 500 µs to 2500 µs, or `0`, the "no signal" value
     (`RC_NO_SIGNAL_US`). A channel sends `0` when no complete pulse ended
     in the last 100 ms, and while its last pulse is outside 500 µs to
-    2500 µs. The logic is in `arduino_rc_reader/rc_channel.h`.
+    2500 µs. `HH` is a CRC-8 (polynomial 0x07, start value 0) of the text
+    before `*`, in two upper-case hexadecimal digits. The logic is in
+    `arduino_rc_reader/rc_channel.h`.
+- Why a CRC (Grok review, 2026-11-13): with the range 500 µs to 2500 µs, a
+  lost byte can give a valid width. For example, `1500` without its `1` is
+  500 µs: a full stick on CH1 or CH2, or "switch OFF" on CH3, which clears
+  the re-arm latch. The old range (800 µs to 2200 µs) caught that case. On
+  a test of 91,531 single lost bytes, the CRC and the range let no wrong
+  line through. Two lost bytes got through 2 times in 60,000.
 - Why 500 µs to 2500 µs (requirement S1): the F-06A sends 1000 µs to
   2500 µs in its 50 Hz mode and 500 µs to 2500 µs in its 333 Hz mode
   (manual page 6). A narrower range changes a valid pulse of the 333 Hz
@@ -187,7 +196,9 @@ Remove the Model X code with the next change to the sketch.
   255.
 - The Pi parser (`pi_app/hardware/arduino_rc.py`, changed 2026-11-13, not
   deployed) accepts the two formats (requirement S12). Each field must be
-  plain digits, and a width from 500 µs to 2500 µs or `0`. The parser drops
+  plain digits. In a 5-field line, each field must be 800 µs to 2200 µs,
+  the only values that `dcc550e` sends. In a 6-field line, the CRC must
+  agree, and each field must be 500 µs to 2500 µs or `0`. The parser drops
   the full line if one field is bad, so a bad line does not refresh the
   frame. It drops a line with 4 fields: no firmware since `5f275d0` sends
   that format, and today such a line is the end of a cut 5-field line, with
@@ -208,8 +219,9 @@ Remove the Model X code with the next change to the sketch.
   - CH5 that comes back with a measured high (1800 µs or more) is a rising
     edge, so it starts the e-stop, as at power-on.
   - CH1 or CH2: that track is neutral.
-  - CH4: FOLLOW_ME stops. When CH4 comes back high, FOLLOW_ME does not
-    start. The switch must go low first.
+  - CH4: FOLLOW_ME stops. The robot stays armed in MANUAL. FOLLOW_ME cannot
+    start again until CH4 is measured low (1200 µs or less). A middle-band
+    value is not sufficient.
   - "No signal" is never high, never in the middle band, and never "switch
     OFF". Thus it cannot clear the re-arm latch, release the person stop
     hold, permit the vision-hang restart, or clear the VESC pack-low latch.
@@ -284,7 +296,14 @@ deploy order is in section 9.1.
    neutral on CH1 or CH2, and stops FOLLOW_ME on CH4 (section 7). A loss in
    the middle of a pulse now gives `0` after 100 ms: the pull-up holds the
    pin high, so the pulse never ends. A stray edge can still give a wrong
-   width inside 500 µs to 2500 µs for up to 100 ms. Tests:
+   width inside 500 µs to 2500 µs for up to 100 ms. Known cost (Grok
+   review): one out-of-range CH3 or CH5 pulse gives one line of `0`, and
+   the robot disarms and latches. The operator must then cycle the arm
+   switch. The armed logs of 2026-10-08 and 2026-11-05 (5,285 logged
+   ticks, about 9.5 minutes) have no CH3 tick that was not high (comment on
+   `SafetyParams` in `pi_app/control/safety.py`). With the old firmware an
+   out-of-range pulse read 1500 µs, so none was logged. Thus the trip is
+   expected to be rare. Tests:
    `tools/arduino_rc_reader_host_test/test_rc_channel.cpp`,
    `pi_app/tests/test_rc_no_signal_safety.py`. Open: bench check 7.
 2. **Transmitter off is tested. A link loss with the transmitter on is not.**
@@ -315,8 +334,9 @@ deploy order is in section 9.1.
    mode can cause this. Latent; source: agent review, sketch line 188.
    **Fix (code only, 2026-11-13):** the valid range is 500 µs to 2500 µs
    (S1, section 7). The sketch sends `0`, not 1500 µs, while the last
-   pulse is outside it. The Pi reads `0` as "no signal", never as
-   neutral, and drops a line with any other value outside the range. A
+   pulse is outside it, and adds a CRC to each line. The Pi reads `0` as
+   "no signal", never as neutral, and drops a line with any other value
+   outside the range or a bad CRC. A
    CH5 pulse from 1800 µs to 2500 µs now triggers the e-stop. A CH5 pulse
    above 2500 µs gives `0`: the robot disarms and latches, without the
    power-off.
@@ -773,7 +793,8 @@ pin header, female header, DIP-30, continuity, meter, power row,
 `RC_NO_SIGNAL_US`, `RC_NO_SIGNAL_DISARM`, `rc_no_signal`,
 `rc_signal_restored`, `NOSIG`, `rc_channel.h`, `rc_signal.py`, no signal,
 debounce, re-arm latch, person stop hold, vision-hang restart, pack-low
-latch, AVR, toolchain, branch, `main`, `dcc550e`, `5f275d0`.
+latch, AVR, toolchain, branch, `main`, `dcc550e`, `5f275d0`, CRC, CRC-8,
+hexadecimal, polynomial.
 
 **Technical Verbs:** arm, disarm, enumerate, latch, mix, parse, power off,
 stack, deploy, flash, upload.
