@@ -639,6 +639,18 @@ Requirements:
   holes take H3 and H4 (an agent checks that the SSD boots from slot 2).
   If the pins bottom in J1 before the shield reaches the block, the pins
   set the gap instead (the PCB session checks J1's insertion depth).
+  Measured by Kevin 2026-11-14 (measurement sheet v2):
+  - NVMe carrier top face to CAN HAT top face: 0.56 in (14.2 mm). Thus
+    the south standoffs (H3, H4) are 14.2 + 11.0 = 25.2 mm.
+  - Receiver bottom face to the top of the plug housing (today's
+    harness): 1.15 in (29.2 mm), thus 19.0 mm above the receiver's top.
+  - Nano USB plug (90 degree Mini-B), from the end of the Nano's board to
+    the far side of the plug: 0.55 in (14.0 mm). With the Nano flat,
+    parts up and the USB end away, the cable leaves to the left (toward
+    the 40-pin edge on the shield).
+  - Not yet: the receiver signal voltage and the rib of a Futaba J plug.
+    No published drawing gives the rib size (Pololu, Core Electronics,
+    RC guides: the rib is on the signal side and runs the full length).
 - **S9. USB link.** The 40-pin header has no USB lines. Kevin's short cable
   has a 90° Mini-B plug: the cable leaves at a right angle to the plug.
   Kevin, 2026-11-13: mount the Nano so that its own Mini-B port sticks out
