@@ -29,7 +29,7 @@ Solid lines are Confirmed. Orange dashed lines are Unknown or Inferred.
 | Part | Model | Confidence and source |
 |---|---|---|
 | Transmitter | HotRC DS600 V3, LCD model, sold as Havcybin | Confirmed, 2026-11-04 (`docs/NEXT_SESSION.md`) |
-| Receiver | HotRC F-06A (V3): 6 channels, PWM, 4 V to 9 V DC | Confirmed: Kevin read "F-06A" on the label, 2026-11-13. This agrees with the V3 transmitter. Kevin reports no power row, but the published F-06A drawing and photo show a seventh row with a power symbol (section 4). |
+| Receiver | HotRC F-06A (V3): 6 channels, PWM, 4 V to 9 V DC | Confirmed: Kevin read "F-06A" on the label, 2026-11-13. This agrees with the V3 transmitter. Kevin reports no power row, but the published F-06A drawing and photo show a seventh row with a power symbol (section 4). Research, 2026-11-13: that row is EXT-V, a voltage sense input, not a power row. |
 | RC bridge MCU | Arduino Nano clone: ATmega328P at 16 MHz, CH340 USB serial chip, Nano old bootloader (57600 baud) | Confirmed 2026-11-13: `lsusb` shows `1a86:7523`, avrdude reads signature `0x1e950f` at 57600 baud, and the last flash used FQBN `arduino:avr:nano:cpu=atmega328old`. Nobody photographed the board. |
 | Former motor driver | OSOYOO Model X H-bridge | Removed. Kevin, 2026-11-13: the Arduino used to control it. Today the Arduino only streams the RC channels to the Pi over USB. The sketch still has the Model X code (section 5). |
 | USB hub | Genesys Logic, USB IDs 05e3:0610 and 05e3:0626 | Removed (Kevin, 2026-11-13). Before that, the Arduino and the OAK-D Lite were on it, and it had its own supply from the main pack (`docs/ups_hat_b.md`). |
@@ -64,6 +64,10 @@ manual drawing):
   most RC receivers, the + pins of all rows connect together, and the −
   pins also, so power can go in on any channel row. VERIFY this on the
   robot's receiver with a meter (continuity, power off).
+- Research, 2026-11-13 (F-06A manual mirror on manuals.plus, retailer listings): the
+  seventh row is EXT-V, the voltage-return SENSE input (0 V to 27 V, a
+  lead to the model battery for the transmitter's display). It is not a
+  power row. The receiver takes its supply on any channel row.
 - Photo and pin drawing:
   <https://howesmodels.co.uk/product/ds600-6-channel-2-4ghz-receiver-for-single-hand-radio-control/>.
 
@@ -83,7 +87,11 @@ Electrical facts:
   5 V).
 - The manual does not give the signal voltage. An ATmega328P at 5 V reads
   a high level at 3.0 V or more (0.6 × VCC). A 3.3 V output thus has 0.3 V
-  of margin. VERIFY (section 10, check 5).
+  of margin. VERIFY (section 10, check 5). Research, 2026-11-13: HotRC publishes no
+  signal level. No scope capture or teardown of this receiver was found.
+- Failsafe: the HotRC manuals of related receivers give a preset position
+  on signal loss, set on the transmitter. No document gives the behaviour
+  of the F-06A with the DS600 V3. Checks 6 and 7 stay open.
 
 ## 5. Model X code in the sketch (board removed)
 
@@ -124,7 +132,7 @@ Remove the Model X code with the next change to the sketch.
 - The Pi 5 limits the current of all its USB ports together to 600 mA,
   unless its firmware knows that the supply gives 5 A. The Arduino and the
   receiver must stay below that limit. Nobody measured the receiver
-  current.
+  current. The F-06A listing gives 35 mA (research, 2026-11-13).
 - The receiver gets its power from the same USB 5 V as the Arduino (Kevin,
   2026-11-13). The Arduino and the receiver do not connect to the 5 V of the
   Pi header. The exact pin on the Arduino side is not recorded; the 5V pin
@@ -183,6 +191,11 @@ Remove the Model X code with the next change to the sketch.
 - Supply range: 3.3 V to 5 V (DFRobot wiki). This answers the "VERIFY" in
   `docs/ups_hat_b.md`: the rover can operate from the Pi's 3.3 V pin. Nobody
   measured its current. `docs/power_module_spec.md` estimates 0.5 W.
+  Research, 2026-11-13: DFRobot gives no current. The LC29H(DA) takes about 44 mA at
+  3.3 V (retailer figure; Quectel's DA table was not read). The LLCC68
+  LoRa radio takes about 4.2 mA in receive. The HM6245 is a linear LDO, so
+  the 5 V current is about the 3.3 V current. Estimate: 60 mA to 90 mA at
+  5 V, with short peaks below about 150 mA.
 - Other devices on bus 1: the UPS HAT (B) INA219 at 0x42 on the robot, and
   the X1202 MAX17040 gauge at 0x36 on the bench. `i2c-bus-guard.service`
   unlocks a stuck bus (`docs/i2c_bus_guard.md`).
@@ -275,13 +288,15 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    and V3 do not work with each other, and the transmitter is a V3. Open:
    the published F-06A has 7 header rows (6 channels and a power row), and
    Kevin reports no power row. Count the rows. Record the blue LED: off is
-   the 50 Hz mode.
+   the 50 Hz mode. Research, 2026-11-13: the seventh row is EXT-V, a sense input
+   (section 4). Listing size: 38 x 24 x 13 mm, 7.4 g. A V3 "voltage return"
+   listing gives 32 x 19 x 13 mm. Both sizes fit the shield's receiver bay.
 4. **Receiver power feed.** Answered by Kevin, 2026-11-13: the USB 5 V,
    on the Arduino side. Nothing connects to the header 5 V except the RTK
    rover. Open: the exact pin on the Arduino side.
 5. **Signal voltage.** Measure the high level of the CH1 signal with a
    scope, transmitter on. A meter shows the average of the pulse, not its
-   high level.
+   high level. Research found no published value (section 4).
 6. **Link loss with the transmitter on.** Run
    `python3 -m pi_app.cli.monitor_rc`. Put the arm switch up. Hold CH1
    forward with a rubber band. Put the transmitter in a closed metal box
@@ -295,8 +310,13 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
 9. **Rover pin order and pull-ups.** Pin order done (Kevin, 2026-11-13):
    red +, black −, blue SCL/RX, green SDA/TX (section 8). Open: with the
    rover on 5 V and the Pi on, measure the SDA and SCL voltage at rest.
-10. **Rover current.** Measure it at 5 V and at 3.3 V.
+10. **Rover current.** Measure it at 5 V. The shield feeds the rover 5 V
+    only (D14). The estimate from the parts is 60 mA to 90 mA (section 8),
+    so the 0.3 A fuse has about 3 times the margin. A USB meter reading at
+    the first power-up is sufficient.
 11. **Header pins.** Record which 5 V pin and which GND pin the rover uses.
+    The shield closes this check: 5 V on pins 2 and 4, and GND on pins 6, 9,
+    14, 30, 34 and 39.
 
 ## 11. Inputs for the Pi 5 shield specification
 
@@ -322,9 +342,13 @@ Requirements:
   while the Nano's 5 V stays on the Pi USB rail after its Schottky (about
   4.5 to 4.8 V, so VIH is about 2.8 V and a 3.3 V signal keeps about 0.5 V
   of margin); S10 already keeps the header 5 V off the Nano. Confirm with
-  check 5 (scope the receiver high level).
+  check 5 (scope the receiver high level). The 1 kOhm resistor does not
+  decrease the margin: with the Nano's 20 kOhm to 50 kOhm pull-up, the pin
+  is at most about 0.1 V above the receiver's high level.
 - **S4. Receiver power.** Supply 5 V through a fuse, with a common ground.
-  The receiver range is 4 V to 9 V DC, 12 V maximum. The current is Unknown.
+  The receiver range is 4 V to 9 V DC, 12 V maximum. The F-06A listing
+  gives 35 mA (research, 2026-11-13; not measured). The fuse is a Bourns
+  MF-R030 (0.3 A hold, 0.6 A trip). An MF-R020 (0.2 A hold) is an option.
   No separate receiver power connector (Kevin, 2026-11-13): the 5 V and the
   ground reach the receiver on the + and − pins of the channel headers
   (S5), and one channel lead is enough, because the receiver connects its +
@@ -340,8 +364,15 @@ Requirements:
   2026-11-13). That 5 V must go off when the Pi halts, so that the rover
   does not drain the cells in storage. The X1202 does this (0 V after a
   halt with the input present, measured 2026-11-13; the halt with the
-  input off is still open in `docs/pi_power_architecture.md`). The UPS
-  HAT (B) does not. The pull-up voltage at the Pi pins must not be more
+  input off is not measured with a meter, `docs/pi_power_architecture.md`).
+  Research, 2026-11-13:
+  the Raspberry Pi bootloader page says that with POWER_OFF_ON_HALT=1 the
+  5 V at the header stays on in a halt. Thus the supply board must cut it.
+  Geekworm's X1202 manual says that the board cuts its output when the Pi
+  shuts down, and that it starts again when the input comes back. That
+  agrees with the 4 h soak on the cells. The fuse is a Bourns MF-R030
+  (0.3 A hold, 0.6 A trip). The UPS HAT (B) does not.
+  The pull-up voltage at the Pi pins must not be more
   than 3.3 V (check 9). Nothing on the shield may keep the Pi's 3.3 V rail
   up after a halt (refer to "Sneak feeds" in `docs/power_module_spec.md`).
 - **S7. Pins and addresses that are in use.** Do not use GPIO 6 (X1202 power
@@ -351,17 +382,20 @@ Requirements:
   (GPIO 8 CE0, GPIO 9, GPIO 10, GPIO 11) with its interrupt on GPIO 25
   (`dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25` in the Pi's
   `config.txt`, read 2026-11-13). Its RS485 side uses the UART (GPIO 14 and
-  GPIO 15) and, on some versions, GPIO 4. VERIFY the RS485 pins on the
-  Waveshare page for the fitted version. The shield's own footprints take
-  GPIO 12 and 13 (UART4, BMS link), GPIO 17 (rover 5 V switch) and GPIO 24
-  (charger-present input) (S15); VERIFY each is free on the Pi 5 and the
-  X1202.
+  GPIO 15) and, on some versions, GPIO 4. Waveshare wiki (research,
+  2026-11-13): RS485 is on GPIO 14 and GPIO 15. Its RSE direction pin is
+  GPIO 4, and only a 0 Ohm resistor connects it; the factory default is
+  automatic direction. The shield uses none of these pins. Superseded by
+  D13: the footprints on GPIO 12, 13, 17 and 24 (S15) are removed.
 - **S8. Mechanical.** Pi 5 HAT+ outline. Kevin, 2026-11-13: the shield
   mounts on top of the Waveshare RS485 CAN HAT, which is on the Pi's
   header. The CAN HAT passes the 40 pins up through its top, so the shield
   plugs straight onto them (Kevin, 2026-11-13). The X1202 is under the Pi
   on pogo pins. VERIFY the height of the CAN HAT's parts and terminal
   blocks, and where the NVMe carrier and the fan sit in the stack.
+  Research, 2026-11-13: Waveshare publishes only the 65 x 30 mm outline and 3.0 mm
+  holes. It does not give the part heights, the header type or a standoff
+  length. Measure the HAT.
 - **S9. USB link.** The 40-pin header has no USB lines. Kevin's short cable
   has a 90° Mini-B plug: the cable leaves at a right angle to the plug.
   Kevin, 2026-11-13: mount the Nano so that its own Mini-B port sticks out
@@ -415,6 +449,9 @@ Requirements:
   link. Kevin: keep the mount, with the antenna lead routed out of the
   stack; if the range is poor, the receiver moves outside on longer leads
   (the servo headers allow it). Do an RC range test before relying on it.
+  As built (board README): the bay is north-east of the servo headers, and
+  the leads are about 10 mm to 30 mm long with a turn. Clip holes: 45.0 x
+  19.0 mm, M2.5. Tie holes: 2.2 mm.
 - **S14. Spare Nano pin header (fitted in v1).** Break out the spare Nano
   pins to a header for later inputs (for example bump switches): A1 to
   A5, D7 to D12, 5 V (USB side) and GND. Label D7 to D12 "outputs in
@@ -524,9 +561,11 @@ Decisions (Kevin, 2026-11-13):
 7. **D7. CH6 is wired now:** to A0 on the current Arduino, and to A0 of the
    Nano socket on the shield. The code reads it later.
 8. **D8. Hand-soldered build,** through-hole where a part allows it, like
-   the other boards in `~/Documents/KiCad/pcb-lessons`.
+   the other boards in `~/Documents/KiCad/pcb-lessons`. Each part is
+   through-hole, except Q1 and Q2 (BSS138, SOT-23).
 9. **D9. The shield mounts on the Waveshare RS485 CAN HAT** (S8), which
-   passes the pins up. The Nano sits on the side of the Pi's USB ports,
+   passes the pins up. The Nano sits above the Pi's Ethernet jack, next to
+   the USB-A ports,
    and its own USB port takes Kevin's 90° Mini-B cable (S9).
 10. **D10. Keep the Waveshare CAN HAT for v1** (S17). Revisit on a later
     board with a ready-made MCP2515 module.
