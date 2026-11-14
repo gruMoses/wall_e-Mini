@@ -360,6 +360,32 @@ sudo systemctl disable --now x1202-bench-logger && sudo rm /etc/systemd/system/x
 
 NOTE: `walle-ups.service` is still installed on the Pi. Its sensor (the INA219 of the HAT (B)) is not there, thus it records I2C errors and it does not halt the Pi. The I2C bus guard has no witness in this condition and does not recover a locked bus. Do not put the Pi on the robot in this condition.
 
+### 7.9 Test plan with the new cells, on the robot (prepared 2026-11-14)
+
+Condition: Kevin puts the Pi with the X1202 and the new cells back on the robot. The robot's converter feeds the board through the main switch. A camera shows the voltage and the current of that supply. There is no remote outlet: Kevin operates the main switch, and the script reads GPIO 6 to see each change. The robot stays on its stand. It is not armed.
+
+WARNING: the Pi still has the bench logger, the old watcher (which does nothing on this board) and an I2C bus guard with no witness. This is acceptable for tests on the stand. It is not the condition for a drive: on an input loss the Pi halts only after 180 s, and a locked I2C bus does not recover.
+
+Kevin gives these facts before the start: the brand, the model and the number of the new cells; the voltage of the converter; which loads are on the 5 V outputs of the board (the hub, the camera, or nothing); which camera shows the supply.
+
+Stage 0, no hands (5 min): the Pi answers; the logger operates; VCELL of the new cells; the supply voltage and current from the camera at idle; EXT5V; `get_throttled`; the USB devices; the RTK GPS and the fuel gauge on I2C bus 1.
+
+Stage 1, a cold start with low cells (only if the new cells are below 3.45 V at the start): halt the Pi, set the main switch to off for 30 s, set it to on. The Pi must boot. Do this stage before the first charge, because new cells come with a low charge and this condition does not come back.
+
+Stage 2, the first charge, with the camera (no hands): set GPIO 16 low. Read the supply current from the camera each minute. Record VCELL. Kevin feels the cells for heat one time. Stop the charge at a rested VCELL of 3.80 V. Results: the charge current, the supply current with the Pi and the charge together (the converter must carry it), and the pack resistance from the VCELL step when the charge stops.
+
+Stage 3, the load test on the cells (the test that the old cells did not pass): Kevin sets the main switch to off, and to on again after 6 min. The script starts when GPIO 6 goes low. It adds 1, 2 and 4 busy cores and an NVMe read, 60 s for each step, with the camera of the robot in operation if the board feeds it. Pass: EXT5V is 4.9 V or more in each step, and `get_throttled` stays 0x0. The script stops the load if VCELL is below 3.35 V or EXT5V is below 4.95 V.
+
+Stage 4, main-switch cycles, 3 times: Kevin sets the main switch to off. The script halts the Pi 5 s after the loss (Kevin's debounce time). Kevin waits until the Pi is dark, counts to 30, and sets the switch to on. Pass: the Pi boots each time with no other action.
+
+Stage 5, the meter readings (Kevin): the 5 V output after a halt with the main switch off (0 V is correct), and the standby drain (7.7, step 3). The drain is a go/no-go item.
+
+Stage 6, the stand test with the motors (Kevin drives the tracks on the stand for 5 min; the script only records): GPIO 6 must have no low sample; EXT5V and the supply voltage on the camera must stay stable under motor load and during regeneration.
+
+Later, not on this day: the load test with warm cells (50 C to 55 C), and the RTK fix quality outdoors with the board in operation.
+
+Go: stages 3, 4 and 6 pass, the drain in stage 5 is in the microampere range (or Kevin accepts a storage rule), and Kevin accepts the items in 7.6 that the tests cannot change (the stay-off condition, the charge during a boot, no cell temperature). After a go, the next step is the watcher of `docs/x1202_power_watcher_design.md`. The board is not ready for a drive before that watcher is installed.
+
 ### 7.8 Facts from the vendor and from other owners (read 2026-11-12)
 
 These facts are not from our tests. "Reported" means one owner report.
