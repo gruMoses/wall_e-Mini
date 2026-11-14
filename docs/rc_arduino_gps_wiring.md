@@ -623,7 +623,11 @@ Requirements:
   face to CAN HAT top face about 12.5 mm) and about 41.8 mm above the Pi.
   Standoff lengths do not change the copper; confirm them before buying. The south standoffs (H3, H4) land on
   the carrier, not on the Pi. The SSD in slot 1 appears to cover one of
-  the carrier's two holes on that side.
+  the carrier's two holes on that side. Kevin, 2026-11-14: move the SSD to
+  slot 2 (under the CAN HAT, about 6 mm clear), so both south carrier
+  holes take H3 and H4 (an agent checks that the SSD boots from slot 2).
+  If the pins bottom in J1 before the shield reaches the block, the pins
+  set the gap instead (the PCB session checks J1's insertion depth).
 - **S9. USB link.** The 40-pin header has no USB lines. Kevin's short cable
   has a 90° Mini-B plug: the cable leaves at a right angle to the plug.
   Kevin, 2026-11-13: mount the Nano so that its own Mini-B port sticks out
