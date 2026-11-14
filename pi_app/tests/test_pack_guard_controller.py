@@ -305,10 +305,13 @@ class TestDeliberateDisarmToDriver(_Base):
         self.assertFalse(cmd.is_armed)                 # the controller disarmed
         n = len(motor.contexts)
         self.assertTrue(all(ctx[0] for ctx in motor.contexts), motor.contexts)
-        # Link back, switch still up: re-arms; the driver never saw a disarm.
+        # Link back, switch still up: since 2026-11-13 (Kevin, "Latch it") a
+        # stale link sets the re-arm latch, so the robot stays disarmed until
+        # the switch is cycled. The driver still never saw a disarm.
         for _ in range(3):
-            cmd, _, _ = self.tick(c)
-        self.assertTrue(cmd.is_armed)
+            cmd, _, telem = self.tick(c)
+        self.assertFalse(cmd.is_armed)
+        self.assertTrue(telem["rearm_requires_switch_cycle"])
         self.assertTrue(all(ctx[0] for ctx in motor.contexts[n:]))
         # Deliberate: ch3 low on a live link, held for latch_clear_low_persist_s
         # (0.2 s; Kevin, 2026-11-13). The first low sample disarms the robot;

@@ -156,7 +156,41 @@ def update_safety(
       ends Follow Me and sets ch4_requires_low: Follow Me cannot start
       again until ch4 is held at or below follow_me_low_threshold_us for
       latch_clear_low_persist_s.
+    - Every Follow Me exit sets ch4_requires_low (Kevin, 2026-11-13: "Yes,
+      held low"): a ch4 low, ch4 no signal, a disarm of any kind, the
+      e-stop. The Controller does the same for its own exits. A restart
+      by ch4 then needs ch4 held low for latch_clear_low_persist_s and a
+      rising edge, so one bounced low frame cannot stop and restart it.
     """
+    new_state, events = _update_safety_core(
+        state, ch3_us, ch4_us, ch5_us, now_epoch_s, params, now_mono_s
+    )
+    if state.follow_me_active and not new_state.follow_me_active:
+        _latch_ch4(new_state)
+    return new_state, events
+
+
+def _latch_ch4(state: SafetyState) -> None:
+    """Set the Follow Me latch and restart the ch4 low run.
+
+    The held low must come AFTER the exit (Grok 55dfba46): with ch4 already
+    resting low for 0.2 s, a run that kept going would clear the latch on
+    the next tick.
+    """
+    state.ch4_requires_low = True
+    state.ch4_low_since_mono_s = None
+
+
+def _update_safety_core(
+    state: SafetyState,
+    ch3_us: int,
+    ch4_us: int,
+    ch5_us: int,
+    now_epoch_s: float,
+    params: SafetyParams,
+    now_mono_s: Optional[float],
+) -> Tuple[SafetyState, List[SafetyEvent]]:
+    """update_safety() without the Follow Me exit latch (see there)."""
     events: List[SafetyEvent] = []
     now = now_epoch_s if now_mono_s is None else now_mono_s
 
@@ -374,6 +408,7 @@ def force_disarm(
         follow_me_active=False,
         last_ch4_high=state.last_ch4_high,
         rearm_requires_switch_cycle=True,
-        ch4_requires_low=state.ch4_requires_low,
+        # A Follow Me exit sets the ch4 latch (Kevin, 2026-11-13).
+        ch4_requires_low=state.ch4_requires_low or state.follow_me_active,
     )
     return new_state, events

@@ -181,6 +181,8 @@ class Controller:
         self._rc_no_signal_monitor = RcNoSignalMonitor()
         # True while CH1 or CH2 has no signal and both tracks read neutral.
         self._rc_tracks_forced_neutral = False
+        # FOLLOW_ME was on at the last check (_track_follow_me_exit).
+        self._follow_me_was_on = False
         # Monotonic start of the current armed-idle stretch. None when this
         # tick is not idle. Compared against process()'s mono_now — do not
         # call time.monotonic() for it (controller tests pin that count).
@@ -662,6 +664,7 @@ class Controller:
             return
         self._mode = "MANUAL"
         self._safety_state.set_follow_me_active(False)
+        self._mark_follow_me_ended()
         if self._follow_me is not None:
             self._follow_me.stop_recorder()
             self._follow_me.reset_tracking()
@@ -687,6 +690,32 @@ class Controller:
             stuck_i,
         )
         self._vision_stale_episode_logged = True
+
+    def _mark_follow_me_ended(self) -> None:
+        """Every FOLLOW_ME exit sets the ch4 latch (Kevin, 2026-11-13).
+
+        A restart by ch4 then needs ch4 held low for
+        SafetyParams.latch_clear_low_persist_s and a rising edge, so one
+        bounced low frame cannot stop and restart FOLLOW_ME. A start from
+        the web UI or a gesture is an operator act and is not blocked. The
+        ch4 low run restarts here, so the held low must come after the exit
+        (Grok 55dfba46).
+        """
+        self._safety_state.ch4_requires_low = True
+        self._safety_state.ch4_low_since_mono_s = None
+
+    def _track_follow_me_exit(self) -> None:
+        """Catch-all: set the ch4 latch on any FOLLOW_ME on -> off change.
+
+        Called at the start of process() (catches exits made between ticks,
+        e.g. the web stop or the calibration wizard) and before each return
+        (exits made inside the tick). The exit sites also call
+        _mark_follow_me_ended() themselves; this covers a path that does not.
+        """
+        on = self._mode == "FOLLOW_ME" or bool(self._safety_state.follow_me_active)
+        if self._follow_me_was_on and not on:
+            self._mark_follow_me_ended()
+        self._follow_me_was_on = on
 
     def _follow_me_target_present(self) -> bool:
         """True when a Follow Me target candidate is currently visible.
@@ -721,6 +750,7 @@ class Controller:
         if self._mode == "FOLLOW_ME":
             self._mode = "MANUAL"
             self._safety_state.set_follow_me_active(False)
+            self._mark_follow_me_ended()
             if self._follow_me is not None:
                 self._follow_me.stop_recorder()
             if self._gesture is not None:
@@ -764,6 +794,9 @@ class Controller:
 
     def enter_calibration_mode(self) -> None:
         """Pause normal control; process() will output neutral commands."""
+        if self._mode == "FOLLOW_ME" or self._safety_state.follow_me_active:
+            self._safety_state.set_follow_me_active(False)
+            self._mark_follow_me_ended()
         self._mode = "MANUAL"
         self._calibration_mode = True
         now = time.monotonic()
@@ -991,6 +1024,7 @@ class Controller:
         self._hold_slew_at_neutral(mono_now)
         if left_mode == "FOLLOW_ME":
             self._safety_state.set_follow_me_active(False)
+            self._mark_follow_me_ended()
             if self._follow_me is not None:
                 self._follow_me.stop_recorder()
                 reset = getattr(self._follow_me, "reset_tracking", None)
@@ -1077,8 +1111,9 @@ class Controller:
         e-stop latch, or an auto-disarm (force_disarm). During an RC dropout
         it keeps its last value, because the driver's armed -> disarmed edge
         clears a pack-low latch into limp home, and a 1 s dropout with the
-        switch still up is not the operator's act (the robot re-arms when
-        the link returns). Same rule as the vision-hang restart gate: the
+        switch still up is not the operator's act (since 2026-11-13 the
+        dropout sets the re-arm latch, so the robot does not re-arm until
+        the switch is cycled). Same rule as the vision-hang restart gate: the
         raw switch level on a fresh link, not ``is_armed``. Unlike that gate,
         a long silence never counts as a switch-off here (fail closed: the
         latch then waits for ch3 low on a live link).
@@ -2023,6 +2058,9 @@ class Controller:
         mono_now = time.monotonic()
         self._sample_vision_freshness()
         was_armed = self._safety_state.is_armed
+        # FOLLOW_ME ended between ticks (web stop, calibration): set the ch4
+        # latch before update_safety can see a ch4 edge.
+        self._track_follow_me_exit()
 
         # ── Poll VESC telemetry every 50 ms ──────────────────────────────────
         _vesc_cfg = getattr(config, "vesc", None)
@@ -2235,16 +2273,21 @@ class Controller:
             self._motor.stop()
             self._reset_slew_state(mono_now)
             self._relay.set_armed(False)
-            # Keep the auto-disarm latch. A stale link must not turn a
-            # latched disarm back into "ch3 still high, so arm".
-            held_rearm_latch = self._safety_state.rearm_requires_switch_cycle
+            # A stale link sets the re-arm latch (Kevin, 2026-11-13: "Latch
+            # it"). Before, the robot re-armed by itself when the USB /
+            # Arduino link came back with the arm switch still up; now it
+            # needs ch3 held low for latch_clear_low_persist_s, then held
+            # high. This is a gap in the serial lines, not a receiver no
+            # signal (that one latches in update_safety).
+            fm_was_on = self._mode == "FOLLOW_ME" or self._safety_state.follow_me_active
             self._safety_state = SafetyState(
                 is_armed=False,
                 last_transition_mono_s=mono_now,
                 emergency_active=self._safety_state.emergency_active,
-                rearm_requires_switch_cycle=held_rearm_latch,
-                # Likewise the ch4 no-signal latch (Follow Me needs ch4 low).
-                ch4_requires_low=self._safety_state.ch4_requires_low,
+                rearm_requires_switch_cycle=True,
+                # The ch4 latch is kept, and a FOLLOW_ME that this ends sets
+                # it (every FOLLOW_ME exit, Kevin 2026-11-13).
+                ch4_requires_low=self._safety_state.ch4_requires_low or fm_was_on,
             )
             self._mode = "MANUAL"
             self._armed_idle_since = None
@@ -2270,6 +2313,7 @@ class Controller:
             self._merge_vision_telemetry(rc_telem)
             self._stamp_auto_disarm_telemetry(rc_telem, mono_now)
             self._end_vision_tick()
+            self._track_follow_me_exit()
             return cmd, [SafetyEvent.RC_STALE], rc_telem
 
         # No signal on a channel (safety findings 1 and 5,
@@ -2393,6 +2437,7 @@ class Controller:
             self._merge_vision_telemetry(cal_telem)
             self._stamp_auto_disarm_telemetry(cal_telem, mono_now)
             self._end_vision_tick()
+            self._track_follow_me_exit()
             return cmd, events, cal_telem
 
         # Pack guard (latched, RESTRICTED, post-latch session, or unreadable):
@@ -2406,6 +2451,9 @@ class Controller:
                 if self._pack_guard_block is not None:
                     self._mode = "MANUAL"
                     self._safety_state.set_follow_me_active(False)
+                    # A refused start also ends FOLLOW_ME: a later start
+                    # needs ch4 held low and a new edge (Kevin, 2026-11-13).
+                    self._mark_follow_me_ended()
                     telemetry["follow_me_activation_blocked"] = "pack_guard"
                     _logger.warning(
                         "FOLLOW_ME start refused: pack guard %s", self._pack_guard_block
@@ -2420,6 +2468,7 @@ class Controller:
                     # target even when the frozen list is non-empty.
                     self._mode = "MANUAL"
                     self._safety_state.set_follow_me_active(False)
+                    self._mark_follow_me_ended()
                     if self._vision_is_stale():
                         telemetry["follow_me_activation_blocked"] = "vision_stale"
                     else:
@@ -2427,6 +2476,8 @@ class Controller:
             elif ev in (SafetyEvent.FOLLOW_ME_EXITED, SafetyEvent.EMERGENCY_TRIGGERED):
                 if self._follow_me is not None:
                     self._follow_me.stop_recorder()
+                if self._mode == "FOLLOW_ME" or ev is SafetyEvent.FOLLOW_ME_EXITED:
+                    self._mark_follow_me_ended()
                 self._mode = "MANUAL"
                 if self._gesture is not None:
                     self._gesture.notify_external_deactivation()
@@ -2464,6 +2515,7 @@ class Controller:
                 if self._mode == "FOLLOW_ME":
                     self._mode = "MANUAL"
                     self._safety_state.set_follow_me_active(False)
+                    self._mark_follow_me_ended()
                     if self._follow_me is not None:
                         self._follow_me.stop_recorder()
 
@@ -3065,6 +3117,7 @@ class Controller:
         self._update_armed_idle(mono_now, rc, bt_override_bytes, left, right)
         self._stamp_auto_disarm_telemetry(telemetry, mono_now)
         self._end_vision_tick()
+        self._track_follow_me_exit()
         return cmd, events, telemetry
 
     def _bytes_to_steering_input(self, left_byte: int, right_byte: int) -> float:

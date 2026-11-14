@@ -84,13 +84,19 @@ class FakeGesture:
         self.notified += 1
 
 
-def _make_controller(gesture=None):
+def _make_controller(gesture=None, latch_clear_low_persist_s=None):
     fm = FollowMeController(FollowMeConfig())
+    params = SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0)
+    if latch_clear_low_persist_s is not None:
+        params = SafetyParams(
+            debounce_seconds=0.0, arm_high_persist_s=0.0,
+            latch_clear_low_persist_s=latch_clear_low_persist_s,
+        )
     ctrl = Controller(
         motor_driver=FakeMotor(),
         arm_relay=FakeRelay(),
         shutdown_scheduler=FakeShutdown(),
-        safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
+        safety_params=params,
         follow_me=fm,
         gesture_controller=gesture,
     )
@@ -173,7 +179,12 @@ class TestVisionStaleEntry(unittest.TestCase):
         self.assertIs(telem.get("vision_stale"), True)
 
     def test_getter_raising_is_stale(self):
-        ctrl, fm = _make_controller()
+        # This test runs on the real clock (ticks microseconds apart), so the
+        # ch4 held low that a refused start now needs before a new edge
+        # (Kevin, 2026-11-13: every FOLLOW_ME exit latches) is set to one
+        # sample here. The held low itself is tested in
+        # test_follow_me_exit_latch.py.
+        ctrl, fm = _make_controller(latch_clear_low_persist_s=0.0)
         computes = {"n": 0}
         real_compute = fm.compute
 
@@ -309,7 +320,10 @@ class TestIncidentRegression(unittest.TestCase):
             )
 
             # A new RC entry while stale is refused. ch4 has to fall first
-            # so the rising edge is real.
+            # so the rising edge is real, and since 2026-11-13 (Kevin: every
+            # FOLLOW_ME exit latches) it has to stay low for
+            # latch_clear_low_persist_s (0.2 s): two 0.5 s steps.
+            step(ARM_RC, 5.0, 8)
             step(ARM_RC, 5.0, 8)
             before = computes["n"]
             _cmd, telem = step(FM_RC, 5.0, 8)
@@ -317,7 +331,9 @@ class TestIncidentRegression(unittest.TestCase):
             self.assertEqual(ctrl._mode, "MANUAL")
             self.assertEqual(telem.get("follow_me_activation_blocked"), "vision_stale")
 
-            # Recovery. The stale exit already reset tracking; a new entry drives.
+            # Recovery. The stale exit already reset tracking; a new entry
+            # drives. The refused start above latched ch4 again: held low.
+            step(ARM_RC, 0.2, 0)
             step(ARM_RC, 0.2, 0)
             self.assertEqual(resets["n"], 1)
             cmd, telem = step(FM_RC, 0.2, 0)
