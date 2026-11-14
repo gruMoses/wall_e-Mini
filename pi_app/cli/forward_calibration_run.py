@@ -26,6 +26,7 @@ from pi_app.hardware.arduino_modelx import ArduinoModelXDriver
 from pi_app.hardware.arduino_rc import ArduinoRCReader
 from pi_app.hardware.vesc import VescCanDriver
 from pi_app.control.safety import SafetyParams
+from pi_app.control.rc_signal import rc_signal_ok, rc_switch_low
 
 
 def clamp_byte(v: int) -> int:
@@ -37,7 +38,13 @@ def is_armed(ch3_us: int, params: SafetyParams) -> bool:
 
 
 def is_disarmed(ch3_us: int, params: SafetyParams) -> bool:
-    return ch3_us <= params.arm_low_threshold_us
+    """Switch low, or no signal on ch3 (pi_app/control/rc_signal.py): either aborts a run."""
+    return not rc_signal_ok(ch3_us) or ch3_us <= params.arm_low_threshold_us
+
+
+def is_switch_off(ch3_us: int, params: SafetyParams) -> bool:
+    """A measured ch3 at or below the low threshold. No signal is not a switch-off."""
+    return rc_switch_low(ch3_us, params.arm_low_threshold_us)
 
 
 def main() -> int:
@@ -147,7 +154,7 @@ def main() -> int:
             saw_disarmed = False
             while not stop_flag["value"]:
                 s = rc.get_state()
-                if is_disarmed(s.ch3_us, params):
+                if is_switch_off(s.ch3_us, params):
                     saw_disarmed = True
                 if saw_disarmed and is_armed(s.ch3_us, params):
                     break

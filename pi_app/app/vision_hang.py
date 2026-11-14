@@ -36,6 +36,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from pi_app.control.rc_signal import rc_signal_ok, rc_switch_low
+
 
 def restart_permitted(
     is_armed: bool,
@@ -54,8 +56,12 @@ def restart_permitted(
     if rc_age_s is None:
         return True, "no RC ever"
     if rc_age_s <= rc_fresh_s:
-        if ch3_us is not None and ch3_us <= arm_low_threshold_us:
+        # No signal on ch3 (pi_app/control/rc_signal.py) is not "switch
+        # low": the switch position is unknown, so it blocks.
+        if rc_switch_low(ch3_us, arm_low_threshold_us):
             return True, "disarmed, switch low"
+        if ch3_us is not None and not rc_signal_ok(ch3_us):
+            return False, "ch3 no signal"
         return False, "switch up"
     if rc_off_s > 0.0 and rc_age_s >= rc_off_s:
         return True, f"disarmed, no RC for {rc_age_s:.0f} s"

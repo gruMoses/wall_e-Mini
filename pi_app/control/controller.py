@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from typing import Any, Protocol, Tuple, List, Optional
 import logging
 import math
@@ -18,6 +18,9 @@ from pi_app.control.mapping import (
 )
 from pi_app.control.safety import (
     update_safety, force_disarm, SafetyState, SafetyParams, SafetyEvent,
+)
+from pi_app.control.rc_signal import (
+    RcNoSignalMonitor, rc_signal_ok, rc_switch_low, rc_track_us,
 )
 from pi_app.control.state import DriveCommand, AutonomyCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
@@ -72,6 +75,10 @@ def _rc_age_and_staleness(stamp_mono_s: float, mono_now: float) -> tuple[float, 
 
 @dataclass(frozen=True)
 class RCInputs:
+    # Each channel is a pulse width in us, or RC_NO_SIGNAL_US (0) when the
+    # Arduino reports no valid pulse (pi_app/control/rc_signal.py). Every
+    # threshold test goes through the rc_signal helpers: no signal is never
+    # high, low or mid-band, and process() makes a dead track neutral.
     ch1_us: int
     ch2_us: int
     ch3_us: int
@@ -81,6 +88,8 @@ class RCInputs:
     # The RC-stale watchdog in process() compares it with time.monotonic(),
     # never with the wall clock (the Pi's clock steps at boot).
     last_update_mono_s: float
+    # CH6 (A0, not used yet). None: the firmware sends 5 fields.
+    ch6_us: Optional[int] = None
 
 
 class MotorDriver(Protocol):
@@ -168,6 +177,8 @@ class Controller:
                 "Arm interlock: the arm switch must be seen OFF before the robot can arm"
             )
         self._safety_params = safety_params or SafetyParams()
+        # Journal + JSON events when a channel loses or regains its signal.
+        self._rc_no_signal_monitor = RcNoSignalMonitor()
         # Monotonic start of the current armed-idle stretch. None when this
         # tick is not idle. Compared against process()'s mono_now — do not
         # call time.monotonic() for it (controller tests pin that count).
@@ -1073,8 +1084,10 @@ class Controller:
         if self._safety_state.is_armed:
             self._driver_armed = True
             return
+        # No signal on ch3 is not a switch-off (pi_app/control/rc_signal.py):
+        # a dead lead must not clear a pack-low latch into limp home.
         try:
-            ch3_low = int(ch3_us) <= int(self._safety_params.arm_low_threshold_us)
+            ch3_low = rc_switch_low(ch3_us, int(self._safety_params.arm_low_threshold_us))
         except (TypeError, ValueError):
             ch3_low = False
         if (
@@ -1825,6 +1838,35 @@ class Controller:
         safety_cfg = getattr(config, "safety", None)
         return int(getattr(safety_cfg, "auto_disarm_stick_deadband_us", 60))
 
+    def _log_rc_no_signal(self, rc: RCInputs, mono_now: float) -> List[dict]:
+        """Journal lines and JSON-event dicts for this tick's no-signal changes.
+
+        Rate-limited per channel (RcNoSignalMonitor). main.py writes the
+        returned dicts to the JSON log as events.
+        """
+        try:
+            events = self._rc_no_signal_monitor.update(
+                mono_now,
+                (rc.ch1_us, rc.ch2_us, rc.ch3_us, rc.ch4_us, rc.ch5_us, rc.ch6_us),
+            )
+        except Exception:
+            _logger.exception("RC no-signal monitor failed")
+            return []
+        out: List[dict] = []
+        for ev in events:
+            _logger.warning("%s", ev.journal_line())
+            out.append(ev.as_log_dict())
+        return out
+
+    @staticmethod
+    def _rc_with_neutral_tracks(rc: RCInputs) -> RCInputs:
+        """CH1 / CH2 with no signal read neutral (1500 us); the rest is unchanged."""
+        if rc_signal_ok(rc.ch1_us) and rc_signal_ok(rc.ch2_us):
+            return rc
+        return dataclass_replace(
+            rc, ch1_us=rc_track_us(rc.ch1_us), ch2_us=rc_track_us(rc.ch2_us)
+        )
+
     def _sticks_within_auto_disarm_deadband(self, rc: RCInputs) -> bool:
         deadband = self._auto_disarm_stick_deadband_us()
         return (
@@ -2177,6 +2219,14 @@ class Controller:
             self._end_vision_tick()
             return cmd, [SafetyEvent.RC_STALE], rc_telem
 
+        # No signal on a channel (safety findings 1 and 5,
+        # docs/rc_arduino_gps_wiring.md): journal and JSON events on entry and
+        # exit, then a dead track channel reads neutral for everything below
+        # (the mixer would map the 0 us sentinel to full reverse).
+        # update_safety handles ch3 / ch4 / ch5.
+        rc_no_signal_events = self._log_rc_no_signal(rc, mono_now)
+        rc = self._rc_with_neutral_tracks(rc)
+
         # Auto-disarm before update_safety so this tick's DISARMED handling
         # (motor stop, relay off, slew reset, follow-me exit) still runs.
         # 2026-09-24 overnight-armed incident.
@@ -2245,6 +2295,8 @@ class Controller:
         telemetry: dict = {"charger_inhibit": self._charger_inhibit}
         if midband_disarm is not None:
             telemetry["arm_midband_disarm"] = midband_disarm
+        if rc_no_signal_events:
+            telemetry["rc_no_signal_events"] = rc_no_signal_events
         self._merge_vision_telemetry(telemetry)
 
         # Calibration early-return — now AFTER update_safety so safety is
@@ -2281,6 +2333,8 @@ class Controller:
             }
             if midband_disarm is not None:
                 cal_telem["arm_midband_disarm"] = midband_disarm
+            if rc_no_signal_events:
+                cal_telem["rc_no_signal_events"] = rc_no_signal_events
             self._armed_idle_since = None
             self._merge_vision_telemetry(cal_telem)
             self._stamp_auto_disarm_telemetry(cal_telem, mono_now)

@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import List, Optional, Tuple
 
+from pi_app.control.rc_signal import rc_signal_ok, rc_switch_high, rc_switch_low
+
 
 class SafetyEvent(Enum):
     ARMED = auto()
@@ -14,6 +16,12 @@ class SafetyEvent(Enum):
     # arm_midband_disarm_s (and is not low). The re-arm latch is set on the
     # same tick.
     ARM_MIDBAND_DISARM = auto()
+    # Emitted with DISARMED when, while armed, ch3 or ch5 reports no signal
+    # (the RC_NO_SIGNAL_US sentinel or any width outside the valid range;
+    # pi_app/control/rc_signal.py). The re-arm latch is set on the same
+    # tick. Never with EMERGENCY_TRIGGERED: a dead e-stop lead is not an
+    # e-stop, and the e-stop powers the Pi off.
+    RC_NO_SIGNAL_DISARM = auto()
 
 
 @dataclass(frozen=True)
@@ -110,12 +118,27 @@ def update_safety(
     - rearm_requires_switch_cycle: ch3 must be seen <= arm_low_threshold_us before a later
       high can arm. Any other ch3 value forces disarmed and leaves the latch set.
       The emergency early return keeps the latch.
+    - No signal (safety findings 1 and 5, docs/rc_arduino_gps_wiring.md): a
+      channel value that is not a measured width (the RC_NO_SIGNAL_US
+      sentinel, or anything outside RC_VALID_MIN_US..RC_VALID_MAX_US; see
+      pi_app/control/rc_signal.py) is never high, never mid-band and never
+      low. No signal on ch3 or ch5 disarms at once (no debounce), sets
+      rearm_requires_switch_cycle and clears the ch3 runs, even when
+      already disarmed; armed, it emits DISARMED plus RC_NO_SIGNAL_DISARM.
+      It never triggers the emergency: only a measured ch5 width at or
+      above emergency_threshold_us does, on its rising edge (a ch5 that
+      comes back high after no signal is such an edge). No signal on ch4
+      ends Follow Me, and counts as high for the ch4 edge, so a ch4 that
+      comes back high does not start Follow Me until it has been not high.
     """
     events: List[SafetyEvent] = []
     now = now_epoch_s if now_mono_s is None else now_mono_s
 
-    ch4_high = ch4_us >= params.follow_me_high_threshold_us
-    ch5_high = ch5_us >= params.emergency_threshold_us
+    ch3_no_signal = not rc_signal_ok(ch3_us)
+    ch4_no_signal = not rc_signal_ok(ch4_us)
+    ch5_no_signal = not rc_signal_ok(ch5_us)
+    ch4_high = rc_switch_high(ch4_us, params.follow_me_high_threshold_us)
+    ch5_high = rc_switch_high(ch5_us, params.emergency_threshold_us)
 
     new_state = SafetyState(
         is_armed=state.is_armed,
@@ -123,7 +146,10 @@ def update_safety(
         last_ch5_high=ch5_high,
         emergency_active=state.emergency_active,
         follow_me_active=state.follow_me_active,
-        last_ch4_high=ch4_high,
+        # A ch4 with no signal counts as high for the Follow Me edge only:
+        # a lead that comes back with the switch up must not start Follow Me
+        # without the operator (the switch must be not high first).
+        last_ch4_high=ch4_high or ch4_no_signal,
         rearm_requires_switch_cycle=state.rearm_requires_switch_cycle,
         ch3_high_since_mono_s=state.ch3_high_since_mono_s,
         ch3_held_high_mono_s=state.ch3_held_high_mono_s,
@@ -147,9 +173,31 @@ def update_safety(
         _clear_ch3_runs(new_state)
         return new_state, events
 
+    # --- No signal on the arm or e-stop channel (findings 1 and 5) ---
+    # A dead CH3 lead held the last width (armed forever); a dead CH5 lead
+    # removed the e-stop with no alarm. Either one: disarm now, latch, and
+    # forget the ch3 runs, so a lead that comes back with the switch up
+    # cannot arm. Not the emergency: that powers the Pi off, and a loose
+    # lead is not the operator's e-stop. Latch even when already disarmed:
+    # the latch is what stops the robot arming on its own when the lead
+    # comes back.
+    if ch3_no_signal or ch5_no_signal:
+        _clear_ch3_runs(new_state)
+        new_state.rearm_requires_switch_cycle = True
+        if new_state.follow_me_active:
+            new_state.follow_me_active = False
+            events.append(SafetyEvent.FOLLOW_ME_EXITED)
+        if new_state.is_armed:
+            new_state.is_armed = False
+            new_state.last_transition_mono_s = now
+            events.append(SafetyEvent.DISARMED)
+            events.append(SafetyEvent.RC_NO_SIGNAL_DISARM)
+        return new_state, events
+
     # --- ch3 runs (RC arm-channel fail-safe, 2026-11-05) ---
-    ch3_low = ch3_us <= params.arm_low_threshold_us
-    ch3_high = ch3_us >= params.arm_high_threshold_us
+    # ch3 is a measured width from here on (no signal returned above).
+    ch3_low = rc_switch_low(ch3_us, params.arm_low_threshold_us)
+    ch3_high = rc_switch_high(ch3_us, params.arm_high_threshold_us)
     if ch3_high:
         if new_state.ch3_high_since_mono_s is None:
             new_state.ch3_high_since_mono_s = now
@@ -188,9 +236,9 @@ def update_safety(
     # that never went low (2026-09-24 overnight-armed incident).
     desired_armed = state.is_armed
     if state.rearm_requires_switch_cycle:
-        # One low sample is enough: the Arduino clamps out-of-range pulses
-        # to 1500 and the reader keeps the last valid value, so a dropout
-        # never reads low, and a 40-140 ms burst still cannot arm after it.
+        # One low sample is enough: it must be a measured width (no signal
+        # returned above and never counts as low), and a 40-140 ms burst
+        # still cannot arm after it.
         if ch3_low:
             new_state.rearm_requires_switch_cycle = False
         else:
@@ -231,7 +279,9 @@ def update_safety(
         if not state.last_ch4_high and ch4_high and not state.follow_me_active:
             new_state.follow_me_active = True
             events.append(SafetyEvent.FOLLOW_ME_ENTERED)
-        elif ch4_us <= params.follow_me_low_threshold_us and state.follow_me_active:
+        elif state.follow_me_active and (
+            ch4_no_signal or rc_switch_low(ch4_us, params.follow_me_low_threshold_us)
+        ):
             new_state.follow_me_active = False
             events.append(SafetyEvent.FOLLOW_ME_EXITED)
 

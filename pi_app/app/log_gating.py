@@ -452,7 +452,10 @@ def build_log_obj(
         # Armed-idle watchdog (2026-09-24 overnight-armed incident).
         "armed_idle_s": telem.get("armed_idle_s"),
         "rearm_requires_switch_cycle": telem.get("rearm_requires_switch_cycle"),
-        "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us}),
+        # 0 = no signal on that channel (pi_app/control/rc_signal.py); ch6 is
+        # None with the 5-field firmware.
+        "rc": to_int({"ch1": s.ch1_us, "ch2": s.ch2_us, "ch3": s.ch3_us, "ch4": s.ch4_us, "ch5": s.ch5_us,
+                      "ch6": getattr(s, "ch6_us", None)}),
         "bt": to_int({"L": bt_override[0] if bt_override else None, "R": bt_override[1] if bt_override else None, "age_s": bt_age}),
         "imu": round_floats(_filter_imu_status_for_log(imu_status), 3) if imu_status else None,
         "imu_steering": {
