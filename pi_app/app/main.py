@@ -362,41 +362,40 @@ def run() -> int:
             # controller.set_gps_reading() with no restart. The waypoint
             # controller is therefore built either way; its start gate
             # refuses a run while there is no GPS reading.
-            if True:
-                detected_now = RtkGpsReader.detect(config.gps.i2c_bus, config.gps.i2c_addr)
-                gps_reader = RtkGpsReader(config.gps)
-                gps_reader.start()
-                if detected_now:
-                    print("RTK GPS detected and started")
+            detected_now = RtkGpsReader.detect(config.gps.i2c_bus, config.gps.i2c_addr)
+            gps_reader = RtkGpsReader(config.gps)
+            gps_reader.start()
+            if detected_now:
+                print("RTK GPS detected and started")
+            else:
+                print("RTK GPS not detected — reader started, retrying every 30 s")
+            if config.waypoint_nav.enabled:
+                wp_cfg = WpNavCfg(
+                    arrival_radius_m=config.waypoint_nav.arrival_radius_m,
+                    cruise_speed_byte=config.waypoint_nav.cruise_speed_byte,
+                    approach_speed_byte=config.waypoint_nav.approach_speed_byte,
+                    slow_radius_m=config.waypoint_nav.slow_radius_m,
+                    min_rtk_quality=config.waypoint_nav.min_rtk_quality,
+                    stale_timeout_s=config.gps.stale_timeout_s,
+                    align_threshold_deg=config.waypoint_nav.align_threshold_deg,
+                    recovery_threshold_deg=config.waypoint_nav.recovery_threshold_deg,
+                    pivot_yaw_cmd=config.waypoint_nav.pivot_yaw_cmd,
+                    pivot_yaw_min=config.waypoint_nav.pivot_yaw_min,
+                    pivot_full_error_deg=config.waypoint_nav.pivot_full_error_deg,
+                    motor_deadband_byte=config.waypoint_nav.motor_deadband_byte,
+                )
+                wp_file = Path(__file__).resolve().parents[2] / config.waypoint_nav.waypoint_file
+                wps = []
+                if wp_file.exists():
+                    try:
+                        wps = load_waypoints(wp_file)
+                        print(f"  Loaded {len(wps)} waypoints from {wp_file.name}")
+                    except Exception as e:
+                        print(f"  Failed to load waypoints: {e}")
                 else:
-                    print("RTK GPS not detected — reader started, retrying every 30 s")
-                if config.waypoint_nav.enabled:
-                    wp_cfg = WpNavCfg(
-                        arrival_radius_m=config.waypoint_nav.arrival_radius_m,
-                        cruise_speed_byte=config.waypoint_nav.cruise_speed_byte,
-                        approach_speed_byte=config.waypoint_nav.approach_speed_byte,
-                        slow_radius_m=config.waypoint_nav.slow_radius_m,
-                        min_rtk_quality=config.waypoint_nav.min_rtk_quality,
-                        stale_timeout_s=config.gps.stale_timeout_s,
-                        align_threshold_deg=config.waypoint_nav.align_threshold_deg,
-                        recovery_threshold_deg=config.waypoint_nav.recovery_threshold_deg,
-                        pivot_yaw_cmd=config.waypoint_nav.pivot_yaw_cmd,
-                        pivot_yaw_min=config.waypoint_nav.pivot_yaw_min,
-                        pivot_full_error_deg=config.waypoint_nav.pivot_full_error_deg,
-                        motor_deadband_byte=config.waypoint_nav.motor_deadband_byte,
-                    )
-                    wp_file = Path(__file__).resolve().parents[2] / config.waypoint_nav.waypoint_file
-                    wps = []
-                    if wp_file.exists():
-                        try:
-                            wps = load_waypoints(wp_file)
-                            print(f"  Loaded {len(wps)} waypoints from {wp_file.name}")
-                        except Exception as e:
-                            print(f"  Failed to load waypoints: {e}")
-                    else:
-                        print(f"  No waypoint file ({wp_file.name}); nav available but empty")
-                    waypoint_nav_ctrl = WaypointNavController(wp_cfg, wps)
-                    print("  Waypoint navigation available")
+                    print(f"  No waypoint file ({wp_file.name}); nav available but empty")
+                waypoint_nav_ctrl = WaypointNavController(wp_cfg, wps)
+                print("  Waypoint navigation available")
         except Exception as e:
             print(f"RTK GPS initialization failed: {e}")
             print("  Continuing without GPS")
