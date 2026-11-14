@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shield Measurement Sheet v2</title>
+<style>
+  @page { size: letter; margin: 0.45in; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #000; font-size: 9.5pt; line-height: 1.3; width: 7.6in; }
+  svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
+
+  .top { display: flex; justify-content: space-between; align-items: baseline; }
+  h1 { font-size: 15pt; margin: 0; }
+  .date { font-size: 9pt; }
+  .lead { margin: 2px 0 5px; font-size: 9.5pt; }
+  .caliper { border: 1px solid #000; border-radius: 5px; padding: 4px 8px; font-size: 9pt; }
+  .have { font-size: 8pt; color: #444; margin: 4px 0 6px; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.1in 0.2in; }
+  .panel { border: 1.2px solid #000; border-radius: 6px; padding: 0.06in 0.09in 0.07in; break-inside: avoid; }
+  .panel h2 { font-size: 11pt; margin: 0 0 2px; }
+  .panel h2 .opt { font-weight: 400; font-size: 9.5pt; }
+  .panel svg { display: block; width: 100%; height: auto; }
+  .how { margin: 3px 0 0; font-size: 9.5pt; }
+  .tick { margin: 4px 0 0; font-size: 9.5pt; }
+  .cb { display: inline-block; width: 11px; height: 11px; border: 1.3px solid #000; border-radius: 2px; margin: 0 3px 0 9px; vertical-align: -1px; }
+
+  .wide { margin-top: 0.1in; }
+  .wide .row { display: flex; gap: 0.15in; align-items: center; }
+  .wide svg { width: 4.0in; flex: none; }
+  .wide .how { font-size: 9.5pt; }
+</style>
+</head>
+<body>
+
+<div class="top">
+  <h1>WALL-E shield: the last few measurements</h1>
+  <div class="date">Nov 14, 2026</div>
+</div>
+<p class="lead">Write each value in the empty box next to its red number and circle <b>in</b> or <b>mm</b>. Send a photo of the sheet. Not to scale.</p>
+<div class="caliper"><b>Dial caliper:</b> one full turn of the needle = 1 inch. Each dial mark = 0.01 in. Whole inches come from the beam. Example: beam past 1, needle on 29 → <b>1.29 in</b>.</div>
+<div class="have">Already have, no need to redo: CAN HAT pin height ≈ 8 mm · Pi top to CAN HAT top 1.29 in · terminal block 0.355 in · receiver 1.30 × 0.785 × 0.40 in · receiver + lead on the Nano 5V pin · receiver header: male pins, S + −.</div>
+
+<div class="grid">
+
+  <!-- ===================== 1: carrier to CAN HAT ===================== -->
+  <section class="panel">
+    <h2>1. NVMe carrier to CAN HAT</h2>
+    <svg viewBox="0 0 350 230" aria-label="Side view of the stack">
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c0392b"/></marker>
+      </defs>
+      <!-- pins on CAN HAT -->
+      <text x="140" y="13" font-size="12" text-anchor="middle">40 pins</text>
+      <g stroke="#000" stroke-width="2.2">
+        <line x1="126" y1="50" x2="126" y2="20"/><line x1="133" y1="50" x2="133" y2="20"/>
+        <line x1="140" y1="50" x2="140" y2="20"/><line x1="147" y1="50" x2="147" y2="20"/>
+        <line x1="154" y1="50" x2="154" y2="20"/>
+      </g>
+      <!-- terminal block -->
+      <text x="72" y="28" font-size="12" text-anchor="middle">terminal block</text>
+      <rect x="52" y="34" width="40" height="16" fill="#fff" stroke="#000" stroke-width="1.2"/>
+      <g fill="none" stroke="#000" stroke-width="1"><circle cx="61" cy="42" r="3"/><circle cx="72" cy="42" r="3"/><circle cx="83" cy="42" r="3"/></g>
+      <!-- CAN HAT -->
+      <rect x="44" y="50" width="120" height="18" fill="#fff" stroke="#000" stroke-width="1.5"/>
+      <text x="104" y="63.5" font-size="12" text-anchor="middle" font-weight="600">CAN HAT (blue)</text>
+      <!-- standoff -->
+      <rect x="150" y="68" width="12" height="56" fill="#e8e8e8" stroke="#000" stroke-width="1.2"/>
+      <line x1="150" y1="82" x2="162" y2="82" stroke="#000" stroke-width="0.8"/>
+      <line x1="150" y1="110" x2="162" y2="110" stroke="#000" stroke-width="0.8"/>
+      <text x="30" y="100" font-size="12">silver standoff</text>
+      <line x1="118" y1="96" x2="147" y2="96" stroke="#000" stroke-width="1"/>
+      <!-- carrier -->
+      <rect x="2" y="124" width="162" height="18" fill="#fff" stroke="#000" stroke-width="1.5"/>
+      <text x="83" y="137.5" font-size="12" text-anchor="middle" font-weight="600">NVMe carrier</text>
+      <!-- brass spacers + cooler -->
+      <rect x="10" y="142" width="8" height="20" fill="#d6d6d6" stroke="#000" stroke-width="0.8"/>
+      <rect x="148" y="142" width="8" height="20" fill="#d6d6d6" stroke="#000" stroke-width="0.8"/>
+      <rect x="52" y="145" width="62" height="17" fill="#f0f0f0" stroke="#000" stroke-width="1"/>
+      <text x="83" y="157.5" font-size="12" text-anchor="middle">cooler</text>
+      <!-- Pi -->
+      <rect x="2" y="162" width="162" height="18" fill="#fff" stroke="#000" stroke-width="1.5"/>
+      <text x="83" y="175.5" font-size="12" text-anchor="middle">Pi 5</text>
+      <rect x="10" y="180" width="8" height="8" fill="#d6d6d6" stroke="#000" stroke-width="0.8"/>
+      <rect x="148" y="180" width="8" height="8" fill="#d6d6d6" stroke="#000" stroke-width="0.8"/>
+      <!-- UPS + cells -->
+      <rect x="2" y="188" width="162" height="18" fill="#fff" stroke="#000" stroke-width="1.5"/>
+      <text x="83" y="201.5" font-size="12" text-anchor="middle">UPS board (X1202)</text>
+      <rect x="16" y="206" width="134" height="22" rx="9" fill="#f0f0f0" stroke="#000" stroke-width="1"/>
+      <text x="83" y="221" font-size="12" text-anchor="middle">18650 cells</text>
+
+      <!-- dimension 1 -->
+      <g stroke="#c0392b" stroke-width="1.2" fill="none">
+        <line x1="166" y1="50" x2="190" y2="50" stroke-dasharray="3 2"/>
+        <line x1="166" y1="124" x2="190" y2="124" stroke-dasharray="3 2"/>
+        <line x1="180" y1="52" x2="180" y2="122" stroke-width="1.6" marker-start="url(#a1)" marker-end="url(#a1)"/>
+      </g>
+      <circle cx="200" cy="87" r="11" fill="#c0392b"/>
+      <text x="200" y="91.5" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">1</text>
+      <rect x="216" y="67" width="130" height="40" fill="#fff" stroke="#000" stroke-width="1.6"/>
+      <text x="281" y="121" font-size="12" text-anchor="middle">in&#160;&#160;/&#160;&#160;mm</text>
+      <text x="194" y="45" font-size="12" fill="#c0392b">top of CAN HAT</text>
+      <text x="194" y="140" font-size="12" fill="#c0392b">top of NVMe carrier</text>
+    </svg>
+    <p class="how">One jaw on the top face of the NVMe carrier, the other on the top face of the blue CAN HAT, right beside the silver standoff on the 40-pin side.</p>
+  </section>
+
+  <!-- ===================== 2: receiver height ===================== -->
+  <section class="panel">
+    <h2>2. Receiver height with the plug on</h2>
+    <svg viewBox="0 0 350 230" aria-label="Side view of the receiver with the plug on">
+      <defs>
+        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c0392b"/></marker>
+      </defs>
+      <!-- wires (white underlay keeps them apart) -->
+      <g fill="none" stroke-linecap="round">
+        <g stroke="#fff" stroke-width="7">
+          <path d="M 150 94 V 70 Q 150 50 130 50 H 40 Q 22 50 18 70"/>
+          <path d="M 139 94 V 74 Q 139 59 124 59 H 44 Q 31 59 28 74"/>
+          <path d="M 128 94 V 78 Q 128 68 118 68 H 48 Q 40 68 38 78"/>
+        </g>
+        <g stroke="#000" stroke-width="3">
+          <path d="M 150 94 V 70 Q 150 50 130 50 H 40 Q 22 50 18 70"/>
+          <path d="M 139 94 V 74 Q 139 59 124 59 H 44 Q 31 59 28 74"/>
+          <path d="M 128 94 V 78 Q 128 68 118 68 H 48 Q 40 68 38 78"/>
+        </g>
+      </g>
+      <text x="58" y="42" font-size="12">wires</text>
+      <!-- plug housing -->
+      <rect x="120" y="94" width="38" height="64" fill="#222" stroke="#000" stroke-width="1.2"/>
+      <text x="139" y="124" font-size="12" fill="#fff" text-anchor="middle">black</text>
+      <text x="139" y="138" font-size="12" fill="#fff" text-anchor="middle">plug</text>
+      <!-- pin stubs -->
+      <g stroke="#000" stroke-width="2"><line x1="128" y1="158" x2="128" y2="162"/><line x1="139" y1="158" x2="139" y2="162"/><line x1="150" y1="158" x2="150" y2="162"/></g>
+      <!-- receiver body -->
+      <rect x="6" y="162" width="154" height="48" rx="5" fill="#fff" stroke="#000" stroke-width="1.6"/>
+      <text x="64" y="191" font-size="12" text-anchor="middle" font-weight="600">receiver, lying flat</text>
+
+      <!-- dimension 2 -->
+      <g stroke="#c0392b" stroke-width="1.2" fill="none">
+        <line x1="160" y1="94" x2="188" y2="94" stroke-dasharray="3 2"/>
+        <line x1="162" y1="210" x2="188" y2="210" stroke-dasharray="3 2"/>
+        <line x1="178" y1="96" x2="178" y2="208" stroke-width="1.6" marker-start="url(#a2)" marker-end="url(#a2)"/>
+      </g>
+      <circle cx="198" cy="152" r="11" fill="#c0392b"/>
+      <text x="198" y="156.5" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">2</text>
+      <rect x="214" y="132" width="130" height="40" fill="#fff" stroke="#000" stroke-width="1.6"/>
+      <text x="279" y="186" font-size="12" text-anchor="middle">in&#160;&#160;/&#160;&#160;mm</text>
+      <text x="192" y="89" font-size="12" fill="#c0392b">top of the black plug</text>
+      <text x="192" y="226" font-size="12" fill="#c0392b">bottom of the receiver</text>
+    </svg>
+    <p class="how">Receiver flat, your harness plugged on. One jaw on the bottom of the receiver, the other on top of the black plug (not on the wires).</p>
+  </section>
+
+  <!-- ===================== 3: signal voltage ===================== -->
+  <section class="panel">
+    <h2>3. Receiver signal voltage <span class="opt">(meter, not caliper)</span></h2>
+    <svg viewBox="0 0 350 240" aria-label="Top view of the receiver header with meter probes">
+      <!-- receiver top, broken off on the left -->
+      <path d="M10 32 H 178 V 236 H 10 L 4 219 L 10 202 L 4 185 L 10 168 L 4 151 L 10 134 L 4 117 L 10 100 L 4 83 L 10 66 L 4 49 L 10 32 Z" fill="#fff" stroke="#000" stroke-width="1.5"/>
+      <text x="18" y="229" font-size="12">receiver, top view</text>
+      <!-- plug outline over rows 1-5 -->
+      <rect x="92" y="58" width="76" height="120" rx="3" fill="#000" fill-opacity="0.08" stroke="#000" stroke-width="1.2" stroke-dasharray="4 3"/>
+      <text x="16" y="112" font-size="12">plug on</text>
+      <text x="16" y="126" font-size="12">rows 1–5</text>
+      <!-- row numbers -->
+      <g font-size="13" text-anchor="end" font-weight="600"><text x="85" y="74.5">1</text><text x="85" y="98.5">2</text><text x="85" y="122.5">3</text><text x="85" y="146.5">4</text><text x="85" y="170.5">5</text><text x="85" y="194.5">6</text></g>
+      <!-- pins: columns S=104, +=130, -=156 -->
+      <g fill="#000"><rect x="100" y="66" width="8" height="8"/><rect x="126" y="66" width="8" height="8"/><rect x="152" y="66" width="8" height="8"/><rect x="100" y="90" width="8" height="8"/><rect x="126" y="90" width="8" height="8"/><rect x="152" y="90" width="8" height="8"/><rect x="100" y="114" width="8" height="8"/><rect x="126" y="114" width="8" height="8"/><rect x="152" y="114" width="8" height="8"/><rect x="100" y="138" width="8" height="8"/><rect x="126" y="138" width="8" height="8"/><rect x="152" y="138" width="8" height="8"/><rect x="100" y="162" width="8" height="8"/><rect x="126" y="162" width="8" height="8"/><rect x="152" y="162" width="8" height="8"/><rect x="100" y="186" width="8" height="8"/><rect x="126" y="186" width="8" height="8"/><rect x="152" y="186" width="8" height="8"/></g>
+      <g font-size="13" font-weight="700" text-anchor="middle">
+        <text x="104" y="212">S</text><text x="130" y="212">+</text><text x="156" y="212">−</text>
+      </g>
+      <!-- probes -->
+      <line x1="104" y1="12" x2="104" y2="58" stroke="#c0392b" stroke-width="5" stroke-linecap="round"/>
+      <line x1="104" y1="58" x2="104" y2="69" stroke="#c0392b" stroke-width="1.8"/>
+      <circle cx="104" cy="70" r="5.5" fill="none" stroke="#c0392b" stroke-width="2"/>
+      <text x="96" y="20" font-size="12" fill="#c0392b" text-anchor="end">red probe</text>
+      <line x1="156" y1="12" x2="156" y2="58" stroke="#000" stroke-width="5" stroke-linecap="round"/>
+      <line x1="156" y1="58" x2="156" y2="69" stroke="#000" stroke-width="1.8"/>
+      <circle cx="156" cy="70" r="5.5" fill="none" stroke="#000" stroke-width="2"/>
+      <text x="164" y="20" font-size="12">black probe</text>
+
+      <!-- meter -->
+      <rect x="186" y="60" width="162" height="132" rx="10" fill="#f2f2f2" stroke="#000" stroke-width="1.5"/>
+      <circle cx="200" cy="102" r="11" fill="#c0392b"/>
+      <text x="200" y="106.5" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">3</text>
+      <rect x="214" y="82" width="130" height="40" fill="#fff" stroke="#000" stroke-width="1.6"/>
+      <text x="279" y="137" font-size="12" text-anchor="middle">volts</text>
+      <circle cx="248" cy="166" r="12" fill="#fff" stroke="#000" stroke-width="1.2"/>
+      <line x1="248" y1="166" x2="256" y2="156" stroke="#000" stroke-width="2"/>
+      <text x="268" y="170" font-size="12">DC volts</text>
+    </svg>
+    <p class="how">Harness on the Nano, Nano on any USB port, transmitter on, stick centred, meter on DC volts. Red probe on row&#160;1&#160;S, black probe on row&#160;1&#160;−. Push the tips in from the top of the&#160;plug.</p>
+    <p class="tick">Blue LED on the receiver: <span class="cb"></span>on <span class="cb"></span>off</p>
+  </section>
+
+  <!-- ===================== 4: USB plug overhang ===================== -->
+  <section class="panel">
+    <h2>4. USB plug sticking out of the Nano</h2>
+    <svg viewBox="0 0 350 240" aria-label="Top view of the Nano with the right-angle USB plug">
+      <defs>
+        <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c0392b"/></marker>
+      </defs>
+      <!-- Nano board, USB end up -->
+      <rect x="60" y="84" width="70" height="154" rx="3" fill="#fff" stroke="#000" stroke-width="1.6"/>
+      <g fill="#000"><circle cx="67" cy="100" r="2.3"/><circle cx="67" cy="110" r="2.3"/><circle cx="67" cy="120" r="2.3"/><circle cx="67" cy="130" r="2.3"/><circle cx="67" cy="140" r="2.3"/><circle cx="67" cy="150" r="2.3"/><circle cx="67" cy="160" r="2.3"/><circle cx="67" cy="170" r="2.3"/><circle cx="67" cy="180" r="2.3"/><circle cx="67" cy="190" r="2.3"/><circle cx="67" cy="200" r="2.3"/><circle cx="67" cy="210" r="2.3"/><circle cx="67" cy="220" r="2.3"/><circle cx="67" cy="230" r="2.3"/><circle cx="123" cy="100" r="2.3"/><circle cx="123" cy="110" r="2.3"/><circle cx="123" cy="120" r="2.3"/><circle cx="123" cy="130" r="2.3"/><circle cx="123" cy="140" r="2.3"/><circle cx="123" cy="150" r="2.3"/><circle cx="123" cy="160" r="2.3"/><circle cx="123" cy="170" r="2.3"/><circle cx="123" cy="180" r="2.3"/><circle cx="123" cy="190" r="2.3"/><circle cx="123" cy="200" r="2.3"/><circle cx="123" cy="210" r="2.3"/><circle cx="123" cy="220" r="2.3"/><circle cx="123" cy="230" r="2.3"/></g>
+      <text x="95" y="166" font-size="13" text-anchor="middle" font-weight="700">Nano</text>
+      <!-- USB socket + right-angle plug -->
+      <rect x="83" y="80" width="24" height="14" fill="#d6d6d6" stroke="#000" stroke-width="1"/>
+      <rect x="77" y="34" width="36" height="47" rx="3" fill="#222" stroke="#000" stroke-width="1.2"/>
+      <path d="M77 50 H 40 Q 24 50 24 66" fill="none" stroke="#000" stroke-width="6" stroke-dasharray="7 4"/>
+      <text x="8" y="40" font-size="12">cable</text>
+      <text x="95" y="64" font-size="12" fill="#fff" text-anchor="middle">90°</text>
+
+      <!-- dimension 4 -->
+      <g stroke="#c0392b" stroke-width="1.2" fill="none">
+        <line x1="115" y1="34" x2="160" y2="34" stroke-dasharray="3 2"/>
+        <line x1="132" y1="84" x2="160" y2="84" stroke-dasharray="3 2"/>
+        <line x1="152" y1="36" x2="152" y2="82" stroke-width="1.6" marker-start="url(#a4)" marker-end="url(#a4)"/>
+      </g>
+      <circle cx="174" cy="59" r="11" fill="#c0392b"/>
+      <text x="174" y="63.5" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">4</text>
+      <rect x="192" y="39" width="130" height="40" fill="#fff" stroke="#000" stroke-width="1.6"/>
+      <text x="257" y="93" font-size="12" text-anchor="middle">in&#160;&#160;/&#160;&#160;mm</text>
+      <text x="118" y="24" font-size="12" fill="#c0392b">farthest point of the plug or its cable bend</text>
+      <text x="136" y="104" font-size="12" fill="#c0392b">board end</text>
+
+      <!-- cable direction ticks -->
+      <text x="150" y="128" font-size="12">Nano flat, parts up, USB end</text>
+      <text x="150" y="142" font-size="12">pointing away from you.</text>
+      <text x="150" y="162" font-size="12" font-weight="700">The cable leaves the plug:</text>
+      <rect x="150" y="172" width="12" height="12" fill="#fff" stroke="#000" stroke-width="1.3"/><text x="168" y="182" font-size="12">up</text><rect x="226" y="172" width="12" height="12" fill="#fff" stroke="#000" stroke-width="1.3"/><text x="244" y="182" font-size="12">down</text><rect x="150" y="194" width="12" height="12" fill="#fff" stroke="#000" stroke-width="1.3"/><text x="168" y="204" font-size="12">left</text><rect x="226" y="194" width="12" height="12" fill="#fff" stroke="#000" stroke-width="1.3"/><text x="244" y="204" font-size="12">right</text><rect x="150" y="216" width="12" height="12" fill="#fff" stroke="#000" stroke-width="1.3"/><text x="168" y="226" font-size="12">straight out</text>
+    </svg>
+    <p class="how">Your 90° plug pushed fully in. One jaw on the USB end of the Nano's board, the other on the farthest point of the plug or its cable bend.</p>
+  </section>
+</div>
+
+<!-- ===================== 5: servo plug rib (optional) ===================== -->
+<section class="panel wide">
+  <h2>5. Rib on a servo plug <span class="opt">(optional: skip if you have none)</span></h2>
+  <div class="row">
+    <svg viewBox="0 0 400 112" aria-label="End view of a servo plug with a rib on one narrow side">
+      <defs>
+        <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#c0392b"/></marker>
+      </defs>
+      <!-- plug face -->
+      <rect x="40" y="46" width="150" height="46" rx="3" fill="#222" stroke="#000" stroke-width="1.2"/>
+      <g fill="#fff"><rect x="58" y="62" width="14" height="14"/><rect x="108" y="62" width="14" height="14"/><rect x="158" y="62" width="14" height="14"/></g>
+      <!-- rib -->
+      <rect x="190" y="56" width="12" height="26" fill="#222" stroke="#000" stroke-width="1.2"/>
+      <text x="208" y="88" font-size="12">rib</text>
+      <text x="115" y="108" font-size="12" text-anchor="middle">end view: looking into the plug</text>
+      <!-- dimension 5 -->
+      <g stroke="#c0392b" stroke-width="1.2" fill="none">
+        <line x1="190" y1="44" x2="190" y2="16" stroke-dasharray="3 2"/>
+        <line x1="202" y1="54" x2="202" y2="16" stroke-dasharray="3 2"/>
+        <line x1="168" y1="24" x2="189" y2="24" stroke-width="1.6" marker-end="url(#a5)"/>
+        <line x1="224" y1="24" x2="203" y2="24" stroke-width="1.6" marker-end="url(#a5)"/>
+      </g>
+      <circle cx="238" cy="24" r="11" fill="#c0392b"/>
+      <text x="238" y="28.5" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">5</text>
+      <rect x="256" y="4" width="130" height="40" fill="#fff" stroke="#000" stroke-width="1.6"/>
+      <text x="321" y="58" font-size="12" text-anchor="middle">in&#160;&#160;/&#160;&#160;mm</text>
+    </svg>
+    <div>
+      <p class="how" style="margin:0">Only if you have a servo lead whose plug (Futaba style) has a thin raised rib along one narrow side.</p>
+      <p class="how">Jaws across the plug over the rib, then again just beside the rib. Write the difference: how far the rib stands out.</p>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>
