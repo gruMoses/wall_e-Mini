@@ -310,9 +310,15 @@ class TestDeliberateDisarmToDriver(_Base):
             cmd, _, _ = self.tick(c)
         self.assertTrue(cmd.is_armed)
         self.assertTrue(all(ctx[0] for ctx in motor.contexts[n:]))
-        # Deliberate: ch3 low on a live link.
+        # Deliberate: ch3 low on a live link, held for latch_clear_low_persist_s
+        # (0.2 s; Kevin, 2026-11-13). The first low sample disarms the robot;
+        # the driver's disarm edge waits for the held low, so one bounced
+        # sample cannot clear a pack-low latch into limp home.
         cmd, _, _ = self.tick(c, {"ch3": 1000})
         self.assertFalse(cmd.is_armed)
+        self.assertEqual(motor.contexts[-1][0], True)
+        for _ in range(3):
+            cmd, _, _ = self.tick(c, {"ch3": 1000})
         self.assertEqual(motor.contexts[-1][0], False)
 
     def test_estop_and_auto_disarm_are_deliberate(self):

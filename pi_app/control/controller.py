@@ -20,7 +20,7 @@ from pi_app.control.safety import (
     update_safety, force_disarm, SafetyState, SafetyParams, SafetyEvent,
 )
 from pi_app.control.rc_signal import (
-    RC_NEUTRAL_US, RcNoSignalMonitor, rc_signal_ok, rc_switch_low,
+    RC_NEUTRAL_US, RcNoSignalMonitor, rc_signal_ok,
 )
 from pi_app.control.state import DriveCommand, AutonomyCommand
 from pi_app.control.imu_steering import ImuSteeringCompensator
@@ -1082,16 +1082,19 @@ class Controller:
         raw switch level on a fresh link, not ``is_armed``. Unlike that gate,
         a long silence never counts as a switch-off here (fail closed: the
         latch then waits for ch3 low on a live link).
+
+        "ch3 low" is the arm switch HELD off (Controller.arm_switch_held_off:
+        a measured low on every tick for latch_clear_low_persist_s, Kevin
+        2026-11-13), not one sample: no signal is never low, and one bounced
+        low sample from a loose lead must not clear the pack-low latch. The
+        cost is 0.2 s before a real switch-off reaches the driver; the motors
+        are already stopped by the disarm itself. ``ch3_us`` is kept for the
+        callers and is not used.
         """
         if self._safety_state.is_armed:
             self._driver_armed = True
             return
-        # No signal on ch3 is not a switch-off (pi_app/control/rc_signal.py):
-        # a dead lead must not clear a pack-low latch into limp home.
-        try:
-            ch3_low = rc_switch_low(ch3_us, int(self._safety_params.arm_low_threshold_us))
-        except (TypeError, ValueError):
-            ch3_low = False
+        ch3_low = self.arm_switch_held_off
         if (
             forced_disarm
             or self._safety_state.emergency_active
@@ -1987,6 +1990,18 @@ class Controller:
         telemetry["rearm_requires_switch_cycle"] = bool(
             self._safety_state.rearm_requires_switch_cycle
         )
+
+    @property
+    def arm_switch_held_off(self) -> bool:
+        """The arm switch is held OFF on this tick.
+
+        A measured ch3 at or below arm_low_threshold_us on every tick for
+        SafetyParams.latch_clear_low_persist_s (0.2 s), from the last
+        update_safety. No signal never counts, and one bounced low sample
+        from a loose lead does not either (Kevin, 2026-11-13). main.py uses
+        it for the person-stop hold release.
+        """
+        return bool(getattr(self._safety_state, "ch3_low_held", False))
 
     @property
     def arm_low_threshold_us(self) -> int:

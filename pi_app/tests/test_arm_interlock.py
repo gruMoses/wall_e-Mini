@@ -97,8 +97,12 @@ class TestArmInterlock(unittest.TestCase):
                 self.assertEqual(
                     (cmd.left_byte, cmd.right_byte), (126, 126)
                 )
-            # Switch off: the latch clears (logged), nothing arms yet.
+            # Switch off, held for latch_clear_low_persist_s (0.2 s; Kevin,
+            # 2026-11-13, it was one sample): the latch clears (logged),
+            # nothing arms yet.
             cmd, events, telem = self._tick(ctrl, 31.0, ch3=1000)
+            self.assertTrue(telem["rearm_requires_switch_cycle"])
+            cmd, events, telem = self._tick(ctrl, 31.25, ch3=1000)
             self.assertFalse(cmd.is_armed)
             self.assertFalse(telem["rearm_requires_switch_cycle"])
             # Switch on again: normal arming once held for arm_high_persist_s.
@@ -117,6 +121,9 @@ class TestArmInterlock(unittest.TestCase):
     def test_switch_off_at_startup_is_the_normal_workflow(self):
         ctrl = self._make(startup_interlock=True)
         cmd, _events, telem = self._tick(ctrl, 0.0, ch3=1000)
+        self.assertFalse(cmd.is_armed)
+        self.assertTrue(telem["rearm_requires_switch_cycle"])  # one sample: not yet
+        cmd, _events, telem = self._tick(ctrl, 0.25, ch3=1000)  # held 0.25 s
         self.assertFalse(cmd.is_armed)
         self.assertFalse(telem["rearm_requires_switch_cycle"])
         cmd, events, _telem = self._tick(ctrl, 0.5, ch3=1900)

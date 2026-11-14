@@ -103,9 +103,12 @@ def test_ch3_no_signal_then_back_high_does_not_arm_until_cycled():
         s, ev = tick(s, t2 + i * DT, HIGH)
         assert not s.is_armed and SafetyEvent.ARMED not in ev
     assert s.rearm_requires_switch_cycle
-    # Switch off (a measured low) clears the latch; switch up re-arms.
+    # Switch off (a measured low held 0.2 s) clears the latch; switch up
+    # re-arms.
     t3 = t2 + 3.0
     s, _ = tick(s, t3, LOW)
+    assert s.rearm_requires_switch_cycle  # one sample is not a switch-off
+    s, _ = tick(s, t3 + 0.25, LOW)
     assert not s.rearm_requires_switch_cycle
     s, _ = tick(s, t3 + 0.5, HIGH)
     s, ev = tick(s, t3 + 0.75, HIGH)
@@ -181,9 +184,11 @@ def test_ch4_back_high_after_no_signal_does_not_restart_follow_me():
     for i in range(2, 34):
         s, ev = tick(s, t + i * DT, HIGH, ch4=CH4_HIGH)
         assert ev == [] and not s.follow_me_active
-    # The operator puts CH4 low, then high again: Follow Me starts.
+    # The operator puts CH4 low (held 0.25 s), then high again: Follow Me
+    # starts.
     s, _ = tick(s, t + 2.0, HIGH, ch4=CH4_LOW)
-    s, ev = tick(s, t + 2.0 + DT, HIGH, ch4=CH4_HIGH)
+    s, _ = tick(s, t + 2.25, HIGH, ch4=CH4_LOW)
+    s, ev = tick(s, t + 2.25 + DT, HIGH, ch4=CH4_HIGH)
     assert ev == [SafetyEvent.FOLLOW_ME_ENTERED] and s.follow_me_active
 
 
@@ -201,8 +206,10 @@ def test_ch4_no_signal_then_mid_then_high_does_not_restart_follow_me(between):
     s, ev = tick(s, t + 3 * DT, HIGH, ch4=CH4_HIGH)
     assert ev == [] and not s.follow_me_active and s.is_armed
     s, ev = tick(s, t + 4 * DT, HIGH, ch4=CH4_LOW)
+    assert ev == [] and s.ch4_requires_low  # one low sample: not yet
+    s, ev = tick(s, t + 4 * DT + 0.25, HIGH, ch4=CH4_LOW)
     assert ev == [] and not s.ch4_requires_low
-    s, ev = tick(s, t + 5 * DT, HIGH, ch4=CH4_HIGH)
+    s, ev = tick(s, t + 5 * DT + 0.25, HIGH, ch4=CH4_HIGH)
     assert ev == [SafetyEvent.FOLLOW_ME_ENTERED]
 
 
@@ -224,6 +231,76 @@ def test_ch4_no_signal_never_starts_follow_me():
     for i in range(2, 34):
         s, ev = tick(s, t + i * DT, HIGH, ch4=NS)
         assert ev == [] and not s.follow_me_active and s.is_armed
+
+
+# --- Held low clears a latch (Kevin, 2026-11-13) ----------------------------------
+# The two cases of the review's sim_bounce.py, at its 30 Hz tick: a loose lead
+# that comes back with one 500-1200 us bounce must not re-arm the robot or
+# restart FOLLOW_ME while the switch stays up.
+
+TICK30 = 1.0 / 30
+
+
+def _sim(seq, state=None):
+    st = SafetyState(rearm_requires_switch_cycle=True) if state is None else state
+    t = 0.0
+    log = []
+    for ch3, ch4, ch5, n in seq:
+        for _ in range(n):
+            st, ev = update_safety(st, ch3, ch4, ch5, t, P, now_mono_s=t)
+            log.extend(ev)
+            t += TICK30
+    return st, log
+
+
+@pytest.mark.parametrize("bounce", [500, 900, 1200])
+def test_ch3_bounce_after_no_signal_does_not_rearm(bounce):
+    st, log = _sim([
+        (1000, 1000, 1000, 15), (2000, 1000, 1000, 30), (2000, 2000, 1000, 10),
+        (NS, 2000, 1000, 10), (bounce, 2000, 1000, 1), (2000, 2000, 1000, 60),
+    ])
+    assert log.count(SafetyEvent.ARMED) == 1  # the operator's first arm only
+    assert log.count(SafetyEvent.FOLLOW_ME_ENTERED) == 1
+    assert not st.is_armed and not st.follow_me_active
+    assert st.rearm_requires_switch_cycle
+
+
+@pytest.mark.parametrize("bounce", [500, 900, 1200])
+def test_ch4_bounce_after_no_signal_does_not_restart_follow_me(bounce):
+    st, log = _sim([
+        (1000, 1000, 1000, 15), (2000, 1000, 1000, 30), (2000, 2000, 1000, 10),
+        (2000, NS, 1000, 5), (2000, bounce, 1000, 1), (2000, 2000, 1000, 60),
+    ])
+    assert log.count(SafetyEvent.FOLLOW_ME_ENTERED) == 1
+    assert st.is_armed and not st.follow_me_active and st.ch4_requires_low
+
+
+def test_a_bouncing_low_run_never_clears_the_latch():
+    """Low samples broken by no signal or mid-band never add up to a held
+    low, however long the bouncing goes on."""
+    seq = []
+    for _ in range(40):
+        seq += [(900, CH4_LOW, CH5_LOW, 4), (NS, CH4_LOW, CH5_LOW, 1),
+                (900, CH4_LOW, CH5_LOW, 4), (MID, CH4_LOW, CH5_LOW, 1)]
+    st, log = _sim(seq)
+    assert st.rearm_requires_switch_cycle and log == []
+
+
+def test_a_held_low_clears_the_latch_and_a_held_high_arms():
+    # 7 ticks at 30 Hz is 0.2 s: the latch clears on the 7th low tick.
+    st, _ = _sim([(LOW, CH4_LOW, CH5_LOW, 7)])
+    assert st.rearm_requires_switch_cycle
+    st, _ = _sim([(LOW, CH4_LOW, CH5_LOW, 8)])
+    assert not st.rearm_requires_switch_cycle
+    st, log = _sim([(LOW, CH4_LOW, CH5_LOW, 8), (HIGH, CH4_LOW, CH5_LOW, 20)])
+    assert st.is_armed and log == [SafetyEvent.ARMED]
+
+
+def test_the_ch3_low_disarm_is_still_one_sample():
+    """Only clearing a latch needs the held low; disarming does not."""
+    s, t = armed_state()
+    s, ev = tick(s, t + 0.375, LOW)
+    assert not s.is_armed and ev == [SafetyEvent.DISARMED]
 
 
 # --- Today's values: unchanged ----------------------------------------------------
@@ -432,11 +509,26 @@ def test_controller_no_signal_disarms_without_shutdown(ctrl, caplog, which):
     assert not [r for r in caplog.records if "NO SIGNAL" in r.getMessage()]
 
 
-def test_controller_ch3_low_still_clears_the_driver_arm_state(ctrl):
+def test_controller_ch3_held_low_clears_the_driver_arm_state(ctrl):
+    """The VESC drive context (pack-low latch into limp home) and the
+    person-stop hold release need the arm switch HELD off for 0.2 s."""
     c, step, motor, _ = ctrl
     t = _arm(step)
-    step(t + 0.5, ch3=LOW)
-    assert motor.contexts[-1] is False
+    step(t + 0.5, ch3=LOW)  # disarms (one sample) ...
+    assert motor.contexts[-1] is True and not c.arm_switch_held_off  # ... not yet "off"
+    step(t + 0.75, ch3=LOW)  # held 0.25 s
+    assert motor.contexts[-1] is False and c.arm_switch_held_off
+
+
+def test_controller_one_bounced_low_is_not_a_switch_off(ctrl):
+    c, step, motor, _ = ctrl
+    t = _arm(step)
+    step(t + DT, ch3=NS)  # lead lost: disarm, latch
+    step(t + 2 * DT, ch3=900)  # one bounce
+    for i in range(3, 40):
+        step(t + i * DT, ch3=HIGH)  # switch up the whole time
+        assert not c.arm_switch_held_off
+    assert motor.contexts[-1] is True
 
 
 def _drive(step, t0, ticks, **kw):

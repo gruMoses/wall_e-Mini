@@ -110,6 +110,9 @@ class TestAutoDisarmController(unittest.TestCase):
             cmd, events, telem = self._tick(600.0)
             # Still disarmed on the next ticks; the warning must not repeat.
             held, held_events, held_telem = self._tick(700.0)
+            # The switch-off is held for latch_clear_low_persist_s (0.2 s;
+            # Kevin, 2026-11-13: one low sample no longer clears the latch).
+            first_low, _, first_low_telem = self._tick(700.75, ch3=1000)
             low, _, low_telem = self._tick(701.0, ch3=1000)
             rearmed, rearm_events, rearm_telem = self._tick(702.0)
             still, _, still_telem = self._tick(702.0 + 599.0)
@@ -137,6 +140,8 @@ class TestAutoDisarmController(unittest.TestCase):
         self.assertNotIn(SafetyEvent.ARMED, held_events)
         self.assertTrue(held_telem["rearm_requires_switch_cycle"])
 
+        self.assertFalse(first_low.is_armed)
+        self.assertTrue(first_low_telem["rearm_requires_switch_cycle"])
         self.assertFalse(low.is_armed)
         self.assertFalse(low_telem["rearm_requires_switch_cycle"])
 

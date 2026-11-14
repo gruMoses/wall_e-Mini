@@ -520,6 +520,13 @@ class TestControllerPackLowLatch(unittest.TestCase):
             self.assertEqual(motor.contexts[-1][0], True)
             fake_now["t"] = 1.4
             c.process(off_rc, now_epoch_s=0.3)
+            # The robot disarms on the first low sample, but the driver's
+            # disarm edge (it clears a pack-low latch into limp home) waits
+            # for the switch held off for latch_clear_low_persist_s (0.2 s;
+            # Kevin, 2026-11-13), so one bounced low sample cannot clear it.
+            self.assertEqual(motor.contexts[-1][0], True)
+            fake_now["t"] = 1.65
+            c.process(off_rc, now_epoch_s=0.55)
         self.assertEqual(motor.contexts[-1][0], False)
 
     def test_latched_telemetry_key_present_and_false_by_default(self):

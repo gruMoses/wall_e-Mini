@@ -53,7 +53,6 @@ try:
     from pi_app.app.phone_override import fresh_override_bytes
     from pi_app.control.netting_mute import near_share, detection_drops_mute
     from pi_app.control.person_stop_hold import NeutralTimer, rc_link_live
-    from pi_app.control.rc_signal import rc_switch_low
     from config import config
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -89,7 +88,6 @@ except ModuleNotFoundError:
     from pi_app.app.phone_override import fresh_override_bytes  # type: ignore
     from pi_app.control.netting_mute import near_share, detection_drops_mute  # type: ignore
     from pi_app.control.person_stop_hold import NeutralTimer, rc_link_live  # type: ignore
-    from pi_app.control.rc_signal import rc_switch_low  # type: ignore
     from config import config  # type: ignore
 
 
@@ -697,9 +695,10 @@ def run() -> int:
             # Person-stop hold (pi_app/control/person_stop_hold.py). Levels
             # for the vision worker, written every tick:
             # - release: the arm switch OFF on a live RC link. Not "disarmed":
-            #   a 1 s RC dropout also disarms with the switch still up. No
-            #   signal on ch3 is not OFF (rc_switch_low): a dead lead must
-            #   not release the hold.
+            #   a 1 s RC dropout also disarms with the switch still up. OFF is
+            #   the switch HELD off for 0.2 s (controller.arm_switch_held_off,
+            #   Kevin 2026-11-13): no signal is never OFF, and one bounced
+            #   low sample from a loose lead must not release the hold.
             # - autonomous: the mode is not MANUAL (missing = autonomous).
             # - forward_neutral: MANUAL and both commanded tracks (RC or
             #   phone, before the obstacle layer) inside the band for
@@ -720,7 +719,7 @@ def run() -> int:
                         release=(
                             _rc_live
                             and not cmd.is_armed
-                            and rc_switch_low(rc.ch3_us, controller.arm_low_threshold_us)
+                            and controller.arm_switch_held_off
                         ),
                         autonomous=telem.get("mode", "") != "MANUAL",
                         forward_neutral=_neutral,

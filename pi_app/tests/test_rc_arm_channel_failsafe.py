@@ -307,11 +307,16 @@ def test_latch_after_midband_disarm_clears_only_on_low():
     for t0, t1, ch3 in ((t + 0.5, t + 3.0, HIGH), (t + 3.5, t + 5.0, MID), (t + 5.5, t + 7.0, HIGH)):
         s, _t, ev = run(s, t0, t1, ch3)
         assert not s.is_armed and ev == [] and s.rearm_requires_switch_cycle, (t0, ch3)
-    # One low frame clears the latch; a held high then arms.
+    # A low held for latch_clear_low_persist_s (0.2 s) clears the latch
+    # (Kevin, 2026-11-13; it was one low frame); a held high then arms.
     s, ev = tick(s, t + 8.0, LOW)
+    assert s.rearm_requires_switch_cycle and ev == []
+    s, ev = tick(s, t + 8.1875, LOW)
+    assert s.rearm_requires_switch_cycle and ev == []
+    s, ev = tick(s, t + 8.21875, LOW)
     assert not s.rearm_requires_switch_cycle and ev == []
-    s, ev = tick(s, t + 8.0625, HIGH)
-    s, ev = tick(s, t + 8.3125, HIGH)
+    s, ev = tick(s, t + 8.25, HIGH)
+    s, ev = tick(s, t + 8.5, HIGH)
     assert s.is_armed and ev == [SafetyEvent.ARMED]
 
 

@@ -105,19 +105,24 @@ class TestRearmLatch(unittest.TestCase):
         params = SafetyParams()
         state, _ = force_disarm(SafetyState(is_armed=True), 0.0)
 
-        state, events = _step(state, CH3_LOW, 0.05, params)
+        # Since 2026-11-13 (Kevin) the low must be held for
+        # latch_clear_low_persist_s (0.2 s); one low sample does not clear it.
+        # (Times are multiples of 1/32 s so the comparisons are exact.)
+        state, events = _step(state, CH3_LOW, 0.03125, params)
+        self.assertTrue(state.rearm_requires_switch_cycle)
+        state, events = _step(state, CH3_LOW, 0.25, params)
         self.assertFalse(state.rearm_requires_switch_cycle)
         self.assertFalse(state.is_armed)
         self.assertEqual(events, [])
 
         # Still inside the 0.3 s debounce measured from force_disarm.
-        state, events = _step(state, CH3_HIGH, 0.10, params)
+        state, events = _step(state, CH3_HIGH, 0.28125, params)
         self.assertFalse(state.is_armed)
         self.assertEqual(events, [])
 
         # ch3 must also stay high for arm_high_persist_s (0.2 s) since
-        # 2026-11-05: at 0.3125 s both the debounce and the hold have run out.
-        state, events = _step(state, CH3_HIGH, 0.3125, params)
+        # 2026-11-05: at 0.5 s both the debounce and the hold have run out.
+        state, events = _step(state, CH3_HIGH, 0.5, params)
         self.assertTrue(state.is_armed)
         self.assertEqual(events, [SafetyEvent.ARMED])
         self.assertFalse(state.rearm_requires_switch_cycle)
@@ -126,6 +131,8 @@ class TestRearmLatch(unittest.TestCase):
         params = SafetyParams()
         state, _ = force_disarm(SafetyState(is_armed=True), 0.0)
         state, _ = _step(state, params.arm_low_threshold_us, 1.0, params)
+        self.assertTrue(state.rearm_requires_switch_cycle)  # held 0 s
+        state, _ = _step(state, params.arm_low_threshold_us, 1.25, params)
         self.assertFalse(state.rearm_requires_switch_cycle)
         self.assertFalse(state.is_armed)
 

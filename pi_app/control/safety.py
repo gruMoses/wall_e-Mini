@@ -55,6 +55,15 @@ class SafetyParams:
     # ticks at 30 Hz, and at the 1.61 m/s top speed it is 0.8 m of travel
     # on a dead arm switch.
     arm_midband_disarm_s: float = 0.5
+    # A latch (rearm_requires_switch_cycle, every cause; ch4_requires_low)
+    # clears only after a MEASURED low held on every tick for this long
+    # (Kevin, 2026-11-13: "Held low 0.2 s"). One low sample used to clear it,
+    # and a loose lead that bounces gives 500-1200 us samples: CH3 re-armed
+    # about 0.6 s later and CH4 restarted FOLLOW_ME with the switch up all
+    # the time (review sim, 2026-11-13). A no-signal tick, or any tick that
+    # is not low, restarts the run. A real switch-off rests low for seconds,
+    # so the cost is 0.2 s.
+    latch_clear_low_persist_s: float = 0.2
 
 
 @dataclass
@@ -67,9 +76,10 @@ class SafetyState:
     emergency_active: bool = False
     follow_me_active: bool = False
     last_ch4_high: bool = False
-    # Software disarm (auto-disarm, mid-band disarm) holds this until ch3 is
-    # seen at or below arm_low_threshold_us. While set, ch3 held high must
-    # not arm.
+    # Software disarm (auto-disarm, mid-band disarm, no signal, startup
+    # interlock) holds this until ch3 is held at or below
+    # arm_low_threshold_us for latch_clear_low_persist_s. While set, ch3
+    # held high must not arm.
     rearm_requires_switch_cycle: bool = False
     # Safety clock of the first tick of the current unbroken run of ch3 at
     # or above arm_high_threshold_us; None when this tick's ch3 is below it.
@@ -77,11 +87,20 @@ class SafetyState:
     # Safety clock of the last tick on which ch3 was held high (that run
     # had lasted arm_high_persist_s); None before the first such tick.
     ch3_held_high_mono_s: Optional[float] = None
-    # Set when ch4 had no signal: Follow Me cannot start until ch4 is seen
-    # at or below follow_me_low_threshold_us (a measured width). Without it,
-    # ch4 high -> no signal -> mid-band -> high restarted Follow Me with the
-    # switch up all the time (Grok review 2026-11-13).
+    # Set when ch4 had no signal: Follow Me cannot start until ch4 is held at
+    # or below follow_me_low_threshold_us (a measured width) for
+    # latch_clear_low_persist_s. Without it, ch4 high -> no signal ->
+    # mid-band -> high restarted Follow Me with the switch up all the time
+    # (Grok review 2026-11-13).
     ch4_requires_low: bool = False
+    # Safety clock of the first tick of the current unbroken run of a
+    # measured ch3 (ch4) at or below its low threshold; None otherwise.
+    ch3_low_since_mono_s: Optional[float] = None
+    ch4_low_since_mono_s: Optional[float] = None
+    # This tick: ch3 has been held low for latch_clear_low_persist_s.
+    # Controller.arm_switch_held_off reads it (pack-low latch, person stop
+    # hold release).
+    ch3_low_held: bool = False
 
     def set_follow_me_active(self, active: bool) -> None:
         """Allow external callers (e.g. web UI) to sync follow-me state."""
@@ -120,9 +139,10 @@ def update_safety(
       When emergency triggers, the system is forced DISARMED and emits EMERGENCY_TRIGGERED.
     - Follow Me activation: ch4 rising edge to >= follow_me_high_threshold_us while armed.
     - Follow Me deactivation: ch4 drops below follow_me_low_threshold_us, or disarm, or emergency.
-    - rearm_requires_switch_cycle: ch3 must be seen <= arm_low_threshold_us before a later
-      high can arm. Any other ch3 value forces disarmed and leaves the latch set.
-      The emergency early return keeps the latch.
+    - rearm_requires_switch_cycle: ch3 must be held <= arm_low_threshold_us on every
+      tick for latch_clear_low_persist_s (Kevin, 2026-11-13; it was one sample)
+      before a later high can arm. Any other ch3 value forces disarmed and leaves the
+      latch set. The emergency early return keeps the latch.
     - No signal (safety findings 1 and 5, docs/rc_arduino_gps_wiring.md): a
       channel value that is not a measured width (the RC_NO_SIGNAL_US
       sentinel, or anything outside RC_VALID_MIN_US..RC_VALID_MAX_US; see
@@ -134,7 +154,8 @@ def update_safety(
       above emergency_threshold_us does, on its rising edge (a ch5 that
       comes back high after no signal is such an edge). No signal on ch4
       ends Follow Me and sets ch4_requires_low: Follow Me cannot start
-      again until ch4 is seen at or below follow_me_low_threshold_us.
+      again until ch4 is held at or below follow_me_low_threshold_us for
+      latch_clear_low_persist_s.
     """
     events: List[SafetyEvent] = []
     now = now_epoch_s if now_mono_s is None else now_mono_s
@@ -157,11 +178,22 @@ def update_safety(
         ch3_held_high_mono_s=state.ch3_held_high_mono_s,
         ch4_requires_low=state.ch4_requires_low,
     )
-    # Follow Me latch: no signal on ch4 sets it on every tick (armed or not,
-    # before any early return below); only a measured ch4 low clears it.
+    # --- Held-low runs that clear the latches (Kevin, 2026-11-13) ---
+    # Updated on every tick, before any early return. A measured low on
+    # every tick for latch_clear_low_persist_s; a no-signal tick or any
+    # other value restarts the run. One bounced low sample is not enough.
+    ch3_low_now = rc_switch_low(ch3_us, params.arm_low_threshold_us)
+    ch4_low_now = rc_switch_low(ch4_us, params.follow_me_low_threshold_us)
+    new_state.ch3_low_since_mono_s = _run_start(state.ch3_low_since_mono_s, ch3_low_now, now)
+    new_state.ch4_low_since_mono_s = _run_start(state.ch4_low_since_mono_s, ch4_low_now, now)
+    ch3_low_held = _run_held(new_state.ch3_low_since_mono_s, now, params.latch_clear_low_persist_s)
+    ch4_low_held = _run_held(new_state.ch4_low_since_mono_s, now, params.latch_clear_low_persist_s)
+    new_state.ch3_low_held = ch3_low_held
+    # Follow Me latch: no signal on ch4 sets it on every tick (armed or not);
+    # only a measured ch4 low held for latch_clear_low_persist_s clears it.
     if ch4_no_signal:
         new_state.ch4_requires_low = True
-    elif rc_switch_low(ch4_us, params.follow_me_low_threshold_us):
+    elif ch4_low_held:
         new_state.ch4_requires_low = False
 
     # --- Emergency detection (rising edge) ---
@@ -245,10 +277,10 @@ def update_safety(
     # that never went low (2026-09-24 overnight-armed incident).
     desired_armed = state.is_armed
     if state.rearm_requires_switch_cycle:
-        # One low sample is enough: it must be a measured width (no signal
-        # returned above and never counts as low), and a 40-140 ms burst
-        # still cannot arm after it.
-        if ch3_low:
+        # Only a measured low held for latch_clear_low_persist_s clears it
+        # (Kevin, 2026-11-13); one low sample (a bounce) no longer does. No
+        # signal returned above and never counts as low.
+        if ch3_low_held:
             new_state.rearm_requires_switch_cycle = False
         else:
             desired_armed = False
@@ -300,6 +332,17 @@ def update_safety(
             events.append(SafetyEvent.FOLLOW_ME_EXITED)
 
     return new_state, events
+
+
+def _run_start(prev_since: Optional[float], condition: bool, now: float) -> Optional[float]:
+    """Start of the current unbroken run of ``condition``; None when it is False."""
+    if not condition:
+        return None
+    return now if prev_since is None else prev_since
+
+
+def _run_held(since: Optional[float], now: float, persist_s: float) -> bool:
+    return since is not None and (now - since) >= persist_s
 
 
 def _clear_ch3_runs(state: SafetyState) -> None:
