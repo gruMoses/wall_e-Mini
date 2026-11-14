@@ -76,10 +76,10 @@ The full record is in `docs/ups_hat_b.md`. Summary:
 - RTK is fixed mostly near sunset (`docs/rtk_float_investigation.md`). Waypoint navigation and the GPS heading lock are not usable at midday.
 - Hand gestures do not work as deployed. `pi_app/control/gesture_control.py` has not changed since 2026-09-20.
 - Video recording is off while gestures are configured (`pi_app/hardware/oak_depth.py`, the condition `hand_queues is None`).
-- The armed JSON log drops events that last one tick: follow-me entered and exited, mode changes, charger-inhibit changes. `should_log_tick` in `pi_app/app/log_gating.py` applies only the 0.1 s gate while armed. `test_log_gating.py` pins that behaviour.
+- FIXED 2026-11-10 (commit `2ebdace`, on main; verified 2026-11-13 with `git merge-base --is-ancestor`): the armed JSON log dropped events that last one tick (follow-me entered and exited, mode changes, charger-inhibit changes). `should_log_tick` in `pi_app/app/log_gating.py` now always writes a tick that has an event, and `test_log_gating.py` covers it.
 - The BMS Bluetooth link sleeps for long periods.
-- GPS does not recover when `wall-e` starts while I2C bus 1 is locked: `RtkGpsReader.detect()` runs one time at startup.
-- `pi_app/cli/calibrate_imu.py` reads an attribute that `ImuReader` does not have. The tool collects no samples.
+- FIXED on branch `worktree-agent-a7a1d394c8dedc8bc`, not deployed: GPS did not recover when `wall-e` started while I2C bus 1 was locked (`RtkGpsReader.detect()` ran one time at startup). The reader thread now retries every 30 s with bounded logging, `main.py` always starts the reader and builds the waypoint controller (its start gate refuses a run with no GPS reading), and `test_rtk_gps.py::TestLateDetection` covers undetected, then detected, then readings. `i2c-bus-guard.service` still does the unlocking.
+- FIXED on branch `worktree-agent-a7a1d394c8dedc8bc`, not deployed: `pi_app/cli/calibrate_imu.py` read attributes that `ImuReader` does not have (`imu`, `mag`). It now reads through `mode`/`icm`/`ism`/`mmc`; `test_calibrate_imu_tool.py` covers it. The tool is for the parked external breakout IMU only; the OAK BMI270 needs no such tool (it calibrates at boot).
 
 ## 6. Waiting for Kevin
 
@@ -97,13 +97,13 @@ Kevin's rulings on 2026-11-10: the BMS targets are applied. The new UPS cells st
 
 Corrected in this commit: `CLAUDE.md`, `docs/NEXT_SESSION.md`, `docs/depthai_upgrade.md`, `docs/oak_d_lite_capability_audit.md`, `docs/rtk_float_investigation.md`, `docs/wifi_watchdog.md`, `docs/teleop.md`, `docs/bms_fail_open_memo.md`, `docs/backup_pump_design.md`, `docs/ups_hat_b.md`, `docs/i2c_bus_guard.md`, `docs/battery_settings.md`, `docs/performance_optimization_todo.md`, `docs/field_test_2026-11-03.md`, `docs/services.md`, `docs/pi_power_architecture.md`, `docs/gearing_memo.md`. In each case the code was the newer and correct side.
 
-Not corrected, because the text is in a code file and a push of a code file restarts `wall-e`. Correct each one with the next change to that file:
+Not corrected on main, because the text is in a code file and a push of a code file restarts `wall-e`. Status on branch `worktree-agent-a7a1d394c8dedc8bc` (comment and docstring changes only, not deployed):
 
-- `config.py`: the stick expo comment gives the per-track formula that the review rejected (the code in `pi_app/control/mapping.py` is ratio-preserving); the `camera_fps` comment calls the value reserved, but it is in use; the pack-low comments say about 37.7 V.
-- `pi_app/hardware/vesc.py` and `pi_app/control/controller.py`: the same pack-low numbers in comments.
-- `bin/walle_ups.py` (docstring) and `bin/install_walle_ups.sh`: a 7.6 V setpoint; the value in the unit files is 7.5 V.
-- `bin/i2c_bus_guard.py` (docstring): it names the UPS HAT (B) for the 2026-09-25 incident; that was the UPSPlus.
-- `pi_app/web/waypoint_nav_ui.py`: the `/api/nav/go` docstring says that motion starts when the robot arms. It does not: the mode drops on the first disarmed tick.
+- `config.py`: FIXED on the branch: the stick expo comment (now the ratio-preserving formula), the `camera_fps` comment (in use, load-bearing) and the `BmsConfig` docstring (JHB-R24TH-V1.3). The pack-low comments (about 37.7 V) were already corrected on main by the pack-guard commits: `config.py` now says 44.0 V, 42.0 V limp floor, 40.0 V BMS trip.
+- `pi_app/hardware/vesc.py`: no stale pack-low number found on 2026-11-13 (comments say 44 V). `pi_app/control/controller.py`: NOT checked, another change owns that file; also `pi_app/hardware/bms.py` had the SPIM08HP name in its docstring (FIXED on the branch).
+- `bin/walle_ups.py` (docstring) and `bin/install_walle_ups.sh`: FIXED on the branch (7.5 V). Auto-deploy does not restart this service.
+- `bin/i2c_bus_guard.py` (docstring): FIXED on the branch (the incident was on the UPSPlus).
+- `pi_app/web/waypoint_nav_ui.py`: FIXED on the branch. The `/api/nav/go` docstring now says that arming does not start motion later (`controller.py`: a disarmed tick sets MANUAL).
 - `docs/walle_one_sheet.html` still shows the UPSPlus HAT.
 
 Housekeeping: DONE 2026-11-10 (evening) with Kevin's approval. All worktrees and their local branches are removed, and the stash is dropped (`docs/NEXT_SESSION.md`, section 4, item 8). The two remote `claude/` branches are still on GitHub.
