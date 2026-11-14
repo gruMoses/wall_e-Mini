@@ -49,7 +49,7 @@ DFRobot wiki: <https://wiki.dfrobot.com/kit0198-us/>.
 | CH3 signal | D4 | Arm switch | Arm: 1800 µs or more, held for 0.2 s. Disarm: 1200 µs or less, or 0.5 s without a held-high reading. |
 | CH4 signal | D5 | FOLLOW_ME | Start at 1800 µs or more while armed. Stop at 1200 µs or less. |
 | CH5 signal | D6 | E-stop | 1800 µs or more: stop, latch DISARMED, power the Pi off after 5 s. |
-| CH6 signal | A0 | Not used yet | Kevin, 2026-11-13: connect the lead now. The sketch does not read A0, and A0 stays an input. Do not use D7 to D12: the sketch drives them as outputs. |
+| CH6 signal | A0 | Not used yet | Kevin, 2026-11-13: connect the lead now. The flashed firmware does not read A0. The repo sketch (2026-11-13, not flashed) sends A0 as the sixth field, and the Pi does not use it. A0 stays an input. Do not use D7 to D12: the sketch drives them as outputs. |
 | + and − | Arduino side, on the USB 5 V | Receiver power | Section 6 (Kevin, 2026-11-13) |
 
 Receiver header (HotRC wiring guide for the F-06A, Howes Models, and the
@@ -81,8 +81,10 @@ Electrical facts:
   333 Hz, 500 µs to 2500 µs. A 3 s press of BIND changes the mode. The logs
   show 992 µs to 2004 µs. The mode on the robot is Unknown.
 - The sketch measures each pulse with `micros()` (4 µs steps) in a
-  pin-change interrupt. It changes a width outside 800 µs to 2200 µs to
-  1500 µs before it sends the line.
+  pin-change interrupt. The flashed firmware changes a width outside
+  800 µs to 2200 µs to 1500 µs before it sends the line. The repo sketch
+  (2026-11-13, not flashed) sends `0` instead, and also after 100 ms with
+  no pulse (section 7).
 - D2 to D6 use `INPUT_PULLUP` (internal pull-up of 20 kOhm to 50 kOhm to
   5 V).
 - The manual does not give the signal voltage. An ATmega328P at 5 V reads
@@ -154,10 +156,27 @@ Remove the Model X code with the next change to the sketch.
   on 2026-11-13). The reader tries `/dev/ttyUSB*` first, then
   `/dev/ttyACM*`.
 - Rate: 115200 baud. 8N1 is Inferred (the Arduino default).
-- Arduino to Pi: one line each 20 ms, `ch1,ch2,ch3,ch4,ch5`, in µs. The
-  rate is fixed. It does not follow the receiver frame rate. After a reset,
-  the sketch waits 1 s and sends `RC Reader initialized`. The Pi parser
-  drops that line, so no log shows it.
+- Arduino to Pi: one line each 20 ms, in µs. The rate is fixed. It does not
+  follow the receiver frame rate. After a reset, the sketch waits 1 s and
+  sends `RC Reader initialized`. The Pi parser drops that line, so no log
+  shows it. There are two line formats:
+  - **5 fields, `ch1,ch2,ch3,ch4,ch5`.** The flashed firmware (`dcc550e`,
+    section 10, check 2) sends this format. Each field is 800 µs to
+    2200 µs, or 1500 µs for any other width (finding 5).
+  - **6 fields, `ch1,ch2,ch3,ch4,ch5,ch6`.** The repo sketch sends this
+    format since 2026-11-13 (not flashed). CH6 is the A0 input. Each field
+    is a width from 500 µs to 2500 µs, or `0`, the "no signal" value
+    (`RC_NO_SIGNAL_US`). A channel sends `0` when no complete pulse ended
+    in the last 100 ms, and while its last pulse is outside 500 µs to
+    2500 µs. The logic is in `arduino_rc_reader/rc_channel.h`.
+- Why 500 µs to 2500 µs (requirement S1): the F-06A sends 1000 µs to
+  2500 µs in its 50 Hz mode and 500 µs to 2500 µs in its 333 Hz mode
+  (manual page 6). A narrower range changes a valid pulse of the 333 Hz
+  mode to "no signal". A wider range lets through widths that no receiver
+  mode sends.
+- Why 100 ms (requirement S2): it is five 50 Hz frames. The minimum is
+  60 ms (three frames). The Pi thus sees a dead lead about 100 ms to
+  120 ms after its last pulse (the timeout plus one 20 ms line).
 - Each time a program opens the port, the DTR line resets the Arduino. The
   Pi start-up opens the port two times (detection, then the reader), so the
   Arduino resets two times.
@@ -166,11 +185,43 @@ Remove the Model X code with the next change to the sketch.
   254, neutral 126. The sketch accepts 0 to 255, but byte 255 overflows its
   PWM calculation (`abs(delta) * 255` in a 16-bit `int`). The Pi never sends
   255.
-- The Pi parser accepts a line with 4 or 5 fields only. It drops a line with
-  6 fields, so a firmware that sends CH6 needs a Pi change first.
+- The Pi parser (`pi_app/hardware/arduino_rc.py`, changed 2026-11-13, not
+  deployed) accepts the two formats (requirement S12). Each field must be
+  plain digits, and a width from 500 µs to 2500 µs or `0`. The parser drops
+  the full line if one field is bad, so a bad line does not refresh the
+  frame. It drops a line with 4 fields: no firmware since `5f275d0` sends
+  that format, and today such a line is the end of a cut 5-field line, with
+  each channel moved one place. It also drops a line that can be a part of
+  a line: a read that has no line end, the line after that read, the first
+  line after the port opens, and a 5-field line after a 6-field line on the
+  same port. The flashed firmware sends only widths from 800 µs to 2200 µs,
+  so its lines give the same values as before
+  (`pi_app/tests/test_rc_no_signal_parser.py`).
+- The Pi keeps `0` in the channel value, so the logs show it. All code that
+  compares a channel with a threshold uses `pi_app/control/rc_signal.py`.
+  The Pi reads "no signal" as follows:
+  - CH3 or CH5: the robot disarms at once, without the debounce. The Pi
+    sets the re-arm latch, so the arm switch must be cycled (OFF, then ON)
+    after the signal comes back. This is not the e-stop: the Pi does not
+    power off. The journal line is `RC CH3 NO SIGNAL: ...` or
+    `RC CH5 NO SIGNAL: ...`, and the event is `RC_NO_SIGNAL_DISARM`.
+  - CH5 that comes back with a measured high (1800 µs or more) is a rising
+    edge, so it starts the e-stop, as at power-on.
+  - CH1 or CH2: that track is neutral.
+  - CH4: FOLLOW_ME stops. When CH4 comes back high, FOLLOW_ME does not
+    start. The switch must go low first.
+  - "No signal" is never high, never in the middle band, and never "switch
+    OFF". Thus it cannot clear the re-arm latch, release the person stop
+    hold, permit the vision-hang restart, or clear the VESC pack-low latch.
+  - The journal gets one line when a channel loses its signal and one when
+    the signal comes back. The JSON log gets the events `rc_no_signal` and
+    `rc_signal_restored`. A channel gets at most one line in 5 s. A loose
+    lead that changes faster gets one line with the number of changes.
 - The Pi puts a monotonic time stamp on each line that it parses. An RC
   frame older than 1.0 s is stale (`RC_STALE_TIMEOUT_S` in
   `pi_app/control/controller.py`).
+- `python3 -m pi_app.cli.monitor_rc` shows `NOSIG` for a channel with no
+  signal, and shows CH6 when the firmware sends it.
 
 ## 8. RTK rover to Pi (4-pin Gravity connector)
 
@@ -206,6 +257,11 @@ Remove the Model X code with the next change to the sketch.
 
 ## 9. Safety findings
 
+Status of findings 1, 5 and 7 (2026-11-13): **fixed in code, not
+deployed, not flashed.** The Pi change and the sketch change are on a
+branch, not on `main`. Nothing in this section ran on the robot. The
+deploy order is in section 9.1.
+
 1. **A lost pulse keeps its last value.** The interrupt routines change a
    channel only on a pulse edge. Nothing times out a channel. The sketch
    still sends a line each 20 ms, and the Pi marks each line as fresh. Thus
@@ -222,6 +278,15 @@ Remove the Model X code with the next change to the sketch.
    cannot trigger the e-stop. A channel with no pulse since the last reset
    reads 1500 µs. For a frozen CH3 at 2000 µs, the only backstop is the
    600 s idle auto-disarm, and it needs neutral sticks.
+   **Fix (code only, 2026-11-13):** the sketch sends `0` for a channel with
+   no complete pulse for 100 ms, and for a channel with no pulse since the
+   reset. The Pi disarms and latches on `0` on CH3 or CH5, holds the track
+   neutral on CH1 or CH2, and stops FOLLOW_ME on CH4 (section 7). A loss in
+   the middle of a pulse now gives `0` after 100 ms: the pull-up holds the
+   pin high, so the pulse never ends. A stray edge can still give a wrong
+   width inside 500 µs to 2500 µs for up to 100 ms. Tests:
+   `tools/arduino_rc_reader_host_test/test_rc_channel.cpp`,
+   `pi_app/tests/test_rc_no_signal_safety.py`. Open: bench check 7.
 2. **Transmitter off is tested. A link loss with the transmitter on is not.**
    Stand test step 5, 2026-11-11 21:04: Kevin switched the transmitter off
    with the arm switch up. In the next 0.05 s, ch3 read 1004 µs and ch4 read
@@ -248,12 +313,52 @@ Remove the Model X code with the next change to the sketch.
    the logs stay in 992 µs to 2004 µs, at the default (maximum) travel of
    the transmitter. A change of the transmitter travel or of the receiver
    mode can cause this. Latent; source: agent review, sketch line 188.
+   **Fix (code only, 2026-11-13):** the valid range is 500 µs to 2500 µs
+   (S1, section 7). The sketch sends `0`, not 1500 µs, while the last
+   pulse is outside it. The Pi reads `0` as "no signal", never as
+   neutral, and drops a line with any other value outside the range. A
+   CH5 pulse from 1800 µs to 2500 µs now triggers the e-stop. A CH5 pulse
+   above 2500 µs gives `0`: the robot disarms and latches, without the
+   power-off.
 6. **No effect now: the Model X code has no motor-command timeout.** If the
    Pi stops sending, the sketch keeps the last Model X command on D7 to
    D12. The board is removed (section 5), so nothing moves.
 7. **Low: `millis()` wraps after 49.7 days.** The CSV timing comparison
    then can stop the CSV. The Pi sees a stale stream and disarms, which is
-   safe.
+   safe. **Fix (code only, 2026-11-13):** the repo sketch compares an
+   unsigned difference, which stays correct across the wrap. The
+   `micros()` wrap (71.6 minutes) is also handled: a channel that timed out
+   stays at `0` until its next pulse.
+
+### 9.1 Deploy order for the fixes of findings 1, 5 and 7
+
+WARNING: Do the steps in this order. A 6-field line or a `0` from the new
+firmware goes to a Pi that does not have the parser change. The old parser
+drops each 6-field line, so the RC link goes stale after 1 s and the robot
+disarms. That is safe, but the robot cannot be driven.
+
+1. Deploy the Pi change first (requirement S12). It is backward compatible
+   with the flashed firmware: the 5-field lines give the same values as
+   before. A merge to `main` restarts `wall-e` on the robot within
+   5 minutes, so do it with the robot disarmed and no cook on the smoker.
+2. Check the Pi change with the flashed firmware: arm, drive, disarm, and
+   use the e-stop switch as before. The journal must show no
+   `RC CHn NO SIGNAL` line.
+3. Build the sketch for the Nano with the Arduino toolchain
+   (`arduino:avr:nano:cpu=atmega328old`). The Mac has no AVR toolchain;
+   the Pi has one (section 10, check 2). Stop `wall-e` first, because it
+   holds the Arduino port. Upload at 57600 baud. Keep the `dcc550e` image
+   (section 10, check 2) as the fallback.
+4. Run `python3 -m pi_app.cli.monitor_rc` with `wall-e` stopped. Expect 6
+   fields, CH6 as `NOSIG` if no CH6 lead is connected, and the other
+   channels as before.
+5. Do bench checks 6 and 7 of section 10 on the stand, with `wall-e`
+   stopped.
+6. Start `wall-e`, with the robot on the stand and the wheels free. Arm,
+   then disconnect the CH3 signal lead. Expect a disarm and the journal
+   line `RC CH3 NO SIGNAL`. Connect the lead with the arm switch still up.
+   Expect no arm until the switch goes OFF and ON. Do the same with the
+   CH5 lead: expect a disarm and no power-off.
 
 ## 10. Open checks
 
@@ -301,10 +406,14 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    `python3 -m pi_app.cli.monitor_rc`. Put the arm switch up. Hold CH1
    forward with a rubber band. Put the transmitter in a closed metal box
    (an unplugged microwave oven is sufficient) for 5 s. Record ch1 to ch5.
-   Do it again with the stick released.
+   Do it again with the stick released. With the new firmware, `NOSIG`
+   means that the receiver stops its outputs at a link loss. Values mean
+   that it sends failsafe positions: record them.
 7. **Lead loss.** Run `python3 -m pi_app.cli.monitor_rc`. Put the arm switch
-   up. Disconnect the CH3 signal lead at the Arduino. Record ch3. Finding 1
-   expects ch3 to stay near 2000 µs.
+   up. Disconnect the CH3 signal lead at the Arduino. Record ch3. With the
+   flashed firmware (`dcc550e`), finding 1 expects ch3 to stay near
+   2000 µs. With the new firmware (section 9.1), expect `NOSIG` about
+   0.1 s after the disconnection.
 8. **Model X.** Done. Kevin, 2026-11-13: the board is removed. The Arduino
    used to control it.
 9. **Rover pin order and pull-ups.** Pin order done (Kevin, 2026-11-13):
@@ -432,6 +541,9 @@ Requirements:
 - **S12. The Pi changes first.** The Pi parser must accept 6 fields and the
   "no signal" value before a firmware sends them (section 7). Kevin,
   2026-11-13: the code can come later, but the CH6 wire must exist now.
+  Status, 2026-11-13: the Pi change, the sketch change (S1 range, S2
+  timeout, CH6) and their tests are written, on a branch. Not deployed,
+  not flashed. Deploy order: section 9.1.
 - **S13. Receiver mount, if there is room.** Kevin, 2026-11-13: "It'd be
   nice to have the real estate to put the receiver on the board. Leave me
   some screw holes to 3D print a clip to attach it if we have the room."
@@ -657,7 +769,11 @@ pin, pull-up, sketch, firmware, stand, rubber band, microwave oven, ID
 EEPROM, GPIO 0, GPIO 1, VBUS, USB hub, OAK, prototype, A0, avrdude,
 `arduino-builder`, avr-gcc, FQBN, bootloader, ICSP, DTR, CH340C, RP2040,
 Pico, Grok, flash image, MD5, `millis()`, Howes Models, C-06A, servo lead,
-pin header, female header, DIP-30, continuity, meter, power row.
+pin header, female header, DIP-30, continuity, meter, power row,
+`RC_NO_SIGNAL_US`, `RC_NO_SIGNAL_DISARM`, `rc_no_signal`,
+`rc_signal_restored`, `NOSIG`, `rc_channel.h`, `rc_signal.py`, no signal,
+debounce, re-arm latch, person stop hold, vision-hang restart, pack-low
+latch, AVR, toolchain, branch, `main`, `dcc550e`, `5f275d0`.
 
 **Technical Verbs:** arm, disarm, enumerate, latch, mix, parse, power off,
-stack.
+stack, deploy, flash, upload.
