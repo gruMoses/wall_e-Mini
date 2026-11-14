@@ -9,6 +9,15 @@ This script performs complete IMU calibration including:
 4. Temperature compensation
 5. Calibration validation and quality metrics
 
+NOTE (2026-11-13): this tool is for the EXTERNAL I2C breakout IMU
+(ICM-20948 or ISM330DHCX + MMC5983MA, ``ImuReader``). The robot's active IMU
+is the OAK-D BMI270 (``imu_source = "oak_d"``, ``OakImuReader``), which
+calibrates its own gyro bias at boot and has no magnetometer. The external IMU
+is parked (docs/external_imu_postmortem.md). Before this fix the tool read
+``self.imu.imu`` / ``self.imu.mag``, attributes ``ImuReader`` does not have
+(it keeps ``icm`` / ``ism`` / ``mmc`` and a ``mode``), so every sample read
+raised and no samples were collected.
+
 Usage:
     python calibrate_imu.py [--interactive] [--validate-only]
 
@@ -59,6 +68,55 @@ class ImuCalibrator:
                              use_magnetometer=config.imu_use_magnetometer)
         self.calibration = CalibrationData()
 
+    # -- Raw sensor access through the real ImuReader API (mode/icm/ism/mmc) --
+
+    def _refresh_icm(self) -> None:
+        icm = self.imu.icm
+        if getattr(icm, 'dataReady', lambda: False)():
+            icm.getAgmt()
+
+    def read_gyro_raw_dps(self) -> Tuple[float, float, float]:
+        """Raw gyro (deg/s), bias not subtracted."""
+        if self.imu.mode == 'ICM20948':
+            self._refresh_icm()
+            i = self.imu.icm
+            return (float(getattr(i, 'gxRaw', 0.0)) / 131.0,
+                    float(getattr(i, 'gyRaw', 0.0)) / 131.0,
+                    float(getattr(i, 'gzRaw', 0.0)) / 131.0)
+        if self.imu.mode == 'ISM_MMC':
+            g = self.imu.ism.get_gyro()
+            return tuple((getattr(g, a, 0.0) or 0.0) / 1000.0
+                         for a in ('xData', 'yData', 'zData'))
+        raise RuntimeError('IMU not initialized (ImuReader.mode is None)')
+
+    def read_accel_g(self) -> Tuple[float, float, float]:
+        if self.imu.mode == 'ICM20948':
+            self._refresh_icm()
+            i = self.imu.icm
+            return (float(getattr(i, 'axRaw', 0.0)) / 16384.0,
+                    float(getattr(i, 'ayRaw', 0.0)) / 16384.0,
+                    float(getattr(i, 'azRaw', 0.0)) / 16384.0)
+        if self.imu.mode == 'ISM_MMC':
+            a = self.imu.ism.get_accel()
+            return tuple((getattr(a, k, 0.0) or 0.0) / 1000.0
+                         for k in ('xData', 'yData', 'zData'))
+        raise RuntimeError('IMU not initialized (ImuReader.mode is None)')
+
+    def read_mag_gauss(self) -> Tuple[float, float, float]:
+        """Raw magnetometer in Gauss, axis-mapped like ImuReader.read()."""
+        if self.imu.mode == 'ICM20948':
+            self._refresh_icm()
+            i = self.imu.icm
+            m = (float(getattr(i, 'mxRaw', 0.0)) * 0.0015,
+                 float(getattr(i, 'myRaw', 0.0)) * 0.0015,
+                 float(getattr(i, 'mzRaw', 0.0)) * 0.0015)
+        elif self.imu.mode == 'ISM_MMC' and self.imu.mmc is not None:
+            m = self.imu.mmc.get_measurement_xyz_gauss()
+        else:
+            raise RuntimeError('No magnetometer (use_magnetometer is off or '
+                               'the device has none)')
+        return self.imu._map_mag_axes(*m)
+
     def load_existing_calibration(self) -> bool:
         """Load existing calibration if available."""
         if self.calibration_path.exists():
@@ -100,11 +158,7 @@ class ImuCalibrator:
 
         while time.monotonic() - start_time < duration_s:
             try:
-                g = self.imu.imu.get_gyro()
-                gx = (g.xData or 0.0) / 1000.0
-                gy = (g.yData or 0.0) / 1000.0
-                gz = (g.zData or 0.0) / 1000.0
-                samples.append((gx, gy, gz))
+                samples.append(self.read_gyro_raw_dps())
                 time.sleep(0.01)
             except Exception as e:
                 print(f"   Error reading gyro: {e}")
@@ -119,7 +173,7 @@ class ImuCalibrator:
         bias_z = sum(s[2] for s in samples) / len(samples)
 
         self.calibration.gyro_bias_dps = (bias_x, bias_y, bias_z)
-        print(".2f")
+        print(f"   Gyro bias (deg/s): x={bias_x:.3f} y={bias_y:.3f} z={bias_z:.3f}")
         # Update IMU reader with new bias
         self.imu.gyro_bias_dps = self.calibration.gyro_bias_dps
 
@@ -146,14 +200,11 @@ class ImuCalibrator:
 
             while time.monotonic() - start_time < duration_s:
                 try:
-                    a = self.imu.imu.get_accel()
-                    ax = (a.xData or 0.0) / 1000.0
-                    ay = (a.yData or 0.0) / 1000.0
-                    az = (a.zData or 0.0) / 1000.0
-                    samples.append((ax, ay, az))
+                    samples.append(self.read_accel_g())
                     time.sleep(0.01)
                 except Exception as e:
                     print(f"   Error reading accel: {e}")
+                    time.sleep(0.1)
 
             if samples:
                 # Average samples for this orientation
@@ -161,7 +212,7 @@ class ImuCalibrator:
                 avg_y = sum(s[1] for s in samples) / len(samples)
                 avg_z = sum(s[2] for s in samples) / len(samples)
                 accel_samples.append((avg_x, avg_y, avg_z))
-                print(".3f")
+                print(f"   mean g: x={avg_x:.3f} y={avg_y:.3f} z={avg_z:.3f}")
         if len(accel_samples) < 6:
             raise RuntimeError("Need samples from all 6 orientations")
 
@@ -184,7 +235,8 @@ class ImuCalibrator:
         self.calibration.accel_bias_g = (bias_x, bias_y, bias_z)
         self.calibration.accel_scale = (scale_x, scale_y, scale_z)
 
-        print(".3f")
+        print(f"   Accel bias (g): {self.calibration.accel_bias_g}")
+        print(f"   Accel scale: {self.calibration.accel_scale}")
         # Update IMU reader (though it doesn't currently use accel calibration)
         # self.imu.accel_bias_g = self.calibration.accel_bias_g
         # self.imu.accel_scale = self.calibration.accel_scale
@@ -203,7 +255,7 @@ class ImuCalibrator:
 
         while time.monotonic() - start_time < duration_s:
             try:
-                mx, my, mz = self.imu.mag.get_measurement_xyz_gauss()
+                mx, my, mz = self.read_mag_gauss()
                 samples.append((mx, my, mz))
                 time.sleep(0.05)  # Slower sampling for mag
             except Exception as e:
@@ -227,7 +279,7 @@ class ImuCalibrator:
         offset_z = (max_z + min_z) / 2.0
 
         self.calibration.mag_offsets_g = (offset_x, offset_y, offset_z)
-        print(".3f")
+        print(f"   Mag offsets (Gauss): {self.calibration.mag_offsets_g}")
         # Update IMU reader with new offsets
         self.imu.mag_offsets_g = self.calibration.mag_offsets_g
 
@@ -245,7 +297,7 @@ class ImuCalibrator:
 
         while time.monotonic() - start_time < duration_s:
             try:
-                mx, my, mz = self.imu.mag.get_measurement_xyz_gauss()
+                mx, my, mz = self.read_mag_gauss()
                 # Apply hard iron correction first
                 mx -= self.calibration.mag_offsets_g[0]
                 my -= self.calibration.mag_offsets_g[1]
@@ -320,10 +372,9 @@ class ImuCalibrator:
 
         quality_score = (heading_quality + stability_quality + attitude_quality) / 3.0
 
-        print(".1f")
-        print(".2f")
-        print(".2f")
-        print(".2f")
+        print(f"   Quality score: {quality_score:.1f}/100")
+        print(f"   Heading std {heading_std:.2f} deg, yaw-rate std {yaw_rate_std:.2f} deg/s")
+        print(f"   Roll std {roll_std:.2f} deg, pitch std {pitch_std:.2f} deg")
         if quality_score > 80:
             print("🎉 Excellent calibration quality!")
         elif quality_score > 60:
