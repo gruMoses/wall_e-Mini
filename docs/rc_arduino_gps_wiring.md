@@ -591,9 +591,15 @@ Decisions (Kevin, 2026-11-13):
       the high side. At the Pi's default 100 kHz the edges are fine.
     - The two I2C cut jumpers are removed: the pinout is confirmed four
       ways above.
-    - Residual (electrical audit item 4): if F3 trips, the rover's rail
-      falls and the shifter conducts, so the rover's pull-ups to a dead
-      rail load I2C bus 1, which the UPS gauge shares. Fault case only.
+    - Residual (electrical audit item 4, refined by the Grok shifter
+      review, session `17a6b264-ec2a-4bc5-be4a-21772be526d7`): if F3
+      trips, the rover's rail falls. If that dead rail is a low impedance
+      to ground, the shifter conducts and the rover's pull-ups hold I2C
+      bus 1 low, which the UPS gauge shares. If the dead rail floats, the
+      bus stays high at about 2.9 V and the rover browns out. Fault case
+      only.
+    - Built as `d5f5a7f` in `gruMoses/hardware-projects`: ERC 0, DRC 0,
+      the shifter as audited, J2 pad 4 on the header 5 V through F3.
 
 ## Appendix: Technical Names and Technical Verbs
 
