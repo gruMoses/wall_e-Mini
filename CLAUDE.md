@@ -120,8 +120,12 @@ robot worse — correcting the FOV without (3) filters the operator out at
 `~/Documents/screenshots/WALLE-constant-audit.md`.
 
 Open: `detect_min_person_height_m = 1.20` was tuned against implied heights
-recorded under the inflated VFOV, so it may now be too aggressive. Needs one
-recorded walk replayed through `tools/replay_follow_me_log.py`.
+recorded under the inflated VFOV, so it may now be too aggressive. 2026-11-14
+research: `tools/replay_follow_me_log.py` CANNOT test it (it rebuilds each
+detection with a dummy (0, 0, 1, 1) box, so Rule 3 never fires), and the
+per-detection `detections` block (bbox + z) is only in logs from 2026-11-04 on.
+Needs a recorded walk out to about 8 m with that block on every FOLLOW_ME tick
+(head unclipped beyond about 2.3 m), or the 2026-11-08 logs if they carry it.
 
 ### OAK-D Lite Camera
 - Obstacle avoidance: depth corridor, valid-pixel % threshold, tiered speed reduction/stop.
