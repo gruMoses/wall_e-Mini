@@ -495,11 +495,15 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    the 50 Hz mode. Measured 2026-11-14 (Kevin's dial caliper; photos
    `docs/data/shield_inputs_20261113/receiver_*_dial_20261114.jpg`): the
    body is 1.30 x 0.785 x 0.40 in (33.0 x 19.9 x 10.2 mm). The antenna
-   leaves one short end. The other end has a block of 18 FEMALE sockets
-   (6 channels x 3) on the top face: the leads plug in from above. There is
-   no power row. EXT-V is a separate 2-pin socket on the top face, next to
-   the BIND button. Thus a lead to the receiver needs MALE pins at the
-   receiver end. Research, 2026-11-13: the seventh row is EXT-V, a sense input
+   leaves one short end. The other end has a standard MALE pin header on
+   the top face, pins pointing up: 6 rows (CH1 to CH6, numbered down the
+   side) of 3 pins, in the order S, +, - from the numbers outward (legend
+   "PWM S + -"; photo `receiver_header_pins_20261114.jpg`). There is no
+   power row. EXT-V is a separate 2-pin socket on the top face, next to the
+   BIND button. Today's harness is a black female housing on CH1 to CH5;
+   CH6's pins are bare. The shield's female-female servo leads fit. The
+   leads plug in from above, so the plug housings add height above the
+   receiver. Research, 2026-11-13: the seventh row is EXT-V, a sense input
    (section 4). Listing size: 38 x 24 x 13 mm, 7.4 g. A V3 "voltage return"
    listing gives 32 x 19 x 13 mm. Both sizes fit the shield's receiver bay.
 4. **Receiver power feed.** Answered by Kevin, 2026-11-13: the USB 5 V,
