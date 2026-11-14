@@ -385,5 +385,79 @@ class TestDetectRetriesTwice(unittest.TestCase):
         self.assertFalse(RtkGpsReader.detect(bus=1, addr=0x20, max_attempts=3))
 
 
+class TestLateDetection(unittest.TestCase):
+    """The reader keeps looking for the receiver when the bus was locked at
+    start (status audit 2026-11-10, section 5)."""
+
+    def setUp(self):
+        self._had_smbus2 = "smbus2" in sys.modules
+        self._orig_smbus2 = sys.modules.get("smbus2")
+
+    def tearDown(self):
+        if self._had_smbus2:
+            sys.modules["smbus2"] = self._orig_smbus2
+        else:
+            sys.modules.pop("smbus2", None)
+
+    def test_undetected_then_detected_readings_flow(self):
+        import time as _time
+
+        fake = FakeI2C(make_block(quality=4, sats=14))
+        state = {"opens": 0, "healthy": False}
+
+        class _Bus:
+            def __init__(self, bus):
+                state["opens"] += 1
+                if not state["healthy"]:
+                    raise OSError("bus locked")
+
+            def read_i2c_block_data(self, addr, reg, n):
+                if reg == 50:
+                    return [addr]
+                return fake.read_i2c_block_data(addr, reg, n)
+
+            def write_i2c_block_data(self, addr, reg, data):
+                fake.write_i2c_block_data(addr, reg, data)
+
+            def close(self):
+                pass
+
+        mod = types.ModuleType("smbus2")
+        mod.SMBus = _Bus
+        sys.modules["smbus2"] = mod
+
+        reader = _reader(poll_hz=50.0)
+        reader._DETECT_RETRY_S = 0.02
+        reader.start()
+        try:
+            _time.sleep(0.15)
+            self.assertIsNone(reader.get_reading())
+            self.assertGreater(state["opens"], 1)  # it kept retrying
+            state["healthy"] = True
+            deadline = _time.monotonic() + 3.0
+            while reader.get_reading() is None and _time.monotonic() < deadline:
+                _time.sleep(0.02)
+            reading = reader.get_reading()
+            self.assertIsNotNone(reading)
+            self.assertEqual(reading.fix_quality, 4)
+        finally:
+            reader.stop()
+
+    def test_stop_ends_retry_wait(self):
+        class _Never:
+            def __init__(self, bus):
+                raise OSError("bus locked")
+
+        mod = types.ModuleType("smbus2")
+        mod.SMBus = _Never
+        sys.modules["smbus2"] = mod
+        reader = _reader()
+        reader.start()  # default 30 s retry wait must not delay stop()
+        import time as _time
+        t0 = _time.monotonic()
+        reader.stop()
+        self.assertLess(_time.monotonic() - t0, 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()

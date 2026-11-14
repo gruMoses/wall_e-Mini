@@ -356,10 +356,20 @@ def run() -> int:
     waypoint_nav_ctrl = None
     if config.gps.enabled:
         try:
-            if RtkGpsReader.detect(config.gps.i2c_bus, config.gps.i2c_addr):
+            # The reader retries detection itself every 30 s, so a receiver
+            # that is absent now (I2C bus 1 locked at boot, receiver still
+            # starting) is picked up later and its readings reach
+            # controller.set_gps_reading() with no restart. The waypoint
+            # controller is therefore built either way; its start gate
+            # refuses a run while there is no GPS reading.
+            if True:
+                detected_now = RtkGpsReader.detect(config.gps.i2c_bus, config.gps.i2c_addr)
                 gps_reader = RtkGpsReader(config.gps)
                 gps_reader.start()
-                print("RTK GPS detected and started")
+                if detected_now:
+                    print("RTK GPS detected and started")
+                else:
+                    print("RTK GPS not detected — reader started, retrying every 30 s")
                 if config.waypoint_nav.enabled:
                     wp_cfg = WpNavCfg(
                         arrival_radius_m=config.waypoint_nav.arrival_radius_m,
@@ -387,8 +397,6 @@ def run() -> int:
                         print(f"  No waypoint file ({wp_file.name}); nav available but empty")
                     waypoint_nav_ctrl = WaypointNavController(wp_cfg, wps)
                     print("  Waypoint navigation available")
-            else:
-                print("RTK GPS not detected — waypoint navigation disabled")
         except Exception as e:
             print(f"RTK GPS initialization failed: {e}")
             print("  Continuing without GPS")

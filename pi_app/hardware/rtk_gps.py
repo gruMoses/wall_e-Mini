@@ -145,6 +145,9 @@ class RtkGpsReader:
 
     _REOPEN_BACKOFF_S = 1.0
     _CONSECUTIVE_ERROR_LIMIT = 10
+    # While the receiver is not found, try again this often (seconds).
+    _DETECT_RETRY_S = 30.0
+    _DETECT_LOG_EVERY = 10
 
     def __init__(self, config: GpsConfig) -> None:
         self._cfg = config
@@ -226,6 +229,35 @@ class RtkGpsReader:
 
     # -- Worker thread -------------------------------------------------------
 
+    def _try_open(self, smbus2, bus: int, addr: int):
+        """Open the bus, check the device ID and set LoRa mode.
+
+        Returns the open SMBus, or None on any failure (the bus is closed
+        first). One attempt, no sleeping.
+        """
+        try:
+            i2c = smbus2.SMBus(bus)
+        except Exception as exc:
+            logger.debug("RTK GPS: cannot open I2C bus %d: %s", bus, exc)
+            return None
+        try:
+            dev_id = i2c.read_i2c_block_data(addr, _REG_I2C_ID, 1)
+            if dev_id[0] != addr:
+                logger.debug("RTK device ID mismatch: expected 0x%02X, got 0x%02X",
+                             addr, dev_id[0])
+                i2c.close()
+                return None
+            self._ensure_lora_mode(i2c, addr)
+        except Exception as exc:
+            logger.debug("RTK GPS init failed: %s", exc)
+            try:
+                i2c.close()
+            except Exception:
+                pass
+            return None
+        logger.warning("RTK GPS initialised on I2C bus %d addr 0x%02X", bus, addr)
+        return i2c
+
     def _read_loop(self) -> None:
         try:
             import smbus2
@@ -237,24 +269,30 @@ class RtkGpsReader:
         addr = self._cfg.i2c_addr
         interval = 1.0 / max(self._cfg.poll_hz, 0.1)
 
-        try:
-            i2c = smbus2.SMBus(bus)
-        except Exception:
-            logger.exception("Failed to open I2C bus %d", bus)
-            return
-
-        try:
-            dev_id = i2c.read_i2c_block_data(addr, _REG_I2C_ID, 1)
-            if dev_id[0] != addr:
-                logger.error("RTK device ID mismatch: expected 0x%02X, got 0x%02X",
-                             addr, dev_id[0])
+        # The service can start while I2C bus 1 is locked (docs/i2c_bus_guard.md
+        # unlocks it later). Keep trying to find the receiver instead of
+        # giving up for the life of the process. One attempt per
+        # _DETECT_RETRY_S, so a stuck bus is not hammered. Log the first
+        # failure, then one line every _DETECT_LOG_EVERY failures.
+        i2c = None
+        failures = 0
+        while i2c is None and not self._stop_event.is_set():
+            i2c = self._try_open(smbus2, bus, addr)
+            if i2c is not None:
+                break
+            failures += 1
+            if failures == 1 or failures % self._DETECT_LOG_EVERY == 0:
+                logger.warning(
+                    "RTK GPS not found on I2C bus %d addr 0x%02X (%d failed "
+                    "attempts); retrying every %.0f s",
+                    bus, addr, failures, self._DETECT_RETRY_S,
+                )
+            if self._stop_event.wait(self._DETECT_RETRY_S):
                 return
-            self._ensure_lora_mode(i2c, addr)
-            logger.info("RTK GPS initialised on I2C bus %d addr 0x%02X", bus, addr)
-        except Exception:
-            logger.exception("RTK GPS init failed")
-            i2c.close()
+        if i2c is None:
             return
+        if failures:
+            logger.warning("RTK GPS found after %d failed attempts", failures)
 
         try:
             while not self._stop_event.is_set():
