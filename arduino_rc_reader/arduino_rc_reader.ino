@@ -1,12 +1,24 @@
 
 
 #include <PinChangeInterrupt.h>
+#include "rc_channel.h"
 #define DEBUG 0
 
-const byte NUM_CHANNELS = 5;
-const byte chPins[NUM_CHANNELS] = {2, 3, 4, 5, 6}; // Ch1, Ch2, Ch3, Ch4, Ch5
-volatile unsigned long pulseWidths[NUM_CHANNELS] = {1500, 1500, 1500, 1500, 1500};
-volatile unsigned long pulseStart[NUM_CHANNELS] = {0, 0, 0, 0, 0};
+// Line to the Pi, every 20 ms at 115200 baud (docs/rc_arduino_gps_wiring.md,
+// section 7): ch1,ch2,ch3,ch4,ch5,ch6 in us. A channel with no complete
+// pulse for 100 ms, or with an out-of-range last pulse, sends 0
+// (RC_NO_SIGNAL_US, rc_channel.h). The Pi must accept this format first
+// (requirement S12): pi_app/hardware/arduino_rc.py.
+//
+// Ch1..Ch5 on D2..D6. Ch6 on A0 (Kevin, 2026-11-13: wired now, not used by
+// the Pi yet). A0 stays an input. Do not use D7..D12: the Model X code
+// below drives them as outputs.
+const byte NUM_CHANNELS = 6;
+const byte chPins[NUM_CHANNELS] = {2, 3, 4, 5, 6, A0};
+volatile RcPulseShared pulses[NUM_CHANNELS];  // written by the ISRs
+RcEdgeState edges[NUM_CHANNELS];              // ISRs only
+RcChannelState chState[NUM_CHANNELS];         // loop() only
+const unsigned long CSV_PERIOD_MS = 20;
 
 // Model X motor driver pin mapping (per attached photo)
 // Left motor: ENB(PWM)=D10, IN3=D7, IN4=D8
@@ -29,48 +41,35 @@ byte cmdLen = 0;
 unsigned long lastByteTime = 0;
 const unsigned long CMD_TIMEOUT_MS = 100;  // reset buffer if idle >100ms
 
-void isrCH1() {
-  if (digitalRead(chPins[0])) 
-    pulseStart[0] = micros();
-  else 
-    pulseWidths[0] = micros() - pulseStart[0];
+// Pin level first, then micros(), on both edges, so the read delay cancels
+// out of the width (the same order as the old ISRs).
+static inline void onRcEdge(byte i) {
+  const bool high = digitalRead(chPins[i]) == HIGH;
+  const uint32_t nowUs = micros();
+  rcOnEdge(edges[i], pulses[i], high, nowUs);
 }
-void isrCH2() {
-  if (digitalRead(chPins[1])) 
-    pulseStart[1] = micros();
-  else 
-    pulseWidths[1] = micros() - pulseStart[1];
-}
-void isrCH3() {
-  if (digitalRead(chPins[2])) 
-    pulseStart[2] = micros();
-  else 
-    pulseWidths[2] = micros() - pulseStart[2];
-}
-void isrCH4() {
-  if (digitalRead(chPins[3])) 
-    pulseStart[3] = micros();
-  else 
-    pulseWidths[3] = micros() - pulseStart[3];
-}
-void isrCH5() {
-  if (digitalRead(chPins[4]))
-    pulseStart[4] = micros();
-  else
-    pulseWidths[4] = micros() - pulseStart[4];
-}
+void isrCH1() { onRcEdge(0); }
+void isrCH2() { onRcEdge(1); }
+void isrCH3() { onRcEdge(2); }
+void isrCH4() { onRcEdge(3); }
+void isrCH5() { onRcEdge(4); }
+void isrCH6() { onRcEdge(5); }
 
 void setup() {
   Serial.begin(115200);
 
   for (byte i = 0; i < NUM_CHANNELS; i++) {
-    pinMode(chPins[i], INPUT_PULLUP);
+    rcInitShared(pulses[i]);
+    rcInitEdge(edges[i]);
+    rcInitChannel(chState[i]);
+    pinMode(chPins[i], INPUT_PULLUP);  // a lead that is off reads high: no edges, so no signal
   }
   attachPCINT(digitalPinToPCINT(chPins[0]), isrCH1, CHANGE);
   attachPCINT(digitalPinToPCINT(chPins[1]), isrCH2, CHANGE);
   attachPCINT(digitalPinToPCINT(chPins[2]), isrCH3, CHANGE);
   attachPCINT(digitalPinToPCINT(chPins[3]), isrCH4, CHANGE);
   attachPCINT(digitalPinToPCINT(chPins[4]), isrCH5, CHANGE);
+  attachPCINT(digitalPinToPCINT(chPins[5]), isrCH6, CHANGE);
 
   // Motor driver outputs
   pinMode(ENB_L, OUTPUT);
@@ -170,55 +169,55 @@ void processSerialCommand() {
 }
 
 void loop() {
-  static unsigned long nextCsvAt = 0;
-  static unsigned long nextDbgAt = 0;
+  static unsigned long lastCsvMs = 0;
+  static unsigned long lastDbgMs = 0;
+  static uint16_t out[NUM_CHANNELS];
+  static RcPulseShared snap[NUM_CHANNELS];
   const unsigned long nowMs = millis();
 
-  // 1) Read current raw widths atomically once
-  unsigned long r0, r1, r2, r3, r4;
+  // 1) Every pass: copy the ISR values with interrupts off (multi-byte
+  //    values), then read micros() so no pulse in the copy ended after it.
+  //    Updating every pass (about 1 ms) lets the timeout latch long before
+  //    the 71.6 min micros() wrap.
+  uint32_t nowUs;
   noInterrupts();
-  r0 = pulseWidths[0];
-  r1 = pulseWidths[1];
-  r2 = pulseWidths[2];
-  r3 = pulseWidths[3];
-  r4 = pulseWidths[4];
+  for (byte i = 0; i < NUM_CHANNELS; i++) {
+    rcCopyPulse(snap[i], pulses[i]);
+  }
+  nowUs = micros();
   interrupts();
 
-  // 2) Sanitize locally (bounds widened per receiver behavior)
-  auto clamp = [](unsigned long v) { return (v < 800 || v > 2200) ? 1500UL : v; };
-  unsigned long f0 = clamp(r0);
-  unsigned long f1 = clamp(r1);
-  unsigned long f2 = clamp(r2);
-  unsigned long f3 = clamp(r3);
-  unsigned long f4 = clamp(r4);
-
-  // 3) Output CSV at ~50 Hz (20 ms)
-  if (nowMs >= nextCsvAt) {
-    Serial.print(f0); Serial.print(',');
-    Serial.print(f1); Serial.print(',');
-    Serial.print(f2); Serial.print(',');
-    Serial.print(f3); Serial.print(',');
-    Serial.println(f4);
-    nextCsvAt = nowMs + 20;
+  // 2) Width, or RC_NO_SIGNAL_US for a timed-out or out-of-range channel.
+  for (byte i = 0; i < NUM_CHANNELS; i++) {
+    out[i] = rcChannelOutput(chState[i], snap[i], nowUs);
   }
 
-  // 4) Optional debug output at ~2 Hz
+  // 3) Output CSV at ~50 Hz (20 ms). The unsigned difference stays right
+  //    across the 49.7-day millis() wrap (safety finding 7).
+  if ((unsigned long)(nowMs - lastCsvMs) >= CSV_PERIOD_MS) {
+    for (byte i = 0; i < NUM_CHANNELS; i++) {
+      if (i > 0) Serial.print(',');
+      Serial.print(out[i]);
+    }
+    Serial.println();
+    lastCsvMs = nowMs;
+  }
+
+  // 4) Optional debug output at ~2 Hz. The Pi drops these lines.
 #if DEBUG
-  if (nowMs >= nextDbgAt) {
-    Serial.print("DBG raw:");
-    Serial.print(r0); Serial.print(',');
-    Serial.print(r1); Serial.print(',');
-    Serial.print(r2); Serial.print(',');
-    Serial.print(r3); Serial.print(',');
-    Serial.print(r4);
-    Serial.print(" filtered:");
-    Serial.print(f0); Serial.print(',');
-    Serial.print(f1); Serial.print(',');
-    Serial.print(f2); Serial.print(',');
-    Serial.print(f3); Serial.print(',');
-    Serial.println(f4);
-    nextDbgAt = nowMs + 500;
+  if ((unsigned long)(nowMs - lastDbgMs) >= 500UL) {
+    Serial.print("DBG width/seq/age_us:");
+    for (byte i = 0; i < NUM_CHANNELS; i++) {
+      Serial.print(' ');
+      Serial.print(snap[i].widthUs); Serial.print('/');
+      Serial.print(snap[i].seq); Serial.print('/');
+      Serial.print((uint32_t)(nowUs - snap[i].endUs));
+    }
+    Serial.println();
+    lastDbgMs = nowMs;
   }
+#else
+  (void)lastDbgMs;
 #endif
 
   // 5) Handle incoming motor commands from Pi every pass
