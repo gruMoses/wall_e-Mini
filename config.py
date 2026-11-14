@@ -199,12 +199,18 @@ class RcMapConfig:
     forward_full_us: int = 1950  # >= maps to 255
     reverse_full_us: int = 1050  # <= maps to 0
     # Stick expo (2026-09-27, Kevin: small movements near the centre really
-    # slow, the edge "just go"): y = (1 - e) x + e x^3 on each track's
-    # deflection after the pulse-to-byte map. RC MANUAL only; the phone
-    # teleop and the autonomous modes do not use it. At 0.6: quarter stick
-    # gives 0.11 of full (linear 0.25), half stick 0.28 (0.50), three
-    # quarters 0.55 (0.75), full stick unchanged. The straight-intent and
-    # arming checks still read the raw pulses. 0.0 = linear.
+    # slow, the edge "just go"): ratio-preserving expo on the track PAIR
+    # after the pulse-to-byte map (pi_app/control/mapping.py,
+    # apply_stick_expo_pair). With m = the larger track deflection, both
+    # tracks are multiplied by k = (1 - e) + e * m^2, so the larger track
+    # follows y = (1 - e) m + e m^3 while the left:right ratio (the turn
+    # radius) is unchanged. Per-track expo was rejected in review
+    # (2026-09-27): it amplified a small stick difference near full stick.
+    # RC MANUAL only; the phone teleop and the autonomous modes do not use
+    # it. At 0.6 the larger track gives: quarter stick 0.11 of full (linear
+    # 0.25), half stick 0.28 (0.50), three quarters 0.55 (0.75), full stick
+    # unchanged. The straight-intent and arming checks still read the raw
+    # pulses. 0.0 = linear.
     stick_expo: float = 0.6
 
 
@@ -1369,7 +1375,7 @@ class ArmsUpConfig:
 
 @dataclass(frozen=True)
 class BmsConfig:
-    """Configuration for Daly BMS Bluetooth communication (SPIM08HP)."""
+    """Configuration for the BMS Bluetooth link (JHB-R24TH-V1.3, Daly-app compatible)."""
     enabled: bool = True                   # enabled -- BMS MAC confirmed 2026-04-01
     bms_mac_address: str = "50:19:05:01:09:4E"  # JHB-50190501094E discovered 2026-04-01
     bms_poll_interval_s: float = 8.0       # seconds between full polls
@@ -1465,9 +1471,11 @@ class OakDetectionConfig:
     # masks with last-published boxes and the safety-tier override already
     # reads last-published detections.
     poll_detections_first: bool = True
-    # 0 = unspecified (today's requestOutput calls, no fps=). Reserved for
-    # the next A/B; when > 0 pass fps= to every Camera.requestOutput in the
-    # YOLO pipeline (colour NN, colour preview/hand, both mono outputs).
+    # 0 = unspecified (requestOutput calls without fps=). When > 0, fps= is
+    # passed to every Camera.requestOutput in the YOLO pipeline (colour NN,
+    # colour preview/hand, both mono outputs). IN USE at 15.0 and
+    # load-bearing: removing it brings back the 0.80 s detection latency
+    # (re-measure oak.det_latency_s before any change).
     camera_fps: float = 15.0
     # 2026-11-06: the OAK's USB 3 (SuperSpeed) link jams the RTK GPS; the
     # antenna is within 30 cm of the hub. Measured outdoors: camera idle,

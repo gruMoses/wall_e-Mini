@@ -10,7 +10,7 @@
 # in this checkout. The wake check is a oneshot
 # that only matters at boot. Auto-deploy does NOT restart this service:
 # re-run this script after changing bin/walle_ups.py or either unit file
-# (for example when --supply-v changes from 8.4 to 7.6 with the robot buck).
+# (for example when --supply-v changes from 8.4 to 7.5 with the robot buck).
 # See docs/ups_hat_b.md.
 set -euo pipefail
 

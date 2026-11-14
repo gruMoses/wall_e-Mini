@@ -9,7 +9,7 @@ Hardware facts (schematic UPS_HAT_B_Schematic.pdf, read 2026-11-03):
     wired straight to the 2S 18650 pack node through the HY2120-driven
     protection MOSFETs. Whatever voltage the jack supplies is the voltage
     the pack floats at, so the robot's buck setpoint IS the charge limit
-    (7.6 V = 3.80 V/cell, about 50 %, Kevin's choice).
+    (7.5 V since 2026-11-04 = 3.75 V/cell; it was 7.6 V at first; Kevin's choice).
   * The only sensor is an INA219 at I2C 0x42 across a shunt in the BATTERY
     leg. The schematic labels it 0.1R; the readings say 10 mOhm: on the
     bench (2026-11-03, brick unplugged) the shunt showed 5-9 mV while the

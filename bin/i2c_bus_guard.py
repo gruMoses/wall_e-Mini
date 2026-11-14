@@ -6,8 +6,9 @@ WHY THIS EXISTS (incident 2026-09-25 21:36:16): the kernel logged
 A device on I2C bus 1 froze mid-transfer and held SDA low. Both devices on
 that bus went dark for 17 hours until a human power-cycled the robot: the
 RTK GPS co-processor (address 0x20, read by the wall-e service) and the
-UPS HAT (B) (read by walle_ups.py / walle-ups.service, which
-triggers a graceful shutdown on real power loss). The UPS daemon logged
+UPSPlus HAT of that date (read by its daemon, since retired; the UPS HAT (B)
+and walle_ups.py / walle-ups.service replaced it on 2026-11-03 and sit on the
+same bus, so the same failure applies to them). The UPS daemon logged
 "WARNING: I2C read error (N consecutive)" every ~10 s the whole time and its
 /tmp/ups_status.json status file went stale, but nothing on the Pi 5 clears
 a stuck bus on its own -- there is no GPIO bus-recovery configured for this

@@ -2783,9 +2783,12 @@ def create_nav_blueprint(controller=None, estop_check=None) -> Blueprint:
             northeast, northwest, southeast, southwest.
 
         NOTE: the robot must already be armed via the RC transmitter
-        (ch3 / throttle stick high) before it will move. This endpoint
-        queues the waypoint and activates nav mode; motion starts as
-        soon as the arm condition is satisfied.
+        (ch3 high) for the request to be useful. Arming does NOT start
+        motion later: this endpoint activates WAYPOINT_NAV only when the
+        start gate passes (GPS, heading, vision), and the controller drops
+        WAYPOINT_NAV back to MANUAL on the first tick on which the robot is
+        disarmed. A request while disarmed therefore does not wait for the
+        arm switch; arm first, then call this endpoint.
 
         Response:
             {"ok": true, "target_lat": x, "target_lon": y}

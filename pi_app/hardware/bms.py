@@ -1,7 +1,7 @@
 """
 Daly BMS Bluetooth service for WALL-E Mini.
 
-Polls the Daly SPIM08HP BMS over BLE (bleak) in a background thread.
+Polls the JHB-R24TH-V1.3 BMS (Daly-app compatible) over BLE (bleak) in a background thread.
 Thread-safe access to the latest battery state via get_state() / is_charging().
 
 Fail-open charger inhibit: if the BMS has been unreachable for longer than
