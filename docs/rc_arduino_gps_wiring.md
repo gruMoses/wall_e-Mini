@@ -613,11 +613,15 @@ Requirements:
   the dual M.2 NVMe carrier on brass standoffs (PCIe ribbon under it, SSD
   in slot 1, slot 2 empty), then the CAN HAT on a stacking header. The
   CAN HAT's pins stand about 8 mm above its top face (a standard stacking
-  header). The terminal block is about the same height. Pi top face to
-  CAN HAT top face: 1.230 in (31.2 mm), read on the dial. Thus, with J1
-  seated (8.5 mm body), the shield's underside is about 8.5 mm above the
-  CAN HAT and about 21 mm above the NVMe carrier (estimate from the photo:
-  carrier top face to CAN HAT top face about 12.5 mm). The south standoffs (H3, H4) land on
+  header). Dial readings (the dial is 1 in per turn, 0.01 in per mark):
+  the terminal block top is 0.355 in (9.0 mm) above the CAN HAT's top
+  face, about 1 mm more than the pins; Pi top face to CAN HAT top face is
+  1.29 in (32.8 mm). Thus the terminal block, not J1 (8.5 mm body), sets
+  the gap: the shield's underside rests on the block, 9.0 mm above the
+  CAN HAT, and the pins engage about 7.5 mm in J1. The shield's underside
+  is about 21.5 mm above the NVMe carrier (photo estimate: carrier top
+  face to CAN HAT top face about 12.5 mm) and about 41.8 mm above the Pi.
+  Standoff lengths do not change the copper; confirm them before buying. The south standoffs (H3, H4) land on
   the carrier, not on the Pi. The SSD in slot 1 appears to cover one of
   the carrier's two holes on that side.
 - **S9. USB link.** The 40-pin header has no USB lines. Kevin's short cable
