@@ -5,10 +5,11 @@
 #define DEBUG 0
 
 // Line to the Pi, every 20 ms at 115200 baud (docs/rc_arduino_gps_wiring.md,
-// section 7): ch1,ch2,ch3,ch4,ch5,ch6 in us. A channel with no complete
-// pulse for 100 ms, or with an out-of-range last pulse, sends 0
-// (RC_NO_SIGNAL_US, rc_channel.h). The Pi must accept this format first
-// (requirement S12): pi_app/hardware/arduino_rc.py.
+// section 7): ch1,ch2,ch3,ch4,ch5,ch6*HH in us, HH = CRC-8 of the text
+// before '*'. A channel with no complete pulse for 100 ms, or with an
+// out-of-range last pulse, sends 0 (RC_NO_SIGNAL_US, rc_channel.h). The Pi
+// must accept this format first (requirement S12):
+// pi_app/hardware/arduino_rc.py.
 //
 // Ch1..Ch5 on D2..D6. Ch6 on A0 (Kevin, 2026-11-13: wired now, not used by
 // the Pi yet). A0 stays an input. Do not use D7..D12: the Model X code
@@ -194,12 +195,11 @@ void loop() {
 
   // 3) Output CSV at ~50 Hz (20 ms). The unsigned difference stays right
   //    across the 49.7-day millis() wrap (safety finding 7).
+  //    The line ends in "*HH", a CRC-8 of the text before it (rc_channel.h).
   if ((unsigned long)(nowMs - lastCsvMs) >= CSV_PERIOD_MS) {
-    for (byte i = 0; i < NUM_CHANNELS; i++) {
-      if (i > 0) Serial.print(',');
-      Serial.print(out[i]);
-    }
-    Serial.println();
+    static char line[RC_LINE_BUF_SIZE];
+    rcFormatLine(line, out, NUM_CHANNELS);
+    Serial.println(line);
     lastCsvMs = nowMs;
   }
 

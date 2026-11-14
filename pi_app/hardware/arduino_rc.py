@@ -8,9 +8,12 @@ from typing import Optional, Tuple, List
 import glob
 
 from pi_app.control.rc_signal import (
+    RC_LEGACY_MAX_US,
+    RC_LEGACY_MIN_US,
     RC_NO_SIGNAL_US,
     RC_VALID_MAX_US,
     RC_VALID_MIN_US,
+    rc_line_crc8,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,13 +37,15 @@ except Exception as exc:  # pragma: no cover
     ) from exc
 
 
-# Line formats (docs/rc_arduino_gps_wiring.md, section 7):
-#   5 fields  ch1,ch2,ch3,ch4,ch5      today's firmware (dcc550e)
-#   6 fields  ch1,ch2,ch3,ch4,ch5,ch6  the firmware with the no-pulse rule
-# Each field is a width in us (RC_VALID_MIN_US..RC_VALID_MAX_US) or the
-# RC_NO_SIGNAL_US sentinel (0). The old 4-field format (no ch4) is no longer
-# accepted: no firmware since 5f275d0 sends it, and a 4-field line is now
-# most likely the tail of a 5-field line, with every channel shifted.
+# Line formats (docs/rc_arduino_gps_wiring.md, section 7;
+# pi_app/control/rc_signal.py):
+#   ch1,ch2,ch3,ch4,ch5          today's firmware (dcc550e): 800..2200 us
+#   ch1,ch2,ch3,ch4,ch5,ch6*HH   the firmware with the no-pulse rule: each
+#                                field 500..2500 us or 0 (no signal), and a
+#                                CRC-8 of the text before "*"
+# The old 4-field format (no ch4) is no longer accepted: no firmware since
+# 5f275d0 sends it, and a 4-field line is now most likely the tail of a
+# 5-field line, with every channel shifted.
 CSV_FIELDS_5 = 5
 CSV_FIELDS_6 = 6
 BAUD_RATE = 115200
@@ -49,7 +54,8 @@ DETECTION_WINDOW_S = 5.0
 STEADY_READ_TIMEOUT_S = 1.0
 
 # Digits only: no sign, no spaces, no "1_500" (int() accepts that).
-_LINE_RE = re.compile(r"^\d{1,4}(?:,\d{1,4}){4,5}$")
+_LINE5_RE = re.compile(r"^\d{3,4}(?:,\d{3,4}){4}$")
+_LINE6_RE = re.compile(r"^(\d{1,4}(?:,\d{1,4}){5})\*([0-9A-F]{2})$")
 
 # Sanitization
 MIN_ACCEPTABLE_US = RC_VALID_MIN_US
@@ -135,22 +141,32 @@ def discover_arduino_port(preferred: Optional[str] = "/dev/ttyUSB0") -> Optional
 def _parse_csv_line(line: str) -> Optional[ParsedLine]:
     """Parse one stripped line into (ch1, ch2, ch3, ch4, ch5, ch6 or None).
 
-    5 or 6 fields of plain digits. Each field must be a valid width or the
-    RC_NO_SIGNAL_US sentinel; any other value means a corrupt line (neither
-    firmware sends one: dcc550e clamps to 800..2200), so the whole line is
-    dropped, not one field, because a corrupt line can have its fields
-    shifted. A dropped line does not refresh the frame stamp, so a stream of
-    them goes RC-stale after 1 s.
+    - 6 fields + CRC: the CRC must match, and each field must be a width
+      (RC_VALID_MIN_US..RC_VALID_MAX_US) or the RC_NO_SIGNAL_US sentinel.
+    - 5 fields (today's firmware): each field must be RC_LEGACY_MIN_US..
+      RC_LEGACY_MAX_US, the only values dcc550e sends. Without a CRC, the
+      old range is what keeps a dropped digit ("1500" -> "500") out.
+    Any other line is corrupt and is dropped whole, not one field, because
+    a corrupt line can have its fields shifted. A dropped line does not
+    refresh the frame stamp, so a stream of them goes RC-stale after 1 s.
     """
-    if not _LINE_RE.match(line):
-        return None
-    values: List[Optional[int]] = [int(p) for p in line.split(",")]
-    for v in values:
-        if v != RC_NO_SIGNAL_US and not (RC_VALID_MIN_US <= v <= RC_VALID_MAX_US):  # type: ignore[operator]
+    m6 = _LINE6_RE.match(line)
+    if m6 is not None:
+        payload, crc_hex = m6.group(1), m6.group(2)
+        if rc_line_crc8(payload.encode("ascii")) != int(crc_hex, 16):
             return None
-    if len(values) == CSV_FIELDS_5:
-        values.append(None)
-    return tuple(values)  # type: ignore[return-value]
+        values6 = [int(p) for p in payload.split(",")]
+        for v in values6:
+            if v != RC_NO_SIGNAL_US and not (RC_VALID_MIN_US <= v <= RC_VALID_MAX_US):
+                return None
+        return (values6[0], values6[1], values6[2], values6[3], values6[4], values6[5])
+    if _LINE5_RE.match(line) is not None:
+        values5 = [int(p) for p in line.split(",")]
+        for v in values5:
+            if not (RC_LEGACY_MIN_US <= v <= RC_LEGACY_MAX_US):
+                return None
+        return (values5[0], values5[1], values5[2], values5[3], values5[4], None)
+    return None
 
 
 class _LineFramer:
@@ -209,12 +225,12 @@ class ArduinoRCReader:
     Background reader that exposes the latest sanitized RC values from the Arduino.
 
     - Autodetects the serial port unless one is provided
-    - Parses lines with 5 CSV fields (ch1..ch5, today's firmware) or 6
-      (ch1..ch6, the firmware with the no-pulse rule); see _LineFramer for
-      the lines it drops
-    - A field is a width (500..2500 µs) or RC_NO_SIGNAL_US (0), kept as is;
-      a line with any other value is dropped whole (the old reader put the
-      last valid value in that field, which held a dead channel)
+    - Parses lines with 5 CSV fields (ch1..ch5, today's firmware, 800..2200
+      µs) or 6 fields and a CRC (ch1..ch6, the firmware with the no-pulse
+      rule: 500..2500 µs or RC_NO_SIGNAL_US = 0, kept as is); see
+      _parse_csv_line and _LineFramer for the lines it drops
+    - A line with a bad value is dropped whole (the old reader put the last
+      valid value in that field, which held a dead channel)
     - Applies ±25 µs deadband around 1500 µs to measured widths
     - Uses a 1.0 s read timeout during steady-state
     """

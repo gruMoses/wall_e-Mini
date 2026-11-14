@@ -11,13 +11,17 @@ Safety findings 1 and 5 of ``docs/rc_arduino_gps_wiring.md`` (2026-11-13):
 
 Wire format, Arduino to Pi, one line each 20 ms:
 
-* ``ch1,ch2,ch3,ch4,ch5``       today's firmware (``dcc550e``, flashed)
-* ``ch1,ch2,ch3,ch4,ch5,ch6``   the firmware with the no-pulse rule
+* ``ch1,ch2,ch3,ch4,ch5``          today's firmware (``dcc550e``, flashed):
+  each field 800..2200 us (the sketch sends 1500 for anything else)
+* ``ch1,ch2,ch3,ch4,ch5,ch6*HH``   the firmware with the no-pulse rule:
+  each field ``RC_VALID_MIN_US`` to ``RC_VALID_MAX_US``, or
+  ``RC_NO_SIGNAL_US`` (0) = no valid pulse on that channel for the sketch's
+  timeout (100 ms), or the last pulse was out of range. ``HH`` is
+  ``rc_line_crc8`` of the text before ``*``, two upper-case hex digits.
 
-Each field is a pulse width in us, ``RC_VALID_MIN_US`` to
-``RC_VALID_MAX_US``, or ``RC_NO_SIGNAL_US`` (0): no valid pulse on that
-channel for the sketch's timeout (100 ms), or the last pulse was out of
-range. The Pi accepts both formats (requirement S12: the Pi changes first).
+The Pi accepts both formats (requirement S12: the Pi changes first). The
+CRC is there because the wider range lets a dropped byte read as a valid
+width: "1500" without its "1" is 500 us, a full stick or a switch OFF.
 
 The reader keeps the sentinel in ``RCState`` / ``RCInputs``, so the logs show
 it. Every consumer goes through the helpers below, so that:
@@ -44,8 +48,26 @@ RC_NO_SIGNAL_US = 0
 # requirement S1). The sketch uses the same range.
 RC_VALID_MIN_US = 500
 RC_VALID_MAX_US = 2500
+# The 5-field firmware (dcc550e) sends only 800..2200 us; any other value
+# in a 5-field line is a corrupt line.
+RC_LEGACY_MIN_US = 800
+RC_LEGACY_MAX_US = 2200
 RC_NEUTRAL_US = 1500
 RC_NUM_CHANNELS = 6
+
+
+def rc_line_crc8(payload: bytes) -> int:
+    """CRC-8/SMBUS (poly 0x07, init 0, no reflection, no final XOR).
+
+    The same as rcCrc8Update() in arduino_rc_reader/rc_channel.h. Check
+    value: rc_line_crc8(b"123456789") == 0xF4.
+    """
+    crc = 0
+    for byte in payload:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
 
 # What the robot does while a channel has no signal. Used in the journal.
 _NO_SIGNAL_EFFECT = {

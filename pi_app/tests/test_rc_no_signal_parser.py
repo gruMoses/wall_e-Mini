@@ -1,10 +1,15 @@
 """Arduino RC line parser: 5 or 6 fields and the no-signal sentinel (S12).
 
 Safety findings 1 and 5 of docs/rc_arduino_gps_wiring.md: the new sketch
-sends ``ch1,ch2,ch3,ch4,ch5,ch6`` with RC_NO_SIGNAL_US (0) for a channel
-that has no valid pulse. The Pi must accept that format BEFORE any firmware
-sends it, and today's 5-field lines from today's firmware (dcc550e) must
-give exactly the same RCState as before.
+sends ``ch1,ch2,ch3,ch4,ch5,ch6*HH`` with RC_NO_SIGNAL_US (0) for a channel
+that has no valid pulse and a CRC-8 after "*". The Pi must accept that
+format BEFORE any firmware sends it, and today's 5-field lines from today's
+firmware (dcc550e) must give exactly the same RCState as before.
+
+Contract change in review (Grok, 2026-11-13): the 6-field format carries a
+CRC and 5-field lines keep the old 800..2200 range, because with 500..2500
+and no CRC a dropped "1" made "1500" a valid 500 us (full stick, switch
+OFF). So a 5-field line with a 0 is now dropped.
 """
 
 import random
@@ -14,7 +19,7 @@ import pytest
 
 serial = pytest.importorskip("serial")
 
-from pi_app.control.rc_signal import RC_NO_SIGNAL_US  # noqa: E402
+from pi_app.control.rc_signal import RC_NO_SIGNAL_US, rc_line_crc8  # noqa: E402
 from pi_app.hardware import arduino_rc  # noqa: E402
 from pi_app.hardware.arduino_rc import (  # noqa: E402
     ArduinoRCReader,
@@ -22,6 +27,18 @@ from pi_app.hardware.arduino_rc import (  # noqa: E402
     _LineFramer,
     _parse_csv_line,
 )
+
+
+def l6(values, crc=None):
+    """A 6-field line as the new sketch prints it (no line end)."""
+    payload = ",".join(str(v) for v in values)
+    if crc is None:
+        crc = rc_line_crc8(payload.encode("ascii"))
+    return f"{payload}*{crc:02X}"
+
+
+def b6(values):
+    return (l6(values) + "\r\n").encode("ascii")
 
 
 class _FakeSerial:
@@ -70,24 +87,46 @@ def test_five_fields_parse_with_no_ch6():
 
 
 def test_six_fields_parse_with_ch6():
-    assert _parse_csv_line("1600,1400,1900,1000,1000,1200") == (
+    assert _parse_csv_line(l6([1600, 1400, 1900, 1000, 1000, 1200])) == (
         1600, 1400, 1900, 1000, 1000, 1200,
     )
+
+
+def test_crc_matches_the_sketch_vectors():
+    # The same vectors as tools/arduino_rc_reader_host_test/test_rc_channel.cpp.
+    assert rc_line_crc8(b"123456789") == 0xF4
+    assert l6([1500, 1500, 2000, 1000, 1000, 1500]) == "1500,1500,2000,1000,1000,1500*25"
+    assert l6([0, 0, 0, 0, 0, 0]) == "0,0,0,0,0,0*10"
+    assert l6([992, 2004, 2004, 992, 996, 0]) == "992,2004,2004,992,996,0*AD"
+    assert l6([500, 2500, 1500, 1000, 2000, 0]) == "500,2500,1500,1000,2000,0*51"
 
 
 @pytest.mark.parametrize("idx", range(6))
 def test_the_sentinel_is_accepted_in_every_field(idx):
     values = [1500, 1500, 2000, 1000, 1000, 1500]
     values[idx] = RC_NO_SIGNAL_US
-    assert _parse_csv_line(",".join(map(str, values))) == tuple(values)
+    assert _parse_csv_line(l6(values)) == tuple(values)
 
 
-def test_sentinel_in_a_five_field_line():
-    assert _parse_csv_line("0,0,0,0,0") == (0, 0, 0, 0, 0, None)
+def test_six_field_range_edges_are_valid():
+    assert _parse_csv_line(l6([500, 2500, 500, 2500, 500, 2500])) == (500, 2500, 500, 2500, 500, 2500)
 
 
-def test_range_edges_are_valid():
-    assert _parse_csv_line("500,2500,500,2500,500,2500") == (500, 2500, 500, 2500, 500, 2500)
+def test_five_field_range_edges_are_the_old_ones():
+    assert _parse_csv_line("800,2200,800,2200,800") == (800, 2200, 800, 2200, 800, None)
+    assert _parse_csv_line("799,1500,2000,1000,1000") is None
+    assert _parse_csv_line("1500,1500,2201,1000,1000") is None
+
+
+def test_a_dropped_digit_is_never_a_valid_width():
+    """Grok review: "1500" without its "1" is 500 us, a full stick or a
+    switch OFF. The 5-field range and the 6-field CRC keep it out."""
+    assert _parse_csv_line("500,1500,1500,1000,1000") is None  # 5 fields
+    good = l6([1500, 1500, 1500, 1000, 1000, 1500])
+    payload, crc = good.split("*")
+    for i in range(len(payload)):
+        damaged = payload[:i] + payload[i + 1:] + "*" + crc
+        assert _parse_csv_line(damaged) is None, damaged
 
 
 @pytest.mark.parametrize(
@@ -95,23 +134,28 @@ def test_range_edges_are_valid():
     [
         "",
         "RC Reader initialized",
-        "DBG raw:1500,1500,1500,1500,1500 filtered:1500,1500,1500,1500,1500",
+        "DBG width/seq/age_us: 1500/12/400 1500/12/400",
         "1500,1500,2000,1000",  # 4 fields: the old ch1,ch2,ch3,ch5 format, or a tail
-        "1500,1500,2000,1000,1000,1500,1500",  # 7 fields
+        "1500,1500,2000,1000,1000,1500",  # 6 fields with no CRC
+        "1500,1500,2000,1000,1000,1500*24",  # wrong CRC (right one is 25)
+        "1500,1500,2000,1000,1000,1500*2a",  # lower-case hex
+        "1500,1500,2000,1000,1000,1500*025",
+        l6([1500, 1500, 2000, 1000, 1000, 1500, 1500]),  # 7 fields
+        l6([1500, 1500, 2000, 1000, 1000]),  # 5 fields with a CRC
+        "0,0,0,0,0",  # the sentinel in a 5-field line: dcc550e never sends it
         "1500,1500,2000,1000,",
         ",1500,1500,2000,1000,1000",
         "1500,,2000,1000,1000",
-        "1500,1500,2000,1000,1000,",
         "1500, 1500,2000,1000,1000",  # a space
         "1500,1500,2000,1000,-1",  # a sign
         "+1500,1500,2000,1000,1000",
         "1_500,1500,2000,1000,1000",  # int() would accept this
         "1500,1500,2000,1000,1000x",
         "15001500,2000,1000,1000,1500",  # merged fields
-        "499,1500,2000,1000,1000",  # below the valid range, not the sentinel
-        "1500,1500,2501,1000,1000",  # above the valid range
-        "1500,1500,2000,1000,9999",
-        "1500,1500,2000,1000,1000,1",  # ch6 out of range
+        l6([499, 1500, 2000, 1000, 1000, 1500]),  # below the valid range, CRC good
+        l6([1500, 1500, 2501, 1000, 1000, 1500]),  # above the valid range, CRC good
+        l6([1500, 1500, 2000, 1000, 1000, 1]),  # ch6 out of range, CRC good
+        l6(["01500", 1500, 2000, 1000, 1000, 1500]),  # 5 digits
     ],
 )
 def test_malformed_lines_are_dropped_whole(line):
@@ -119,40 +163,45 @@ def test_malformed_lines_are_dropped_whole(line):
 
 
 def test_zero_with_leading_zeros_is_the_sentinel():
-    # "00" is the integer 0. Neither firmware prints leading zeros; the Pi
-    # reads it as no signal, the safe direction.
-    assert _parse_csv_line("00,1500,2000,1000,1000") == (0, 1500, 2000, 1000, 1000, None)
+    # "00" is the integer 0. The sketch never prints leading zeros; with a
+    # good CRC the Pi reads it as no signal, the safe direction.
+    assert _parse_csv_line(l6(["00", 1500, 2000, 1000, 1000, 1500])) == (
+        0, 1500, 2000, 1000, 1000, 1500,
+    )
 
 
 # --- _LineFramer ---------------------------------------------------------------
 
 
+GOOD6 = [1500, 1500, 2000, 1000, 1000, 1500]
+
+
 def test_framer_drops_the_first_line_after_a_port_opens():
     f = _LineFramer()
     f.new_port()
-    assert f.feed(b"500,2000,1000,1000,1500\r\n") is None  # maybe a tail
-    assert f.feed(b"1500,1500,2000,1000,1000,1500\r\n") == (1500, 1500, 2000, 1000, 1000, 1500)
+    assert f.feed(b"1500,2000,1000,1000,1500\r\n") is None  # maybe a tail
+    assert f.feed(b6(GOOD6)) == tuple(GOOD6)
 
 
 def test_framer_drops_an_unterminated_read_and_the_next_line():
     f = _LineFramer()
     assert f.feed(b"1500,1500,2000,1000,1000,1") is None  # readline timed out
     assert f.feed(b"500,1500,2000,1000,1000,1500\r\n") is None  # the rest of it
-    assert f.feed(b"1500,1500,2000,1000,1000,1500\r\n") is not None
+    assert f.feed(b6(GOOD6)) is not None
 
 
 def test_framer_drops_five_field_lines_after_a_six_field_line():
     f = _LineFramer()
-    assert f.feed(b"1500,1500,2000,1000,1000,1500\r\n") is not None
-    # The tail of "1500,1500,2000,1000,1000,1500" minus its first field: it
-    # would read ch2 as ch1, ch3 (2000) as the right track, and so on.
-    assert f.feed(b"1500,2000,1000,1000,1500\r\n") is None
-    assert f.feed(b"1500,1500,2000,1000,1000,1500\r\n") is not None
+    assert f.feed(b6(GOOD6)) is not None
+    # A 6-field line that lost ",1500*25": it looks like a 5-field line of
+    # today's firmware. Once a 6-field line was seen on the port, it is not.
+    assert f.feed(b"1500,1500,2000,1000,1000\r\n") is None
+    assert f.feed(b6(GOOD6)) is not None
 
 
 def test_framer_new_port_forgets_the_six_field_latch():
     f = _LineFramer()
-    assert f.feed(b"1500,1500,2000,1000,1000,1500\r\n") is not None
+    assert f.feed(b6(GOOD6)) is not None
     f.new_port()
     assert f.feed(b"RC Reader initialized\r\n") is None
     assert f.feed(b"1500,1500,2000,1000,1000\r\n") == (1500, 1500, 2000, 1000, 1000, None)
@@ -168,7 +217,7 @@ def test_framer_drops_non_ascii():
 
 
 def test_reader_keeps_the_sentinel_and_ch6():
-    reader, states = _run_reader([b"1600,0,1900,0,1000,0\r\n", b"1600,1400,0,1000,1000,1200\r\n"])
+    reader, states = _run_reader([b6([1600, 0, 1900, 0, 1000, 0]), b6([1600, 1400, 0, 1000, 1000, 1200])])
     a, b = states[0], states[1]
     assert (a.ch1_us, a.ch2_us, a.ch3_us, a.ch4_us, a.ch5_us, a.ch6_us) == (1600, 0, 1900, 0, 1000, 0)
     assert (b.ch1_us, b.ch2_us, b.ch3_us, b.ch4_us, b.ch5_us, b.ch6_us) == (1600, 1400, 0, 1000, 1000, 1200)
@@ -190,7 +239,7 @@ def test_reader_after_open_ignores_the_first_line():
 
 
 def test_reader_applies_the_deadband_to_widths_only():
-    reader, states = _run_reader([b"1520,1475,0,1510,1000,1490\r\n"])
+    reader, states = _run_reader([b6([1520, 1475, 0, 1510, 1000, 1490])])
     s = states[0]
     assert (s.ch1_us, s.ch2_us, s.ch3_us, s.ch4_us, s.ch5_us, s.ch6_us) == (1500, 1500, 0, 1500, 1000, 1500)
 

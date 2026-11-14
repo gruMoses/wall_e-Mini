@@ -194,6 +194,50 @@ static void test_sequence_wrap() {
   CHECK_EQ((unsigned long)c.shared.seq, 70000UL & 0xFFFFUL);
 }
 
+static bool same_text(const char *a, const char *b) {
+  while (*a && *a == *b) {
+    ++a;
+    ++b;
+  }
+  return *a == *b;
+}
+
+static void test_crc8_and_line_format() {
+  // CRC-8/SMBUS check value.
+  const char *check = "123456789";
+  uint8_t crc = 0;
+  for (const char *p = check; *p; ++p) crc = rcCrc8Update(crc, (uint8_t)*p);
+  CHECK_EQ(crc, 0xF4);
+  // The same lines as pi_app/tests/test_rc_no_signal_parser.py (CRCs from
+  // rc_line_crc8() in pi_app/control/rc_signal.py).
+  struct Vec {
+    uint16_t v[6];
+    const char *line;
+  };
+  const Vec vecs[] = {
+      {{1500, 1500, 2000, 1000, 1000, 1500}, "1500,1500,2000,1000,1000,1500*25"},
+      {{0, 0, 0, 0, 0, 0}, "0,0,0,0,0,0*10"},
+      {{992, 2004, 2004, 992, 996, 0}, "992,2004,2004,992,996,0*AD"},
+      {{500, 2500, 1500, 1000, 2000, 0}, "500,2500,1500,1000,2000,0*51"},
+  };
+  for (unsigned i = 0; i < sizeof(vecs) / sizeof(vecs[0]); ++i) {
+    char buf[RC_LINE_BUF_SIZE];
+    const uint8_t n = rcFormatLine(buf, vecs[i].v, 6);
+    ++g_checks;
+    if (!same_text(buf, vecs[i].line)) {
+      ++g_failures;
+      fprintf(stderr, "rcFormatLine: got \"%s\", expected \"%s\"\n", buf, vecs[i].line);
+    }
+    unsigned len = 0;
+    while (vecs[i].line[len]) ++len;
+    CHECK_EQ(n, len);
+  }
+  // The longest possible line fits the buffer.
+  const uint16_t big[6] = {65535, 65535, 65535, 65535, 65535, 65535};
+  char buf[RC_LINE_BUF_SIZE];
+  CHECK_EQ(rcFormatLine(buf, big, 6), RC_LINE_BUF_SIZE - 1);
+}
+
 static void test_timeout_constant() {
   CHECK_EQ(RC_TIMEOUT_US, 100000UL);
   CHECK_EQ(RC_TIMEOUT_US >= 60000UL, 1);  // S2
@@ -215,6 +259,7 @@ int main() {
   test_50hz_train_with_missed_frames();
   test_333hz_digital_mode();
   test_sequence_wrap();
+  test_crc8_and_line_format();
   test_timeout_constant();
   if (g_failures) {
     fprintf(stderr, "%d of %d checks FAILED\n", g_failures, g_checks);

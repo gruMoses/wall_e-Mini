@@ -126,4 +126,52 @@ inline uint16_t rcChannelOutput(RcChannelState &st, const RcPulseShared &snap, u
   return st.widthUs;
 }
 
+// CRC-8/SMBUS (poly 0x07, init 0): the same as rc_line_crc8() in
+// pi_app/control/rc_signal.py. Check value: "123456789" -> 0xF4. The Pi
+// needs it because the 500..2500 us range lets a dropped byte read as a
+// valid width ("1500" without its "1" is 500 us).
+inline uint8_t rcCrc8Update(uint8_t crc, uint8_t data) {
+  crc ^= data;
+  for (uint8_t bit = 0; bit < 8; bit++) {
+    crc = (crc & 0x80) ? (uint8_t)((uint8_t)(crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+  }
+  return crc;
+}
+
+// Size for rcFormatLine(): 6 fields of at most 5 digits, 5 commas, "*HH",
+// and the NUL.
+const uint8_t RC_LINE_BUF_SIZE = 6 * 5 + 5 + 3 + 1;
+
+// Writes "v0,v1,...,v(count-1)*HH" and a NUL into buf, where HH is the
+// CRC-8 of the text before '*' in upper-case hex. Returns the length
+// without the NUL. buf needs 6 * count + 4 bytes (RC_LINE_BUF_SIZE for 6).
+inline uint8_t rcFormatLine(char *buf, const uint16_t *vals, uint8_t count) {
+  static const char hex[] = "0123456789ABCDEF";
+  uint8_t pos = 0;
+  for (uint8_t i = 0; i < count; i++) {
+    if (i > 0) {
+      buf[pos++] = ',';
+    }
+    char digits[5];
+    uint8_t n = 0;
+    uint16_t v = vals[i];
+    do {
+      digits[n++] = (char)('0' + (v % 10));
+      v = (uint16_t)(v / 10);
+    } while (v != 0 && n < 5);
+    while (n > 0) {
+      buf[pos++] = digits[--n];
+    }
+  }
+  uint8_t crc = 0;
+  for (uint8_t j = 0; j < pos; j++) {
+    crc = rcCrc8Update(crc, (uint8_t)buf[j]);
+  }
+  buf[pos++] = '*';
+  buf[pos++] = hex[crc >> 4];
+  buf[pos++] = hex[crc & 0x0F];
+  buf[pos] = '\0';
+  return pos;
+}
+
 #endif  // RC_CHANNEL_H
