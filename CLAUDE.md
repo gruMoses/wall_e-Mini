@@ -119,13 +119,17 @@ robot worse — correcting the FOV without (3) filters the operator out at
 `follow_distance_m`. Expect this pattern elsewhere; see
 `~/Documents/screenshots/WALLE-constant-audit.md`.
 
-Open: `detect_min_person_height_m = 1.20` was tuned against implied heights
-recorded under the inflated VFOV, so it may now be too aggressive. 2026-11-14
-research: `tools/replay_follow_me_log.py` CANNOT test it (it rebuilds each
-detection with a dummy (0, 0, 1, 1) box, so Rule 3 never fires), and the
-per-detection `detections` block (bbox + z) is only in logs from 2026-11-04 on.
-Needs a recorded walk out to about 8 m with that block on every FOLLOW_ME tick
-(head unclipped beyond about 2.3 m), or the 2026-11-08 logs if they carry it.
+Checked 2026-11-14 (all armed logs 2026-11-06 to 11-11 on the Pi, Rule 3
+recomputed from the logged raw boxes): `detect_min_person_height_m = 1.20` is
+right; keep it. Upright adults measure 1.55-1.75 m (p25-p50 at 3.5-5 m). In
+FOLLOW_ME, 94 % of person boxes are top-clipped, so the rule skips them. On
+the 26 FOLLOW_ME ticks with a height reject, every rejected box was a
+non-target track of about 1 m (goats and dogs labelled person, with sheep or
+dog detections beside them), and no tick lost all its detections. The speed
+cap (`_nearest_person_range_m`) and the 0.8 m stop ignore the rule. Residual:
+a crouched or half-hidden operator beyond about 3 m reads about 1 m and is
+dropped, and the robot then stops. `tools/replay_follow_me_log.py` cannot
+test the rule (it uses a dummy box); recompute from the `detections` block.
 
 ### OAK-D Lite Camera
 - Obstacle avoidance: depth corridor, valid-pixel % threshold, tiered speed reduction/stop.
