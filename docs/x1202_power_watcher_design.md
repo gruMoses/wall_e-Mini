@@ -371,7 +371,7 @@ Meter check (2026-11-15, 15:05 to 15:18, Kevin's approval for the `nohalt` file;
 - EXT5V was 5.06 V to 5.20 V. `get_throttled` was 0x0. The maximum CPU temperature was 80.4 C (on the cells, with the full load).
 - The `nohalt` file was removed after the test, and the watcher shows no fault.
 
-Totals for the day on the robot: a burst with the full CPU load stopped early 5 times of 5. A burst with the usual load was correct 4 times of 4 (one in the first test, two after it, one in the meter check).
+Totals for the day on the robot: a burst with the full CPU load stopped early 5 times of 5. A burst with the usual load was correct 3 times of 3 (one in the first test, one after it at 14:13, one in the meter check).
 
 Open (Kevin's decision): accept this as a known limit of the board (a burst with a very high load stops early, and the watcher tries again after 120 s), or change the charge policy (for example, no burst while the robot is armed; that is a change to the watcher and needs the two reviews and a new install).
 
