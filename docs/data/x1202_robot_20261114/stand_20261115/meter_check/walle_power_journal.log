@@ -1,0 +1,24 @@
+2026-11-15T15:06:30-0600 walle python3[36327]: good: True -> False
+2026-11-15T15:06:31-0600 walle python3[36327]: state: run -> debounce
+2026-11-15T15:09:24-0600 walle python3[36327]: good: False -> True
+2026-11-15T15:09:32-0600 walle python3[36327]: state: debounce -> run
+2026-11-15T15:11:25-0600 walle python3[36327]: charge: disabled -> burst
+2026-11-15T15:11:51-0600 walle python3[36327]: good: True -> False
+2026-11-15T15:11:51-0600 walle python3[36327]: charge: burst -> disabled
+2026-11-15T15:11:51-0600 walle python3[36327]: good: False -> True
+2026-11-15T15:11:51-0600 walle python3[36327]: state: run -> debounce
+2026-11-15T15:11:59-0600 walle python3[36327]: state: debounce -> run
+2026-11-15T15:13:51-0600 walle python3[36327]: charge: disabled -> burst
+2026-11-15T15:14:13-0600 walle python3[36327]: good: True -> False
+2026-11-15T15:14:13-0600 walle python3[36327]: charge: burst -> disabled
+2026-11-15T15:14:14-0600 walle python3[36327]: good: False -> True
+2026-11-15T15:14:14-0600 walle python3[36327]: state: run -> debounce
+2026-11-15T15:14:21-0600 walle python3[36327]: state: debounce -> run
+2026-11-15T15:16:14-0600 walle python3[36327]: charge: disabled -> burst
+2026-11-15T15:18:14-0600 walle python3[36327]: charge: burst -> disabled
+2026-11-15T15:18:36-0600 walle systemd[1]: Stopping walle-power.service - WALL-E power watcher (Geekworm X1202)...
+2026-11-15T15:18:36-0600 walle systemd[1]: walle-power.service: Deactivated successfully.
+2026-11-15T15:18:36-0600 walle systemd[1]: Stopped walle-power.service - WALL-E power watcher (Geekworm X1202).
+2026-11-15T15:18:36-0600 walle systemd[1]: walle-power.service: Consumed 17.979s CPU time.
+2026-11-15T15:18:36-0600 walle systemd[1]: Starting walle-power.service - WALL-E power watcher (Geekworm X1202)...
+2026-11-15T15:18:37-0600 walle systemd[1]: Started walle-power.service - WALL-E power watcher (Geekworm X1202).

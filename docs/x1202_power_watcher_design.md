@@ -357,11 +357,23 @@ Conclusions:
 
 1. The motors do not disturb the input of the X1202 (forward, full speed).
 2. On the robot, the input cannot carry the Pi with a full CPU load, the camera and the charge at the same time. The burst stops early, and the Pi continues without a fault. With the usual load, the burst is correct.
-3. The cause is not known. The rating of the converter is not the cause: it is 10 A on a 5 A fuse (Kevin, after the test), and the estimated input current in the test is approximately 3 A. Possible causes that stay: the output of the converter under load (its real voltage was not measured), the voltage drop in the wiring, the fuse and the jack, or the limit of the board itself (the camera adds load, and the bench test had no camera; the same time of 33 s to 38 s in each burst can be a thermal limit). The voltage at the jack was not measured.
+3. The cause is in the board, not in the supply (meter check below). The rating of the converter is not the cause: it is 10 A on a 5 A fuse (Kevin, after the test), and the estimated input current in the test is approximately 3 A. The 12 V at the barrel plug stays at 12.03 V or more. The probable cause is a thermal limit of the board: the time to the low signal decreases when the board is warmer (38 s, 33 s and 34 s in the first test; 26 s and 22 s in the meter check, which started after 122 s of full load on the cells). This cause is not confirmed (no temperature of the board was measured).
 
-Not examined: a burst with the usual load while the motors are in operation; reverse and hard stops; a meter on the converter output.
+Not examined: a burst with the usual load while the motors are in operation; reverse and hard stops; the temperature of the board.
 
-Open before a go: measure the voltage at the barrel jack during a burst with the full CPU load. If the voltage at the jack decreases, the cause is the converter or the wiring. If it stays at 12 V, the cause is the board.
+Meter check (2026-11-15, 15:05 to 15:18, Kevin's approval for the `nohalt` file; the robot was not armed):
+
+- Kevin put a Fluke 115 on the 12 V at the barrel plug that goes into the X1202 (clips on the plug). Before the test: 12.14 V.
+- Kevin set the main switch to off for 174 s and then to on. He reset the MIN MAX record of the meter after that. GPIO 6 was sampled at 10 Hz.
+- Burst 1 (15:11:25, full CPU load): GPIO 6 went low after 26 s, one sample (approximately 0.1 s). Burst 2 (15:13:51, full CPU load): low after 22 s, one sample.
+- The minimum on the meter after the two bursts: 12.03 V. Limit of this result: the low time is approximately 0.1 s, and the MIN record of the meter can be too slow for an event of that length. The stable voltage during the bursts is sure: the supply does not decrease under the load.
+- Burst 3 (15:16:14, the usual load, directly after the two bursts above): the full 120 s, no low sample, VCELL to 3.9112 V.
+- EXT5V was 5.06 V to 5.20 V. `get_throttled` was 0x0. The maximum CPU temperature was 80.4 C (on the cells, with the full load).
+- The `nohalt` file was removed after the test, and the watcher shows no fault.
+
+Totals for the day on the robot: a burst with the full CPU load stopped early 5 times of 5. A burst with the usual load was correct 4 times of 4 (one in the first test, two after it, one in the meter check).
+
+Open (Kevin's decision): accept this as a known limit of the board (a burst with a very high load stops early, and the watcher tries again after 120 s), or change the charge policy (for example, no burst while the robot is armed; that is a change to the watcher and needs the two reviews and a new install).
 
 
 ### Clock unit

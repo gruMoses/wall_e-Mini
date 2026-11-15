@@ -1,0 +1,13 @@
+{"t": 1794776755.9, "msg": "start; waiting for input loss 3.7675 ['nohalt']"}
+{"t": 1794776791.4, "msg": "input LOST; on the cells 3.7675"}
+{"t": 1794776791.4, "msg": "load ON: on the cells"}
+{"t": 1794776913.5, "msg": "load OFF: VCELL 3.447 < 3.45"}
+{"t": 1794776965.0, "msg": "input BACK after 174 s; loaded vcell 3.69 ext5v 5.18178 temp 55.65"}
+{"t": 1794777085.6, "msg": "burst 1 START; vcell 3.71"}
+{"t": 1794777085.6, "msg": "load ON: burst 1"}
+{"t": 1794777112.1, "msg": "burst 1 END after 27 s; vcell 3.77 ext5v 5.10272 temp 75.45 faults ['nohalt']"}
+{"t": 1794777112.1, "msg": "load OFF: burst end"}
+{"t": 1794777231.7, "msg": "burst 2 START; vcell 3.7175"}
+{"t": 1794777231.7, "msg": "load ON: burst 2"}
+{"t": 1794777254.2, "msg": "burst 2 END after 23 s; vcell 3.8363 ext5v 5.10406 temp 75.45 faults ['nohalt']"}
+{"t": 1794777254.2, "msg": "load OFF: burst end"}
