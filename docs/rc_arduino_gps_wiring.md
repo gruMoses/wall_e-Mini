@@ -79,7 +79,9 @@ Electrical facts:
 - The F-06A has two output modes (manual page 6). Blue LED off: analogue
   servo mode, 50 Hz, 1000 µs to 2500 µs. Blue LED on: digital servo mode,
   333 Hz, 500 µs to 2500 µs. A 3 s press of BIND changes the mode. The logs
-  show 992 µs to 2004 µs. The mode on the robot is Unknown.
+  show 992 µs to 2004 µs. The robot runs in the 333 Hz mode (Kevin's
+  meter, 2026-11-15: CH1 at centre averages 1.6 V; at 50 Hz that average
+  would need a 21 V high).
 - The sketch measures each pulse with `micros()` (4 µs steps) in a
   pin-change interrupt. The flashed firmware changes a width outside
   800 µs to 2200 µs to 1500 µs before it sends the line. The repo sketch
@@ -90,8 +92,13 @@ Electrical facts:
   5 V).
 - The manual does not give the signal voltage. An ATmega328P at 5 V reads
   a high level at 3.0 V or more (0.6 × VCC). A 3.3 V output thus has 0.3 V
-  of margin. VERIFY (section 10, check 5). Research, 2026-11-13: HotRC publishes no
-  signal level. No scope capture or teardown of this receiver was found.
+  of margin. Research, 2026-11-13: HotRC publishes no signal level. No
+  scope capture or teardown of this receiver was found. Measured
+  2026-11-15 (check 5): about 3.2 V, so 3.3 V logic, 0.1 V to 0.3 V over
+  the threshold. The margin is thin but fails safe: a missed high is a
+  lost pulse, and the sketch reports "no signal" after 100 ms, which
+  disarms. The robot has run on this level since it was built. No buffer
+  on the shield (D13 stands).
 - Failsafe: the HotRC manuals of related receivers give a preset position
   on signal loss, set on the transmitter. No document gives the behaviour
   of the F-06A with the DS600 V3. Checks 6 and 7 stay open.
@@ -513,9 +520,12 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
 4. **Receiver power feed.** Answered by Kevin, 2026-11-13: the USB 5 V,
    on the Arduino side. Nothing connects to the header 5 V except the RTK
    rover. The pin on the Arduino side: 5V (Kevin, 2026-11-14).
-5. **Signal voltage.** Measure the high level of the CH1 signal with a
-   scope, transmitter on. A meter shows the average of the pulse, not its
-   high level. Research found no published value (section 4).
+5. **Signal voltage.** Done 2026-11-15. Kevin's Fluke, DC volts, CH1 S
+   to CH1 −, transmitter on, stick at centre: 1.6 V. A meter shows the
+   average: high = average / duty. At 333 Hz (3.0 ms frame) a 1500 µs
+   pulse is a duty of 0.5, so the high is about 3.2 V (3.1 V to 3.3 V for
+   a reading of 1.55 V to 1.65 V). Optional firmer value: the meter's Hz
+   button, pressed twice, gives the duty in %; high = 1.6 V / duty.
 6. **Link loss with the transmitter on.** Run
    `python3 -m pi_app.cli.monitor_rc`. Put the arm switch up. Hold CH1
    forward with a rubber band. Put the transmitter in a closed metal box
@@ -555,7 +565,8 @@ Requirements:
 - **S1. RC inputs.** Read 6 PWM channels. Accept 500 µs to 2500 µs (both
   F-06A modes). Accept 50 Hz and 333 Hz frames. Resolution: 4 µs or better.
   Report a pulse outside the valid range as invalid, not as 1500 µs
-  (finding 5). Test at 333 Hz before you use that mode.
+  (finding 5). The robot runs in the 333 Hz mode (2026-11-15), so the
+  bench checks of the new sketch run at 333 Hz.
 - **S2. No-pulse detection.** Report "no signal" for a channel that has no
   pulse for a set time (proposal: 100 ms, five 50 Hz frames; never less than
   60 ms, three 50 Hz frames). The Pi must treat "no signal" on CH3 or CH5 as
@@ -652,7 +663,8 @@ Requirements:
     the far side of the plug: 0.55 in (14.0 mm). With the Nano flat,
     parts up and the USB end away, the cable leaves to the left (toward
     the 40-pin edge on the shield).
-  - Not yet: the receiver signal voltage and the rib of a Futaba J plug.
+  - Receiver signal high: about 3.2 V (section 10, check 5).
+  - Not yet: the rib of a Futaba J plug.
     No published drawing gives the rib size (Pololu, Core Electronics,
     RC guides: the rib is on the signal side and runs the full length).
 - **S9. USB link.** The 40-pin header has no USB lines. Kevin's short cable
