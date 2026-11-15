@@ -6,6 +6,7 @@ no WebSocket. They exercise the server-side enforcement directly via
 thread calls it.
 """
 
+import sys
 import time
 
 import pytest
@@ -719,9 +720,33 @@ def test_register_teleop_backward_compat_no_frame_source(tmp_path):
     assert c.get("/api/teleop/camera/frame?token=T0K").status_code == 503
 
 
-def test_camera_ws_route_registered_only_when_frame_source_present(tmp_path):
+class _FakeSock:
+    """Stand-in for flask_sock.Sock: ``route`` puts the rule on the URL map.
+
+    The real package is a Pi-only dependency (like depthai or smbus2) and is
+    not installed on the Mac.  register_teleop() only uses ``Sock(app)`` and
+    ``@sock.route(rule)``; no socket is opened here.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    def route(self, rule, **options):
+        def deco(f):
+            self.app.add_url_rule(rule, endpoint="ws_" + f.__name__,
+                                  view_func=f, **options)
+            return f
+        return deco
+
+
+def test_camera_ws_route_registered_only_when_frame_source_present(tmp_path, monkeypatch):
     """The /ws/camera URL pattern is only in the app's URL map when
     frame_source is provided.  (No live socket needed — we inspect url_map.)"""
+    import types
+    fake_mod = types.ModuleType("flask_sock")
+    fake_mod.Sock = _FakeSock
+    monkeypatch.setitem(sys.modules, "flask_sock", fake_mod)
+
     # With source: /ws/camera must appear in the URL map.
     app_with, _ = _make_flask_app_with_camera(
         "T0K", tmp_path, frame_source=lambda: _FAKE_JPEG
@@ -733,6 +758,20 @@ def test_camera_ws_route_registered_only_when_frame_source_present(tmp_path):
     app_without, _ = _make_flask_app_with_camera("T0K", tmp_path, frame_source=None)
     rules_without = {r.rule for r in app_without.url_map.iter_rules()}
     assert "/ws/camera" not in rules_without
+
+
+def test_missing_flask_sock_falls_back_to_rest_only(tmp_path, monkeypatch):
+    """Without flask_sock, register_teleop() logs and returns early: no /ws/
+    route, but the REST routes registered before that point stay."""
+    monkeypatch.setitem(sys.modules, "flask_sock", None)  # import raises ImportError
+    app, _ = _make_flask_app_with_camera(
+        "T0K", tmp_path, frame_source=lambda: _FAKE_JPEG
+    )
+    rules = {r.rule for r in app.url_map.iter_rules()}
+    assert not any(r.startswith("/ws/") for r in rules)
+    assert "/drive" in rules
+    assert "/api/teleop/session/status" in rules
+    assert "/api/teleop/camera/frame" in rules
 
 
 # ==========================================================================
