@@ -5,7 +5,7 @@ Runs as walle-power.service (Type=notify, WatchdogSec). It halts the Pi when
 the board input is lost (GPIO 6 low for 5 s within 7.5 s; a re-check can
 cancel), forces a power-off when the cells are low (tiers a and b; never
 cancelled), keeps charging disabled (GPIO 16 driven high) except for the
-optional hold bursts (off by default), and writes /run/walle-power/status.json.
+hold bursts (--hold; the unit passes it), and writes /run/walle-power/status.json.
 
 The specification is docs/x1202_power_watcher_design.md. Change it first.
 All decisions are in the small classes below; they take the clock and the
@@ -45,7 +45,7 @@ TIER_B_V, TIER_B_SAMPLES = 3.10, 3
 STOP_WAIT_S, POLL_S, RECHECK_SAMPLES = 15.0, 0.5, 2
 LADDER_STEP_S = 30.0               # --force at 30 s, --force --force at 60 s, again each 30 s
 GAUGE_FAILSAFE_READS, GAUGE_FAULT_S, FAULT_WARN_S = 3, 60.0, 60.0
-HOLD_ENABLED = False               # charge hold, branch A (design section 5); ships OFF
+HOLD_ENABLED = False               # charge hold, branch A (design section 5); the unit passes --hold
 HOLD_V, HOLD_REST_S, HOLD_BURST_S = 3.75, 120.0, 120.0
 CELLS_HIGH_V = 3.95
 NOHALT_DEFAULT = 3

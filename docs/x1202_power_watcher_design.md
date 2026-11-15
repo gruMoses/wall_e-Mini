@@ -110,14 +110,14 @@ Option 2 (a hook in `systemd-shutdown` that turns the power-off into a reboot) w
 
 The requirement "cells never at 100 percent" is only partly met. Software holds the level while Linux runs. With the Pi off and the input present (e-stop, stay-off), the board charges to 4.2 V, and only hardware can change that. On the robot the input is absent while parked, so this state lasts only until the operator cycles the switch.
 
-The hold rule ships OFF (GPIO 16 always high, driven as an output) until the soak result is read. Result, 2026-11-13 (`docs/pi_power_architecture.md`, 7.5, findings 13 and 14): branch A applies. With GPIO 16 high and the input on, the input carries the Pi. The rested VCELL decreased from 3.981 V to 3.911 V in 1.67 h, and the rate decreased from 50 mV in 1 h to less than 10 mV in 1 h. The hold rule stays off until Kevin decides (decision 6). This result was added after the reviews; it selects a branch that the reviewed draft already contains. The two branches:
+The hold rule was OFF (GPIO 16 always high, driven as an output) until Kevin's decision of 2026-11-15. It is now ON: `bin/walle-power.service` starts the watcher with `--hold`. The default in the code stays off, thus a start without the option keeps the charge disabled at all times. The Pi gets a change of the unit only when `bin/install_walle_power.sh` runs again (a hand step). Soak result, 2026-11-13 (`docs/pi_power_architecture.md`, 7.5, findings 13 and 14): branch A applies. With GPIO 16 high and the input on, the input carries the Pi. The rested VCELL decreased from 3.981 V to 3.911 V in 1.67 h, and the rate decreased from 50 mV in 1 h to less than 10 mV in 1 h. Kevin decided on 2026-11-15, after bench tests 13 and 14 (decision 6): the hold is on. The result of 2026-11-13 was added after the reviews; it selects a branch that the reviewed draft already contains. The two branches:
 
 - Branch A (the input carries the Pi with charging disabled): a burst starts when the input is good, the cells have rested 120 s, and VCELL is below 3.75 V. A burst lasts 120 s. It ends at once on an input loss, a gauge error, or a VCELL below its value at the burst start (charging must raise VCELL; a fall means the input is not there). Tier (b) stays active during a burst.
 - Branch B (the cells carry the Pi with charging disabled): VCELL is a loaded reading. The hold stays off, and a manual 10 min burst is the only top-up. Tier (b) stays active during that burst, and the burst ends at once if VCELL falls below its value at the burst start. If the board does not move back to the input before the cells are low, branch B is not acceptable, and the hold goes back to Kevin. Note: with these cells (0.23 ohm), a loaded 3.10 V is a rested 3.6 V, so tier (b) could halt with the input present. New cells are a go/no-go item.
 
 I2C fail-safe: 3 failed gauge reads in a row force GPIO 16 high. A burst does not resume after the gauge comes back.
 
-Temperature: no cell temperature exists. The gauge has none and the board has no sensor. The 45 C requirement is NOT met. The smallest real option is a sensor on the cells, for example a DS18B20 (a part Kevin buys). It controls only the software bursts, not the boot-window charge or the charge with the Pi off. Until then, the default is "charge disabled".
+Temperature: no cell temperature exists. The gauge has none and the board has no sensor. The 45 C requirement is NOT met. The smallest real option is a sensor on the cells, for example a DS18B20 (a part Kevin buys). It controls only the software bursts, not the boot-window charge or the charge with the Pi off. Kevin turned the hold on with this limit known (2026-11-15): a burst can charge warm cells. A burst is 120 s, and it starts only when the rested VCELL is below 3.75 V.
 
 Boot window (optional, not in the first install): `gpio=16=op,dh` in `config.txt`. It is not verified that the Pi 5 firmware applies `gpio=` to the RP1 header pins, or that the kernel keeps the state. The alternative is a `gpio-hog` device-tree overlay. Bench check: rest the cells at about 3.8 V with charging disabled, remove the input, apply it to a cold Pi, and log VCELL from the earliest unit (`DefaultDependencies=no`, which also runs `pinctrl get 16`). Compare 3 boots with the line and 3 without. A meter on GPIO 16 from power-on is the direct check.
 
@@ -168,7 +168,7 @@ RuntimeDirectoryPreserve=yes
 StateDirectory=walle-power
 ExecStartPre=-/usr/bin/pinctrl set 16 op dh
 ExecStartPre=-/usr/bin/pinctrl set 6 ip pd
-ExecStart=/usr/bin/python3 /usr/local/lib/walle-power/walle_power.py
+ExecStart=/usr/bin/python3 /usr/local/lib/walle-power/walle_power.py --hold
 ExecStopPost=-/usr/bin/pinctrl set 16 op dh
 Restart=always
 RestartSec=15
@@ -252,7 +252,7 @@ Risks, most serious first:
 3. A false GPIO 6 low halts the robot. The Pi stays off until a person acts.
 4. A watcher that is not running gives a hard cut. The alarms are a stale heartbeat and a guard warning.
 5. A final stage that never ends (a stuck NVMe flush) has no software bound.
-6. The power path with charging disabled is unknown until the soak. The hold stays off.
+6. The power path with charging disabled is unknown until the soak. The hold stays off. CLOSED: branch A applies (soak of 2026-11-13), and the hold is on since 2026-11-15 (decision 6). New with the hold on: a burst can start at any time while the Pi runs, and the supply must then carry the Pi and the charge together (approximately 29 W, section 7.10 of `docs/pi_power_architecture.md`). The stand test of section 9 examines this and is necessary before a drive.
 7. The present cells fail the load test (EXT5V 4.896 V), and their sag can fire tier (b) under branch B.
 8. The wall clock is wrong at each start. The new code does not use it. Log names and the recorder clean-up do.
 
@@ -263,7 +263,7 @@ Kevin's decisions:
 3. Fail-off on GPIO 6 (D1) and tier (b) unconditional (D2).
 4. A cell temperature sensor (a part to buy), or no temperature rule.
 5. The hardware watchdog (`RebootWatchdogSec`, `RuntimeWatchdogSec`), after bench test 10.
-6. The hold branch, after the soak. Result, 2026-11-15 (bench test 13): branch A operates correctly in a run of 5.8 h. The hold is off on the Pi. Kevin's decision is open: hold on or hold off.
+6. The hold branch, after the soak. Result, 2026-11-15 (bench test 13): branch A operates correctly in a run of 5.8 h. DECIDED by Kevin on 2026-11-15: the hold is ON (`--hold` in the unit file). Reasons: the storage drain of 0.85 mA (bench test 14) takes approximately 0.5 percent of the cells each day, and with the `config.txt` line of decision 7 nothing else charges the cells while the Pi runs.
 7. The `config.txt` or `gpio-hog` line, after the bench check. DECIDED by Kevin on 2026-11-14: add `gpio=16=op,dh` to `/boot/firmware/config.txt`. The line is on the Pi since 2026-11-14 23:00 (backup: `config.txt.bak-20261114-gpio16`). It is a hand step of the installation.
 8. An RTC cell for the Pi 5 (a part to buy). Kevin, 2026-11-14: the clock unit (finding 3) stays installed if it passes its bench test. The RTC cell stays open.
 9. The buck at about 12 V and the 2-pin connector.
@@ -279,7 +279,7 @@ Code review: Grok (sessions `29454134` for the watcher, `53dea5f0` for the guard
 
 Differences from this design (each one came from a review or from the bench):
 
-- Size: `bin/walle_power.py` has approximately 800 lines, not 120 to 150. The reviews added most of the difference. A shorter script is possible if Kevin removes functions, for example the charge hold that is off.
+- Size: `bin/walle_power.py` has approximately 800 lines, not 120 to 150. The reviews added most of the difference. A shorter script is possible if Kevin removes functions.
 - The re-check uses readable samples only. A pin that cannot be read for 2 s in the re-check causes the power-off.
 - The debounce counts the time between readable samples (2.5 s maximum for each step). A failed read does not set the count to zero.
 - The gauge read comes after the GPIO 6 path in each loop pass. `READY=1` goes out at the end of the start. The longest time between two watchdog messages is 9 s with each tool at its time limit.

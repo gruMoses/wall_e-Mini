@@ -16,7 +16,9 @@ StateDirectory=walle-power
 ExecStartPre=-/usr/bin/pinctrl set 16 op dh
 ExecStartPre=-/usr/bin/pinctrl set 6 ip pd
 # The installed copy, so an auto-deploy pull cannot change the running watcher.
-ExecStart=/usr/bin/python3 /usr/local/lib/walle-power/walle_power.py
+# --hold: charge bursts keep the rested cells near 3.75 V (Kevin, 2026-11-15).
+# Without the option the watcher keeps the charge disabled at all times.
+ExecStart=/usr/bin/python3 /usr/local/lib/walle-power/walle_power.py --hold
 # Runs after a stop, a crash, a watchdog kill and a failed start: charging off.
 ExecStopPost=-/usr/bin/pinctrl set 16 op dh
 Restart=always

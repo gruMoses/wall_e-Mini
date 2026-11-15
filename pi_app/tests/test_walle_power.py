@@ -1080,7 +1080,8 @@ def test_unit_file_matches_design():
                  "RuntimeDirectoryPreserve=yes", "StateDirectory=walle-power",
                  "ExecStartPre=-/usr/bin/pinctrl set 16 op dh",
                  "ExecStartPre=-/usr/bin/pinctrl set 6 ip pd",
-                 "ExecStart=/usr/bin/python3 /usr/local/lib/walle-power/walle_power.py",
+                 # --hold: Kevin turned the charge hold on (2026-11-15, decision 6).
+                 "ExecStart=/usr/bin/python3 /usr/local/lib/walle-power/walle_power.py --hold",
                  "ExecStopPost=-/usr/bin/pinctrl set 16 op dh"):
         assert line in u.splitlines()
 
@@ -1091,7 +1092,20 @@ def test_poweroff_dropin():
 
 
 def test_hold_default_off():
+    # The code default stays off: a start without --hold never charges.
     assert wp.HOLD_ENABLED is False
+
+
+def test_main_passes_hold_option(monkeypatch):
+    seen = []
+    monkeypatch.setattr(wp, "System", lambda: object())
+    monkeypatch.setattr(wp, "Watcher", lambda ops, now, hold: seen.append(hold))
+    monkeypatch.setattr(wp, "loop", lambda *a, **k: None)
+    monkeypatch.setattr(wp, "boottime", lambda: 0.0)
+    monkeypatch.setattr(wp.signal, "signal", lambda *a: None)
+    wp.main([])
+    wp.main(["--hold"])
+    assert seen == [False, True]
 
 
 # ---------------------------------------------------------------- review round 1
