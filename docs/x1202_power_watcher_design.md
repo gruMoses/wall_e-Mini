@@ -377,7 +377,7 @@ Meter check (2026-11-15, 15:05 to 15:18, Kevin's approval for the `nohalt` file;
 
 Totals for the day on the robot: a burst with the full CPU load stopped early 5 times of 5. A burst with the usual load was correct 3 times of 3 (one in the first test, one after it at 14:13, one in the meter check).
 
-Open (Kevin's decision): accept this as a known limit of the board (a burst with a very high load stops early, and the watcher tries again after 120 s), or change the charge policy (for example, no burst while the robot is armed; that is a change to the watcher and needs the two reviews and a new install).
+DECIDED (Kevin, 2026-11-15): this is accepted as a known limit of the board. A burst with a very high load stops early, and the watcher tries again after 120 s. The charge policy does not change. The alternative (no burst while the robot is armed) was not chosen: the low signal stops when the watcher stops the charge, thus it cannot become a halt condition by this cause; a burst is rare when the cells are at the hold level (approximately one in 5 h); and the watcher would need the arm state of `wall-e`, which adds code and a dependency to the unit that halts the Pi. Not examined, and still open as observations: a burst with the usual load while the motors are in operation, and operation in hot weather (the Pi then gets to its maximum power sooner, and more bursts stop early; the cells then get to the hold level more slowly).
 
 
 ### Clock unit
