@@ -1,0 +1,29 @@
+22:46:02 start: {'vcell_v': 4.0575, 'ext5v_v': 5.1858, 'state': 'run', 'faults': ['cells_high'], 'charge': 'disabled', 'throttled': '0x0', 'temp': "49.9'C"}
+22:46:09 nohalt active; faults: ['nohalt']
+22:46:09 load: Running as unit: x1202-load.service
+22:46:29 loaded on input: {'vcell_v': 4.0575, 'ext5v_v': 5.10004, 'throttled': '0x0', 'temp': "68.6'C"}
+22:46:30 outlet OFF: on the cells
+22:47:12 GPIO 16 toggles on the cells: u0=245.62 u1=262.05 same_boot=yes throttled=0x0 pin16=16: op dh pd | hi // GPIO16 = output
+{"boot_id": "9e712a53-b85e-4949-8cfd-5494b9f0c661", "bus_ok_mono": 260.886012002, "bus_ok_ts": 1794718031.1969383, "charge": "disabled", "ext5v_v": 5.092, "faults": ["nohalt"], "halt_reason": null, "hb_mono": 260.886, "hold": "off", "input_good": false, "last_error": null, "low_s": 7.5, "schema": "walle-power/1", "state": "debounce", "vcell_v": 3.8788}
+22:47:12 1 min: vcell=3.8788 ext5v=5.10674 thr=0x0 temp=73.0'C state=debounce
+22:52:21 6 min: vcell=3.7612 ext5v=5.08664 thr=0x0 temp=75.2'C state=debounce
+22:57:30 11 min: vcell=3.6625 ext5v=5.10674 thr=0x0 temp=75.7'C state=debounce
+23:02:38 16 min: vcell=3.5787 ext5v=5.10272 thr=0x0 temp=75.7'C state=debounce
+23:07:46 21 min: vcell=3.515 ext5v=5.10138 thr=0x0 temp=75.7'C state=debounce
+23:12:54 26 min: vcell=3.4663 ext5v=5.10674 thr=0x0 temp=77.4'C state=debounce
+23:18:03 32 min: vcell=3.425 ext5v=5.12416 thr=0x0 temp=76.8'C state=debounce
+23:22:11 36 min: vcell=3.39 ext5v=5.1188 thr=0x0 temp=76.3'C state=debounce
+23:24:20 38 min: vcell=3.3738 ext5v=5.1054 thr=0x0 temp=76.8'C state=debounce
+23:26:28 40 min: vcell=3.3513 ext5v=5.10808 thr=0x0 temp=77.4'C state=debounce
+23:28:37 42 min: vcell=3.3225 ext5v=5.09736 thr=0x0 temp=77.4'C state=debounce
+23:30:02 VCELL 3.300 <= 3.30 at 2612 s
+23:30:30 Pi is down at 2629 s
+  outlet on error: timed out
+23:31:09 outlet ON
+23:31:20 after boot: {'vcell_v': 3.515, 'ext5v_v': 5.14694, 'state': 'run', 'faults': [], 'charge': 'disabled', 'throttled': '0x0', 'temp': "56.0'C"}
+23:31:20 events: [{'bt': 2840.636, 'event': 'tier', 'kind': None, 'reason': 'low_voltage_a vcell=3.297', 'vcell_v': 3.2975, 'input_good': False}, {'bt': 2840.636, 'event': 'halt', 'kind': 'low_voltage', 'reason': 'low_voltage_a vcell=3.297', 'vcell_v': 3.2975, 'input_good': False}]
+23:34:12 cleanup: active active
+{"boot_id": "7b5b664b-9032-4321-a17a-f64a697b88b8", "bus_ok_mono": 188.182068817, "bus_ok_ts": 1794720851.7088394, "charge": "disabled", "ext5v_v": 5.1456, "faults": [], "halt_reason": null, "hb_mono": 188.182, "hold": "off", "input_good": true, "last_error": null, "low_s": 0, "schema": "walle-power/1", "state": "run", "vcell_v": 3.52}
+SUMMARY {"test": "tier_a", "result": "PASS", "start": {"vcell_v": 4.0575, "ext5v_v": 5.1858, "state": "run", "faults": ["cells_high"], "charge": "disabled", "throttled": "0x0", "temp": "49.9'C"}, "loaded_on_input": {"vcell_v": 4.0575, "ext5v_v": 5.10004, "throttled": "0x0", "temp": "68.6'C"}, "t_off": "22:46:30", "toggle_test": "u0=245.62 u1=262.05 same_boot=yes throttled=0x0 pin16=16: op dh pd | hi // GPIO16 = output\n{\"boot_id\": \"9e712a53-b85e-4949-8cfd-5494b9f0c661\", \"bus_ok_mono\": 260.886012002, \"bus_ok_ts\": 1794718031.1969383, \"charge\": \"disabled\", \"ext5v_v\": 5.092, \"faults\": [\"nohalt\"], \"halt_reason\": null, \"hb_mono\": 260.886, \"hold\": \"off\", \"input_good\": false, \"last_error\": null, \"low_s\": 7.5, \"schema\": \"walle-power/1\", \"state\": \"debounce\", \"vcell_v\": 3.8788}", "t_down_s": 2628.7, "last_sample": {"vcell_v": 3.2988, "ext5v_v": 5.11076, "state": "debounce", "halt_reason": null, "throttled": "0x0", "temp": "77.4'C"}, "low_seen_s": 2612.114598274231, "boot_s_after_on": -8.4, "new_boot": true, "after_boot": {"vcell_v": 3.515, "ext5v_v": 5.14694, "state": "run", "faults": [], "charge": "disabled", "throttled": "0x0", "temp": "56.0'C"}, "events": [{"bt": 2840.636, "event": "tier", "kind": null, "reason": "low_voltage_a vcell=3.297", "vcell_v": 3.2975, "input_good": false}, {"bt": 2840.636, "event": "halt", "kind": "low_voltage", "reason": "low_voltage_a vcell=3.297", "vcell_v": 3.2975, "input_good": false}], "rested_3min": {"vcell_v": 3.52, "charge": "disabled", "faults": []}}
+
+[exited with code 0]

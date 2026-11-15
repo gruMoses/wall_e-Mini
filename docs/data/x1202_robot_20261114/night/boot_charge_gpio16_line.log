@@ -1,0 +1,10 @@
+22:36:30 probe installed: Created symlink /etc/systemd/system/sysinit.target.wants/x1202-early-probe.service → /etc/systemd/system/x1202-early-probe.service. | 0
+22:37:36 without the line, cycle 1 | rested before the cycle: 4.055 | boot=1317eff2 pin_uptime=2.84 pin16=[16: no    pd | -- // GPIO16 = none] vcell=4.1850 vcell_uptime=2.91 cfgline=0
+22:39:27 without the line, cycle 2 | rested before the cycle: 4.0575 | boot=4653c64b pin_uptime=2.88 pin16=[16: no    pd | -- // GPIO16 = none] vcell=4.1863 vcell_uptime=2.94 cfgline=0
+22:40:13 config.txt line added: # TEMP bench check 2026-11-14: drive GPIO 16 high (X1202 charge disable) from the firmware stage | gpio=16=op,dh
+22:41:19 WITH the line, cycle 1 | rested before the cycle: 4.0587 | boot=361ad72e pin_uptime=2.71 pin16=[16: op dh pd | hi // GPIO16 = output] vcell=4.0600 vcell_uptime=2.78 cfgline=1
+22:43:12 WITH the line, cycle 2 | rested before the cycle: 4.0575 | boot=9e712a53 pin_uptime=2.73 pin16=[16: op dh pd | hi // GPIO16 = output] vcell=4.0600 vcell_uptime=2.83 cfgline=1
+22:43:58 cleanup: gpio16 lines in config.txt: 0  usb line: 1 | active active
+SUMMARY [{"tag": "without the line, cycle 1", "v_before": 4.055, "probe": "boot=1317eff2 pin_uptime=2.84 pin16=[16: no    pd | -- // GPIO16 = none] vcell=4.1850 vcell_uptime=2.91 cfgline=0"}, {"tag": "without the line, cycle 2", "v_before": 4.0575, "probe": "boot=4653c64b pin_uptime=2.88 pin16=[16: no    pd | -- // GPIO16 = none] vcell=4.1863 vcell_uptime=2.94 cfgline=0"}, {"tag": "WITH the line, cycle 1", "v_before": 4.0587, "probe": "boot=361ad72e pin_uptime=2.71 pin16=[16: op dh pd | hi // GPIO16 = output] vcell=4.0600 vcell_uptime=2.78 cfgline=1"}, {"tag": "WITH the line, cycle 2", "v_before": 4.0575, "probe": "boot=9e712a53 pin_uptime=2.73 pin16=[16: op dh pd | hi // GPIO16 = output] vcell=4.0600 vcell_uptime=2.83 cfgline=1"}]
+
+[exited with code 0]

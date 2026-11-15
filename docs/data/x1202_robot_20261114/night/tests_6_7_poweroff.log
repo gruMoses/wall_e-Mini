@@ -1,0 +1,13 @@
+22:15:28 waiting 377 s so that a hung shutdown is certainly over
+22:22:08 Pi up, boot dc73ab0f
+22:22:10 test 6 unit: active | 1min
+22:22:11 test 6: poweroff sent, input PRESENT
+22:25:07 test 6: PASS alive seconds in the trail: 60 | alive 57 uptime=72.28 ; alive 58 uptime=73.29 ; alive 59 uptime=74.29 ; alive 60 uptime=75.29
+22:25:53 test 7 setup: active | PATH=/home/pi/x1202_bench/fakebin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+22:26:02 test 7: outlet off
+22:26:44 test 7: Pi down
+22:27:22 test 7: PASS force came 30.25 s after the failed poweroff | events: ['3.17 start', '59.72 start', '77.98 halt', '77.98 kill', '78.23 stopped', '78.48 poweroff', '108.73 force'] | fake: ['FAILED-ON-PURPOSE uptime=78.48 args=poweroff --no-wall', 'PASSED-THROUGH uptime=108.73 args=poweroff --force']
+22:27:27 cleanup: active active | 0 | PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin | run True 4.06 []
+SUMMARY {"test6_trail_tail": ["alive 57 uptime=72.28", "alive 58 uptime=73.29", "alive 59 uptime=74.29", "alive 60 uptime=75.29"], "test6_alive_seconds": 60, "test6_result": "PASS", "test7_down_after_off_s": 42.9, "test7_fake_log": ["FAILED-ON-PURPOSE uptime=78.48 args=poweroff --no-wall", "PASSED-THROUGH uptime=108.73 args=poweroff --force"], "test7_events": ["3.17 start", "59.72 start", "77.98 halt", "77.98 kill", "78.23 stopped", "78.48 poweroff", "108.73 force"], "test7_force_after_poweroff_s": 30.25, "test7_result": "PASS"}
+
+[exited with code 0]

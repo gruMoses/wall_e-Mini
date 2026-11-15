@@ -72,7 +72,8 @@ Python control stack on a Raspberry Pi 5. Entry point `pi_app/app/main.py`: a fa
 - Follow-me: direct pursuit only; a lost target pivots in place, then stops.
 - Waypoint nav: ALIGN / DRIVE / ARRIVE; needs RTK fixed, a fresh heading and fresh vision to start.
 - BMS: JHB-R24TH-V1.3 over BLE; feeds the charger inhibit. Fails open after 30 s BLE dropout.
-- Root services in `bin/`: UPS watcher, I2C bus guard, Wi-Fi watchdog, auto-deploy. The UPS watcher and the I2C bus guard do not restart on auto-deploy; reinstall them by hand.
+- Pi power: a Geekworm X1202 board (2 cells) under the Pi. `walle-power` halts the Pi 5 s after the input goes off; the board then cuts the 5 V and starts the Pi when the input returns. Stay-off gotcha: after a halt with the input present (ch5 e-stop, `poweroff`), or an input-off of about 5 s to 14 s, the Pi stays off until the input is off for 30 s (or the button on the board). The system journal of a halted boot is lost on this board; the halt record is `/var/lib/walle-power/events.jsonl`. Status (2026-11-14): on the test stand, go/no-go not yet (`docs/pi_power_architecture.md` 7.6).
+- Root services in `bin/`: power watcher (`walle-power`; it replaced `walle-ups` on 2026-11-14), I2C bus guard, Wi-Fi watchdog, auto-deploy. The power watcher and the I2C bus guard do not restart on auto-deploy; reinstall them by hand (`bin/install_walle_power.sh`).
 
 ## Tests
 ```bash
@@ -95,7 +96,7 @@ Use pytest, not `unittest discover` (it collects zero cases from the pytest-styl
 - `docs/follow-me-tuning.md`: before you change follow-me gains, speed, corridor or arms-up.
 - `docs/imu-heading.md`, `docs/heading_tuning.md`, `docs/gps_heading_alignment.md`: before you change IMU, heading or ZUPT code.
 - `docs/rc_arduino_gps_wiring.md`: RC, arming, Arduino sketch and flashing.
-- `docs/ups_hat_b.md`: UPS HAT (B) behaviour and halt rules.
+- `docs/x1202_power_watcher_design.md`, `docs/pi_power_architecture.md` (section 7): the X1202 power board, the `walle-power` watcher, bench results and open items. `docs/ups_hat_b.md` is the retired UPS HAT (B).
 - `docs/i2c_bus_guard.md`, `docs/wifi_watchdog.md`: the root watchdog services.
 - `docs/depthai_upgrade.md`: depthai 3.6.1, IMU report types, VIO.
 - `docs/auto_deploy.md`: the deploy script.

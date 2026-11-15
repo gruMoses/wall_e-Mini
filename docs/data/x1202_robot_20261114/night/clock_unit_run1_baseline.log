@@ -1,0 +1,15 @@
+23:40:52 [chain3] Pi ok: True t5v_v": 5.14694, "faults": [], "halt_reason": null, "hb_mono": 134.595, "hold": "off", "input_good": true, "last_error": null, "low_s": 0, "schema": "walle-power/1", "state": "run", "vcell_v": 3.5225}
+23:40:52 [chain3] starting night_clock_floor.py
+23:42:03 without 1 | ren=1 ren_user=0 prev_marker=1 prev_lines=1723 nfiles=100 tildes=13 y2025=0 floor_state=/inactive ssh_after_on_s=21.7 failed=0
+23:42:03    floor:  | order: [    1.713223] walle systemd-journald[331]: Journal started|[    1.713939] walle fake-hwclock[328]: Sun 15 Nov 05:41:03 UTC 2026|[    1.727890] walle systemd-journald[331]: Received client request to flush runtime journal.
+23:43:40 without 2 | ren=1 ren_user=0 prev_marker=1 prev_lines=1675 nfiles=100 tildes=14 y2025=0 floor_state=/inactive ssh_after_on_s=21.8 failed=0
+23:43:40    floor:  | order: [    1.700970] walle systemd-journald[333]: Journal started|[    1.702038] walle fake-hwclock[332]: Sun 15 Nov 05:42:40 UTC 2026|[    1.714906] walle systemd-journald[333]: Received client request to flush runtime journal.
+23:44:06 TEMP install of the clock unit: raising clock by 1 s to 2026-11-15 05:44:07 UTC (source: journal-tail) | Created symlink /etc/systemd/system/sysinit.target.wants/walle-clock-floor.service → /etc/systemd/system/walle-clock-floor.service.
+23:45:17 WITH 1 | ren=0 ren_user=0 prev_marker=1 prev_lines=1721 nfiles=100 tildes=14 y2025=0 floor_state=enabled/inactive ssh_after_on_s=21.7 failed=0
+23:45:17    floor:  | order: [    1.885805] walle systemd-journald[332]: Journal started|[    1.887272] walle fake-hwclock[330]: Sun 15 Nov 05:44:17 UTC 2026|[    1.892797] walle walle-clock-floor[347]: raising clock by 1 s to 2026-11-15 05:44:18 UTC (source: journal-|[    1.902393] walle systemd-journald[332]: Received client request to flush runtime journal.|[    2.324352] walle walle-clock-floor[546]: raising clock by 1 s to 2026-11-15 05:44:19 UTC (source: journal-|[    2.615808] walle walle-clock-floor[625]: raising clock by 1 s to 2026-11-15 05:44:20 UTC (source: journal-
+23:50:58 CLEANUP NOT DONE: Pi unreachable; the clock unit may still be installed
+SUMMARY [{"tag": "without 1", "ssh_after_on_s": 21.7, "ren": "1", "ren_user": "0", "prev_marker": "1", "prev_lines": "1723", "nfiles": "100", "tildes": "13", "y2025": "0", "floor": "", "floor_state": "/inactive", "order": "[    1.713223] walle systemd-journald[331]: Journal started|[    1.713939] walle fake-hwclock[328]: Sun 15 Nov 05:41:03 UTC 2026|[    1.727890] walle systemd-journald[331]: Received client request to flush runtime journal.", "date": "2026-11-14 23:41:25 synced=no", "boot": "Startup finished in 1.413s (kernel) + 8.566s (userspace) = 9.979s ", "failed": "0"}, {"tag": "without 2", "ssh_after_on_s": 21.8, "ren": "1", "ren_user": "0", "prev_marker": "1", "prev_lines": "1675", "nfiles": "100", "tildes": "14", "y2025": "0", "floor": "", "floor_state": "/inactive", "order": "[    1.700970] walle systemd-journald[333]: Journal started|[    1.702038] walle fake-hwclock[332]: Sun
+TimeoutError: timed out
+23:50:58 [chain3] night_clock_floor.py ended, rc 1
+
+[exited with code 143]

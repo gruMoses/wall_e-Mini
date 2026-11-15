@@ -263,15 +263,15 @@ Kevin's decisions:
 4. A cell temperature sensor (a part to buy), or no temperature rule.
 5. The hardware watchdog (`RebootWatchdogSec`, `RuntimeWatchdogSec`), after bench test 10.
 6. The hold branch, after the soak.
-7. The `config.txt` or `gpio-hog` line, after the bench check.
-8. An RTC cell for the Pi 5 (a part to buy).
+7. The `config.txt` or `gpio-hog` line, after the bench check. DECIDED by Kevin on 2026-11-14: add `gpio=16=op,dh` to `/boot/firmware/config.txt`. The line is on the Pi since 2026-11-14 23:00 (backup: `config.txt.bak-20261114-gpio16`). It is a hand step of the installation.
+8. An RTC cell for the Pi 5 (a part to buy). Kevin, 2026-11-14: the clock unit (finding 3) stays installed if it passes its bench test. The RTC cell stays open.
 9. The buck at about 12 V and the 2-pin connector.
 10. The EEPROM test (bench test 15).
 11. Approval of push 1, each hand step and push 2.
 
 ## Implementation and bench status (2026-11-14)
 
-Status: the watcher is installed on the Pi on the test stand (Kevin's approval, 2026-11-14). The code is on `main` (commits `0ad7643` to `285ec62`). The old watcher is still installed and does nothing on this board; `bin/retire_walle_ups.sh` is not run yet. The bench logger is stopped and kept (`/home/pi/x1202_bench/ENABLED.off`). The I2C bus guard is not restarted yet, thus it still runs the old code.
+Status: the watcher is installed on the Pi on the test stand (Kevin's approval, 2026-11-14). The code is on `main` (commits `0ad7643` to `285ec62`). The old watcher is retired: `bin/retire_walle_ups.sh` ran on the Pi on 2026-11-14 at 22:08 (Kevin's approval). The I2C bus guard was restarted after that; it runs the new code and its witness is `walle-power`. The bench logger is stopped and kept (`/home/pi/x1202_bench/ENABLED.off`). `bin/walle_ups.py` and the code for the old status file are still in the repository (push 2, Kevin's approval).
 
 Code review: Grok (sessions `29454134` for the watcher, `53dea5f0` for the guard, the deploy hold and the retire script) and an independent Opus reviewer examined the code in two rounds. All three agree that it is fit for the bench.
 
@@ -297,16 +297,60 @@ Bench tests of section 9 with the installed watcher (bench supply at 12.2 V on t
 | 5: input off for 8 s, 12 s, 16 s, 20 s | 1 each | 8 s and 12 s: the Pi halts and stays off (an input-off of 30 s starts it). 16 s and 20 s: the Pi halts and starts again. |
 | 8: watcher stopped with SIGSTOP | 1 | The watchdog ends it after 16 s, the new process is active after 31 s, GPIO 16 stays `op dh`, no reboot. |
 | 9: watcher killed during a halt | 2 | The new process continues the halt from the marker and powers off 16 s after the first halt decision. The halt record shows `resume`, `kill`, `stopped`, `poweroff`. |
+| 6: `poweroff.target` time limit | 1 | A test unit with a stop command that does not end (`TimeoutStopSec=infinity`), then `systemctl poweroff` with the input on. The stop command stayed alive for 60 s, then systemd forced the power-off. Pass. The Pi then stays off (the stay-off condition); an input-off of 30 s starts it. |
+| 7: power-off ladder | 1 | A `systemctl` that fails on the first `poweroff` call, in the `PATH` of the watcher only. Input off: halt decision, `poweroff` 0.5 s later (fails), `poweroff --force` 30.25 s after that. The Pi was off the network 43 s after the outlet went off. Pass. |
+| 11: 20 toggles of GPIO 16 on the cells | 1 | The input was off and the Pi was on the cells with the load. The boot ID did not change, the uptime continued (245.62 s to 262.05 s), and `throttled` was `0x0`. Pass. |
+| 12: tier (a) on the real cells | 1 | Load: 4 cores at 100 %, `wall-e` and the OAK camera. The input was off and the `nohalt` file disabled the input-loss halt. The rested VCELL at the start was 4.0575 V. VCELL reached 3.30 V after 43.5 min (2612 s) on the cells. The `tier` event shows VCELL 3.2975 V. The Pi was off the network 16.6 s after VCELL reached 3.30 V. On the cells, EXT5V was 5.080 V to 5.128 V, `throttled` was `0x0` in each sample, and the CPU temperature was 73.0 C to 78.5 C. Pass. |
+| 12: boot on low cells | 1 | The input came back. The Pi booted with no other action. After the boot the rested VCELL was 3.515 V (3.52 V after 3 min), EXT5V was 5.147 V, `throttled` was `0x0` and the watcher showed no faults. This boot was the first with the `gpio=16=op,dh` line in `config.txt`, so the board did not charge the cells during the boot. |
 | 1: unit tests on the Pi | 1 | 134 passed (before the last change; 147 on the Mac). |
 
-Not done yet: test 2 (the pin voltage of GPIO 6 with the pull-down, with a meter), test 6 (the `poweroff.target` time limit with a test unit), test 7 (the power-off ladder with a `systemctl` that fails), and tests 10 to 15.
+Not done yet: test 2 (the pin voltage of GPIO 6 with the pull-down; needs a meter), test 10 (the hardware watchdog), test 13 (the hold soak; in progress), test 14 (the storage drain; needs a meter), test 15 (the EEPROM test; needs Kevin's approval), and the flat-cell LED check of test 12 (needs a person at the board).
 
 Findings from the bench:
 
 1. The stay-off window with the 5 s debounce is an input-off time of approximately 5 s to 14 s on this supply. Shorter: no halt. Longer: the Pi starts again. Operator rule 1 applies.
 2. The time from the halt decision to the `poweroff` call is 0.5 s. The Pi is off approximately 4 s later.
-3. The system journal of a halted boot is lost. No system journal entry between 2026-11-08 and the present boot is on the disk, although the Pi was in operation each day. A marker line that was synced to the disk was not there after the next start. Cause: the X1202 cuts the 5 V, the RTC has no cell, and each boot starts with the clock at 2025-05-29. `journald` then renames the journal file of the last boot with that old date and removes it as the oldest file. The file system itself is clean (no ext4 recovery). Corrections, Kevin's decision: an RTC cell (decision 8), or an order rule that restores the saved clock before `journald` opens its files. Until then, `journalctl -b -1` shows no system lines, and the halt record of the watcher is the only record of a halt.
-4. The cell level increases with each power cycle. The board charges for approximately 18 s at each start (12 s before the kernel, then until the watcher starts at 5.8 s), and a halt uses the cells for approximately 10 s. In the tests of 2026-11-14 the rested VCELL went from 3.89 V to 4.02 V in approximately 25 cycles. With the hold off, nothing brings the level down. This is decision 7 (drive GPIO 16 earlier) and decision 6 (the hold).
+3. The system journal of a halted boot is lost. No system journal entry between 2026-11-08 and 2026-11-14 is on the disk, although the Pi was in operation each day. A marker line that was synced to the disk was not there after the next start. The file system itself is clean (no ext4 recovery). Cause, examined on 2026-11-14 in the systemd 252 source and on the Pi (three steps):
+   - The X1202 cuts the 5 V and the RTC has no cell, thus each boot starts with the clock at 2025-05-29 (the build date of systemd). `fake-hwclock` then restores a saved time. That time is old: it is saved at a clean stop and one time each hour, and it was 10 min old in the boots that were examined.
+   - `journald` opens the journal file of the last boot approximately 1.7 s after the start. The last entry in that file is later than the clock. `journald` does not append to a file "from the future": it renames the file to `system@<clock>.journal~` (the log line is "corrupted or uncleanly shut down, renaming and replacing"). This occurs at each boot, also after a clean halt.
+   - The journal directory is at its limit of 100 files (`SystemMaxFiles`, the default; 90 files are one user journal for each boot). `journald` then deletes the oldest files by name. A file that was renamed with an old clock is the oldest. The size limit (4 GB, 1.5 GB used) is not the cause.
+   Until a correction is installed, `journalctl -b -1` is not reliable, and the halt record of the watcher is the only sure record of a halt. Corrections (Kevin's decision 8): an RTC cell (the Raspberry Pi RTC battery on connector J5; charging must be enabled with `dtparam=rtc_bbat_vchg=3000000`), or a small unit that sets the clock forward to the newest known time before `journald` opens the file (refer to "Clock unit" below), or the two together.
+4. The cell level increases with each power cycle. The board charges for approximately 18 s at each start (12 s before the kernel, then until the watcher starts at 5.8 s), and a halt uses the cells for approximately 10 s. In the tests of 2026-11-14 the rested VCELL went from 3.89 V to 4.02 V in approximately 25 cycles. With the hold off, nothing brings the level down. This is decision 7 (drive GPIO 16 earlier) and decision 6 (the hold). Bench check of decision 7 (2026-11-14, 22:36 to 22:44, two power cycles for each case, a probe unit at 2.7 s to 2.9 s after the kernel start): without a `config.txt` line, GPIO 16 is not driven at that time and VCELL is 4.185 V (the charge is on; the rested value was 4.056 V). With `gpio=16=op,dh` in `config.txt`, GPIO 16 is `op dh` at that time and VCELL is 4.060 V, which is the rested value. The Pi 5 firmware applies the line to the header pin, and the kernel keeps the state until the watcher starts. The rested VCELL did not increase in the two cycles with the line (4.0575 V to 4.0587 V). The charge in the first seconds before the firmware reads `config.txt` stays. The line was removed after the check. Kevin then approved it, and it is in `config.txt` since 23:00 (decision 7).
+5. For a low-voltage halt, the halt record has a `tier` line and a `halt` line, and no `poweroff` line (refer to the `events` in `tier_a_discharge.log`). The decision is recorded. The call is not.
+6. The stay-off condition occurred one time in the tests of the night. At 23:45 the command "outlet off" got no reply in 10 s from the home dashboard, but the outlet went off. The test script then set the outlet to on. The Pi halted during that interval and stayed off with the input present. An input-off of 34 s started it. This is operator rule 1. The test harness now reads the outlet state and does not trust the reply (`tools/x1202_cycle_test.py`).
+7. The cell level with the `gpio=16=op,dh` line: in the 10 power cycles of the clock test the rested VCELL went from 3.5925 V to 3.585 V (no increase). When the Pi is off and the input is on, the board still charges the cells. Between 23:40 and 23:53 the rested VCELL went from 3.52 V to 3.59 V; the probable cause is the 5 min of the stay-off condition above (the three boots in that interval had the line).
+
+### Clock unit
+
+The clock unit is a oneshot unit, `walle-clock-floor.service`. It runs `/usr/local/sbin/walle-clock-floor` after `fake-hwclock.service` and before `systemd-journal-flush.service`. The script sets the clock forward, never back, to the newest of three times:
+
+- the `fake-hwclock` file,
+- the modification time of the `systemd-timesyncd` clock file,
+- the last entry of the system journal plus 1 s.
+
+The script ignores a value that is older than June 2025, or more than 1 h later than the modification time of its file. It always exits with 0. The unit has a time limit of 15 s.
+
+Review: Grok (session `79728951`) examined the first draft. It rejected the order `Before=systemd-journald.service`, because it is not necessary and it delays the start of `journald`. That line was removed. Grok also said that `fake-hwclock load` sets the clock back. The Debian script sets it forward only, so this point was not accepted. `After=fake-hwclock.service` was added because it costs nothing.
+
+Bench result (raw data: `clock_unit_run1_baseline.log` and `clock_unit_run2_10_cycles.log`):
+
+| Case | Cycles | Journal renamed | Time to the first ssh answer |
+|---|---|---|---|
+| No unit | 2 | 2 of 2 (`ren=1`) | 21.7 s and 21.8 s |
+| First version of the unit | 1 | 0 of 1 | 21.7 s |
+| Final unit | 10 | 0 of 10 | 18.9 s to 21.8 s (9 of 10 cycles: 21.7 s to 21.8 s) |
+
+With the final unit, the marker of the previous boot was readable in 10 of 10 cycles. It was also readable in the 2 cycles without the unit, so the rename count is the test, not the marker. The number of `.journal~` files was 13 and 14 without the unit and 14 in each cycle with the unit. The first version had no `RemainAfterExit=yes`. It ran 3 times in each boot and moved the clock 1 s forward each time. With `RemainAfterExit=yes` it runs one time in each boot, and it raises the clock by 1 s.
+
+Status: the unit is installed on the Pi since 2026-11-14 at 23:44. Kevin decided on 2026-11-14 that it stays installed if it passes; it passed. Install it with `sudo bash bin/install_walle_clock_floor.sh`. The removal commands are in the header of that script.
+
+Limits:
+
+- The unit does not make the clock correct. On 2026-11-14 at 23:52 the clock of the Pi was 6.5 min behind the real time and `NTPSynchronized` was `no`. The clock is correct only after a time synchronization, or with an RTC cell.
+- The test shows that the unit prevents the rename, which is the first step of the loss. The loss itself (a deleted file) did not occur in the 2 cycles without the unit: in those boots `fake-hwclock` restored a time in 2026, and the renamed file was not the oldest file.
+- Not tested: a boot with all three time sources missing.
+- Not tested: a power cut without a halt. This is not possible on this board without removal of the cells.
+- The RTC cell stays Kevin's decision (decision 8).
 
 ## Reviewer disagreements
 
