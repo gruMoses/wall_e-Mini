@@ -525,8 +525,9 @@ WARNING: Do checks 6 and 7 with the robot on the stand, wheels free, and
    to CH1 −, transmitter on, stick at centre: 1.6 V. A meter shows the
    average: high = average / duty. At 333 Hz (3.0 ms frame) a 1500 µs
    pulse is a duty of 0.5, so the high is about 3.2 V (3.1 V to 3.3 V for
-   a reading of 1.55 V to 1.65 V). Optional firmer value: the meter's Hz
-   button, pressed twice, gives the duty in %; high = 1.6 V / duty.
+   a reading of 1.55 V to 1.65 V). Kevin's Hz reading the same day:
+   329 Hz (3.04 ms frame), so a 1500 µs pulse is a duty of 0.49 and the
+   high is about 3.24 V.
 6. **Link loss with the transmitter on.** Run
    `python3 -m pi_app.cli.monitor_rc`. Put the arm switch up. Hold CH1
    forward with a rubber band. Put the transmitter in a closed metal box
