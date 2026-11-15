@@ -1,0 +1,17 @@
+[Unit]
+Description=Raise the clock to the newest known time before the persistent journal opens
+Documentation=file:///usr/local/sbin/walle-clock-floor
+DefaultDependencies=no
+After=fake-hwclock.service
+Before=systemd-journal-flush.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/walle-clock-floor
+StandardOutput=kmsg
+StandardError=kmsg
+TimeoutStartSec=15
+
+[Install]
+WantedBy=sysinit.target

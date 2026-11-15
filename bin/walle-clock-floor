@@ -1,0 +1,55 @@
+#!/bin/sh
+# walle-clock-floor: set the system clock FORWARD (never back) to the newest
+# known time, before journald opens the journal file of the last boot.
+#
+# Why: the X1202 cuts the 5 V after a halt and the Pi 5 RTC has no cell, so
+# each boot starts with an old clock. journald does not append to a journal
+# file whose last entry is later than the clock: it renames the file, and the
+# file-count limit then deletes it. The system journal of the halted boot is
+# lost. See docs/x1202_power_watcher_design.md, bench finding 3.
+#
+# Installed as /usr/local/sbin/walle-clock-floor by
+# bin/install_walle_clock_floor.sh; run by walle-clock-floor.service.
+# Always exits 0. Reads only; the one write is the clock.
+# Set WALLE_CLOCK_FLOOR_DRY=1 to print the decision without setting the clock.
+MIN_SEC=1750000000          # 2025-06-15: anything older is a bogus value
+SLACK=3600                  # a value may exceed its file's mtime by at most 1 h
+now=$(date -u +%s)
+best=$now
+why="current clock"
+
+# consider <seconds> <mtime-seconds-of-source> <label>
+consider() {
+    v=$1; m=$2; l=$3
+    case "$v$m" in ''|*[!0-9]*) return;; esac
+    [ "$v" -ge "$MIN_SEC" ] || return
+    [ "$v" -le $((m + SLACK)) ] || { echo "ignoring $l: $v is far beyond its file time $m"; return; }
+    if [ "$v" -gt "$best" ]; then best=$v; why=$l; fi
+}
+
+# A: fake-hwclock (saved at clean shutdown and hourly; seconds are truncated)
+f=/etc/fake-hwclock.data
+if [ -r "$f" ]; then
+    consider "$(date -u -d "$(cat "$f")" +%s 2>/dev/null)" "$(stat -c %Y "$f" 2>/dev/null)" fake-hwclock
+fi
+# B: timesyncd clock file (its mtime is touched about every 60 s)
+f=/var/lib/systemd/timesync/clock
+if [ -e "$f" ]; then
+    m=$(stat -c %Y "$f" 2>/dev/null)
+    consider "$m" "$m" timesyncd-clock-file
+fi
+# C: last entry of the active system journal (the file journald will try to append to)
+f=/var/log/journal/$(cat /etc/machine-id 2>/dev/null)/system.journal
+if [ -r "$f" ]; then
+    us=$(timeout 8 journalctl --no-pager --file="$f" -n 1 -o json 2>/dev/null \
+         | sed -n 's/.*"__REALTIME_TIMESTAMP" *: *"\([0-9]*\)".*/\1/p' | head -n 1)
+    case "$us" in ''|*[!0-9]*) ;; *) consider "$((us / 1000000 + 1))" "$(stat -c %Y "$f" 2>/dev/null)" journal-tail;; esac
+fi
+
+if [ "$best" -gt "$now" ]; then
+    echo "raising clock by $((best - now)) s to $(date -u -d @"$best" '+%F %T') UTC (source: $why)"
+    [ "${WALLE_CLOCK_FLOOR_DRY:-0}" = 1 ] || date -u -s "@$best" >/dev/null
+else
+    echo "clock already at or past every known timestamp (now $(date -u -d @"$now" '+%F %T') UTC)"
+fi
+exit 0
