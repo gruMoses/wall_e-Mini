@@ -269,6 +269,45 @@ Kevin's decisions:
 10. The EEPROM test (bench test 15).
 11. Approval of push 1, each hand step and push 2.
 
+## Implementation and bench status (2026-11-14)
+
+Status: the watcher is installed on the Pi on the test stand (Kevin's approval, 2026-11-14). The code is on `main` (commits `0ad7643` to `285ec62`). The old watcher is still installed and does nothing on this board; `bin/retire_walle_ups.sh` is not run yet. The bench logger is stopped and kept (`/home/pi/x1202_bench/ENABLED.off`). The I2C bus guard is not restarted yet, thus it still runs the old code.
+
+Code review: Grok (sessions `29454134` for the watcher, `53dea5f0` for the guard, the deploy hold and the retire script) and an independent Opus reviewer examined the code in two rounds. All three agree that it is fit for the bench.
+
+Differences from this design (each one came from a review or from the bench):
+
+- Size: `bin/walle_power.py` has approximately 800 lines, not 120 to 150. The reviews added most of the difference. A shorter script is possible if Kevin removes functions, for example the charge hold that is off.
+- The re-check uses readable samples only. A pin that cannot be read for 2 s in the re-check causes the power-off.
+- The debounce counts the time between readable samples (2.5 s maximum for each step). A failed read does not set the count to zero.
+- The gauge read comes after the GPIO 6 path in each loop pass. `READY=1` goes out at the end of the start. The longest time between two watchdog messages is 9 s with each tool at its time limit.
+- The command runner cannot wait without a limit. A main loop error does not stop the process; 20 failed passes in a row cause an exit and a new start.
+- `bus_ok_mono` is the start time of the watcher until the first good read. The plausible VCELL range starts at 2.0 V.
+- The `nohalt` file cannot stop the start: a file that cannot be read means "not active".
+- The deploy HOLD compares the two file trees. On systemd 252, `systemctl list-unit-files` returns 1 when no unit file matches; the HOLD accepts that.
+- New: a halt record. The watcher appends each halt event to `/var/lib/walle-power/events.jsonl` and syncs the file. Reason: on this board the system journal of a halted boot is lost (refer to the finding below).
+- New: `cells_high` uses rested readings only and is a notice. The first reading after a start is taken during the charge of the boot.
+
+Bench tests of section 9 with the installed watcher (bench supply at 12.2 V on the relay outlet, the two Molicel cells, the jumper, the camera on a USB port of the Pi; raw data in `docs/data/x1202_robot_20261114/watcher_bench_results.jsonl`):
+
+| Test | n | Result |
+|---|---|---|
+| 3: input off for 3 s | 5 | No halt, and `wall-e` continues. The low time that the watcher counts is 3.75 s to 4.0 s, because the supply holds its output and GPIO 6 comes back 2.3 s after the input. In one more run the outlet stayed off for 5.7 s; the watcher halted the Pi, which is correct. |
+| 4: input off for 40 s to 60 s | 5 | Halt each time. The halt decision is 5.8 s to 6.1 s after the outlet goes off, and the Pi is off the network 8.8 s to 10.8 s after it. The Pi boots with no other action when the input returns. |
+| 5: input off for 8 s, 12 s, 16 s, 20 s | 1 each | 8 s and 12 s: the Pi halts and stays off (an input-off of 30 s starts it). 16 s and 20 s: the Pi halts and starts again. |
+| 8: watcher stopped with SIGSTOP | 1 | The watchdog ends it after 16 s, the new process is active after 31 s, GPIO 16 stays `op dh`, no reboot. |
+| 9: watcher killed during a halt | 2 | The new process continues the halt from the marker and powers off 16 s after the first halt decision. The halt record shows `resume`, `kill`, `stopped`, `poweroff`. |
+| 1: unit tests on the Pi | 1 | 134 passed (before the last change; 147 on the Mac). |
+
+Not done yet: test 2 (the pin voltage of GPIO 6 with the pull-down, with a meter), test 6 (the `poweroff.target` time limit with a test unit), test 7 (the power-off ladder with a `systemctl` that fails), and tests 10 to 15.
+
+Findings from the bench:
+
+1. The stay-off window with the 5 s debounce is an input-off time of approximately 5 s to 14 s on this supply. Shorter: no halt. Longer: the Pi starts again. Operator rule 1 applies.
+2. The time from the halt decision to the `poweroff` call is 0.5 s. The Pi is off approximately 4 s later.
+3. The system journal of a halted boot is lost. No system journal entry between 2026-11-08 and the present boot is on the disk, although the Pi was in operation each day. A marker line that was synced to the disk was not there after the next start. Cause: the X1202 cuts the 5 V, the RTC has no cell, and each boot starts with the clock at 2025-05-29. `journald` then renames the journal file of the last boot with that old date and removes it as the oldest file. The file system itself is clean (no ext4 recovery). Corrections, Kevin's decision: an RTC cell (decision 8), or an order rule that restores the saved clock before `journald` opens its files. Until then, `journalctl -b -1` shows no system lines, and the halt record of the watcher is the only record of a halt.
+4. The cell level increases with each power cycle. The board charges for approximately 18 s at each start (12 s before the kernel, then until the watcher starts at 5.8 s), and a halt uses the cells for approximately 10 s. In the tests of 2026-11-14 the rested VCELL went from 3.89 V to 4.02 V in approximately 25 cycles. With the hold off, nothing brings the level down. This is decision 7 (drive GPIO 16 earlier) and decision 6 (the hold).
+
 ## Reviewer disagreements
 
 D1 and D2 are closed. D3 is open for Kevin. D1 (a GPIO 6 that reads low with the input present): round 1 split; Grok wanted an alarm only, Opus wanted a halt. The ruling was fail-off, with an override file. In round 2 both reviewers agree with that ruling. Draft 3 adds an expiry to the override file. D2 (a low-voltage halt with GPIO 6 high): Grok wanted it unconditional, Opus wanted a probe on that branch. The ruling was tier (b) unconditional at 3.10 V. In round 2 both reviewers accept it. Opus still prefers the probe, but agrees that the cost is one operator cycle, not a safety cost. Opus finding 9 (a frozen gauge counts as unreadable) is not taken; Opus agrees in round 2.

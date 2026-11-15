@@ -320,7 +320,7 @@ The 12 V input gives the same behaviour as the USB Type-C input. The one differe
 | 4. Hub power from the board | Not done | Needs hands. |
 | RTK fix quality | Not done | Needs the robot. |
 
-Status, 2026-11-14 evening: the board with the new cells and the jumper passes each test that does not need hands (7.10). Before a go, these items stay open: the standby drain with a meter, the converter of the robot (3 A or more at 12 V), the stand test with the motors, and Kevin's decisions. Before a drive, the watcher must be installed.
+Status, 2026-11-14 evening: the board with the new cells and the jumper passes each test that does not need hands (7.10). The watcher of `docs/x1202_power_watcher_design.md` is installed on the Pi on the test stand since 21:15 and passes its bench tests (section "Implementation and bench status" of that document). One new item: the system journal of a halted boot is lost on this board, because the clock starts at an old date at each boot. Before a go, these items stay open: the standby drain with a meter, the converter of the robot (3 A or more at 12 V), the stand test with the motors, and Kevin's decisions. Before a drive, the watcher must be installed.
 
 Go/no-go, 2026-11-13: **not yet**. No result rejects option F. The primary functions are correct: the Pi starts when the input returns, there is no poll wake, the power-loss signal is clean, and a reboot does not cut the power. The board does not go on the robot until these items are closed:
 
