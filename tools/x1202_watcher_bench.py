@@ -120,9 +120,25 @@ class Stream:
                 "vcell_min": min([r["vcell_v"] for r in s if r.get("vcell_v") is not None] or [None])}
 
 
-def prev_journal(b, n=25, keys=KEYS):
-    rc, out, _ = b.ssh("journalctl -b -1 -u walle-power --no-pager -o short-monotonic | tail -n %d" % n, timeout=25)
-    return [ln[:220] for ln in out.splitlines() if any(k.lower() in ln.lower() for k in keys)] if rc == 0 else None
+def prev_journal(b, n=25, keys=KEYS, boot_id=None):
+    """The watcher's own halt record, /var/lib/walle-power/events.jsonl. The
+    system journal of a halted boot does not survive on this board (the clock
+    starts in the past at each boot and journald then discards the file), so
+    `journalctl -b -1` is empty. boot_id limits the lines to that boot."""
+    rc, out, _ = b.ssh("sudo -n tail -n %d /var/lib/walle-power/events.jsonl" % max(n, 40), timeout=25)
+    if rc != 0:
+        return None
+    lines = []
+    for ln in out.splitlines():
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if boot_id and r.get("boot_id") != boot_id:
+            continue
+        lines.append("%s bt=%.2f %s %s" % (str(r.get("boot_id"))[:8], r.get("bt") or 0.0, r.get("event"),
+                                          r.get("reason") or r.get("phase") or ""))
+    return lines
 
 
 def ensure_up(b, rec, t_ref, force=False):
@@ -361,15 +377,15 @@ def resume(b, a):
             rec["boot_id"] = c["boot_id"]
         restore(b, rec)
         if down:
-            rec["journal_prev"] = prev_journal(b, 60, ("continuing halt", "HALT", "halt step"))
+            rec["journal_prev"] = prev_journal(b, 60, boot_id=rec["boot_id_before"])
         if "t_kill" not in rec:
             fail(rec, "state never became halting within 60 s")
         elif not down:
             fail(rec, "Pi still up 90 s after the off command")
         elif rec.get("recovered_by_cycle") or not c or c["boot_id"] == rec["boot_id_before"]:
             fail(rec, "did not come back by itself with a new boot id")
-        elif not any("continuing halt" in ln for ln in rec["journal_prev"] or []):
-            fail(rec, "no 'continuing halt' line in the previous boot journal")
+        elif not any(" resume " in ln for ln in rec["journal_prev"] or []):
+            fail(rec, "no 'resume' event in the watcher's halt record for that boot")
     return run_test(b, rec, body)
 
 
