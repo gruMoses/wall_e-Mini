@@ -266,7 +266,7 @@ Kevin's decisions:
 6. The hold branch, after the soak. Result, 2026-11-15 (bench test 13): branch A operates correctly in a run of 5.8 h. DECIDED by Kevin on 2026-11-15: the hold is ON (`--hold` in the unit file). Reasons: the storage drain of 0.85 mA (bench test 14) takes approximately 0.5 percent of the cells each day, and with the `config.txt` line of decision 7 nothing else charges the cells while the Pi runs.
 7. The `config.txt` or `gpio-hog` line, after the bench check. DECIDED by Kevin on 2026-11-14: add `gpio=16=op,dh` to `/boot/firmware/config.txt`. The line is on the Pi since 2026-11-14 23:00 (backup: `config.txt.bak-20261114-gpio16`). It is a hand step of the installation.
 8. An RTC cell for the Pi 5 (a part to buy). Kevin, 2026-11-14: the clock unit (finding 3) stays installed if it passes its bench test. The RTC cell stays open.
-9. The buck at about 12 V and the input connector. The connector is DECIDED by Kevin on 2026-11-15 (answer given in the session "Arduino and RC receiver schematics"): the barrel jack with a retention, not the XH input (section 8, step 8). The 12 V setting of the buck stays open.
+9. The buck at about 12 V and the input connector. The connector is DECIDED by Kevin on 2026-11-15 (answer given in the session "Arduino and RC receiver schematics"): the barrel jack with a retention, not the XH input (section 8, step 8). The 12 V setting: Kevin set the buck to approximately 12 V before the stand test of 2026-11-15 (his report; the value was not measured in this session). Its current rating is not recorded, and the stand test shows a limit on the robot ("Stand test on the robot").
 10. The EEPROM test (bench test 15).
 11. Approval of push 1, each hand step and push 2.
 12. The storage rule. DECIDED by Kevin on 2026-11-15, after bench test 14: operator rule 4 (more than 6 weeks parked: remove the cells).
@@ -309,6 +309,8 @@ Bench tests of section 9 with the installed watcher (bench supply at 12.2 V on t
 | 4, on the barrel jack: input off for 45 s | 2 | 2026-11-15. The bench supply at 12 V goes into the barrel jack (Kevin's decision 9), with the relay outlet in line. Halt each time: the halt decision was 5.8 s and 6.0 s after the outlet went off. The Pi booted with no other action, and the boot started 12.1 s and 12.3 s after the outlet went on (first ssh answer after 19.2 s and 40.0 s; the second boot had a slow Wi-Fi connection). Pass. The behaviour is the same as on the 2-pin input. |
 | Charge burst with a full CPU load, on the barrel jack | 1 | 2026-11-15, the hold on. This is the bench part of the stand test (no motors, no camera). Load: 4 cores at 100 % and an NVMe read. First the Pi ran 186 s on the cells with this load (the `nohalt` file was active): the rested VCELL went from 3.766 V to 3.715 V, and EXT5V was 5.11 V to 5.17 V. Then the input came back. The watcher started a burst 122 s later, and the burst lasted the full 120 s. GPIO 6 was sampled at 4 Hz on the Pi: it was low only in the planned time on the cells, and it had no low sample in the 6.4 min after the input came back (approximately 1550 samples, 480 of them during the burst). EXT5V during the burst was 5.10 V to 5.16 V. There was no undervoltage flag. VCELL was 3.915 V at the end of the burst, and the rested VCELL after it was 3.7525 V. The supply current was not read (no camera on the supply; the limit of this supply is 3 A). Pass for the power path. Side finding: `throttled` showed `0x80000` and `0x80008` after approximately 4 min of this load. That is the soft temperature limit of the CPU, not a power fault. The fan turned (3391 rpm after the test). Data: `docs/data/x1202_robot_20261114/jack_20261115/`. |
 | 1: unit tests on the Pi | 1 | 134 passed (before the last change; 147 on the Mac). |
+| Robot's converter, no motion | 1 | 2026-11-15, 13:45. The Pi is on the robot, on the stand, not armed. The converter of the robot feeds the barrel jack (Kevin: set to approximately 12 V; its current rating is not recorded). The OAK camera and the Arduino are on the USB ports of the Pi, and `wall-e` is in operation. Load: 4 cores at 100 % and an NVMe read for 177 s, with no charge burst. GPIO 6 at 4 Hz: 708 of 708 samples high. EXT5V was 5.05 V to 5.11 V (5.13 V to 5.20 V before the load). There was no undervoltage flag. The CPU temperature went from 49 C to 78.8 C in 3 min with the fan at 8500 rpm. Pass. Data: `docs/data/x1202_robot_20261114/stand_20261115/noload_samples_4hz.jsonl`. |
+| Stand test with the motors (section 9), on the robot's converter | 1 | 2026-11-15, 13:53 to 14:11. FAIL for the pass condition "no GPIO 6 low sample" when the CPU load is full. Pass with the usual load of the robot. Refer to "Stand test on the robot" below. Data: `docs/data/x1202_robot_20261114/stand_20261115/`. |
 
 Not done yet: test 2 (the pin voltage of GPIO 6 with the pull-down; needs a meter), test 10 (the hardware watchdog), the remaining time of test 13 (the hold soak is 24 h in the test plan; 5.8 h are done), test 15 (the EEPROM test; needs Kevin's approval), and the flat-cell LED check of test 12 (needs a person at the board).
 
@@ -326,6 +328,41 @@ Findings from the bench:
 6. The stay-off condition occurred one time in the tests of the night. At 23:45 the command "outlet off" got no reply in 10 s from the home dashboard, but the outlet went off. The test script then set the outlet to on. The Pi halted during that interval and stayed off with the input present. An input-off of 34 s started it. This is operator rule 1. The test harness now reads the outlet state and does not trust the reply (`tools/x1202_cycle_test.py`).
 7. The cell level with the `gpio=16=op,dh` line: in the 10 power cycles of the clock test the rested VCELL went from 3.5925 V to 3.585 V (no increase). When the Pi is off and the input is on, the board still charges the cells. Between 23:40 and 23:53 the rested VCELL went from 3.52 V to 3.59 V; the probable cause is the 5 min of the stay-off condition above (the three boots in that interval had the line).
 8. The board starts the Pi on the cells with no input. On 2026-11-15, on Kevin's bench with the input disconnected, the Pi started two times. Kevin pressed the button of the board by accident (his report; one press is confirmed, the cause of the second start is not recorded). It is not known if a cell that is put back starts the Pi. The watcher halted the first start 17.7 s after the kernel start (the input-loss rule; halt record of boot `d14d716d`). The second start has a `start` line and no halt line in the halt record, and its journal stops after 15 s: the power was cut (probable cause: a cell was removed for the drain test). The journal findings of that cut are in "Clock unit", Limits.
+
+### Stand test on the robot (2026-11-15)
+
+Setup: the Pi with the X1202 is on the robot, on the stand, with the tracks off the ground (Kevin's confirmation before the test). The converter of the robot feeds the barrel jack. The `nohalt` file was active for this boot (Kevin's approval), and it was removed after the test. A sampler on the Pi read GPIO 6 at 4 Hz. A second script on the Pi added a load of 4 busy cores and an NVMe read. The scripts sent no command to the motors: Kevin drove the tracks with the transmitter.
+
+Sequence:
+
+1. Kevin set the main switch to off for 225 s. The Pi stayed in operation on the cells. The script added the full CPU load, and stopped it after 70 s because the loaded VCELL was 3.4475 V (the limit of the script was 3.45 V). With the usual load of the robot, the loaded VCELL was then 3.56 V to 3.58 V. EXT5V on the cells was 5.07 V to 5.18 V.
+2. Kevin set the main switch to on, armed the robot with the transmitter on, and drove the tracks for 326 s. The drive was forward at full speed (approximately 20 000 erpm) with few stops. The VESC bus current was -5.8 A to 9.5 A, and the bus voltage was 52.0 V to 55.3 V.
+3. The watcher started charge bursts, and the script added the full CPU load during bursts 1, 2 and 3. Burst 4 had no added load.
+
+Results:
+
+| Burst | Motors | CPU load | Result |
+|---|---|---|---|
+| 1 (14:00:40) | in operation | full | Stopped after 38 s: GPIO 6 went low for less than 0.25 s. |
+| 2 (14:03:18) | in operation | full | Stopped after 33 s: GPIO 6 went low for less than 0.25 s. |
+| 3 (14:05:52) | stopped | full | Stopped after 34 s: GPIO 6 went low for less than 0.25 s. |
+| 4 (14:08:26) | stopped | usual (`wall-e`, the camera, not armed) | The full 120 s. No low sample. VCELL went from 3.72 V to 3.9075 V. EXT5V was 5.14 V to 5.18 V. |
+
+- The watcher was correct each time: it recorded `good: True -> False` and stopped the burst. The low time was much shorter than the debounce of 5 s, thus there was no halt condition (also without the `nohalt` file).
+- In bursts 1 to 3, VCELL stayed at 3.82 V to 3.85 V and did not increase. The board decreased the charge current. On the bench supply, with the same CPU load and no camera, VCELL increased continuously to 3.915 V (test "Charge burst with a full CPU load, on the barrel jack").
+- With the motors in operation and no burst, GPIO 6 had no low sample. In the 12.9 min after the input came back there were 3097 samples. Two were low (the ends of bursts 2 and 3). The low time at the end of burst 1 was shorter than one sample period; the watcher recorded it.
+- EXT5V was 5.07 V to 5.20 V in the full test. `get_throttled` was 0x0. The maximum CPU temperature was 78.8 C.
+
+Conclusions:
+
+1. The motors do not disturb the input of the X1202 (forward, full speed).
+2. On the robot, the input cannot carry the Pi with a full CPU load, the camera and the charge at the same time. The burst stops early, and the Pi continues without a fault. With the usual load, the burst is correct.
+3. The cause is not known. Possible causes: the limit of the converter, the voltage drop in the wiring to the jack, or the limit of the board itself (the camera adds load, and the bench test had no camera). The voltage at the jack was not measured.
+
+Not examined: a burst with the usual load while the motors are in operation; reverse and hard stops; a meter on the converter output.
+
+Open before a go: record the current rating of the converter, and measure the voltage at the barrel jack during a burst with the full CPU load. If the voltage at the jack decreases, the cause is the converter or the wiring. If it stays at 12 V, the cause is the board.
+
 
 ### Clock unit
 
