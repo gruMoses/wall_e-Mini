@@ -357,7 +357,11 @@ Conclusions:
 
 1. The motors do not disturb the input of the X1202 (forward, full speed).
 2. On the robot, the input cannot carry the Pi with a full CPU load, the camera and the charge at the same time. The burst stops early, and the Pi continues without a fault. With the usual load, the burst is correct.
-3. The cause is in the board, not in the supply (meter check below). The rating of the converter is not the cause: it is 10 A on a 5 A fuse (Kevin, after the test), and the estimated input current in the test is approximately 3 A. The 12 V at the barrel plug stays at 12.03 V or more. The probable cause is a thermal limit of the board: the time to the low signal decreases when the board is warmer (38 s, 33 s and 34 s in the first test; 26 s and 22 s in the meter check, which started after 122 s of full load on the cells). This cause is not confirmed (no temperature of the board was measured).
+3. The cause is in the board, not in the supply (meter check below). The rating of the converter is not the cause: it is 10 A on a 5 A fuse (Kevin, after the test), and the estimated input current in the test is approximately 3 A. The 12 V at the barrel plug stays at 12.03 V or more. The probable cause is a load limit of the board, not heat in the board (analysis after Kevin's question, 2026-11-15; not confirmed):
+   - Each of the 5 low signals came when the CPU temperature was 74 C to 77 C, although the time in the burst was different (22 s to 38 s). At that temperature the Pi takes its maximum power: a hot CPU takes more current, and the fan goes to full speed at 75 C.
+   - The low signal stays until the watcher stops the charge. The watcher reads GPIO 6 each 0.25 s and recorded 5 of 5 low signals. A free signal of 0.1 s would be missed in approximately 60 % of the cases. After the charge stops, the signal is high again in 0.1 s. Thus the short low time is the reaction time of the watcher. It is not a cooling time.
+   - With the same CPU temperature and no charge (the test "Robot's converter, no motion"), there was no low signal.
+   - A thermal limit of the board is not excluded (no temperature of the board was measured), but the data do not need it. It is also not known if the limit is a stable limit or a short transient when the fan changes speed.
 
 Not examined: a burst with the usual load while the motors are in operation; reverse and hard stops; the temperature of the board.
 
