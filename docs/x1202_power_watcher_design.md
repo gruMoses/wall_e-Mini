@@ -273,7 +273,7 @@ Kevin's decisions:
 
 ## Implementation and bench status (2026-11-14)
 
-Status: the watcher is installed on the Pi on the test stand (Kevin's approval, 2026-11-14). The code is on `main` (commits `0ad7643` to `285ec62`). The old watcher is retired: `bin/retire_walle_ups.sh` ran on the Pi on 2026-11-14 at 22:08 (Kevin's approval). The I2C bus guard was restarted after that; it runs the new code and its witness is `walle-power`. The bench logger is stopped and kept (`/home/pi/x1202_bench/ENABLED.off`). `bin/walle_ups.py` and the code for the old status file are still in the repository (push 2, Kevin's approval).
+Status: the watcher is installed on the Pi on the test stand (Kevin's approval, 2026-11-14). The code is on `main` (commits `0ad7643` to `285ec62`). The old watcher is retired: `bin/retire_walle_ups.sh` ran on the Pi on 2026-11-14 at 22:08 (Kevin's approval). The I2C bus guard was restarted after that; it runs the new code and its witness is `walle-power`. The bench logger is stopped and kept (`/home/pi/x1202_bench/ENABLED.off`). `bin/walle_ups.py` and the code for the old status file are still in the repository (push 2, Kevin's approval). The charge hold is on since 2026-11-15 at 11:15: `bin/install_walle_power.sh` ran again after commit `ffa35d7` (Kevin's approval), and the status file shows `hold` = `on`.
 
 Code review: Grok (sessions `29454134` for the watcher, `53dea5f0` for the guard, the deploy hold and the retire script) and an independent Opus reviewer examined the code in two rounds. All three agree that it is fit for the bench.
 
@@ -323,6 +323,7 @@ Findings from the bench:
 5. For a low-voltage halt, the halt record has a `tier` line and a `halt` line, and no `poweroff` line (refer to the `events` in `tier_a_discharge.log`). The decision is recorded. The call is not.
 6. The stay-off condition occurred one time in the tests of the night. At 23:45 the command "outlet off" got no reply in 10 s from the home dashboard, but the outlet went off. The test script then set the outlet to on. The Pi halted during that interval and stayed off with the input present. An input-off of 34 s started it. This is operator rule 1. The test harness now reads the outlet state and does not trust the reply (`tools/x1202_cycle_test.py`).
 7. The cell level with the `gpio=16=op,dh` line: in the 10 power cycles of the clock test the rested VCELL went from 3.5925 V to 3.585 V (no increase). When the Pi is off and the input is on, the board still charges the cells. Between 23:40 and 23:53 the rested VCELL went from 3.52 V to 3.59 V; the probable cause is the 5 min of the stay-off condition above (the three boots in that interval had the line).
+8. The board starts the Pi on the cells with no input. On 2026-11-15, on Kevin's bench with the input disconnected, the Pi started two times (the cause is not recorded: the button of the board, or a cell that was put back). The watcher halted the first start 17.7 s after the kernel start (the input-loss rule; halt record of boot `d14d716d`). The second start has a `start` line and no halt line in the halt record, and its journal stops after 15 s: the power was cut (probable cause: a cell was removed for the drain test). The journal findings of that cut are in "Clock unit", Limits.
 
 ### Clock unit
 
@@ -353,7 +354,7 @@ Limits:
 - The unit does not make the clock correct. On 2026-11-14 at 23:52 the clock of the Pi was 6.5 min behind the real time and `NTPSynchronized` was `no`. The clock is correct only after a time synchronization, or with an RTC cell.
 - The test shows that the unit prevents the rename, which is the first step of the loss. The loss itself (a deleted file) did not occur in the 2 cycles without the unit: in those boots `fake-hwclock` restored a time in 2026, and the renamed file was not the oldest file.
 - Not tested: a boot with all three time sources missing.
-- Not tested: a power cut without a halt. This is not possible on this board without removal of the cells.
+- A power cut without a halt occurred one time, on 2026-11-15 (finding 8). At the next boot `journald` renamed the journal of the cut boot, which is correct for a file that was not closed. The journals of the cut boot and of the two boots before it stayed readable (`journalctl --list-boots`). The unit ran one time and raised the clock by 1935 s (source: the clock file of `systemd-timesyncd`). This is one observation, not a test.
 - The RTC cell stays Kevin's decision (decision 8).
 
 ## Reviewer disagreements
