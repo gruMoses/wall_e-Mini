@@ -81,7 +81,8 @@ Electrical facts:
   333 Hz, 500 µs to 2500 µs. A 3 s press of BIND changes the mode. The logs
   show 992 µs to 2004 µs. The robot runs in the 333 Hz mode (Kevin's
   meter, 2026-11-15: CH1 at centre averages 1.6 V; at 50 Hz that average
-  would need a 21 V high).
+  would need a 21 V high). Confirmed the same day: Kevin saw the blue LED
+  on. The green LED was on too, most likely the link light.
 - The sketch measures each pulse with `micros()` (4 µs steps) in a
   pin-change interrupt. The flashed firmware changes a width outside
   800 µs to 2200 µs to 1500 µs before it sends the line. The repo sketch
