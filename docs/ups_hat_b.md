@@ -1,3 +1,10 @@
+> RETIRED. This board is retired. The Geekworm X1202 power board with two
+> 18650 cells replaced it (the watcher changed on 2026-11-14; see `docs/pi_power_architecture.md`
+> section 7 and `docs/x1202_power_watcher_design.md`). The watcher code
+> (`bin/walle_ups.py` and its units, installer and test) was deleted from the
+> repo in commit `8037d3d` on 2026-11-15. The last commit that has it is
+> `b0fc480` (`git show b0fc480:bin/walle_ups.py`). The text below is history.
+
 # UPS HAT (B): mains-loss halt and RTC wake
 
 This document describes the Pi's uninterruptible power supply (UPS) since
