@@ -335,7 +335,7 @@ Conditions and follow-up work:
 1. Before the first drive: hold the barrel plug in the jack (a cable tie or a right-angle plug). If the plug comes out, the Pi halts 5 s later and the robot stops.
 2. This go is for the power board only. The open safety items in `CLAUDE.md` (for example the person stop hold with a person) are not part of it.
 3. At the first drive outdoors: the RTK fix quality with the board in operation.
-4. After 7 days with no fault: delete the old watcher code (push 2; Kevin's approval). DONE on 2026-11-15, commit `8037d3d`: Kevin did not wait the 7 days. The old files are in the git history (last commit `b0fc480`).
+4. After 7 days with no fault: delete the old watcher code (push 2; Kevin's approval). DONE on 2026-11-15, commit `8037d3d`: Kevin did not wait the 7 days. The old files are in the git history (last commit `b0fc480`). The auto-deploy HOLD for that push, its test and the retire script were deleted on the same day (commit `e5bf928`).
 5. Before the summer of 2027: the load test with warm cells (50 C to 55 C), and the decision on a cell temperature sensor.
 6. When the RTC cell is in the Pi: add `dtparam=rtc_bbat_vchg=3000000` to `config.txt` (Kevin's word).
 7. With no date: bench tests 2, 10 and 15 of the design document, the flat-cell LED check, and a charge burst with the usual load while the motors are in operation (an observation, not a test with a pass condition).
