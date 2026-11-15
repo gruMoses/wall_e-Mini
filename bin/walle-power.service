@@ -1,0 +1,26 @@
+[Unit]
+Description=WALL-E power watcher (Geekworm X1202)
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+TimeoutStartSec=10
+WatchdogSec=15
+User=root
+RuntimeDirectory=walle-power
+RuntimeDirectoryPreserve=yes
+StateDirectory=walle-power
+# "-": a failed pinctrl must not stop the watcher; the script sets both pins
+# again, reads them back and reports FAULT charge_pin / gpio6_cfg.
+ExecStartPre=-/usr/bin/pinctrl set 16 op dh
+ExecStartPre=-/usr/bin/pinctrl set 6 ip pd
+# The installed copy, so an auto-deploy pull cannot change the running watcher.
+ExecStart=/usr/bin/python3 /usr/local/lib/walle-power/walle_power.py
+# Runs after a stop, a crash, a watchdog kill and a failed start: charging off.
+ExecStopPost=-/usr/bin/pinctrl set 16 op dh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
