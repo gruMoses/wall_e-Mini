@@ -316,9 +316,11 @@ The 12 V input gives the same behaviour as the USB Type-C input. The one differe
 | Mechanical stack | Done | Correct. The NVMe carrier stays on top. |
 | 1. Power cycles | Done without hands, 34 cycles on the USB Type-C input (one after 4 h with the input off) and 17 cycles on the 12 V input | Normal cycle: 10 of 10. Reboot: 4 of 4. Race at 2 s and at 10 s: the Pi stays off. Race at 30 s: 3 of 3. |
 | 2. Drain and charge control | Partly done | GPIO 16 stops the charge while Linux drives it. It cannot stop the charge during a boot or with the Pi off. The drain is not measured. The boot with the cells at 3.3 V is not tested. |
-| 3. Full load on the cells at 50 C to 55 C | Partly done, at room temperature | Not passed with these cells: EXT5V is 4.896 V with 4 cores and an NVMe read. The limit is 4.9 V. |
+| 3. Full load on the cells at 50 C to 55 C | Passed at room temperature on 2026-11-14 (7.10, item 11); not done with warm cells | With the new cells, the jumper and the camera in operation: EXT5V is 5.08 V or more with 4 cores and an NVMe read. The limit is 4.9 V. |
 | 4. Hub power from the board | Not done | Needs hands. |
 | RTK fix quality | Not done | Needs the robot. |
+
+Status, 2026-11-14 evening: the board with the new cells and the jumper passes each test that does not need hands (7.10). Before a go, these items stay open: the standby drain with a meter, the converter of the robot (3 A or more at 12 V), the stand test with the motors, and Kevin's decisions. Before a drive, the watcher must be installed.
 
 Go/no-go, 2026-11-13: **not yet**. No result rejects option F. The primary functions are correct: the Pi starts when the input returns, there is no poll wake, the power-loss signal is clean, and a reboot does not cut the power. The board does not go on the robot until these items are closed:
 
@@ -400,9 +402,23 @@ Setup: the Pi with the X1202 is on the robot, on the stand, not armed. The cells
 8. Power cycles with the camera and the Arduino connected: 3 of 3 boot with no other action.
 9. I2C bus 1: the fuel gauge (0x36) and the RTK GPS (0x20) answer together.
 
+10. The meter confirms item 3 (Kevin, 2026-11-14 18:05, Pi at idle with the camera in operation): 5.2 V at the 5 V output of the X1202, and 4.95 V on the 5 V rail of the Pi (measured at the screw terminals of the top HAT, the same value as EXT5V). The loss is 0.25 V in the pogo-pin path.
+11. The jumper (Kevin, 2026-11-14 19:20): two wires from the 5 V output of the X1202 to the 5 V and ground screw terminals of the top HAT. This is a second path in parallel with the pogo pins. Results with the jumper, the camera still on a USB port of the Pi:
+
+| Load | EXT5V before the jumper (12 V input) | EXT5V with the jumper (12 V input) | EXT5V with the jumper (on the cells, minimum) |
+|---|---|---|---|
+| Idle | 4.97 V | 5.16 V | 5.14 V |
+| 1 busy core | 4.89 V | 5.14 V | 5.12 V |
+| 2 busy cores | 4.86 V, undervoltage | 5.12 V | 5.10 V |
+| 4 busy cores | not done | 5.10 V | 5.09 V |
+| 4 busy cores and an NVMe read | not done | 5.10 V (minimum 5.06 V) | 5.08 V |
+
+   `get_throttled` stays 0x0 from the boot, also while the camera starts. The load test on the cells (T6) is passed at room temperature: the limit is 4.9 V. VCELL goes from 3.94 V rested to 3.69 V in the last step. This was also the first run of the corrected T6 cleanup on the hardware.
+12. The halt and the start with the jumper: 2 of 2 power cycles boot with no other action (the boot starts 12.1 s to 12.3 s after the input returns); after a halt with the input present the Pi stays off, and an input-off of 30 s starts it; an input-off of 3.0 s starts a halted Pi. Thus the 5 V output of the board goes off together with the pogo-pin supply, and the jumper does not keep the Pi on after a halt. Not measured yet: the temperature of the 2-pin connector of the board under load, and the standby drain with the jumper.
+
 Consequences:
 
-- The cells are no longer a go/no-go item. The low EXT5V under load is the item: the Pi cannot supply the camera through the pogo pins of this board. Corrections: supply the camera from a 5 V output of the board (the cable that Kevin plans), or add a second 5 V path from a 5 V output of the board to the 5 V pins of the header, or the two together. Do the load test again after the correction.
+- The cells are no longer a go/no-go item. The low EXT5V under load is the item: the Pi cannot supply the camera through the pogo pins of this board. Corrections: supply the camera from a 5 V output of the board (the cable that Kevin planned), or add a second 5 V path from a 5 V output of the board to the 5 V pins of the header. DONE on 2026-11-14 with the second path (item 11): the load test passes, and the camera stays on a USB port of the Pi with a standard cable. The jumper is now a necessary part of the installation. A Grok second opinion (session cdb2a75e) agreed with the second path, and gave the conditions that items 11 and 12 examine.
 - `usb_max_current_enable=1` stays in `config.txt` while a USB device takes its power from the Pi. To remove it, delete the last three lines of the file or restore the backup.
 - The harness aborts only on an undervoltage that is present, not on the history flag. This change is in the work tree and is not committed yet, because a commit under `tools/` restarts `wall-e.service` on the robot.
 
