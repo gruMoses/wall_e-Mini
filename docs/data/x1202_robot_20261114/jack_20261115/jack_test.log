@@ -1,0 +1,18 @@
+# Barrel-jack test, 2026-11-15 11:37 to 11:53: two power cycles, then a charge burst with 4 busy cores and an NVMe read.
+11:37:29 stage A: two power cycles (watcher bench 'long')
+11:42:15 stage A rc 0
+test=WB_LONG rep=1 result=PASS t_first_ping_s=19.16 t_first_ssh_s=19.16
+test=WB_LONG rep=2 result=PASS t_first_ping_s=40.04 t_first_ssh_s=40.04
+
+11:42:36 stage B start: {'vcell_v': 3.7662, 'ext5v_v': 5.2394, 'state': 'run', 'hold': 'on', 'charge': 'disabled', 'faults': [], 'input_good': True, 'throttled': '0x0'}
+11:42:42 nohalt active
+11:43:03 loaded on the input: {'vcell_v': 3.7662, 'ext5v_v': 5.1456, 'throttled': '0x0'}
+11:43:04 round 1: outlet OFF, on the cells
+11:46:10 round 1 on the cells: {'round': 1, 'on_cells_s': 186, 'loaded_v_start': 3.6063, 'loaded_v_end': 3.53, 'ext5v_end': 5.12818, 'thr': '0x0', 'guard': None}
+11:46:11 outlet ON
+11:48:13 burst started 122 s after outlet on, vcell 3.715
+11:52:47 cleanup: active
+{"boot_id": "b81fbff2-70f0-4a22-b0ea-1f6ac52d94f5", "bus_ok_mono": 723.727300018, "bus_ok_ts": 1794765166.9717267, "charge": "disabled", "ext5v_v": 5.2327, "faults": [], "halt_reason": null, "hb_mono": 723.727, "hold": "on", "input_good": true, "last_error": null, "low_s": 0, "schema": "walle-power/1", "state": "run", "vcell_v": 3.7525}
+SUMMARY {"test": "jack_burst", "result": "DONE", "stage_a_rc": 0, "stage_a_tail": "test=WB_LONG rep=1 result=PASS t_first_ping_s=19.16 t_first_ssh_s=19.16\ntest=WB_LONG rep=2 result=PASS t_first_ping_s=40.04 t_first_ssh_s=40.04\n", "rested_start": 3.7662, "loaded_on_input": {"vcell_v": 3.7662, "ext5v_v": 5.1456, "throttled": "0x0"}, "rounds": [{"round": 1, "on_cells_s": 186, "loaded_v_start": 3.6063, "loaded_v_end": 3.53, "ext5v_end": 5.12818, "thr": "0x0", "guard": null}], "burst": {"round": 1, "start_after_on_s": 122, "dur_s_approx": 121}, "rested_end": {"vcell_v": 3.7525, "ext5v_v": 5.24208, "charge": "disabled", "faults": ["nohalt"], "throttled": "0x80000"}, "journal": ["2026-11-15T11:42:36-0600 walle python3[2340]: nohalt: 0 start(s) left after this one", "2026-11-15T11:42:36-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:43:36-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:44:36-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:45:37-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:46:37-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:47:37-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:48:12-0600 walle python3[2340]: charge: disabled -> burst", "2026-11-15T11:48:37-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:49:37-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:50:13-0600 walle python3[2340]: charge: burst -> disabled", "2026-11-15T11:50:37-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:51:37-0600 walle python3[2340]: FAULT nohalt last_error=None", "2026-11-15T11:52:37-0600 walle python3[2340]: FAULT nohalt last_error=None"]}
+
+[exited with code 0]
