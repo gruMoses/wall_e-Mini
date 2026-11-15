@@ -261,7 +261,7 @@ Kevin's decisions:
 1. Option 1 and the three operator rules.
 2. The debounce. DECIDED by Kevin on 2026-11-13: 5 s (5 s of low in the last 7.5 s).
 3. Fail-off on GPIO 6 (D1) and tier (b) unconditional (D2).
-4. A cell temperature sensor (a part to buy), or no temperature rule.
+4. A cell temperature sensor (a part to buy), or no temperature rule. DECIDED by Kevin on 2026-11-15: no temperature rule for now. The charge is in bursts of 2 min to 3.75 V. Examine this decision again before the summer of 2027, together with the load test with warm cells.
 5. The hardware watchdog (`RebootWatchdogSec`, `RuntimeWatchdogSec`), after bench test 10.
 6. The hold branch, after the soak. Result, 2026-11-15 (bench test 13): branch A operates correctly in a run of 5.8 h. DECIDED by Kevin on 2026-11-15: the hold is ON (`--hold` in the unit file). Reasons: the storage drain of 0.85 mA (bench test 14) takes approximately 0.5 percent of the cells each day, and with the `config.txt` line of decision 7 nothing else charges the cells while the Pi runs.
 7. The `config.txt` or `gpio-hog` line, after the bench check. DECIDED by Kevin on 2026-11-14: add `gpio=16=op,dh` to `/boot/firmware/config.txt`. The line is on the Pi since 2026-11-14 23:00 (backup: `config.txt.bak-20261114-gpio16`). It is a hand step of the installation.
@@ -279,7 +279,7 @@ Code review: Grok (sessions `29454134` for the watcher, `53dea5f0` for the guard
 
 Differences from this design (each one came from a review or from the bench):
 
-- Size: `bin/walle_power.py` has approximately 800 lines, not 120 to 150. The reviews added most of the difference. A shorter script is possible if Kevin removes functions.
+- Size: `bin/walle_power.py` has approximately 800 lines, not 120 to 150. The reviews added most of the difference. A shorter script is possible if Kevin removes functions. DECIDED by Kevin on 2026-11-15: the script stays as it is.
 - The re-check uses readable samples only. A pin that cannot be read for 2 s in the re-check causes the power-off.
 - The debounce counts the time between readable samples (2.5 s maximum for each step). A failed read does not set the count to zero.
 - The gauge read comes after the GPIO 6 path in each loop pass. `READY=1` goes out at the end of the start. The longest time between two watchdog messages is 9 s with each tool at its time limit.
@@ -433,7 +433,7 @@ Limits:
 
 ## Reviewer disagreements
 
-D1 and D2 are closed. D3 is open for Kevin. D1 (a GPIO 6 that reads low with the input present): round 1 split; Grok wanted an alarm only, Opus wanted a halt. The ruling was fail-off, with an override file. In round 2 both reviewers agree with that ruling. Draft 3 adds an expiry to the override file. D2 (a low-voltage halt with GPIO 6 high): Grok wanted it unconditional, Opus wanted a probe on that branch. The ruling was tier (b) unconditional at 3.10 V. In round 2 both reviewers accept it. Opus still prefers the probe, but agrees that the cost is one operator cycle, not a safety cost. Opus finding 9 (a frozen gauge counts as unreadable) is not taken; Opus agrees in round 2.
+D1 and D2 are closed. D3 is closed (Kevin, 2026-11-15: tier (a) stays on while the `nohalt` file is present; in the stand test of that day tier (a) was the protection of the cells during the time on the cells). D1 (a GPIO 6 that reads low with the input present): round 1 split; Grok wanted an alarm only, Opus wanted a halt. The ruling was fail-off, with an override file. In round 2 both reviewers agree with that ruling. Draft 3 adds an expiry to the override file. D2 (a low-voltage halt with GPIO 6 high): Grok wanted it unconditional, Opus wanted a probe on that branch. The ruling was tier (b) unconditional at 3.10 V. In round 2 both reviewers accept it. Opus still prefers the probe, but agrees that the cost is one operator cycle, not a safety cost. Opus finding 9 (a frozen gauge counts as unreadable) is not taken; Opus agrees in round 2.
 
 D3 (the `nohalt` file and tier (a)): in round 3, Grok asked that tier (a) is off while the file is present, so that a fault-finding session with GPIO 6 stuck low cannot halt at 3.30 V. This draft keeps tier (a) on. Reason: a forgotten file together with a real input loss then halts at 3.30 V and not at 3.10 V, and a false GPIO 6 low alone cannot make VCELL low. Kevin can change this.
 
