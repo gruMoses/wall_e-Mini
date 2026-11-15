@@ -6,6 +6,8 @@ Grok second opinion (session 01a1a8bd). Nothing is bought.
 
 UPDATE 2026-11-13: the first bench results of the X1202 are in 7.5 to 7.8.
 
+UPDATE 2026-11-15: the fuse plan from the pack to the Pi is in `docs/fuse_plan_2026-11-15.md`.
+
 UPDATE 2026-11-10: read section 7 first. It proposes a bought UPS board
 behind the switched-side converter (option F) in place of the custom
 board. Kevin orders one for a bench test.
