@@ -24,6 +24,10 @@ from config import OakWebViewerConfig
 from pi_app.hardware.oak_recorder import RecordingTelemetry
 from pi_app.web.oak_viewer import create_app, read_ups_status
 
+# The old-file (walle-ups) cases pass this as the new file's path, so a real
+# /run/walle-power/status.json on a Pi cannot shadow their file.
+_NO_POWER = "/nonexistent/walle-power/status.json"
+
 
 # ---------------------------------------------------------------------------
 # /debug route
@@ -135,20 +139,29 @@ def test_api_ups_returns_200_when_file_missing(client):
 
 
 def test_debug_page_ups_panel_matches_walle_ups_bridge(client):
-    """The UPS panel names its watcher (bin/walle_ups.py) and carries one cell
-    per field of the walle-ups/1 status file; the cells of the retired HAT are
-    gone, and every u-* id that applyUps() writes to exists in the page."""
+    """The UPS panel carries one cell per field of the walle-ups/1 file AND of
+    the walle-power/1 file; the cells of the retired HAT are gone, and every
+    u-* id that applyUps() writes to exists in the page. The hint names
+    walle-power.service when the new file is in use (source "walle-power")
+    and keeps the old names (bin/walle_ups.py, walle-ups.service) otherwise."""
     import re
 
     body = client.get("/debug").get_data(as_text=True)
     for cell_id in ("u-mains", "u-battv", "u-battma", "u-supply", "u-loss",
-                    "u-mode", "u-state", "u-errors", "u-hint"):
+                    "u-mode", "u-state", "u-errors", "u-hint",
+                    "u-rail", "u-charge", "u-halt", "u-faults"):
         assert f'id="{cell_id}"' in body, cell_id
-    assert "bin/walle_ups.py" in body
-    assert "walle-ups.service" in body
     for gone in ("u-ac", "u-typec", "u-microusb", "u-protect", "u-swc"):
         assert f'id="{gone}"' not in body, gone
     js = body[body.index("function applyUps"):body.index("function pollUps")]
+    # The service named in the hint follows the source of the status.
+    assert "u.source === 'walle-power'" in js
+    assert "'walle-power.service (bin/walle_power.py)'" in js
+    assert "'walle-ups.service (bin/walle_ups.py)'" in js
+    assert "Is ' + svc + ' running?" in js
+    assert "walle-ups.service running" not in js  # no fixed old name left
+    # One banner per fault.
+    assert "upsFaults(" in js and "ups-fault" in body
     used = set(re.findall(r"'(u-[a-z]+)'", js))
     assert used, "applyUps() references no u-* ids"
     for ident in used:
@@ -156,7 +169,7 @@ def test_debug_page_ups_panel_matches_walle_ups_bridge(client):
 
 
 def test_read_ups_status_missing_file(tmp_path):
-    st = read_ups_status(str(tmp_path / "nope.json"))
+    st = read_ups_status(str(tmp_path / "nope.json"), power_path=_NO_POWER)
     assert st["available"] is False
     assert st["stale"] is True
     assert st["reason"] == "missing"
@@ -165,7 +178,7 @@ def test_read_ups_status_missing_file(tmp_path):
 def test_read_ups_status_corrupt_json(tmp_path):
     p = tmp_path / "ups_status.json"
     p.write_text("{ this is not valid json ")
-    st = read_ups_status(str(p))
+    st = read_ups_status(str(p), power_path=_NO_POWER)
     assert st["available"] is False
     assert st["reason"] == "corrupt"
 
@@ -173,7 +186,7 @@ def test_read_ups_status_corrupt_json(tmp_path):
 def test_read_ups_status_non_dict_payload(tmp_path):
     p = tmp_path / "ups_status.json"
     p.write_text("[1, 2, 3]")  # valid JSON, wrong shape
-    st = read_ups_status(str(p))
+    st = read_ups_status(str(p), power_path=_NO_POWER)
     assert st["available"] is False
     assert st["reason"] == "corrupt"
 
@@ -190,7 +203,7 @@ def test_read_ups_status_fresh(tmp_path):
         "errors": 0, "errors_run": 0, "last_error": None, "last_loss": None,
         "first_alarm_s": 90,
     }))
-    st = read_ups_status(str(p), max_age_s=10.0, now=now)
+    st = read_ups_status(str(p), power_path=_NO_POWER, max_age_s=10.0, now=now)
     assert st["available"] is True
     assert st["stale"] is False
     assert st["input"] == "present"
@@ -220,7 +233,7 @@ def test_read_ups_status_stale(tmp_path):
     p = tmp_path / "ups_status.json"
     now = 1_000_000.0
     p.write_text(json.dumps({"ts": now - 30.0, "input": "absent"}))
-    st = read_ups_status(str(p), max_age_s=10.0, now=now)
+    st = read_ups_status(str(p), power_path=_NO_POWER, max_age_s=10.0, now=now)
     # Old-but-readable: still "available" so last-known values can be shown
     # greyed out, but flagged stale.
     assert st["available"] is True
@@ -232,7 +245,7 @@ def test_read_ups_status_stale(tmp_path):
 def test_read_ups_status_missing_ts_is_stale(tmp_path):
     p = tmp_path / "ups_status.json"
     p.write_text(json.dumps({"input": "present"}))  # no ts
-    st = read_ups_status(str(p), now=1_000_000.0)
+    st = read_ups_status(str(p), power_path=_NO_POWER, now=1_000_000.0)
     assert st["available"] is True
     assert st["stale"] is True
     assert st["age_s"] is None
@@ -250,7 +263,7 @@ def test_read_ups_status_blind_watcher_is_stale(tmp_path):
         "state": "monitoring", "mode": "armed",
         "errors": 7, "last_error": "OSError: [Errno 121] Remote I/O error",
     }))
-    st = read_ups_status(str(p), max_age_s=10.0, now=now)
+    st = read_ups_status(str(p), power_path=_NO_POWER, max_age_s=10.0, now=now)
     assert st["available"] is True
     assert st["stale"] is True
     assert st["age_s"] is None
@@ -258,6 +271,142 @@ def test_read_ups_status_blind_watcher_is_stale(tmp_path):
     assert st["input"] is None
     assert st["errors"] == 7
     assert st["last_error"].startswith("OSError")
+
+
+# ---------------------------------------------------------------------------
+# New watcher: /run/walle-power/status.json (schema walle-power/1)
+# ---------------------------------------------------------------------------
+
+_BOOT = "11111111-2222-3333-4444-555555555555"
+_BOOT_NOW = 5000.0
+
+
+def _power_file(tmp_path, **over):
+    payload = {
+        "schema": "walle-power/1", "boot_id": _BOOT,
+        "hb_mono": _BOOT_NOW - 0.5, "bus_ok_mono": _BOOT_NOW - 0.8,
+        "bus_ok_ts": 1_700_000_000.0, "input_good": True, "low_s": 0.0,
+        "vcell_v": 3.912, "ext5v_v": 5.08, "charge": "disabled", "hold": "off",
+        "state": "run", "halt_reason": None, "faults": [], "last_error": None,
+    }
+    payload.update(over)
+    p = tmp_path / "power_status.json"
+    p.write_text(json.dumps(payload))
+    return str(p)
+
+
+def _read_power(tmp_path, old_path=None, **over):
+    return read_ups_status(
+        old_path or str(tmp_path / "no_old.json"),
+        power_path=_power_file(tmp_path, **over),
+        now_boot=_BOOT_NOW, boot_id=_BOOT,
+    )
+
+
+def test_power_status_fresh(tmp_path):
+    st = _read_power(tmp_path)
+    assert st["available"] is True
+    assert st["stale"] is False
+    assert st["source"] == "walle-power"
+    assert st["age_s"] == pytest.approx(0.5, abs=0.01)
+    assert st["bus_ok_age_s"] == pytest.approx(0.8, abs=0.01)
+    # Old keys the page reads, filled from the new fields.
+    assert st["input"] == "present"
+    assert st["batt_v"] == 3.912
+    # New fields.
+    assert st["input_good"] is True
+    assert st["vcell_v"] == 3.912
+    assert st["ext5v_v"] == 5.08
+    assert st["charge"] == "disabled"
+    assert st["hold"] == "off"
+    assert st["state"] == "run"
+    assert st["halt_reason"] is None
+    assert st["faults"] == []
+    assert st["low_s"] == 0.0
+
+
+@pytest.mark.parametrize("good, expected", [
+    (True, "present"), (False, "absent"), (None, "unknown"), ("yes", "unknown"),
+])
+def test_power_status_input_mapping(tmp_path, good, expected):
+    assert _read_power(tmp_path, input_good=good)["input"] == expected
+
+
+def test_power_status_stale_by_heartbeat(tmp_path):
+    # The bus read is fresh, but the loop heartbeat is 11 s old: stale.
+    st = _read_power(tmp_path, hb_mono=_BOOT_NOW - 11.0, bus_ok_mono=_BOOT_NOW - 1.0)
+    assert st["available"] is True
+    assert st["stale"] is True
+    assert st["age_s"] == pytest.approx(11.0, abs=0.01)
+
+
+def test_power_status_missing_heartbeat_is_stale(tmp_path):
+    st = _read_power(tmp_path, hb_mono=None)
+    assert st["stale"] is True
+    assert st["age_s"] is None
+
+
+def test_power_status_from_another_boot_is_stale(tmp_path):
+    st = _read_power(tmp_path, boot_id="00000000-dead-beef-0000-000000000000")
+    assert st["available"] is True
+    assert st["stale"] is True
+    assert st["boot_ok"] is False
+    assert st["reason"] == "other_boot"
+    assert st["age_s"] is None  # another boot's clock is never compared
+
+
+def test_power_status_with_faults(tmp_path):
+    st = _read_power(tmp_path, faults=["gauge", "nohalt"], state="halting",
+                     halt_reason="input_loss", charge="failsafe")
+    assert st["faults"] == ["gauge", "nohalt"]
+    assert st["state"] == "halting"
+    assert st["halt_reason"] == "input_loss"
+    assert st["charge"] == "failsafe"
+
+
+def test_power_status_corrupt_does_not_fall_back(tmp_path):
+    old = tmp_path / "ups_status.json"
+    old.write_text(json.dumps({"ts": time.time(), "input": "present"}))
+    p = tmp_path / "power_status.json"
+    p.write_text("{ nope")
+    st = read_ups_status(str(old), power_path=str(p), now_boot=_BOOT_NOW, boot_id=_BOOT)
+    assert st["available"] is False
+    assert st["reason"] == "corrupt"
+    assert st["source"] == "walle-power"
+
+
+def test_power_status_missing_falls_back_to_old_file(tmp_path):
+    old = tmp_path / "ups_status.json"
+    now = 1_000_000.0
+    old.write_text(json.dumps({"schema": "walle-ups/1", "ts": now - 2.0,
+                               "input": "absent", "batt_v": 7.4}))
+    st = read_ups_status(str(old), power_path=str(tmp_path / "no_power.json"),
+                         max_age_s=10.0, now=now)
+    assert st["available"] is True
+    assert st["stale"] is False
+    assert st["source"] == "walle-ups"
+    assert st["input"] == "absent"
+    assert st["batt_v"] == 7.4
+    assert st["age_s"] == pytest.approx(2.0, abs=0.01)
+
+
+def test_power_status_preferred_over_old_file(tmp_path):
+    old = tmp_path / "ups_status.json"
+    old.write_text(json.dumps({"ts": time.time(), "input": "absent"}))
+    st = _read_power(tmp_path, old_path=str(old))
+    assert st["source"] == "walle-power"
+    assert st["input"] == "present"
+
+
+def test_api_ups_serves_power_file(tmp_path, monkeypatch):
+    import pi_app.web.oak_viewer as viewer
+
+    path = _power_file(tmp_path, boot_id="not-this-boot")
+    monkeypatch.setattr(viewer, "POWER_STATUS_FILE", path)
+    app = create_app(None, OakWebViewerConfig())
+    body = app.test_client().get("/api/ups").get_json()
+    assert body["source"] == "walle-power"
+    assert body["stale"] is True  # boot id does not match this machine
 
 
 # ---------------------------------------------------------------------------
@@ -461,3 +610,50 @@ def test_sse_bms_temp_min_is_independent_of_max():
     d = _first_sse_payload(_OneShotRecorder(t))
     assert d["bms_temp_max_c"] == pytest.approx(40.0)
     assert d["bms_temp_min_c"] == pytest.approx(22.0)
+
+
+@pytest.mark.parametrize("text", [
+    '{"ts": -1.0}', '{"ts": NaN}', '{"ts": Infinity}', '{"ts": true}',
+    '{"ts": %s}' % ("9" * 400),
+])
+def test_old_file_bad_ts_is_stale_not_error(tmp_path, text):
+    p = tmp_path / "ups_status.json"
+    p.write_text(text)
+    st = read_ups_status(str(p), power_path=_NO_POWER, now=1_000_000.0)
+    assert st["available"] is True
+    assert st["stale"] is True
+    assert st["age_s"] is None
+
+
+@pytest.mark.parametrize("field", ["hb_mono", "bus_ok_mono"])
+@pytest.mark.parametrize("bad", ["-1.0", "NaN", "-Infinity", "true", "1" + "0" * 400])
+def test_power_file_bad_numbers(tmp_path, field, bad):
+    path = _power_file(tmp_path)
+    text = open(path).read()
+    data = json.loads(text)
+    data[field] = "__BAD__"
+    open(path, "w").write(json.dumps(data).replace('"__BAD__"', bad))
+    st = read_ups_status(str(tmp_path / "no_old.json"), power_path=path,
+                         now_boot=_BOOT_NOW, boot_id=_BOOT)
+    assert st["available"] is True
+    if field == "hb_mono":
+        assert st["stale"] is True and st["age_s"] is None
+    else:
+        assert st["bus_ok_age_s"] is None
+
+
+@pytest.mark.parametrize("which", ["new", "old"])
+@pytest.mark.parametrize("content", ["[" * 100000 + "]" * 100000, "9" * 400, b"\xff\xfe"])
+def test_status_readers_never_raise(tmp_path, which, content):
+    p = tmp_path / "status.json"
+    if isinstance(content, bytes):
+        p.write_bytes(content)
+    else:
+        p.write_text(content)
+    if which == "new":
+        st = read_ups_status(str(tmp_path / "no_old.json"), power_path=str(p),
+                             now_boot=_BOOT_NOW, boot_id=_BOOT)
+    else:
+        st = read_ups_status(str(p), power_path=_NO_POWER)
+    assert st["available"] is False
+    assert st["reason"] == "corrupt"
