@@ -185,7 +185,7 @@ def fail(rec, why):
 
 # ------------------------------------------------------------------ tests
 def cmd_status(b, a):
-    sh = ("systemctl is-active walle-power wall-e x1202-bench-logger walle-ups; echo ---; cat %s; echo; echo ---; "
+    sh = ("systemctl is-active walle-power wall-e i2c-bus-guard; echo ---; cat %s; echo; echo ---; "
           "pinctrl get 6,16; echo ---; journalctl -u walle-power --no-pager -n 5" % STATUS)
     print("outlet:", json.dumps(b.outlet_attrs(), default=str))
     print(b.ssh(sh, timeout=20)[1])

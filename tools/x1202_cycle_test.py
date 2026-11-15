@@ -245,7 +245,7 @@ class Bench:
     def journal_warnings(self):
         rc, out, _ = self.ssh("journalctl -b -p warning --no-pager | grep -iE "
                               "'volt|power|i2c|nvme|ext4|fsck|throttl|brownout|pmic|filesystem' | "
-                              "grep -v walle-ups | tail -5", timeout=20)
+                              "tail -5", timeout=20)
         return [ln[:200] for ln in out.splitlines()] if rc == 0 else None
 
     def wait_ssh(self, t_on, limit=SSH_WAIT_S, exclude_boot=None):
