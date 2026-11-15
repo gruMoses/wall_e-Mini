@@ -1,0 +1,72 @@
+# Charge-hold soak (design test 13), 2026-11-15 00:10:48 to 06:00:00. Test script output, then the watcher journal.
+00:10:48 [chain3] Pi ok: True xt5v_v": 5.18714, "faults": [], "halt_reason": null, "hb_mono": 110.435, "hold": "off", "input_good": true, "last_error": null, "low_s": 0, "schema": "walle-power/1", "state": "run", "vcell_v": 3.585}
+00:10:48 [chain3] starting night_hold.py
+00:10:54 hold ON; start: {'vcell_v': 3.585, 'charge': 'disabled', 'hold': 'on', 'faults': []}
+00:14:48 burst 1: {'t': '00:12:56', 'v_start': 3.7125, 'v_peak': 3.74, 'v_end': 3.7425}
+00:18:53 burst 2: {'t': '00:16:50', 'v_start': 3.6025, 'v_peak': 3.7513, 'v_end': 3.63}
+00:22:57 burst 3: {'t': '00:20:54', 'v_start': 3.7363, 'v_peak': 3.7612, 'v_end': 3.635}
+00:26:20 vcell=3.7675 charge=burst bursts=3 faults=[]
+00:30:55 burst 5: {'t': '00:28:52', 'v_start': 3.75, 'v_peak': 3.78, 'v_end': 3.655}
+00:41:56 vcell=3.8013 charge=burst bursts=7 faults=[]
+00:50:57 burst 10: {'t': '00:49:04', 'v_start': 3.8025, 'v_peak': 3.8287, 'v_end': 3.7125}
+00:57:33 vcell=3.8425 charge=burst bursts=11 faults=[]
+01:17:09 vcell=3.7525 charge=disabled bursts=14 faults=[]
+01:47:25 vcell=3.75 charge=disabled bursts=14 faults=[]
+02:17:41 vcell=3.75 charge=disabled bursts=14 faults=[]
+02:47:57 vcell=3.75 charge=disabled bursts=14 faults=[]
+03:18:13 vcell=3.75 charge=disabled bursts=14 faults=[]
+03:48:29 vcell=3.75 charge=disabled bursts=14 faults=[]
+04:18:45 vcell=3.75 charge=disabled bursts=14 faults=[]
+04:35:45 burst 15: {'t': '04:33:53', 'v_start': 3.8825, 'v_peak': 3.9087, 'v_end': 3.785}
+04:45:20 vcell=3.77 charge=disabled bursts=15 faults=[]
+05:15:36 vcell=3.7688 charge=disabled bursts=15 faults=[]
+05:45:53 vcell=3.7688 charge=disabled bursts=15 faults=[]
+06:00:07 cleanup: active
+{"boot_id": "ba5c01de-a27a-45da-bc10-7e805c8f9571", "bus_ok_mono": 21068.722658649, "bus_ok_ts": 1794744006.2456908, "charge": "disabled", "ext5v_v": 5.14426, "faults": [], "halt_reason": null, "hb_mono": 21068.723, "hold": "off", "input_good": true, "last_error": null, "low_s": 0, "schema": "walle-power/1", "state": "run", "vcell_v": 3.7675}
+SUMMARY {"test": "hold", "bursts": [{"t": "00:12:56", "v_start": 3.7125, "v_peak": 3.74, "v_end": 3.7425}, {"t": "00:16:50", "v_start": 3.6025, "v_peak": 3.7513, "v_end": 3.63}, {"t": "00:20:54", "v_start": 3.7363, "v_peak": 3.7612, "v_end": 3.635}, {"t": "00:24:58", "v_start": 3.75, "v_peak": 3.77, "v_end": 3.77}, {"t": "00:28:52", "v_start": 3.75, "v_peak": 3.78, "v_end": 3.655}, {"t": "00:32:56", "v_start": 3.7625, "v_peak": 3.7875, "v_end": 3.66}, {"t": "00:37:01", "v_start": 3.775, "v_peak": 3.7975, "v_end": 3.7975}, {"t": "00:40:55", "v_start": 3.655, "v_peak": 3.8075, "v_end": 3.6837}, {"t": "00:44:59", "v_start": 3.7888, "v_peak": 3.8175, "v_end": 3.69}, {"t": "00:49:04", "v_start": 3.8025, "v_peak": 3.8287, "v_end": 3.7125}, {"t": "00:52:58", "v_start": 3.8013, "v_peak": 3.8425, "v_end": 3.7175}, {"t": "00:57:02", "v_start": 3.8225, "v_peak": 3.8575, "v_end": 3.7275}, {"t": "01:01:06", "v_start": 3.8413, "v_peak": 3.8725, "v_end": 3.7538}, {"t": "01:05:00", "v_start": 3.855, "v_peak": 3.89, "v_end": 3.765}, {"t": "04:33:53", "v_start": 3.8825, "v_peak": 3.9087, "v_end": 3.785}], "result": "DONE", "start": {"vcell_v": 3.585, "charge": "disabled", "hold": "on", "faults": []}, "end": {"vcell_v": 3.7675, "charge": "disabled", "faults": []}, "cleanup": "active\n{\"boot_id\": \"ba5c01de-a27a-45da-bc10-7e805c8f9571\", \"bus_ok_mono\": 21068.722658649, \"bus_ok_ts\": 1794744006.2456908, \"charge\": \"disabled\", \"ext5v_v\": 5.14426, \"faults\": [], \"halt_reason\": null, \"hb_mono\": 21068.723, \"hold\": \"off\", \"input_good\": true, \"last_error\": null, \"low_s\": 0, \"schema\": \"walle-power/1\", \"state\": \"run\", \"vcell_v\": 3.7675}"}
+06:00:07 [chain3] night_hold.py ended, rc 0
+06:01:07 [chain3] chain3 done
+
+# Watcher journal on the Pi (journalctl -u walle-power --since '2026-11-15 00:10')
+2026-11-15T00:10:48-0600 walle systemd[1]: Stopping walle-power.service - WALL-E power watcher (Geekworm X1202)...
+2026-11-15T00:10:48-0600 walle systemd[1]: walle-power.service: Deactivated successfully.
+2026-11-15T00:10:48-0600 walle systemd[1]: Stopped walle-power.service - WALL-E power watcher (Geekworm X1202).
+2026-11-15T00:10:48-0600 walle systemd[1]: walle-power.service: Consumed 1.072s CPU time.
+2026-11-15T00:10:48-0600 walle systemd[1]: Starting walle-power.service - WALL-E power watcher (Geekworm X1202)...
+2026-11-15T00:10:48-0600 walle systemd[1]: Started walle-power.service - WALL-E power watcher (Geekworm X1202).
+2026-11-15T00:12:49-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:14:49-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:16:49-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:18:49-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:20:50-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:22:50-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:24:50-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:26:50-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:28:50-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:30:50-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:32:52-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:34:52-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:36:53-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:38:53-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:40:54-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:42:54-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:44:54-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:46:54-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:48:55-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:50:55-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:52:55-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:54:55-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T00:56:56-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T00:58:56-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T01:00:57-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T01:02:57-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T01:04:57-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T01:06:57-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T04:33:40-0600 walle python3[2164]: charge: disabled -> burst
+2026-11-15T04:35:40-0600 walle python3[2164]: charge: burst -> disabled
+2026-11-15T06:00:00-0600 walle systemd[1]: Stopping walle-power.service - WALL-E power watcher (Geekworm X1202)...
+2026-11-15T06:00:00-0600 walle systemd[1]: walle-power.service: Deactivated successfully.
+2026-11-15T06:00:00-0600 walle systemd[1]: Stopped walle-power.service - WALL-E power watcher (Geekworm X1202).
+2026-11-15T06:00:00-0600 walle systemd[1]: walle-power.service: Consumed 3min 5.522s CPU time.
+2026-11-15T06:00:00-0600 walle systemd[1]: Starting walle-power.service - WALL-E power watcher (Geekworm X1202)...
+2026-11-15T06:00:00-0600 walle systemd[1]: Started walle-power.service - WALL-E power watcher (Geekworm X1202).

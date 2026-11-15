@@ -262,7 +262,7 @@ Kevin's decisions:
 3. Fail-off on GPIO 6 (D1) and tier (b) unconditional (D2).
 4. A cell temperature sensor (a part to buy), or no temperature rule.
 5. The hardware watchdog (`RebootWatchdogSec`, `RuntimeWatchdogSec`), after bench test 10.
-6. The hold branch, after the soak.
+6. The hold branch, after the soak. Result, 2026-11-15 (bench test 13): branch A operates correctly in a run of 5.8 h. The hold is off on the Pi. Kevin's decision is open: hold on or hold off.
 7. The `config.txt` or `gpio-hog` line, after the bench check. DECIDED by Kevin on 2026-11-14: add `gpio=16=op,dh` to `/boot/firmware/config.txt`. The line is on the Pi since 2026-11-14 23:00 (backup: `config.txt.bak-20261114-gpio16`). It is a hand step of the installation.
 8. An RTC cell for the Pi 5 (a part to buy). Kevin, 2026-11-14: the clock unit (finding 3) stays installed if it passes its bench test. The RTC cell stays open.
 9. The buck at about 12 V and the 2-pin connector.
@@ -302,9 +302,10 @@ Bench tests of section 9 with the installed watcher (bench supply at 12.2 V on t
 | 11: 20 toggles of GPIO 16 on the cells | 1 | The input was off and the Pi was on the cells with the load. The boot ID did not change, the uptime continued (245.62 s to 262.05 s), and `throttled` was `0x0`. Pass. |
 | 12: tier (a) on the real cells | 1 | Load: 4 cores at 100 %, `wall-e` and the OAK camera. The input was off and the `nohalt` file disabled the input-loss halt. The rested VCELL at the start was 4.0575 V. VCELL reached 3.30 V after 43.5 min (2612 s) on the cells. The `tier` event shows VCELL 3.2975 V. The Pi was off the network 16.6 s after VCELL reached 3.30 V. On the cells, EXT5V was 5.080 V to 5.128 V, `throttled` was `0x0` in each sample, and the CPU temperature was 73.0 C to 78.5 C. Pass. |
 | 12: boot on low cells | 1 | The input came back. The Pi booted with no other action. After the boot the rested VCELL was 3.515 V (3.52 V after 3 min), EXT5V was 5.147 V, `throttled` was `0x0` and the watcher showed no faults. This boot was the first with the `gpio=16=op,dh` line in `config.txt`, so the board did not charge the cells during the boot. |
+| 13: charge hold (branch A), 5.8 h | 1 | The watcher ran with `--hold` from 00:10:48 to 06:00:00 on 2026-11-15 (a temporary drop-in; the test removed it at the end). The input was on, `wall-e` was in operation, and there was no added CPU load. The rested VCELL at the start was 3.585 V. 14 bursts of 120 s, with 120 s of rest between them, brought the rested VCELL to 3.7525 V in 56 min (7.5 mV to 21 mV for each burst). Then the watcher made no burst for 3 h 27 min, and the rested VCELL was 3.7500 V to 3.7563 V. One burst at 04:33:40 brought it to 3.77 V, and it was 3.7675 V at 06:00. During a burst VCELL was 3.91 V maximum. EXT5V was 5.112 V to 5.190 V, the watcher showed no faults, `throttled` was `0x0`, and the Pi did not reboot. After the cells reached the target, the rested VCELL stayed in the limits of the test plan (3.70 V to 3.85 V). The test plan asks for 24 h with the CPU load logged. This run is 5.8 h with no load log: a pass for 5.8 h, not the full test. Data: `hold_soak.log` and `hold_soak_samples.jsonl` in `docs/data/x1202_robot_20261114/night/`. |
 | 1: unit tests on the Pi | 1 | 134 passed (before the last change; 147 on the Mac). |
 
-Not done yet: test 2 (the pin voltage of GPIO 6 with the pull-down; needs a meter), test 10 (the hardware watchdog), test 13 (the hold soak; in progress), test 14 (the storage drain; needs a meter), test 15 (the EEPROM test; needs Kevin's approval), and the flat-cell LED check of test 12 (needs a person at the board).
+Not done yet: test 2 (the pin voltage of GPIO 6 with the pull-down; needs a meter), test 10 (the hardware watchdog), the remaining time of test 13 (the hold soak is 24 h in the test plan; 5.8 h are done), test 14 (the storage drain; needs a meter), test 15 (the EEPROM test; needs Kevin's approval), and the flat-cell LED check of test 12 (needs a person at the board).
 
 Findings from the bench:
 
