@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import statistics
 import subprocess
@@ -40,7 +41,7 @@ import urllib.request
 V_REST_MIN = 3.60
 V_REST_MIN_LOAD = 3.75
 V_ABORT = 3.35
-EXT5V_ABORT = 4.95
+EXT5V_ABORT = float(os.environ.get("X1202_EXT5V_ABORT", "4.95"))  # lower it when the Pi also feeds USB loads
 CHARGE_TARGET = 4.15
 CHARGE_HOLD_S = 180
 SSH_WAIT_S = 300
@@ -388,7 +389,9 @@ class Bench:
             if e is not None and e < EXT5V_ABORT:
                 raise Abort("EXT5V %.3f < %.2f" % (e, EXT5V_ABORT))
             th = r.get("thr")
-            if th not in (None, "0x0"):
+            # Abort only on a LIVE undervoltage or throttle (bits 0 and 2). The bits from 16 up
+            # are history ("has occurred since boot") and stay set for the whole boot.
+            if th not in (None, "0x0") and (int(th, 16) & 0x5):
                 raise Abort("throttled %s" % th)
 
     def watch(self, m, seconds, t_from, step=0.25):
