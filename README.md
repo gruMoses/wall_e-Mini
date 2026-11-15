@@ -48,9 +48,9 @@ Service-based runtime in production typically uses `run_main.sh` via
 - `wall-e-spp.service` is a Bluetooth SPP diagnostics server. Its control writes
   to the command file are gated OFF by default (commit `a2628f0`, 2026-07-17;
   environment variable `WALL_E_SPP_CONTROL_ENABLED`). See `docs/spp_writer_audit.md`.
-- The UPS watcher is a separate root service, `walle-ups.service`
-  (`bin/walle_ups.py`, Waveshare UPS HAT (B)), installed by
-  `bin/install_walle_ups.sh`. See `docs/ups_hat_b.md`.
+- The power watcher is a separate root service, `walle-power.service`
+  (`bin/walle_power.py`, Geekworm X1202), installed by
+  `bin/install_walle_power.sh`. See `docs/x1202_power_watcher_design.md`.
 - Safety defaults:
   - `ch3` high/low arms/disarms
   - `ch4` high enters Follow Me, low exits

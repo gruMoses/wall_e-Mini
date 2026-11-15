@@ -2,8 +2,7 @@
 
 bin/ is not a package, so the script is loaded via importlib straight from
 its file path (no sys.path changes needed -- the script is stdlib-only, so
-unlike bin/walle_ups.py there is nothing to stub before
-import).
+there is nothing to stub before import).
 
 All hardware access in the guard goes through one Hardware class
 (read_sda / read_pins / is_bound / set_pin / unbind / bind /
@@ -148,7 +147,7 @@ class FakeHardware:
         self._record(("bind",))
         self.bound = True
 
-    def restart_ups_service(self, service_name=guard.UPS_SERVICE_NAME) -> None:
+    def restart_ups_service(self, service_name=guard.POWER_SERVICE_NAME) -> None:
         # Mirrors the real Hardware's contract: best-effort, never raises.
         # The call log keeps its old shape; the target goes in `restarted`.
         self.calls.append(("restart_ups_service",))
@@ -344,7 +343,7 @@ class HardwarePlumbingTests(unittest.TestCase):
         with mock.patch("subprocess.run") as run:
             hw.restart_ups_service()
         run.assert_called_once_with(
-            ["systemctl", "restart", guard.UPS_SERVICE_NAME], timeout=15, check=True,
+            ["systemctl", "restart", guard.POWER_SERVICE_NAME], timeout=15, check=True,
         )
 
     def test_restart_ups_service_dry_run_does_not_touch_subprocess(self):
@@ -362,48 +361,8 @@ class HardwarePlumbingTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# UPS status-file age
+# UPS status age
 # ---------------------------------------------------------------------------
-
-class ReadUpsAgeTests(unittest.TestCase):
-    def test_missing_file_is_none(self):
-        with tempfile.TemporaryDirectory() as d:
-            age = guard.read_ups_age_s(os.path.join(d, "nope.json"), now=1000.0)
-        self.assertIsNone(age)
-
-    def test_malformed_json_is_none(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "ups.json")
-            with open(path, "w") as f:
-                f.write("{not valid json")
-            age = guard.read_ups_age_s(path, now=1000.0)
-        self.assertIsNone(age)
-
-    def test_negative_non_finite_and_non_number_ts_is_none(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "ups.json")
-            for text in ("-1.0", "NaN", "Infinity", "true", '"12.5"', "9" * 400):
-                with self.subTest(text=text[:10]):
-                    with open(path, "w") as f:
-                        f.write('{"ts": %s}' % text)
-                    self.assertIsNone(guard.read_ups_age_s(path, now=1000.0))
-
-    def test_missing_ts_key_is_none(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "ups.json")
-            with open(path, "w") as f:
-                json.dump({"ac_present": True}, f)
-            age = guard.read_ups_age_s(path, now=1000.0)
-        self.assertIsNone(age)
-
-    def test_valid_ts_returns_age(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "ups.json")
-            with open(path, "w") as f:
-                json.dump({"ts": 940.0}, f)
-            age = guard.read_ups_age_s(path, now=1000.0)
-        self.assertEqual(age, 60.0)
-
 
 class IsUpsStaleTests(unittest.TestCase):
     def test_unknown_age_is_not_stale(self):
@@ -883,21 +842,35 @@ class RunLoopTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class GuardCycleTests(unittest.TestCase):
+    # The witness is the walle-power status file. `ups_path` below is that
+    # file. A test that has no such file passes a path that never exists.
+
     @staticmethod
-    def _cfg(status_file, ups_status_file, **overrides):
-        # The new watcher's file defaults to a path that never exists, so
-        # these cases test the old witness alone, as before, even on a Pi
-        # where /run/walle-power/status.json is real.
+    def _cfg(status_file, power_status_file, **overrides):
         kwargs = dict(
             interval_s=5.0, stale_s=30.0, sample_count=10, sample_interval_s=0.1,
-            max_per_hour=6, status_file=status_file, ups_status_file=ups_status_file,
-            power_status_file=os.path.join(
-                os.path.dirname(status_file), "missing_power.json"
-            ),
+            max_per_hour=6, status_file=status_file,
+            power_status_file=power_status_file,
             dry_run=False,
         )
         kwargs.update(overrides)
         return guard.GuardConfig(**kwargs)
+
+    @staticmethod
+    def _power(path, age_s):
+        """A walle-power file from this boot whose last good bus read is
+        `age_s` old. The heartbeat is as old as the bus read (a dead
+        writer), so the heartbeat rule allows a restart when it is stale."""
+        with open(path, "w") as f:
+            json.dump({"schema": "walle-power/1", "boot_id": BOOT,
+                       "hb_mono": BOOT_NOW - age_s, "bus_ok_mono": BOOT_NOW - age_s,
+                       "state": "run"}, f)
+
+    @staticmethod
+    def _guard(hw, cfg, **kwargs):
+        kwargs.setdefault("boottime_fn", lambda: BOOT_NOW)
+        kwargs.setdefault("boot_id_fn", lambda: BOOT)
+        return guard.I2cBusGuard(hw, cfg, **kwargs)
 
     def test_not_stuck_cycle_never_calls_recovery(self):
         with tempfile.TemporaryDirectory() as d:
@@ -905,7 +878,7 @@ class GuardCycleTests(unittest.TestCase):
             ups_path = os.path.join(d, "missing_ups.json")  # never created -> age unknown
             hw = FakeHardware(joint_sequence=[("lo", "hi")] * 3)
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(hw, cfg, sleep_fn=_noop_sleep)
+            g = self._guard(hw, cfg, sleep_fn=_noop_sleep)
             result = g.run_cycle()
             with open(status_path) as f:
                 on_disk = json.load(f)
@@ -919,8 +892,7 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 0.0}, f)
+            self._power(ups_path, age_s=1000.0)
             # +1 for the self-heal health check every cycle does, then the
             # full 10-sample joint stuck streak.
             hw = FakeHardware(
@@ -928,7 +900,7 @@ class GuardCycleTests(unittest.TestCase):
                 sda_sequence=["hi"] * 10,  # recovery: 1 pulse check + 3 success reads
             )
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
                 sleep_fn=_noop_sleep,
             )
@@ -955,14 +927,13 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 0.0}, f)
+            self._power(ups_path, age_s=1000.0)
             hw = FakeHardware(
                 joint_sequence=[("lo", "hi")] * 20,
                 sda_sequence=["lo"] * 20,
             )
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
                 sleep_fn=_noop_sleep,
             )
@@ -976,14 +947,13 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 0.0}, f)
+            self._power(ups_path, age_s=1000.0)
             hw = FakeHardware(
                 joint_sequence=[("lo", "hi")] * 20,
                 sda_sequence=["hi"] * 10,
             )
             cfg = self._cfg(status_path, ups_path, restart_ups=False)
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
                 sleep_fn=_noop_sleep,
             )
@@ -996,8 +966,7 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 0.0}, f)
+            self._power(ups_path, age_s=1000.0)
             # Simulates the half-finished state a kill leaves: unbound,
             # pins off a3. The rest of the cycle (detection) sees a
             # healthy, un-stale bus so nothing else fires.
@@ -1007,7 +976,7 @@ class GuardCycleTests(unittest.TestCase):
                 joint_sequence=[("hi", "hi")] * 5,
             )
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
                 sleep_fn=_noop_sleep,
             )
@@ -1033,7 +1002,7 @@ class GuardCycleTests(unittest.TestCase):
                 joint_sequence=[("hi", "hi")] * 5,
             )
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(hw, cfg, sleep_fn=_noop_sleep)
+            g = self._guard(hw, cfg, sleep_fn=_noop_sleep)
             g.run_cycle()
 
         self.assertTrue(hw.is_bound())
@@ -1047,15 +1016,14 @@ class GuardCycleTests(unittest.TestCase):
             # UPS status fresh (age 1s) -- isolates self-heal's own
             # restart decision from the separate stale-bus safety net,
             # which would otherwise also fire on a healthy (hi, hi) bus.
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 999.0}, f)
+            self._power(ups_path, age_s=1.0)
             hw = FakeHardware(
                 bound=True,
                 pin_functions={guard.SDA_PIN: "ip", guard.SCL_PIN: "a3"},
                 joint_sequence=[("hi", "hi")] * 5,
             )
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
                 sleep_fn=_noop_sleep,
             )
@@ -1068,8 +1036,7 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 0.0}, f)
+            self._power(ups_path, age_s=1000.0)
             # sample_count=2 keeps the joint-sequence bookkeeping small
             # across several cycles: 1 self-heal check + 2 detection
             # samples per cycle.
@@ -1079,10 +1046,11 @@ class GuardCycleTests(unittest.TestCase):
             )
             cfg = self._cfg(status_path, ups_path, max_per_hour=1, sample_count=2)
             clock = {"m": 0.0}
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg,
                 now_fn=lambda: 1000.0 + clock["m"],
                 monotonic_fn=lambda: clock["m"],
+                boottime_fn=lambda: BOOT_NOW + clock["m"],
                 sleep_fn=_noop_sleep,
             )
             with self.assertLogs(level="ERROR") as captured:
@@ -1100,18 +1068,18 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 0.0}, f)
+            self._power(ups_path, age_s=2000.0)
             hw = FakeHardware(
                 joint_sequence=[("lo", "hi")] * 40,
                 sda_sequence=["lo"] * 60,
             )
             cfg = self._cfg(status_path, ups_path, max_per_hour=1, sample_count=2)
             clock = {"m": 0.0}
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg,
                 now_fn=lambda: 100000.0 + clock["m"],
                 monotonic_fn=lambda: clock["m"],
+                boottime_fn=lambda: BOOT_NOW + clock["m"],
                 sleep_fn=_noop_sleep,
             )
             with self.assertLogs(level="ERROR") as captured:
@@ -1133,14 +1101,13 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 940.0}, f)
+            self._power(ups_path, age_s=60.0)
             # age = 60s: stale (> stale_s=30) but under the 120s
             # safety-net floor, and the bus reads healthy -- isolates
             # this warning from both the stuck path and the safety net.
             hw = FakeHardware(joint_sequence=[("hi", "hi")] * 5)
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
                 sleep_fn=_noop_sleep,
             )
@@ -1162,15 +1129,15 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 999.0}, f)
+            self._power(ups_path, age_s=1.0)
             hw = FakeHardware(joint_sequence=[("hi", "hi")] * 10)
             cfg = self._cfg(status_path, ups_path)
             clock = {"m": 0.0}
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg,
                 now_fn=lambda: 1000.0 + clock["m"],
                 monotonic_fn=lambda: clock["m"],
+                boottime_fn=lambda: BOOT_NOW + clock["m"],
                 sleep_fn=_noop_sleep,
             )
             with self.assertLogs(level="WARNING") as captured:
@@ -1192,7 +1159,7 @@ class GuardCycleTests(unittest.TestCase):
             ups_path = os.path.join(d, "missing_ups.json")  # never created
             hw = FakeHardware(joint_sequence=[("hi", "hi")] * 10)
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(hw, cfg, sleep_fn=_noop_sleep)
+            g = self._guard(hw, cfg, sleep_fn=_noop_sleep)
             with self.assertLogs(level="INFO") as captured:
                 g.run_cycle()
                 g.run_cycle()
@@ -1207,11 +1174,10 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 0.0}, f)
+            self._power(ups_path, age_s=1000.0)
             hw = FakeHardware(joint_sequence=[("hi", "hi")] * 5)
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
                 sleep_fn=_noop_sleep,
             )
@@ -1226,11 +1192,10 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 940.0}, f)  # age = 60s: stale, but < 120s
+            self._power(ups_path, age_s=60.0)  # age = 60s: stale, but < 120s
             hw = FakeHardware(joint_sequence=[("hi", "hi")] * 5)
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
                 sleep_fn=_noop_sleep,
             )
@@ -1242,13 +1207,12 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 0.0}, f)
+            self._power(ups_path, age_s=1000.0)
             # Stale for 1000s (> 120s) but SCL reads low -- ambiguous, not
             # a confirmed-healthy bus, so the safety net must stay quiet.
             hw = FakeHardware(joint_sequence=[("hi", "lo")] * 5)
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg, now_fn=lambda: 1000.0, monotonic_fn=lambda: 100.0,
                 sleep_fn=_noop_sleep,
             )
@@ -1262,7 +1226,7 @@ class GuardCycleTests(unittest.TestCase):
             ups_path = os.path.join(d, "missing_ups.json")
             hw = FakeHardware(joint_sequence=[("hi", "hi")] * 5)
             cfg = self._cfg(status_path, ups_path)
-            g = guard.I2cBusGuard(hw, cfg, sleep_fn=_noop_sleep)
+            g = self._guard(hw, cfg, sleep_fn=_noop_sleep)
             g.run_cycle()
 
         self.assertNotIn(("restart_ups_service",), hw.calls)
@@ -1271,18 +1235,18 @@ class GuardCycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
             ups_path = os.path.join(d, "ups.json")
-            with open(ups_path, "w") as f:
-                json.dump({"ts": 0.0}, f)
+            self._power(ups_path, age_s=2000.0)
             hw = FakeHardware(joint_sequence=[("hi", "hi")] * 20)
             cfg = self._cfg(status_path, ups_path)
             clock = {"m": 0.0}
-            g = guard.I2cBusGuard(
+            g = self._guard(
                 hw, cfg,
                 now_fn=lambda: 100000.0 + clock["m"],
                 monotonic_fn=lambda: clock["m"],
+                boottime_fn=lambda: BOOT_NOW + clock["m"],
                 sleep_fn=_noop_sleep,
             )
-            g.run_cycle()  # fires; age = 100000s, well past 120s
+            g.run_cycle()  # fires; age = 2000s, well past 120s
             clock["m"] += 60.0
             g.run_cycle()  # inside the 15-minute window -> no repeat
             restart_calls_before = hw.calls.count(("restart_ups_service",))
@@ -1291,18 +1255,18 @@ class GuardCycleTests(unittest.TestCase):
 
         self.assertEqual(restart_calls_before, 1)
         self.assertEqual(hw.calls.count(("restart_ups_service",)), 2)
-        # The old witness is in use, so the old service is the target.
-        self.assertEqual(hw.restarted, [guard.UPS_SERVICE_NAME] * 2)
+        # The heartbeat is stale, so walle-power is the target.
+        self.assertEqual(hw.restarted, [guard.POWER_SERVICE_NAME] * 2)
 
 
 # ---------------------------------------------------------------------------
-# The two witnesses (docs/x1202_power_watcher_design.md, section 6): the new
-# /run/walle-power/status.json (CLOCK_BOOTTIME, same boot only) and the old
-# /tmp/ups_status.json (wall clock), and the walle-power no-restart rule.
+# The witness (docs/x1202_power_watcher_design.md, section 6):
+# /run/walle-power/status.json (CLOCK_BOOTTIME, same boot only), and the
+# walle-power no-restart rule.
 # ---------------------------------------------------------------------------
 
 BOOT = "11111111-2222-3333-4444-555555555555"
-WALL_NOW = 1000.0   # guard's wall clock (old file `ts` is compared to this)
+WALL_NOW = 1000.0   # guard's wall clock
 BOOT_NOW = 5000.0   # guard's CLOCK_BOOTTIME (new file `_mono` values)
 
 
@@ -1311,15 +1275,10 @@ class PowerWitnessTests(unittest.TestCase):
         self._dir = tempfile.TemporaryDirectory()
         d = self._dir.name
         self.status_path = os.path.join(d, "guard_status.json")
-        self.ups_path = os.path.join(d, "ups_status.json")
         self.power_path = os.path.join(d, "power_status.json")
 
     def tearDown(self):
         self._dir.cleanup()
-
-    def _old(self, age_s):
-        with open(self.ups_path, "w") as f:
-            json.dump({"ts": WALL_NOW - age_s}, f)
 
     def _new(self, bus_age_s, hb_age_s=0.5, state="run", boot_id=BOOT, **extra):
         payload = {
@@ -1336,7 +1295,7 @@ class PowerWitnessTests(unittest.TestCase):
         kwargs = dict(
             interval_s=5.0, stale_s=30.0, sample_count=10, sample_interval_s=0.1,
             max_per_hour=6, status_file=self.status_path,
-            ups_status_file=self.ups_path, power_status_file=self.power_path,
+            power_status_file=self.power_path,
             dry_run=False,
         )
         kwargs.update(cfg_overrides)
@@ -1362,7 +1321,7 @@ class PowerWitnessTests(unittest.TestCase):
         self.assertFalse(result["ups_stale"])
         self.assertEqual(hw.restarted, [])
 
-    def test_new_file_stale_with_no_old_file_stays_stale(self):
+    def test_new_file_stale_stays_stale(self):
         self._new(bus_age_s=60.0)
         hw, result = self._healthy_cycle()
         self.assertEqual(result["witness"], "walle-power")
@@ -1375,13 +1334,6 @@ class PowerWitnessTests(unittest.TestCase):
         self.assertIsNone(result["witness"])
         self.assertIsNone(result["ups_age_s"])
         self.assertFalse(result["ups_stale"])
-
-    def test_new_file_from_another_boot_falls_back_to_old_file(self):
-        self._new(bus_age_s=1.0, boot_id="00000000-dead-beef-0000-000000000000")
-        self._old(age_s=200.0)
-        hw, result = self._healthy_cycle()
-        self.assertEqual(result["witness"], "walle-ups")
-        self.assertAlmostEqual(result["ups_age_s"], 200.0)
 
     def test_unknown_own_boot_id_makes_new_file_absent(self):
         self._new(bus_age_s=1.0)
@@ -1416,41 +1368,12 @@ class PowerWitnessTests(unittest.TestCase):
         hw, result = self._healthy_cycle()
         self.assertIsNone(result["witness"])
 
-    def test_new_missing_old_fresh(self):
-        self._old(age_s=2.0)
-        hw, result = self._healthy_cycle()
-        self.assertEqual(result["witness"], "walle-ups")
-        self.assertAlmostEqual(result["ups_age_s"], 2.0)
-        self.assertFalse(result["ups_stale"])
-
-    def test_new_missing_old_stale(self):
-        self._old(age_s=60.0)
-        hw, result = self._healthy_cycle()
-        self.assertEqual(result["witness"], "walle-ups")
-        self.assertTrue(result["ups_stale"])
-
-    def test_new_missing_old_missing(self):
+    def test_new_file_missing(self):
         hw, result = self._healthy_cycle()
         self.assertIsNone(result["witness"])
         self.assertIsNone(result["ups_age_s"])
         self.assertFalse(result["ups_stale"])
         self.assertEqual(hw.restarted, [])
-
-    def test_both_present_new_fresher(self):
-        self._new(bus_age_s=3.0)
-        self._old(age_s=500.0)
-        hw, result = self._healthy_cycle()
-        self.assertEqual(result["witness"], "walle-power")
-        self.assertAlmostEqual(result["ups_age_s"], 3.0)
-        self.assertFalse(result["ups_stale"])
-
-    def test_both_present_old_fresher(self):
-        self._new(bus_age_s=500.0)
-        self._old(age_s=3.0)
-        hw, result = self._healthy_cycle()
-        self.assertEqual(result["witness"], "walle-ups")
-        self.assertAlmostEqual(result["ups_age_s"], 3.0)
-        self.assertFalse(result["ups_stale"])
 
     def test_witness_written_to_status_file(self):
         self._new(bus_age_s=1.0)
@@ -1513,7 +1436,7 @@ class PowerWitnessTests(unittest.TestCase):
         clock = {"m": 0.0}
         g = guard.I2cBusGuard(
             hw, guard.GuardConfig(
-                status_file=self.status_path, ups_status_file=self.ups_path,
+                status_file=self.status_path,
                 power_status_file=self.power_path),
             now_fn=lambda: WALL_NOW, monotonic_fn=lambda: clock["m"],
             sleep_fn=_noop_sleep,
@@ -1577,9 +1500,8 @@ class PowerWitnessTests(unittest.TestCase):
         deep = "[" * 100000 + "]" * 100000
         for content in (deep, "1" + "0" * 400, '{"ts": %s}' % ("9" * 400)):
             with self.subTest(content=content[:10]):
-                for path in (self.power_path, self.ups_path):
-                    with open(path, "w") as f:
-                        f.write(content)
+                with open(self.power_path, "w") as f:
+                    f.write(content)
                 hw, result = self._healthy_cycle()
                 self.assertIsNone(result["witness"])
 
@@ -1604,17 +1526,6 @@ class PowerWitnessTests(unittest.TestCase):
         self._guard(hw, restart_ups=False).run_cycle()
         self.assertEqual(hw.restarted, [])
 
-    def test_old_witness_in_use_restarts_old_service(self):
-        # New file present but the old one is fresher: the old watcher is
-        # the witness, and its service is the target.
-        self._new(bus_age_s=900.0, hb_age_s=900.0)
-        self._old(age_s=60.0)
-        hw = self._stuck_hw()
-        g = self._guard(hw)
-        result = g.run_cycle()
-        self.assertEqual(result["witness"], "walle-ups")
-        self.assertEqual(hw.restarted, ["walle-ups.service"])
-
     def test_safety_net_restarts_walle_power_with_stale_heartbeat(self):
         self._new(bus_age_s=600.0, hb_age_s=600.0)
         hw, result = self._healthy_cycle()
@@ -1633,6 +1544,20 @@ class PowerWitnessTests(unittest.TestCase):
             g.run_cycle()
         self.assertTrue(hw.is_bound())
         self.assertEqual(hw.restarted, [])
+
+    def test_self_heal_rebind_with_new_file_missing_does_not_restart(self):
+        hw = FakeHardware(
+            bound=False,
+            pin_functions={guard.SDA_PIN: "ip", guard.SCL_PIN: "op"},
+            joint_sequence=[("hi", "hi")] * 5,
+        )
+        g = self._guard(hw)
+        with self.assertLogs(level="WARNING") as captured:
+            result = g.run_cycle()
+        self.assertTrue(hw.is_bound())
+        self.assertIsNone(result["witness"])
+        self.assertEqual(hw.restarted, [])
+        self.assertTrue(any("status file absent" in m for m in captured.output))
 
     def test_failing_gauge_live_writer_healthy_bus(self):
         # The gauge fails (bus_ok_mono 1000 s old) but the writer loop is
@@ -1695,13 +1620,6 @@ class ReadPowerStatusTests(unittest.TestCase):
         self.assertAlmostEqual(st.bus_ok_age_s, 10.0)
         self.assertEqual(st.state, "debounce")
 
-    def test_choose_witness(self):
-        self.assertEqual(guard.choose_witness(None, None), (None, None))
-        self.assertEqual(guard.choose_witness(5.0, None), (5.0, "walle-power"))
-        self.assertEqual(guard.choose_witness(None, 7.0), (7.0, "walle-ups"))
-        self.assertEqual(guard.choose_witness(5.0, 7.0), (5.0, "walle-power"))
-        self.assertEqual(guard.choose_witness(9.0, 7.0), (7.0, "walle-ups"))
-
     def test_real_boottime_and_boot_id_helpers_do_not_raise(self):
         self.assertIsInstance(guard.read_boottime(), float)
         self.assertIsNone(guard.read_boot_id("/nonexistent/boot_id"))
@@ -1747,11 +1665,9 @@ class MainSmokeTests(unittest.TestCase):
         # runs too) that cannot touch real hardware.
         with tempfile.TemporaryDirectory() as d:
             status_path = os.path.join(d, "status.json")
-            missing_ups = os.path.join(d, "no_such_ups.json")
             rc = guard.main([
                 "--once", "--dry-run",
                 "--status-file", status_path,
-                "--ups-status-file", missing_ups,
                 "--power-status-file", os.path.join(d, "no_such_power.json"),
             ])
             with open(status_path) as f:
@@ -1772,7 +1688,6 @@ class MainSmokeTests(unittest.TestCase):
             guard.main([
                 "--once", "--dry-run",
                 "--status-file", os.path.join(d, "status.json"),
-                "--ups-status-file", os.path.join(d, "no_such_ups.json"),
                 "--power-status-file", os.path.join(d, "no_such_power.json"),
             ])
         self.assertEqual(signal.getsignal(signal.SIGTERM), original_sigterm)

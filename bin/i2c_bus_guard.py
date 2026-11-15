@@ -6,13 +6,12 @@ WHY THIS EXISTS (incident 2026-09-25 21:36:16): the kernel logged
 A device on I2C bus 1 froze mid-transfer and held SDA low. Both devices on
 that bus went dark for 17 hours until a human power-cycled the robot: the
 RTK GPS co-processor (address 0x20, read by the wall-e service) and the
-UPSPlus HAT of that date (read by its daemon, since retired; the UPS HAT (B)
-and walle_ups.py / walle-ups.service replaced it on 2026-11-03 and sit on the
-same bus, so the same failure applies to them). The UPS daemon logged
+UPS board of that date (read by its daemon). The UPS daemon logged
 "WARNING: I2C read error (N consecutive)" every ~10 s the whole time and its
-/tmp/ups_status.json status file went stale, but nothing on the Pi 5 clears
-a stuck bus on its own -- there is no GPIO bus-recovery configured for this
-controller.
+status file went stale, but nothing on the Pi 5 clears a stuck bus on its
+own -- there is no GPIO bus-recovery configured for this controller. Today
+the power board on that bus is the Geekworm X1202, read by walle-power
+(bin/walle_power.py), so the same failure applies to it.
 
 WHAT THIS SCRIPT DOES
 
@@ -25,15 +24,14 @@ Every --interval seconds (default 5):
      WARNING, and apply the UPS-restart rule below if it rebound the
      driver. This runs at the start of every cycle, so it doubles as the
      startup check -- the first cycle IS startup.
-  2. Reads the age of the last good bus-1 read from the UPS watcher's
-     status file. Two witnesses during the move to the X1202 watcher
-     (docs/x1202_power_watcher_design.md, section 6): the new
-     /run/walle-power/status.json (CLOCK_BOOTTIME now - `bus_ok_mono`,
-     used only when its `boot_id` is this boot's) and the old
-     /tmp/ups_status.json (wall clock now - `ts`). The fresher one that is
-     present wins. A missing, unreadable or other-boot file counts as
-     age UNKNOWN, not stale -- the watcher might simply be stopped, and
-     that alone must never trigger a bus recovery.
+  2. Reads the age of the last good bus-1 read from the power watcher's
+     status file, /run/walle-power/status.json: CLOCK_BOOTTIME now -
+     `bus_ok_mono`, used only when its `boot_id` is this boot's
+     (docs/x1202_power_watcher_design.md, section 6). A missing,
+     unreadable or other-boot file counts as age UNKNOWN, not stale -- the
+     watcher might simply be stopped, and that alone must never trigger a
+     bus recovery. (Until 2026-11 the old walle-ups watcher's file was a
+     second witness; it is retired.)
   3. If (and only if) that age is stale, samples SDA and SCL TOGETHER --
      one `pinctrl get 2,3` call per sample -- --sample-count times (default
      10), about --sample-interval-s apart (default 0.1s).
@@ -59,23 +57,22 @@ Every --interval seconds (default 5):
      dying mid-recovery and skipping recover_bus's `finally` (that is what
      step 1's self-heal repairs on a later cycle if it ever happens anyway
      -- SIGKILL cannot be caught at all).
-  8. UPS daemon restart: unbinding the adapter invalidates the UPS
-     daemon's only I2C file handle, and it never reopens that handle on
-     its own. After ANY bus recovery attempt (success or failure), or any
-     self-heal that rebound the driver, once the driver is bound again,
-     this guard restarts walle-ups.service (unless --no-restart-ups).
-     When the new status file is the witness in use, the target is
-     walle-power.service instead, and the guard never restarts it while
-     its heartbeat `hb_mono` is fresh or its `state` is "halting" -- it
-     only reports. (walle-power opens the bus for each read.)
+  8. Watcher restart: after ANY bus recovery attempt (success or
+     failure), or any self-heal that rebound the driver, once the driver
+     is bound again, this guard may restart walle-power.service (unless
+     --no-restart-ups). It never restarts it while its heartbeat `hb_mono`
+     is fresh or unknown, or while the status file is absent -- it only
+     reports. walle-power opens the bus for each read, so a live watcher
+     needs no restart after an unbind.
      wall-e.service is deliberately never restarted here -- see
      docs/i2c_bus_guard.md for why, and for the one case that still needs
      a person.
   9. UPS safety net: if the UPS status has been stale for more than 120s
      while the bus itself looks healthy (SDA high, SCL high -- not
      stuck), a wedged bus cannot be the cause, so this guard restarts the
-     UPS daemon anyway, on the chance that fixes it. Rate-limited to once
-     per 15 minutes. A missing status file never triggers this.
+     watcher anyway (same heartbeat rule as step 8), on the chance that
+     fixes it. Rate-limited to once per 15 minutes. A missing status file
+     never triggers this.
   10. Independently of whether the bus is stuck, a UPS status that is
       stale for any reason (its daemon crashed, was stopped, anything)
       gets its own throttled warning -- a stuck bus is only one way the
@@ -115,10 +112,8 @@ _DRIVER_DIR = "/sys/bus/platform/drivers/i2c_designware"
 UNBIND_PATH = f"{_DRIVER_DIR}/unbind"
 BIND_PATH = f"{_DRIVER_DIR}/bind"
 DEVICE_LINK_PATH = f"{_DRIVER_DIR}/{DEVICE_NAME}"  # symlink present only while bound
-UPS_SERVICE_NAME = "walle-ups.service"          # old watcher (bin/walle_ups.py)
-POWER_SERVICE_NAME = "walle-power.service"      # new watcher (bin/walle_power.py)
+POWER_SERVICE_NAME = "walle-power.service"      # the watcher (bin/walle_power.py)
 WITNESS_POWER = "walle-power"
-WITNESS_UPS = "walle-ups"
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 
 # --- Recovery shape ----------------------------------------------------------
@@ -146,7 +141,6 @@ DEFAULT_INTERVAL_S = 5.0
 DEFAULT_STALE_S = 30.0
 DEFAULT_MAX_PER_HOUR = 6
 DEFAULT_STATUS_FILE = "/tmp/i2c_guard_status.json"
-DEFAULT_UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
 DEFAULT_POWER_STATUS_FILE = "/run/walle-power/status.json"
 
 # `pinctrl get 2` prints a line shaped like:
@@ -289,19 +283,11 @@ class Hardware:
         with open(path, "w") as f:
             f.write(value)
 
-    def restart_ups_service(self, service_name: str = UPS_SERVICE_NAME) -> None:
-        """Restart the UPS watcher (walle-ups.service by default, or
-        walle-power.service) so it reopens its I2C handle.
+    def restart_ups_service(self, service_name: str = POWER_SERVICE_NAME) -> None:
+        """Restart the power watcher (walle-power.service).
 
-        The caller (I2cBusGuard._restart_ups) decides WHICH service and
-        whether a restart is allowed at all; this method only acts.
-
-        Unbinding/rebinding the i2c_designware driver invalidates any
-        smbus2.SMBus handle opened before the unbind. The UPS daemon opens
-        its handle once at startup and only ever backs off and retries on
-        read errors -- it never reopens the handle itself -- so without
-        this restart it stays blind to real power loss even after the bus
-        is clear again.
+        The caller (I2cBusGuard._restart_ups) decides whether a restart is
+        allowed at all; this method only acts.
 
         Best-effort: unlike unbind()/bind()/set_pin(), a failure here is
         logged and swallowed, never raised. A failed UPS restart must
@@ -371,7 +357,7 @@ def read_power_status(path: str, now_boot_fn, boot_id: str | None) -> PowerStatu
     object, or its `boot_id` does not equal this boot's id (or this boot's
     id is unknown). A file from another boot carries CLOCK_BOOTTIME values
     of a different clock, so it is never compared, and never called stale.
-    There is no wall-clock fallback for this file.
+    There is no wall-clock fallback.
 
     The clock is read AFTER the file, so a value the writer stamped just
     before the read cannot be in the guard's future.
@@ -395,40 +381,6 @@ def read_power_status(path: str, now_boot_fn, boot_id: str | None) -> PowerStatu
         hb_age_s=None if hb is None else now_boot - hb,
         state=state if isinstance(state, str) else None,
     )
-
-
-def choose_witness(
-    power_age_s: float | None, ups_age_s: float | None
-) -> tuple[float | None, str | None]:
-    """Pick the fresher (smaller age) of the witnesses that are present.
-
-    Returns (age, witness). One present: that one. None present:
-    (None, None) -- age unknown, never stale.
-    """
-    if power_age_s is not None and (ups_age_s is None or power_age_s <= ups_age_s):
-        return power_age_s, WITNESS_POWER
-    if ups_age_s is not None:
-        return ups_age_s, WITNESS_UPS
-    return None, None
-
-
-def read_ups_age_s(path: str, now: float) -> float | None:
-    """Age, in seconds, of the UPS daemon's status file `ts` field.
-
-    Returns None when the file is missing, unreadable, or malformed (a
-    `ts` that is not a finite number >= 0 counts as malformed) --
-    treated by the caller as NOT stale, because the UPS daemon might
-    simply be stopped rather than blind on a stuck bus. Never raises.
-    """
-    try:
-        with open(path, "r") as f:
-            payload = json.load(f)
-        ts = _finite_number(payload["ts"])
-    except Exception:  # OSError, bad JSON, RecursionError, not a dict...
-        return None
-    if ts is None:
-        return None
-    return now - ts
 
 
 def is_ups_stale(ups_age_s: float | None, stale_s: float) -> bool:
@@ -672,8 +624,7 @@ class RateLimiter:
     """At most `max_count` events in any trailing window.
 
     Pure logic over a caller-supplied clock (pass time.monotonic() values)
-    so it is unit-testable with no real waiting. Mirrors the hardware-free
-    design of AcPresenceTracker in bin/walle_ups.py. Used
+    so it is unit-testable with no real waiting. Used
     for two independent limits: bus recoveries (--max-per-hour, an hour
     window) and the UPS safety-net restart (once per 15 minutes).
     """
@@ -722,9 +673,8 @@ def write_status_file(path: str, status: dict) -> None:
     dashboard card) never observes a half-written file. tempfile.mkstemp
     opens with O_EXCL under an unpredictable name in the same directory,
     so a pre-planted symlink or file at a guessed temp path is refused
-    rather than followed -- the same concern write_status_file in
-    bin/walle_ups.py documents in more detail, since this
-    guard is also a root daemon writing into a world-writable /tmp.
+    rather than followed: this guard is a root daemon writing into a
+    world-writable /tmp.
 
     Any failure is logged and swallowed: a skipped status publish must
     never stop the guard from doing its actual job.
@@ -759,7 +709,6 @@ class GuardConfig:
     sample_interval_s: float = DEFAULT_SAMPLE_INTERVAL_S
     max_per_hour: int = DEFAULT_MAX_PER_HOUR
     status_file: str = DEFAULT_STATUS_FILE
-    ups_status_file: str = DEFAULT_UPS_STATUS_FILE
     power_status_file: str = DEFAULT_POWER_STATUS_FILE
     dry_run: bool = False
     restart_ups: bool = True
@@ -790,8 +739,8 @@ class I2cBusGuard:
         self._sleep = sleep_fn
         self._boottime = boottime_fn
         self._boot_id = boot_id_fn
-        # The witness in use this cycle; decides which service a restart
-        # targets. Set at the start of run_cycle, before self-heal.
+        # The witness in use this cycle, for the status file. Set at the
+        # start of run_cycle.
         self._witness: str | None = None
         self._limiter = RateLimiter(cfg.max_per_hour, RATE_LIMIT_WINDOW_S)
         self._ups_safety_net_limiter = RateLimiter(1, UPS_SAFETY_NET_WINDOW_S)
@@ -808,9 +757,7 @@ class I2cBusGuard:
         now_wall = self._now()
         now_mono = self._monotonic()
 
-        # Witness first, so a self-heal restart below targets the right
-        # service. Self-heal touches no status file, so one read serves both.
-        ups_age, self._witness = self._read_witness(now_wall)
+        ups_age, self._witness = self._read_witness()
         self._maybe_self_heal(now_mono)
 
         ups_stale = is_ups_stale(ups_age, self._cfg.stale_s)
@@ -869,22 +816,23 @@ class I2cBusGuard:
             self._cfg.power_status_file, self._boottime, self._boot_id()
         )
 
-    def _read_witness(self, now_wall: float) -> tuple[float | None, str | None]:
-        """Age of the last good bus-1 read, from the fresher of the two
-        watchers' status files. New file: CLOCK_BOOTTIME - bus_ok_mono,
-        same boot only. Old file: wall clock - ts, exactly as before."""
+    def _read_witness(self) -> tuple[float | None, str | None]:
+        """Age of the last good bus-1 read and the witness name, from the
+        walle-power status file: CLOCK_BOOTTIME - bus_ok_mono, same boot
+        only. (None, None) when there is no usable age: unknown, never
+        stale."""
         power = self._read_power_status()
         power_age = power.bus_ok_age_s if power is not None else None
-        old_age = read_ups_age_s(self._cfg.ups_status_file, now_wall)
-        return choose_witness(power_age, old_age)
+        if power_age is None:
+            return None, None
+        return power_age, WITNESS_POWER
 
     def _restart_ups(self, reason: str) -> bool:
         """Shared by every UPS-restart trigger (a bus recovery, a
         self-heal that rebound the driver, and the stale-with-healthy-bus
         safety net). Respects --no-restart-ups for all three.
 
-        The target is walle-power.service when the new status file is the
-        witness in use this cycle, else walle-ups.service. walle-power is
+        The target is walle-power.service. It is
         NEVER restarted while its heartbeat is fresh (it opens the bus for
         each read, so an unbind/rebind needs no restart; a fresh heartbeat
         means it is alive, and when its state is "halting" a restart would
@@ -893,35 +841,34 @@ class I2cBusGuard:
         and the restarted watcher continues the halt from its marker. The
         status file is read again here, so the decision uses the heartbeat
         at this moment, not the one from before a recovery. An unknown
-        heartbeat also blocks.
+        heartbeat, or a status file that is absent or from another boot,
+        also blocks.
 
         Returns True only when a restart was issued (the safety net uses
         this, so a blocked restart does not use its rate-limit token).
         """
         if not self._cfg.restart_ups:
             return False
-        service = UPS_SERVICE_NAME
-        if self._witness == WITNESS_POWER:
-            service = POWER_SERVICE_NAME
-            power = self._read_power_status()
-            block = None
-            if power is None:
-                block = "status file absent or from another boot"
-            elif power.hb_age_s is None:
-                block = "heartbeat unknown"
-            elif power.hb_age_s <= self._cfg.stale_s:
-                block = f"heartbeat fresh ({power.hb_age_s:.1f}s)"
-                if power.state == "halting":
-                    block += ", state is halting"
-            if block is not None:
-                # Throttled: with the token no longer used by a blocked
-                # restart, the safety net asks again every cycle.
-                if self._throttle.ready("restart_blocked", self._monotonic()):
-                    logger.warning(
-                        "Not restarting %s (%s): %s; report only.",
-                        service, reason, block,
-                    )
-                return False
+        service = POWER_SERVICE_NAME
+        power = self._read_power_status()
+        block = None
+        if power is None:
+            block = "status file absent or from another boot"
+        elif power.hb_age_s is None:
+            block = "heartbeat unknown"
+        elif power.hb_age_s <= self._cfg.stale_s:
+            block = f"heartbeat fresh ({power.hb_age_s:.1f}s)"
+            if power.state == "halting":
+                block += ", state is halting"
+        if block is not None:
+            # Throttled: with the token no longer used by a blocked
+            # restart, the safety net asks again every cycle.
+            if self._throttle.ready("restart_blocked", self._monotonic()):
+                logger.warning(
+                    "Not restarting %s (%s): %s; report only.",
+                    service, reason, block,
+                )
+            return False
         logger.warning(
             "Restarting %s (%s) so it reopens its I2C handle.",
             service, reason,
@@ -976,9 +923,9 @@ class I2cBusGuard:
         if ups_age is None:
             if not self._ups_unknown_logged:
                 logger.info(
-                    "UPS status files unreadable, missing or from another "
-                    "boot (%s, %s); age unknown, not treated as stale.",
-                    self._cfg.power_status_file, self._cfg.ups_status_file,
+                    "UPS status file unreadable, missing or from another "
+                    "boot (%s); age unknown, not treated as stale.",
+                    self._cfg.power_status_file,
                 )
                 self._ups_unknown_logged = True
             return
@@ -1039,9 +986,9 @@ class I2cBusGuard:
         else:
             logger.error("I2C bus recovery failed: %s", error)
 
-        # Rule B: the unbind inside recover_bus killed the UPS daemon's
-        # only I2C fd regardless of outcome -- restart it once the driver
-        # is bound again. Checked fresh (not trusted from `ok`, which is
+        # Rule B: after any recovery attempt, ask for a watcher restart
+        # once the driver is bound again (_restart_ups applies the
+        # heartbeat rule). Checked fresh (not trusted from `ok`, which is
         # about SDA, not about whether the finally block's bind() itself
         # actually succeeded).
         if self._hw.is_bound():
@@ -1081,13 +1028,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"path for this guard's own status JSON (default: {DEFAULT_STATUS_FILE})",
     )
     parser.add_argument(
-        "--ups-status-file", default=DEFAULT_UPS_STATUS_FILE, dest="ups_status_file",
-        help=(
-            "path to the UPS daemon's status JSON "
-            "(default: $UPS_STATUS_FILE or /tmp/ups_status.json)"
-        ),
-    )
-    parser.add_argument(
         "--power-status-file", default=DEFAULT_POWER_STATUS_FILE,
         dest="power_status_file",
         help=(
@@ -1098,7 +1038,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-restart-ups", dest="restart_ups", action="store_false", default=True,
         help=(
-            "do not restart walle-ups.service / walle-power.service after a bus recovery, a "
+            "do not restart walle-power.service after a bus recovery, a "
             "self-heal that rebinds the driver, or the stale-UPS safety net "
             "(default: restart it)"
         ),
@@ -1181,7 +1121,6 @@ def main(argv: list[str] | None = None) -> int:
         sample_interval_s=args.sample_interval_s,
         max_per_hour=args.max_per_hour,
         status_file=args.status_file,
-        ups_status_file=args.ups_status_file,
         power_status_file=args.power_status_file,
         dry_run=args.dry_run,
         restart_ups=args.restart_ups,

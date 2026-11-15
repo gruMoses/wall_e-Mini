@@ -38,31 +38,15 @@ from config import OakWebViewerConfig
 # UPS status bridge (read side)
 # ---------------------------------------------------------------------------
 #
-# The Waveshare UPS HAT (B) is watched by a *separate* root process
-# (bin/walle_ups.py, walle-ups.service) that has the I2C bus; WALL-E's control
-# loop never touches it. The HAT has no MCU: its only sensor is an INA219 on
-# the battery-leg shunt, and mains presence is INFERRED from the battery
-# current (a small positive trickle means mains is on the jack; a large
-# negative current means the pack is carrying the Pi). The watcher atomically
-# publishes a small JSON snapshot (schema "walle-ups/1") to UPS_STATUS_FILE on
-# every poll; this reader lets the /debug board show live UPS state without
-# giving the web app any hardware access. Both sides read the same env var so
-# they stay in sync.
-#
-# In that file "ts" is the time of the last SUCCESSFUL INA219 read, so a
-# watcher that is alive but cannot read the sensor looks stale here (it is the
-# same witness bin/i2c_bus_guard.py uses). "ts_loop" is the time of its last
-# poll.
+# The Geekworm X1202 power board is watched by a *separate* root process
+# (bin/walle_power.py, walle-power.service) that has the I2C bus; WALL-E's
+# control loop never touches it. The watcher atomically publishes a small
+# JSON snapshot (schema "walle-power/1") to POWER_STATUS_FILE; this reader
+# lets the /debug board show live power state without giving the web app any
+# hardware access (docs/x1202_power_watcher_design.md, section 6). Its age is
+# CLOCK_BOOTTIME - hb_mono (the loop heartbeat), valid only when the file's
+# boot_id is this boot's. The old UPS HAT (B) watcher (walle-ups) is retired.
 
-#
-# Move to the Geekworm X1202 (docs/x1202_power_watcher_design.md, section 6):
-# the new watcher (bin/walle_power.py, walle-power.service) publishes schema
-# "walle-power/1" to POWER_STATUS_FILE. read_ups_status() reads that file
-# first and falls back to the old file only when the new one is missing. Its
-# age is CLOCK_BOOTTIME - hb_mono (the loop heartbeat), valid only when the
-# file's boot_id is this boot's.
-
-UPS_STATUS_FILE = os.environ.get("UPS_STATUS_FILE", "/tmp/ups_status.json")
 UPS_STATUS_MAX_AGE_S = 10.0
 POWER_STATUS_FILE = "/run/walle-power/status.json"
 _BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
@@ -128,7 +112,7 @@ def _read_power_status(raw: str, max_age_s: float, now_boot: float,
         "bus_ok_age_s": round(bus_age, 2) if bus_age is not None else None,
         "ts": data.get("bus_ok_ts"),
         "input_good": input_good if isinstance(input_good, bool) else None,
-        # Old keys the page reads, filled where a mapping exists.
+        # Keys the page reads for the input pill and the battery cell.
         "input": ("present" if input_good is True
                   else "absent" if input_good is False else "unknown"),
         "batt_v": data.get("vcell_v"),
@@ -144,27 +128,18 @@ def _read_power_status(raw: str, max_age_s: float, now_boot: float,
     }
 
 
-def read_ups_status(path: str = UPS_STATUS_FILE,
+def read_ups_status(power_path: str | None = None,
                     max_age_s: float = UPS_STATUS_MAX_AGE_S,
-                    now: float | None = None,
-                    power_path: str | None = None,
                     now_boot: float | None = None,
                     boot_id: str | None = None) -> dict:
-    """Read the power watcher's status: the walle-power file at
-    ``power_path`` first; only when it is missing, the old walle-ups file at
-    ``path`` with the behaviour below (unchanged). ``power_path`` defaults
-    to POWER_STATUS_FILE; ``now_boot`` and
+    """Read the walle-power watcher's status file at ``power_path``.
+    ``power_path`` defaults to POWER_STATUS_FILE; ``now_boot`` and
     ``boot_id`` default to this machine's CLOCK_BOOTTIME and boot id.
 
-    Old file (bin/walle_ups.py):
-
-    Always returns a dict with at least ``available`` and ``stale`` bools —
-    a missing file, unreadable path, corrupt/undecodable JSON, or a non-dict
-    payload all yield ``{"available": False, ...}`` instead of raising, so the
-    /api/ups route can never 500 on a bad/absent file. A readable file whose
-    ``ts`` is older than ``max_age_s`` (or has no usable ``ts``) is reported
-    ``available=True, stale=True`` so the page can grey out last-known values
-    rather than hide them.
+    Always returns a dict with at least ``available`` and ``stale`` bools. A
+    missing file, an unreadable path, corrupt or undecodable JSON, or a
+    non-dict payload all yield ``{"available": False, ...}`` instead of
+    raising, so the /api/ups route can never 500 on a bad or absent file.
     """
     if power_path is None:
         power_path = POWER_STATUS_FILE  # looked up per call
@@ -172,77 +147,23 @@ def read_ups_status(path: str = UPS_STATUS_FILE,
         with open(power_path, "r") as f:
             power_raw = f.read()
     except (FileNotFoundError, NotADirectoryError):
-        power_raw = None  # missing: fall back to the old file
+        return {"available": False, "stale": True, "age_s": None,
+                "reason": "missing", "source": "walle-power"}
     except OSError:
         return {"available": False, "stale": True, "age_s": None,
                 "reason": "unreadable", "source": "walle-power"}
     except ValueError:  # undecodable bytes
         return {"available": False, "stale": True, "age_s": None,
                 "reason": "corrupt", "source": "walle-power"}
-    if power_raw is not None:
-        try:
-            return _read_power_status(
-                power_raw, max_age_s,
-                _read_boottime() if now_boot is None else now_boot,
-                _read_boot_id() if boot_id is None else boot_id,
-            )
-        except Exception:  # never let a status file 500 the route
-            return {"available": False, "stale": True, "age_s": None,
-                    "reason": "corrupt", "source": "walle-power"}
-
-    now = time.time() if now is None else now
     try:
-        with open(path, "r") as f:
-            raw = f.read()
-    except OSError:
-        return {"available": False, "stale": True, "age_s": None, "reason": "missing"}
-    except ValueError:  # undecodable bytes
-        return {"available": False, "stale": True, "age_s": None, "reason": "corrupt"}
-    try:
-        data = json.loads(raw)
-    except Exception:  # bad JSON, RecursionError on deep nesting, ...
-        return {"available": False, "stale": True, "age_s": None, "reason": "corrupt"}
-    if not isinstance(data, dict):
-        return {"available": False, "stale": True, "age_s": None, "reason": "corrupt"}
-
-    ts = data.get("ts")
-    age_s = None
-    ts_num = _json_number(ts)  # negative / non-finite / bool: no age, stale
-    if ts_num is not None:
-        age_s = max(0.0, float(now) - ts_num)
-    stale = (age_s is None) or (age_s > max_age_s)
-    return {
-        "available": True,
-        "stale": bool(stale),
-        "source": "walle-ups",
-        "age_s": round(age_s, 2) if age_s is not None else None,
-        "ts": ts,
-        # Time of the watcher's last poll (the process is alive), and the
-        # file schema ("walle-ups/1").
-        "ts_loop": data.get("ts_loop"),
-        "schema": data.get("schema"),
-        # Mains presence, inferred from the battery current:
-        # "present" | "absent" | "discharge" | "unknown" | "above_supply"
-        # (None before the first successful read).
-        "input": data.get("input"),
-        "batt_v": data.get("batt_v"),
-        "batt_ma": data.get("batt_ma"),
-        "soc_pct": data.get("soc_pct"),
-        "overflow": data.get("overflow"),
-        "supply_v": data.get("supply_v"),
-        # Loss timer: seconds of "absent" samples so far, and the threshold
-        # at which the watcher halts the Pi (when halting is enabled).
-        "absent_s": data.get("absent_s"),
-        "loss_s": data.get("loss_s"),
-        # "monitoring" | "countdown" | "shutdown" | "loss-ignored"
-        "state": data.get("state"),
-        # "armed" | "detect-only" | "nohalt-flag"
-        "mode": data.get("mode"),
-        "halt_enabled": data.get("halt_enabled"),
-        "errors": data.get("errors"),
-        "last_error": data.get("last_error"),
-        "last_loss": data.get("last_loss"),
-    }
+        return _read_power_status(
+            power_raw, max_age_s,
+            _read_boottime() if now_boot is None else now_boot,
+            _read_boot_id() if boot_id is None else boot_id,
+        )
+    except Exception:  # never let a status file 500 the route
+        return {"available": False, "stale": True, "age_s": None,
+                "reason": "corrupt", "source": "walle-power"}
 
 
 # ---------------------------------------------------------------------------
@@ -1262,10 +1183,6 @@ _DEBUG_HTML = """<!DOCTYPE html>
   .log .up { color: #4ecdc4; } .log .down { color: #ff6b74; } .log .neu { color: #f0b344; }
   .log .empty { color: #444; font-style: italic; }
   .hint { font-size: 11px; color: #5b6472; margin-top: 10px; }
-  /* UPS panel: cells per watcher (walle-power vs the old walle-ups). */
-  #p-ups .ups-new { display: none; }
-  #p-ups.src-power .ups-new { display: block; }
-  #p-ups.src-power .ups-old { display: none; }
   .ups-fault { background: #3d1418; color: #ff6b74; border: 1px solid #6b2228;
                border-radius: 8px; padding: 8px 12px; margin-bottom: 8px;
                font-size: 13px; font-weight: 700; }
@@ -1366,17 +1283,12 @@ _DEBUG_HTML = """<!DOCTYPE html>
     <div class="grid">
       <div class="cell"><div class="k">Input</div><span id="u-mains" class="pill grey">&mdash;</span></div>
       <div class="cell"><div class="k">Battery</div><span id="u-battv" class="val grey">&mdash;</span></div>
-      <div class="cell ups-new"><div class="k">5 V Rail</div><span id="u-rail" class="val grey">&mdash;</span></div>
-      <div class="cell ups-new"><div class="k">Charge</div><span id="u-charge" class="pill grey">&mdash;</span></div>
-      <div class="cell ups-old"><div class="k">Current</div><span id="u-battma" class="val grey">&mdash;</span></div>
-      <div class="cell ups-old"><div class="k">Supply Setpoint</div><span id="u-supply" class="val grey">&mdash;</span></div>
-      <div class="cell ups-old"><div class="k">Loss Timer</div><span id="u-loss" class="val grey">&mdash;</span></div>
-      <div class="cell ups-old"><div class="k">Mode</div><span id="u-mode" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">5 V Rail</div><span id="u-rail" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Charge</div><span id="u-charge" class="pill grey">&mdash;</span></div>
       <div class="cell"><div class="k">State</div><span id="u-state" class="val grey">&mdash;</span></div>
-      <div class="cell ups-new"><div class="k">Halt Reason</div><span id="u-halt" class="val grey">&mdash;</span></div>
-      <div class="cell ups-old"><div class="k">Errors</div><span id="u-errors" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Halt Reason</div><span id="u-halt" class="val grey">&mdash;</span></div>
     </div>
-    <div class="hint" id="u-hint">Waiting for /run/walle-power/status.json from bin/walle_power.py (walle-power.service), or /tmp/ups_status.json from bin/walle_ups.py (walle-ups.service) &hellip;</div>
+    <div class="hint" id="u-hint">Waiting for /run/walle-power/status.json from bin/walle_power.py (walle-power.service) &hellip;</div>
   </div>
 
   <div class="panel" id="p-temp">
@@ -1600,93 +1512,57 @@ function applyUps(u) {
   var panel = document.getElementById('p-ups');
   var tag = document.getElementById('ups-tag');
   var hint = document.getElementById('u-hint');
-  /* walle-power (X1202) or the old walle-ups watcher: picks the cells shown
-     and the service the hint names. */
-  var power = !!(u && u.source === 'walle-power');
-  panel.classList.toggle('src-power', power);
-  var svc = power ? 'walle-power.service (bin/walle_power.py)'
-                  : 'walle-ups.service (bin/walle_ups.py)';
-  upsFaults(power && u.available ? u.faults : []);
+  var svc = 'walle-power.service (bin/walle_power.py)';
+  upsFaults(u && u.available ? u.faults : []);
   if (!u || !u.available) {
     panel.classList.add('stale');
     tag.textContent = 'UNAVAILABLE';
     var reason = u && u.reason ? u.reason : 'no data';
     hint.textContent = 'UPS status unavailable (' + reason + '). Is ' + svc + ' running?';
-    ['u-mains','u-mode','u-charge'].forEach(function(id){ pill(id, '—', 'grey'); });
-    ['u-battv','u-battma','u-supply','u-loss','u-state','u-errors','u-rail','u-halt'].forEach(function(id){ val(id,'—','grey'); });
+    ['u-mains','u-charge'].forEach(function(id){ pill(id, '—', 'grey'); });
+    ['u-battv','u-state','u-rail','u-halt'].forEach(function(id){ val(id,'—','grey'); });
     watch('mains', 'ups_mains', undefined, null, null);
     return;
   }
   if (u.stale) {
     panel.classList.add('stale');
     tag.textContent = 'STALE ' + (u.age_s != null ? u.age_s + 's' : '');
-    if (power && u.boot_ok === false) {
+    if (u.boot_ok === false) {
       hint.textContent = 'Status file is from another boot. Is ' + svc + ' running?';
     } else {
       hint.textContent = 'Last UPS update ' + (u.age_s != null ? u.age_s + 's ago' : '(unknown age)') +
                          ' — older than freshness window; values may be out of date.' +
-                         (power ? ' Is ' + svc + ' running?' : '');
+                         ' Is ' + svc + ' running?';
     }
   } else {
     panel.classList.remove('stale');
     tag.textContent = '';
     hint.textContent = 'Live — updated ' + (u.age_s != null ? u.age_s + 's ago' : 'just now') + '.';
   }
-  /* ts only advances on a good INA219 read, so a watcher that cannot read the
-     sensor shows STALE; its last read error says why. */
   if (u.last_error) hint.textContent += ' Last error: ' + u.last_error;
-  /* The HAT has no MCU: the watcher INFERS mains from the battery current.
-     A missing or unknown value renders '—', never PRESENT. */
+  /* A missing or unknown input renders '—' or UNKNOWN, never PRESENT. */
   var inp = u.input;
   var mtxt = '—', mcls = 'grey';
   if (inp === 'present') { mtxt = 'PRESENT'; mcls = 'green'; }
   else if (inp === 'absent') { mtxt = 'ABSENT'; mcls = 'red'; }
   else if (inp === 'unknown') { mtxt = 'UNKNOWN'; mcls = 'grey'; }
-  else if (inp === 'above_supply') { mtxt = 'ABOVE SUPPLY'; mcls = 'amber'; }
-  /* discharging near the setpoint with no fresh present sample: the supply may be
-     connected but below the pack, or gone; the low-battery floor decides. */
-  else if (inp === 'discharge') { mtxt = 'ON BATTERY?'; mcls = 'amber'; }
   pill('u-mains', mtxt, mcls);
-  val('u-battv', num(u.batt_v, 3, ' V') +
-      ((u.batt_v == null || u.soc_pct == null) ? '' : ' ~' + u.soc_pct + '%'),
-      u.batt_v == null ? 'grey' : '');
-  if (u.batt_ma == null) { val('u-battma', '—', 'grey'); }
-  else {
-    var mlbl = u.batt_ma > 20 ? ' (charging)' : u.batt_ma < -20 ? ' (discharging)' : '';
-    val('u-battma', u.batt_ma.toFixed(0) + ' mA' + mlbl,
-        u.batt_ma > 20 ? 'green' : u.batt_ma < -20 ? 'amber' : '');
-  }
-  val('u-supply', num(u.supply_v, 2, ' V'), u.supply_v == null ? 'grey' : '');
-  var absS = u.absent_s, lossS = u.loss_s;
-  val('u-loss', (absS == null ? '—' : absS) + ' / ' + (lossS == null ? '—' : lossS) + ' s',
-      absS == null ? 'grey' : absS > 0 ? 'amber' : 'green');
-  /* A missing or unknown mode renders '—', never ARMED (a false "armed"
-     claim about power protection). */
-  var md = u.mode;
-  var dtxt = '—', dcls = 'grey';
-  if (md === 'armed') { dtxt = 'ARMED'; dcls = 'green'; }
-  else if (md === 'detect-only') { dtxt = 'DETECT-ONLY'; dcls = 'amber'; }
-  else if (md === 'nohalt-flag') { dtxt = 'NOHALT'; dcls = 'red'; }
-  pill('u-mode', dtxt, dcls);
+  val('u-battv', num(u.batt_v, 3, ' V'), u.batt_v == null ? 'grey' : '');
   var st = u.state;
   val('u-state', st == null ? '—' : st,
-      st == null ? 'grey' : (st === 'shutdown' || st === 'halting') ? 'red' :
+      st == null ? 'grey' : st === 'halting' ? 'red' :
       st === 'debounce' ? 'amber' : '');
-  val('u-errors', u.errors == null ? '—' : u.errors, u.errors == null ? 'grey' : '');
-  if (power) {
-    /* walle-power: 5 V rail, charge state (disabled is the safe default),
-       and why it is halting. */
-    val('u-rail', num(u.ext5v_v, 2, ' V'), u.ext5v_v == null ? 'grey' : '');
-    var ch = u.charge;
-    pill('u-charge', ch == null ? '—' : String(ch).toUpperCase(),
-         ch === 'burst' ? 'green' : ch === 'failsafe' ? 'amber' : 'grey');
-    val('u-halt', u.halt_reason == null ? '—' : u.halt_reason,
-        u.halt_reason == null ? 'grey' : 'red');
-  }
+  /* 5 V rail, charge state (disabled is the safe default), and why it is
+     halting. */
+  val('u-rail', num(u.ext5v_v, 2, ' V'), u.ext5v_v == null ? 'grey' : '');
+  var ch = u.charge;
+  pill('u-charge', ch == null ? '—' : String(ch).toUpperCase(),
+       ch === 'burst' ? 'green' : ch === 'failsafe' ? 'amber' : 'grey');
+  val('u-halt', u.halt_reason == null ? '—' : u.halt_reason,
+      u.halt_reason == null ? 'grey' : 'red');
 
   watch('mains', 'ups_mains', inp == null ? undefined : inp, null,
         function(v){ return v === 'present' ? 'up' : 'down'; });
-  watch('upsmode', 'ups_daemon_mode', md == null ? undefined : md, null, null);
 }
 function pollUps() {
   fetch('/api/ups', {cache: 'no-store'})
@@ -2341,9 +2217,8 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
     def api_ups():
         """UPS snapshot from the separate power daemon's status file.
 
-        Read-only: reads /run/walle-power/status.json, else the old
-        /tmp/ups_status.json (via read_ups_status, which never
-        raises). Returns 200 even when the file is missing/stale/corrupt so the
+        Read-only: reads /run/walle-power/status.json (via
+        read_ups_status, which never raises). Returns 200 even when the file is missing/stale/corrupt so the
         debug page can render an UNAVAILABLE/STALE state instead of erroring.
         """
         return Response(json.dumps(read_ups_status()), content_type="application/json")
