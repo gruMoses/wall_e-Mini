@@ -909,14 +909,31 @@ Decisions (Kevin, 2026-11-13):
     - The two I2C cut jumpers are removed: the pinout is confirmed four
       ways above.
     - Residual (electrical audit item 4, refined by the Grok shifter
-      review, session `17a6b264-ec2a-4bc5-be4a-21772be526d7`): if F3
-      trips, the rover's rail falls. If that dead rail is a low impedance
-      to ground, the shifter conducts and the rover's pull-ups hold I2C
-      bus 1 low, which the UPS gauge shares. If the dead rail floats, the
-      bus stays high at about 2.9 V and the rover browns out. Fault case
-      only.
+      review, session `17a6b264-ec2a-4bc5-be4a-21772be526d7`, and
+      corrected by the Fable design review, 2026-11-15): if F3 trips, the
+      rover's rail falls and the rover browns out. Bus 1 is NOT held low:
+      on the connector side the rover has only R16 and R17 (10 kOhm to
+      its VCC) and the drains of Q4 and Q5, nothing that clamps the lines.
+      With the rover's VCC at 0 V the Pi's 1.8 kOhm pull-ups divide
+      against the 10 kOhm, so bus 1 rests at about 2.8 V, a valid high,
+      with about 0.28 mA per line into the dead rail. The UPS gauge on
+      bus 1 still reads, with a smaller noise margin. Fault case only;
+      unplug the rover if F3 is open.
     - Built as `d5f5a7f` in `gruMoses/hardware-projects`: ERC 0, DRC 0,
       the shifter as audited, J2 pad 4 on the header 5 V through F3.
+15. **D15. J1 is a pass-through stacking header (Kevin, 2026-11-15).**
+    Kevin: "make sure the 40-pin connector is the pass-through style so we
+    could put another hat on top if we need to in the future." J1 becomes
+    a 2x20 stacking header: the socket under the shield as before, on the
+    CAN HAT's pins, and long pins up through the top. Limit: a full HAT
+    cannot plug straight onto the top pins, because the receiver with its
+    plugs stands about 29 mm above the shield and the Nano in its socket
+    is also taller than a HAT's socket. A future board takes the top pins
+    by a ribbon cable (2x20 IDC), or sits higher on its own standoffs.
+    The top pins include 5 V and ground: cover them when they are not in
+    use. Same day: the order adds the official Raspberry Pi 5 RTC battery
+    (rechargeable, for the Pi's BAT connector); the Pi does not charge it
+    until `dtparam=rtc_bbat_vchg` is set in `config.txt`.
 
 ## Appendix: Technical Names and Technical Verbs
 
