@@ -380,6 +380,25 @@ Totals for the day on the robot: a burst with the full CPU load stopped early 5 
 DECIDED (Kevin, 2026-11-15): this is accepted as a known limit of the board. A burst with a very high load stops early, and the watcher tries again after 120 s. The charge policy does not change. The alternative (no burst while the robot is armed) was not chosen: the low signal stops when the watcher stops the charge, thus it cannot become a halt condition by this cause; a burst is rare when the cells are at the hold level (approximately one in 5 h); and the watcher would need the arm state of `wall-e`, which adds code and a dependency to the unit that halts the Pi. Not examined, and still open as observations: a burst with the usual load while the motors are in operation, and operation in hot weather (the Pi then gets to its maximum power sooner, and more bursts stop early; the cells then get to the hold level more slowly).
 
 
+### Robot checks after the install (2026-11-15, 15:46 to 16:11)
+
+These are tests 1 to 4 of "Robot, after the install" in section 9. The Pi is on the robot, on the stand, on the converter of the robot. The `nohalt` file was not active. A script on the Mac recorded when the Pi answered (`switch_checks_monitor.log`). Kevin operated the main switch and the transmitter.
+
+| Test | Result |
+|---|---|
+| 1. Main switch off, then on | Pass. The watcher made the halt decision after 5.00 s of low input (15:48:10), and called the power-off 0.5 s later. The Pi was off the network 9 s after that. Kevin's report: all lights dark after approximately 20 s to 30 s. Kevin set the switch to on after approximately 43 s. The Pi started with no other action. The web page of `wall-e` answered 17.6 s after the kernel start (approximately 30 s after the switch). No fault. The journal of the halted boot is readable. |
+| 2. Main switch off for 3 s, then on | Pass. GPIO 6 was low from 15:50:14 to 15:50:18 (approximately 4 s). The watcher went to `debounce` and back to `run`. The boot id did not change, and there was no halt. The low time was near the limit of 5 s: an off time of 3 s at the switch gives approximately 4 s at the pin. |
+| 3. ch5 e-stop | Pass, with one finding. Kevin armed the robot with the transmitter on and set ch5 to e-stop (15:53:56). `wall-e` disarmed and called `shutdown -h now` 1 s later. The Pi was off the network 8 s after the e-stop. Kevin then set the main switch to off and to on. The Pi started, but ch5 was still in the e-stop position: `wall-e` called the shutdown again 19 s after its start. The Pi then stayed off with the input present for approximately 13.5 min, until Kevin set the main switch to off and to on again (with the transmitter off). This is the stay-off condition and operator rule 1. Finding: in those 13.5 min the board charged the cells from 3.75 V to 3.92 V (VCELL 52 s after the start). This is operator rule 2: after an e-stop, set the main switch to off. |
+| 4. `/debug` data and the guard | Pass. `/api/ups` (the source of the power panel) shows the source `walle-power`, the status available and not stale, the input present and no fault. `i2c-bus-guard` is active. The page itself was not examined on a screen. |
+
+Notes:
+
+- A boot with no network starts with the clock of the clock unit (the last known time). In the two boots after the e-stop, the clock was 2.5 min and 16 min behind the real time until the time server answered. The journal times of those boots are thus not real times.
+- Not recorded: Kevin's confirmation that the Pi stayed dark for 30 s after the first e-stop with the main switch on. The 13.5 min after the second shutdown show the same condition.
+
+Data: `docs/data/x1202_robot_20261114/stand_20261115/switch_checks_monitor.log`, `switch_checks_after_estop.log`.
+
+
 ### Clock unit
 
 The clock unit is a oneshot unit, `walle-clock-floor.service`. It runs `/usr/local/sbin/walle-clock-floor` after `fake-hwclock.service` and before `systemd-journal-flush.service`. The script sets the clock forward, never back, to the newest of three times:

@@ -1,0 +1,62 @@
+16:10:58 Pi answers: ['0f07a2de', '17.04']
+15:55:01
+--- boots
+  -5 b81fbff270f04a22b0ea1f6ac52d94f5 Sun 2026-11-15 11:39:53 CST Sun 2026-11-15 13:03:34 CST
+  -4 14e3e095b08649618a444f74bfc95fa6 Sun 2026-11-15 13:03:34 CST Sun 2026-11-15 13:15:31 CST
+  -3 492b027c40c4450881003301a77d5ffc Sun 2026-11-15 13:15:31 CST Sun 2026-11-15 15:48:15 CST
+  -2 2cf0d448fd3542dc846de9c05a3c4afb Sun 2026-11-15 15:48:15 CST Sun 2026-11-15 15:54:05 CST
+  -1 372f029c2a28441db6aea119f690f600 Sun 2026-11-15 15:54:05 CST Sun 2026-11-15 15:54:35 CST
+   0 0f07a2deaa264dc6bf1f235da56393b1 Sun 2026-11-15 15:54:35 CST Sun 2026-11-15 15:55:01 CST
+--- boot -1: wall-e tail
+2026-11-15T15:54:24-0600 walle run_main.sh[791]: RC RC(ch1=1500 ch2=1500 ch3=2000 ch4= 996 ch5=2000) BT(external SPP)  IMU 0°→0°  corr_raw=0 corr_applied=-  armed=N ev=0  OAK(1.69m scl=1
+2026-11-15T15:54:24-0600 walle sudo[1499]:       pi : PWD=/home/pi/wall_e-Mini/pi_app ; USER=root ; COMMAND=/usr/sbin/shutdown -h now
+2026-11-15T15:54:24-0600 walle sudo[1499]: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1000)
+2026-11-15T15:54:24-0600 walle sudo[1499]: pam_unix(sudo:session): session closed for user root
+2026-11-15T15:54:29-0600 walle systemd[1]: Stopping wall-e.service - WALL-E Main Control App (RC, motors, OAK-D, web viewer)...
+2026-11-15T15:54:34-0600 walle systemd[1]: wall-e.service: Deactivated successfully.
+2026-11-15T15:54:34-0600 walle systemd[1]: Stopped wall-e.service - WALL-E Main Control App (RC, motors, OAK-D, web viewer).
+2026-11-15T15:54:34-0600 walle systemd[1]: wall-e.service: Consumed 7.521s CPU time.
+--- boot -1: shutdown and watcher
+2026-11-15T15:54:14-0600 walle NetworkManager[674]: <info>  [1794779654.0272] device (br-be199e033c08): state change: ip-config -> ip-check (reason 'none', sys-iface-state: 'external')
+2026-11-15T15:54:14-0600 walle NetworkManager[674]: <info>  [1794779654.0287] device (br-be199e033c08): state change: ip-check -> secondaries (reason 'none', sys-iface-state: 'external')
+2026-11-15T15:54:14-0600 walle NetworkManager[674]: <info>  [1794779654.0288] device (br-be199e033c08): state change: secondaries -> activated (reason 'none', sys-iface-state: 'external')
+2026-11-15T15:54:24-0600 walle sudo[1499]:       pi : PWD=/home/pi/wall_e-Mini/pi_app ; USER=root ; COMMAND=/usr/sbin/shutdown -h now
+2026-11-15T15:54:34-0600 walle NetworkManager[674]: <info>  [1794779674.4652] device (wlan0): state change: activated -> deactivating (reason 'unmanaged', sys-iface-state: 'managed')
+2026-11-15T15:54:34-0600 walle NetworkManager[674]: <info>  [1794779674.4991] device (wlan0): state change: deactivating -> unmanaged (reason 'removed', sys-iface-state: 'managed')
+2026-11-15T15:54:35-0600 walle NetworkManager[674]: <info>  [1794779675.1000] device (p2p-dev-wlan0): state change: disconnected -> unmanaged (reason 'removed', sys-iface-state: 'removed')
+2026-11-15T15:54:35-0600 walle NetworkManager[674]: <info>  [1794779675.1003] device (08:8B:C8:45:39:A6): state change: disconnected -> unmanaged (reason 'unmanaged', sys-iface-state: 'manag
+--- boot -2: wall-e tail
+2026-11-15T15:53:56-0600 walle run_main.sh[786]: RC RC(ch1=1500 ch2=1500 ch3=2004 ch4= 996 ch5=1996) BT(external SPP)  IMU 360°→0°  corr_raw=0 corr_applied=-  armed=N ev=0  OAK(1.68m scl
+2026-11-15T15:53:57-0600 walle sudo[4485]:       pi : PWD=/home/pi/wall_e-Mini/pi_app ; USER=root ; COMMAND=/usr/sbin/shutdown -h now
+2026-11-15T15:53:57-0600 walle sudo[4485]: pam_unix(sudo:session): session opened for user root(uid=0) by (uid=1000)
+2026-11-15T15:53:57-0600 walle sudo[4485]: pam_unix(sudo:session): session closed for user root
+2026-11-15T15:54:01-0600 walle systemd[1]: Stopping wall-e.service - WALL-E Main Control App (RC, motors, OAK-D, web viewer)...
+2026-11-15T15:54:05-0600 walle systemd[1]: wall-e.service: Deactivated successfully.
+2026-11-15T15:54:05-0600 walle systemd[1]: Stopped wall-e.service - WALL-E Main Control App (RC, motors, OAK-D, web viewer).
+2026-11-15T15:54:05-0600 walle systemd[1]: wall-e.service: Consumed 1min 31.942s CPU time.
+--- boot -2: shutdown and watcher
+2026-11-15T15:50:14-0600 walle python3[690]: state: run -> debounce
+2026-11-15T15:50:18-0600 walle python3[690]: good: False -> True
+2026-11-15T15:50:25-0600 walle python3[690]: state: debounce -> run
+2026-11-15T15:53:57-0600 walle sudo[4485]:       pi : PWD=/home/pi/wall_e-Mini/pi_app ; USER=root ; COMMAND=/usr/sbin/shutdown -h now
+2026-11-15T15:54:05-0600 walle NetworkManager[697]: <info>  [1794779645.0521] device (wlan0): state change: activated -> deactivating (reason 'unmanaged', sys-iface-state: 'managed')
+2026-11-15T15:54:05-0600 walle NetworkManager[697]: <info>  [1794779645.0789] device (wlan0): state change: deactivating -> unmanaged (reason 'removed', sys-iface-state: 'managed')
+2026-11-15T15:54:05-0600 walle NetworkManager[697]: <info>  [1794779645.6604] device (p2p-dev-wlan0): state change: disconnected -> unmanaged (reason 'removed', sys-iface-state: 'removed')
+2026-11-15T15:54:05-0600 walle NetworkManager[697]: <info>  [1794779645.6608] device (08:8B:C8:45:39:A6): state change: disconnected -> unmanaged (reason 'unmanaged', sys-iface-state: 'manag
+--- events
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7874.698, "event": "kill", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.283}
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7874.946, "event": "stopped", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.515}
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7875.196, "event": "poweroff", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.758}
+{"boot_id": "2cf0d448-fd35-42dc-846d-e9c05a3c4afb", "bt": 3.155, "event": "start", "nohalt": false, "resumed_marker": false, "version": "walle-power 2026-11-15", "wall": 1794779297.3}
+{"boot_id": "372f029c-2a28-441d-b6ae-a119f690f600", "bt": 3.155, "event": "start", "nohalt": false, "resumed_marker": false, "version": "walle-power 2026-11-15", "wall": 1794779647.291}
+{"boot_id": "0f07a2de-aa26-4dc6-bf1f-235da56393b1", "bt": 3.038, "event": "start", "nohalt": false, "resumed_marker": false, "version": "walle-power 2026-11-15", "wall": 1794779677.325}
+--- now
+{"boot_id": "0f07a2de-aa26-4dc6-bf1f-235da56393b1", "bus_ok_mono": 28.548968869, "bus_ok_ts": 1794779702.8306963, "charge": "disabled", "ext5v_v": 5.1456, "faults": [], "halt_reason": null, "hb_mono": 28.549, "hold": "on", "input_good": true, "last_error": null, "low_s": 0, "schema": "walle-power/1", "state": "run", "vcell_v": 3.9225}
+active
+active
+active
+2026-11-15T15:54:54-0600 walle run_main.sh[775]: RC RC(ch1=1500 ch2=1500 ch3=1500 ch4=1500 ch5=1500) BT(external SPP)  IMU 0°→0°  corr_raw=0 corr_
+2026-11-15T15:54:59-0600 walle run_main.sh[775]: RC RC(ch1=1500 ch2=1500 ch3=1500 ch4=1500 ch5=1500) BT(external SPP)  IMU 0°→0°  corr_raw=0 corr_
+
+
+[exited with code 0]

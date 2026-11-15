@@ -1,0 +1,77 @@
+15:46:53 cycle start: boot 492b027c uptime 7798 s active active
+15:48:19 Pi stopped answering (last answer 15:48:13)
+15:49:14 Pi answers again: boot 2cf0d448 uptime 13.7 s active active
+15:49:18 web page up; Pi uptime now 17.6 s
+15:49:18 down for 55 s (Mac clock, from the first missed answer)
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7874.698, "event": "halt", "input_good": false, "kind": "input_loss", "low_s": 5.0, "reason": "input_loss low=5.00s", "vcell_v": 3.635, "wall": 1794779290.261}
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7874.698, "event": "kill", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.283}
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7874.946, "event": "stopped", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.515}
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7875.196, "event": "poweroff", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.758}
+{"boot_id": "2cf0d448-fd35-42dc-846d-e9c05a3c4afb", "bt": 3.155, "event": "start", "nohalt": false, "resumed_marker": false, "version": "walle-power 2026-11-15", "wall": 1794779297.3}
+---
+{"boot_id": "2cf0d448-fd35-42dc-846d-e9c05a3c4afb", "bus_ok_mono": 17.439972949, "bus_ok_ts": 1794779311.559605, "charge": "disabled", "ext5v_v": 5.14024, "faults": [], "halt_reason": null, "hb_mono": 17.44, "hold": "on", "input_good": true, "last_error": null, "low_s": 0, "schema": "walle-power/1", "state": "run", "vcell_v": 3.755}
+---
+NRestarts=0
+ActiveEnterTimestampMonotonic=3162552
+Startup finished in 1.561s (kernel) + 8.570s (userspace) = 10.132s 
+---
+2026-11-15T15:48:10-0600 walle python3[77090]: halt step kill: input_loss low=5.00s vcell=3.635 uptime=7874.7
+2026-11-15T15:48:10-0600 walle python3[77090]: state: debounce -> halting
+2026-11-15T15:48:10-0600 walle python3[77090]: halt step stopped: input_loss low=5.00s vcell=3.635 uptime=7874.9
+2026-11-15T15:48:10-0600 walle python3[77090]: halt step poweroff: input_loss low=5.00s vcell=3.635 uptime=7875.2
+2026-11-15T15:48:14-0600 walle systemd[1]: Stopping walle-power.service - WALL-E power watcher (Geekworm X1202)...
+2026-11-15T15:48:14-0600 walle systemd[1]: walle-power.service: Deactivated successfully.
+2026-11-15T15:48:14-0600 walle systemd[1]: Stopped walle-power.service - WALL-E power watcher (Geekworm X1202).
+2026-11-15T15:48:14-0600 walle systemd[1]: walle-power.service: Consumed 16.552s CPU time.
+---
+2026-11-15T15:47:50-0600 walle run_main.sh[796]: RC RC(ch1=1500 ch2=1500 ch3=1004 ch4=1000 ch5= 996) BT(external SPP)  IMU 1°→0°  corr_raw=-2 corr_applied=-  armed=N ev=0  OAK(1.67m scl=1.0)  GPS(
+2026-11-15T15:47:55-0600 walle run_main.sh[796]: RC RC(ch1=1500 ch2=1500 ch3=1004 ch4=1000 ch5= 996) BT(external SPP)  IMU 1°→0°  corr_raw=-2 corr_applied=-  armed=N ev=0  OAK(1.67m scl=1.0)  GPS(
+2026-11-15T15:48:00-0600 walle run_main.sh[796]: RC RC(ch1=1500 ch2=1500 ch3=1004 ch4=1000 ch5= 996) BT(external SPP)  IMU 1°→0°  corr_raw=-2 corr_applied=-  armed=N ev=0  OAK(1.67m scl=1.0)  GPS(
+2026-11-15T15:48:05-0600 walle run_main.sh[796]: RC RC(ch1=1500 ch2=1500 ch3=1000 ch4=1000 ch5= 996) BT(external SPP)  IMU 1°→0°  corr_raw=-2 corr_applied=-  armed=N ev=0  OAK(1.67m scl=1.0)  GPS(
+2026-11-15T15:48:10-0600 walle run_main.sh[796]: RC RC(ch1=1500 ch2=1500 ch3=1004 ch4=1000 ch5= 996) BT(external SPP)  IMU 1°→0°  corr_raw=-2 corr_applied=-  armed=N ev=0  OAK(1.67m scl=1.0)  GPS(
+
+15:49:39 blip start: boot 2cf0d448 uptime 38 s active active
+15:50:29 short loss seen; same boot: True
+2026-11-15T15:50:14-0600 walle python3[690]: good: True -> False
+2026-11-15T15:50:14-0600 walle python3[690]: state: run -> debounce
+2026-11-15T15:50:18-0600 walle python3[690]: good: False -> True
+2026-11-15T15:50:25-0600 walle python3[690]: state: debounce -> run
+2cf0d448-fd35-42dc-846d-e9c05a3c4afb
+{"boot_id": "2cf0d448-fd35-42dc-846d-e9c05a3c4afb", "bus_ok_mono": 87.939953485, "bus_ok_ts": 1794779428.6458178, "charge": "disabled", "ext5v_v": 5.17642, "faults": [], "halt_reason": null, "hb_mono": 87.94, "hold": "on", "input_good": true, "last_error": null, "low_s": 0, "schema": "walle-power/1", "state": "run", "vcell_v": 3.75}
+active
+active
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7875.196, "event": "poweroff", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.758}
+{"boot_id": "2cf0d448-fd35-42dc-846d-e9c05a3c4afb", "bt": 3.155, "event": "start", "nohalt": false, "resumed_marker": false, "version": "walle-power 2026-11-15", "wall": 1794779297.3}
+
+15:50:47 cycle start: boot 2cf0d448 uptime 107 s active active
+15:54:04 Pi stopped answering (last answer 15:54:01)
+15:56:47 Pi answers again: boot 372f029c uptime 18.6 s active active
+15:56:48 web page up; Pi uptime now 19.0 s
+15:56:48 down for 163 s (Mac clock, from the first missed answer)
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7874.698, "event": "kill", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.283}
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7874.946, "event": "stopped", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.515}
+{"boot_id": "492b027c-40c4-4508-8100-3301a77d5ffc", "bt": 7875.196, "event": "poweroff", "kind": "input_loss", "reason": "input_loss low=5.00s", "wall": 1794779290.758}
+{"boot_id": "2cf0d448-fd35-42dc-846d-e9c05a3c4afb", "bt": 3.155, "event": "start", "nohalt": false, "resumed_marker": false, "version": "walle-power 2026-11-15", "wall": 1794779297.3}
+{"boot_id": "372f029c-2a28-441d-b6ae-a119f690f600", "bt": 3.155, "event": "start", "nohalt": false, "resumed_marker": false, "version": "walle-power 2026-11-15", "wall": 1794779647.291}
+---
+{"boot_id": "372f029c-2a28-441d-b6ae-a119f690f600", "bus_ok_mono": 19.419424355, "bus_ok_ts": 1794779663.5475557, "charge": "disabled", "ext5v_v": 5.11344, "faults": [], "halt_reason": null, "hb_mono": 19.419, "hold": "on", "input_good": true, "last_error": null, "low_s": 0, "schema": "walle-power/1", "state": "run", "vcell_v": 3.775}
+---
+NRestarts=0
+ActiveEnterTimestampMonotonic=3177478
+Startup finished in 1.563s (kernel) + 8.564s (userspace) = 10.128s 
+---
+2026-11-15T15:50:14-0600 walle python3[690]: good: True -> False
+2026-11-15T15:50:14-0600 walle python3[690]: state: run -> debounce
+2026-11-15T15:50:18-0600 walle python3[690]: good: False -> True
+2026-11-15T15:50:25-0600 walle python3[690]: state: debounce -> run
+2026-11-15T15:54:01-0600 walle systemd[1]: Stopping walle-power.service - WALL-E power watcher (Geekworm X1202)...
+2026-11-15T15:54:01-0600 walle systemd[1]: walle-power.service: Deactivated successfully.
+2026-11-15T15:54:01-0600 walle systemd[1]: Stopped walle-power.service - WALL-E power watcher (Geekworm X1202).
+2026-11-15T15:54:01-0600 walle systemd[1]: walle-power.service: Consumed 2.841s CPU time.
+---
+2026-11-15T15:53:41-0600 walle run_main.sh[786]: RC RC(ch1=1500 ch2=1500 ch3=1500 ch4=1500 ch5=1500) BT(external SPP)  IMU 0°→0°  corr_raw=0 corr_applied=-  armed=N ev=0  OAK(0.90m scl=0.7)  GPS(q
+2026-11-15T15:53:46-0600 walle run_main.sh[786]: RC RC(ch1=1500 ch2=1500 ch3=1004 ch4=1000 ch5= 996) BT(external SPP)  IMU 0°→0°  corr_raw=0 corr_applied=-  armed=N ev=0  OAK(0.89m scl=0.7)  GPS(q
+2026-11-15T15:53:51-0600 walle run_main.sh[786]: RC RC(ch1=1808 ch2=1812 ch3=2004 ch4= 992 ch5=1000) BT(external SPP)  IMU 0°→0°  corr_raw=0 corr_applied=-  armed=Y ev=0  OAK(1.01m scl=0.8)  GPS(q
+2026-11-15T15:53:56-0600 walle run_main.sh[786]: RC RC(ch1=1500 ch2=1500 ch3=2004 ch4= 996 ch5=1996) BT(external SPP)  IMU 360°→0°  corr_raw=0 corr_applied=-  armed=N ev=0  OAK(1.68m scl=1.0)  GPS
+2026-11-15T15:53:57-0600 walle sudo[4485]:       pi : PWD=/home/pi/wall_e-Mini/pi_app ; USER=root ; COMMAND=/usr/sbin/shutdown -h now
+
