@@ -98,6 +98,7 @@ The Pi stays off when the input returns before the board cuts its output, or aft
 1. "If WALL-E does not start within 60 s after the main switch goes on, set the main switch to off, wait 5 s, and set it to on."
 2. "After an e-stop, set the main switch to off within some minutes." Else the board charges the cells to 4.2 V with the Pi off.
 3. Flat cells (tier (b) at boot): "If WALL-E does not start and the board shows one or no battery LED, leave the main switch on for at least 15 min, then set it to off for 5 s and to on." A 5 s off time does not charge the cells above 3.10 V. With the Pi off and the input present, the board charges the cells. Verify on the bench: what the battery LEDs show at about 3.1 V with the Pi off, and the charge time from 3.0 V to a rested 3.4 V.
+4. Storage (Kevin, 2026-11-15): "If WALL-E stays parked for more than 6 weeks, remove the two cells from the board." With the Pi off and the input off, the board takes 0.85 mA from the cells (bench test 14), and the board has no low-voltage cutoff.
 
 With the 5 s debounce and the re-check, rule 1 applies after an input-off time of about 7 s to 25 s. An input-off time of less than 5 s causes no halt.
 
@@ -247,7 +248,7 @@ Robot, after the install:
 Risks, most serious first:
 
 1. No cell temperature. The 45 C requirement is not met. A sensor cannot control the charge with the Pi off.
-2. Storage: no hardware cutoff and an unknown drain (bench test 14 is a gate).
+2. Storage: no hardware cutoff and an unknown drain (bench test 14 is a gate). Measured on 2026-11-15: 0.85 mA. Operator rule 4 (section 4) applies.
 3. A false GPIO 6 low halts the robot. The Pi stays off until a person acts.
 4. A watcher that is not running gives a hard cut. The alarms are a stale heartbeat and a guard warning.
 5. A final stage that never ends (a stuck NVMe flush) has no software bound.
@@ -268,6 +269,7 @@ Kevin's decisions:
 9. The buck at about 12 V and the 2-pin connector.
 10. The EEPROM test (bench test 15).
 11. Approval of push 1, each hand step and push 2.
+12. The storage rule. DECIDED by Kevin on 2026-11-15, after bench test 14: operator rule 4 (more than 6 weeks parked: remove the cells).
 
 ## Implementation and bench status (2026-11-14)
 
@@ -303,9 +305,10 @@ Bench tests of section 9 with the installed watcher (bench supply at 12.2 V on t
 | 12: tier (a) on the real cells | 1 | Load: 4 cores at 100 %, `wall-e` and the OAK camera. The input was off and the `nohalt` file disabled the input-loss halt. The rested VCELL at the start was 4.0575 V. VCELL reached 3.30 V after 43.5 min (2612 s) on the cells. The `tier` event shows VCELL 3.2975 V. The Pi was off the network 16.6 s after VCELL reached 3.30 V. On the cells, EXT5V was 5.080 V to 5.128 V, `throttled` was `0x0` in each sample, and the CPU temperature was 73.0 C to 78.5 C. Pass. |
 | 12: boot on low cells | 1 | The input came back. The Pi booted with no other action. After the boot the rested VCELL was 3.515 V (3.52 V after 3 min), EXT5V was 5.147 V, `throttled` was `0x0` and the watcher showed no faults. This boot was the first with the `gpio=16=op,dh` line in `config.txt`, so the board did not charge the cells during the boot. |
 | 13: charge hold (branch A), 5.8 h | 1 | The watcher ran with `--hold` from 00:10:48 to 06:00:00 on 2026-11-15 (a temporary drop-in; the test removed it at the end). The input was on, `wall-e` was in operation, and there was no added CPU load. The rested VCELL at the start was 3.585 V. 14 bursts of 120 s, with 120 s of rest between them, brought the rested VCELL to 3.7525 V in 56 min (7.5 mV to 21 mV for each burst). Then the watcher made no burst for 3 h 27 min, and the rested VCELL was 3.7500 V to 3.7563 V. One burst at 04:33:40 brought it to 3.77 V, and it was 3.7675 V at 06:00. During a burst VCELL was 3.91 V maximum. EXT5V was 5.112 V to 5.190 V, the watcher showed no faults, `throttled` was `0x0`, and the Pi did not reboot. After the cells reached the target, the rested VCELL stayed in the limits of the test plan (3.70 V to 3.85 V). The test plan asks for 24 h with the CPU load logged. This run is 5.8 h with no load log: a pass for 5.8 h, not the full test. Data: `hold_soak.log` and `hold_soak_samples.jsonl` in `docs/data/x1202_robot_20261114/night/`. |
+| 14: storage drain | 1 | Kevin, 2026-11-15, on his bench. The Pi was halted (input-loss halt). The input and all cables of the robot were disconnected. The jumper was in place. One cell was removed. A resistor in series with the other cell (between the positive end of the cell and the holder contact) showed 85 mV on a Fluke 115. With a 100 ohm resistor that is 0.85 mA. Kevin did not state the resistor value: 100 ohm was the value in the instruction, and a direct reading of 0.001 A on the 6 A range of the meter agrees with it. The drain is approximately 20 mAh in one day. From the hold level (3.75 V, approximately half of 4 Ah) the cells are empty after approximately 3 months. The limit of the test plan is 0.2 mA, thus the result needs an operator rule. Kevin accepted the rule on 2026-11-15: more than 6 weeks parked, remove the cells (section 4, rule 4). |
 | 1: unit tests on the Pi | 1 | 134 passed (before the last change; 147 on the Mac). |
 
-Not done yet: test 2 (the pin voltage of GPIO 6 with the pull-down; needs a meter), test 10 (the hardware watchdog), the remaining time of test 13 (the hold soak is 24 h in the test plan; 5.8 h are done), test 14 (the storage drain; needs a meter), test 15 (the EEPROM test; needs Kevin's approval), and the flat-cell LED check of test 12 (needs a person at the board).
+Not done yet: test 2 (the pin voltage of GPIO 6 with the pull-down; needs a meter), test 10 (the hardware watchdog), the remaining time of test 13 (the hold soak is 24 h in the test plan; 5.8 h are done), test 15 (the EEPROM test; needs Kevin's approval), and the flat-cell LED check of test 12 (needs a person at the board).
 
 Findings from the bench:
 
