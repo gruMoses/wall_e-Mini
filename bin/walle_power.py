@@ -36,6 +36,10 @@ DEBOUNCE_NEED_S, DEBOUNCE_WINDOW_S, DEBOUNCE_MAX_DT_S = 5.0, 7.5, 2.5
 RECHECK_UNREADABLE_S = 2.0         # re-check: pin unreadable this long -> power off
 RETRY_S = 60.0                     # EEPROM check and GPIO 6 re-configuration retry
 ERROR_LOG_S, MAX_FAILED_TICKS = 10.0, 20
+EVENTS_MAX_BYTES = 256 * 1024
+VERSION = "walle-power 2026-11-15"
+CELLS_REST_S = 120.0               # cells_high is judged only on a rested sample
+NOTICES = {"cells_high"}           # in "faults" for /debug, but no periodic FAULT warning
 TIER_A_V, TIER_A_S = 3.30, 5.0
 TIER_B_V, TIER_B_SAMPLES = 3.10, 3
 STOP_WAIT_S, POLL_S, RECHECK_SAMPLES = 15.0, 0.5, 2
@@ -201,8 +205,11 @@ class Charge:
         self.bad_since = now            # unknown until the first good read
         self.rest_since = now
         self.burst = None               # (start vcell, end time)
+        self.burst_end = None           # end time of the last burst
 
     def _end(self, now):
+        if self.burst:
+            self.burst_end = now
         self.burst = None
         self.rest_since = now
 
@@ -245,10 +252,12 @@ def _time_ok(v, now):
 class Halter:
     """Halt state machine: idle -> kill -> wait_stop -> recheck -> ladder
     (input loss), or idle -> ladder at once with --force (low voltage).
-    step() performs at most one action per call and returns its name."""
+    step() performs at most one action per call and returns its name.
+    note(now, event) is called for each halt event, after the marker and
+    before a poweroff call, so the record reaches the disk first."""
 
-    def __init__(self, ops):
-        self.ops = ops
+    def __init__(self, ops, note=None):
+        self.ops, self.note = ops, note or (lambda now, event: None)
         self.phase, self.kind, self.reason = "idle", None, None
         self.t0 = self.poweroff_at = None
         self.rung, self.deadline, self.next_poll, self.highs = 0, 0.0, 0.0, 0
@@ -270,6 +279,7 @@ class Halter:
             self.kind, self.reason, self.t0, self.poweroff_at = kind, reason, now, None
             self.phase = "kill"
             self._marker()
+            self.note(now, "halt")
             return True
         if self.active and self.kind == "low_voltage":
             return False
@@ -279,6 +289,7 @@ class Halter:
             self.poweroff_at, self.rung, self.phase = now, 0, "ladder"
         self.kind, self.reason = kind, reason
         self._marker()
+        self.note(now, "halt")
         self.ops.poweroff(["--force"])
         return True
 
@@ -307,6 +318,7 @@ class Halter:
         if self.phase == "kill":
             self.ops.kill_robot()
             self.phase, self.deadline, self.next_poll = "wait_stop", now + STOP_WAIT_S, now
+            self.note(now, "kill")
             return "kill"
         if self.phase == "wait_stop":
             done = now >= self.deadline - EPS
@@ -316,6 +328,7 @@ class Halter:
                 done = st is not None and st not in BUSY
             if done:
                 self.phase, self.highs, self.recheck_t = "recheck", 0, now
+                self.note(now, "stopped")
                 return "stopped"
             return None
         if self.phase == "recheck":
@@ -327,19 +340,23 @@ class Halter:
                 if self.highs >= RECHECK_SAMPLES:
                     self.ops.delete_marker()
                     self.ops.start_robot()
-                    self.__init__(self.ops)
+                    self.note(now, "cancel")
+                    self.__init__(self.ops, self.note)
                     return "cancel"
                 return None
             if good is None and now - self.recheck_t < RECHECK_UNREADABLE_S - EPS:
                 return None
             self.poweroff_at, self.rung, self.phase = now, 0, "ladder"
             self._marker()
+            self.note(now, "poweroff")
             self.ops.poweroff(["--no-wall"])
             return "poweroff"
         if self.phase == "ladder" and now - self.poweroff_at >= LADDER_STEP_S * (self.rung + 1) - EPS:
             self.rung += 1
-            self.ops.poweroff(["--force"] if self.rung == 1 else ["--force", "--force"])
-            return "force" if self.rung == 1 else "force_force"
+            ev = "force" if self.rung == 1 else "force_force"
+            self.note(now, ev)
+            self.ops.poweroff(["--force"] if ev == "force" else ["--force", "--force"])
+            return ev
         return None
 
 
@@ -390,6 +407,45 @@ class System:
         self.status_path = os.path.join(run_dir, "status.json")
         self.marker_path = os.path.join(run_dir, "halting")
         self.nohalt_path = os.path.join(state_dir, "nohalt")
+        self.events_path = os.path.join(state_dir, "events.jsonl")
+
+    def event(self, rec):
+        """Append one JSON line to the event file, then fsync: it must be on
+        the disk before a power-off (the journal of a halted boot is lost on
+        this board). Returns None, or the error text. Never raises."""
+        try:
+            data = (json.dumps(rec, sort_keys=True) + "\n").encode()
+            fd = os.open(self.events_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            try:
+                os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return None
+        except Exception as e:  # noqa: BLE001
+            return ("events: %s: %s" % (type(e).__name__, e))[:120]
+
+    def trim_events(self, max_bytes=EVENTS_MAX_BYTES):
+        """At a start: a file above max_bytes keeps its newest half (whole
+        lines), rewritten atomically. Returns None or the error text."""
+        try:
+            if os.path.getsize(self.events_path) <= max_bytes:
+                return None
+            with open(self.events_path, "rb") as f:
+                f.seek(-(max_bytes // 2), os.SEEK_END)
+                tail = f.read()
+            tail = tail[tail.find(b"\n") + 1:]
+            tmp = self.events_path + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(tail)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.events_path)
+            return None
+        except FileNotFoundError:
+            return None
+        except Exception as e:  # noqa: BLE001
+            return ("events trim: %s: %s" % (type(e).__name__, e))[:120]
 
     @staticmethod
     def log(msg, level=6):
@@ -498,12 +554,13 @@ class Watcher:
     def __init__(self, ops, now, hold=HOLD_ENABLED):
         self.ops, self.hold, self.boot_id = ops, hold, ops.boot_id()
         self.debounce, self.tiers, self.charge = Debounce(), LowVoltage(), Charge(hold, now)
-        self.halter = Halter(ops)
+        self.halter = Halter(ops, self._on_halt)
+        self.start_t, self.good, self.pending_tier = now, None, None
         self.next_gauge, self.vcell, self.ext5v, self.last_error = now, None, None, None
         # bus_ok_mono: the last good bus-1 read, or the watcher's start if there
         # was none yet, so a bus stuck from boot still goes stale for the guard.
         self.bus_ok_mono, self.bus_ok_ts = now, None
-        self.first_vcell, self.cells_high, self.eeprom_bad = True, False, None
+        self.cells_high, self.eeprom_bad = False, None
         self.prev, self.faults, self.next_warn = {}, set(), now
         self.next_eeprom, self.next_g6_fix = now, now + RETRY_S
         self.want_prev, self.charge_pin_bad, self.pin_mismatch = "dh", False, False
@@ -517,13 +574,26 @@ class Watcher:
             if not ops.set_pin(pin, func, mode):
                 ops.log("pinctrl set %d %s %s failed" % (pin, func, mode), 3)
         try:
-            self.halter.resume(now, ops.read_marker())
+            err = ops.trim_events()
+        except Exception as e:  # noqa: BLE001 - never fail the start for this file
+            err = "events trim: %s" % e
+        self.last_error = err or self.last_error
+        try:
+            marker = ops.read_marker()
+        except Exception:  # noqa: BLE001
+            marker = {}
+        self.record(now, "start", version=VERSION, nohalt=self.nohalt,
+                    resumed_marker=marker is not None)
+        try:
+            self.halter.resume(now, marker)
         except Exception as e:  # noqa: BLE001 - never crash-loop before READY
             ops.log("halting marker unusable (%s): continuing as input loss" % e, 3)
-            self.halter = Halter(ops)
+            self.halter = Halter(ops, self._on_halt)
             self.halter.resume(now, {})
         if self.halter.active:
             ops.log("continuing halt from marker: %s (%s)" % (self.halter.reason, self.halter.phase), 4)
+            self.record(now, "resume", phase=self.halter.phase, kind=self.halter.kind,
+                        reason=self.halter.reason)
         ops.notify("READY=1\nWATCHDOG=1")   # at most 2 bounded calls (6 s) since the start
 
     # Watchdog budget (WatchdogSec=15, kept below 10 s). Every run() is at most
@@ -538,15 +608,12 @@ class Watcher:
         ops.notify("WATCHDOG=1")            # an error late in a tick cannot stretch the gap
         g6, g16 = ops.read_pins()
         good = None if g6 is None or g6["level"] is None else g6["level"] == 1
+        self.good = good
         self.debounce.update(now, good)
         # Never START an input-loss halt on a sample that shows the input back.
         if self.debounce.tripped and good is not True and not self.nohalt and not self.halter.active:
             self.halter.start(now, "input_loss", "input_loss low=%.2fs" % self.debounce.low_s)
-            self._halt_log(now, "HALT")
-        reason = self.halter.reason
         action = self.halter.step(now, good)
-        if action:
-            self._halt_log(now, "halt step " + action, reason)
         if action == "cancel":
             self.debounce.clear()           # else the same low time trips again at once
         ops.notify("WATCHDOG=1")            # the GPIO 6 path never waits behind I2C
@@ -558,12 +625,13 @@ class Watcher:
                 self.last_error = err
             else:
                 self.bus_ok_mono, self.bus_ok_ts = now, ops.wall()
-                if self.first_vcell:
-                    self.first_vcell, self.cells_high = False, self.vcell > CELLS_HIGH_V
+                self._judge_cells(now, good)
             reason = self.tiers.update(now, good, self.vcell)
-            if reason and self.halter.start(now, "low_voltage", reason):
-                self._halt_log(now, "HALT (forced, no cancel)")
-                action = action or "low_voltage"
+            if reason:
+                self.pending_tier = reason
+                if self.halter.start(now, "low_voltage", reason):
+                    action = action or "low_voltage"
+                self.pending_tier = None
             self.ext5v = None if self.halter.active else ops.ext5v()
             ops.notify("WATCHDOG=1")
         charge = self.charge.update(now, good, sampled, self.vcell, self.halter.active)
@@ -605,17 +673,60 @@ class Watcher:
                 self.charge_pin_bad = True
         self.want_prev, self.pin_mismatch = want, mismatch
 
-    def _halt_log(self, now, what, reason=None):
-        v = "%.3f" % self.vcell if self.vcell is not None else "unreadable"
-        self.ops.log("%s: %s vcell=%s uptime=%.1f" % (what, reason or self.halter.reason, v, now), 4)
+    def record(self, now, event, **fields):
+        """One line in the persistent event file. Never raises."""
+        rec = {"boot_id": self.boot_id, "bt": round(now, 3), "event": event}
+        try:
+            rec["wall"] = round(self.ops.wall(), 3)
+        except Exception:  # noqa: BLE001
+            rec["wall"] = None
+        rec.update(fields)
+        try:
+            err = self.ops.event(rec)
+        except Exception as e:  # noqa: BLE001
+            err = "events: %s" % e
+        if err:
+            self.last_error = err
+
+    def _on_halt(self, now, event):
+        """Halter hook: journal line and event line, after the marker and
+        before any poweroff call."""
+        h = self.halter
+        v = None if self.vcell is None else round(self.vcell, 4)
+        if event == "halt":
+            if h.kind == "low_voltage" and self.pending_tier:
+                self.record(now, "tier", reason=self.pending_tier, vcell_v=v, input_good=self.good)
+            self.record(now, "halt", kind=h.kind, reason=h.reason, vcell_v=v,
+                        low_s=round(self.debounce.low_s, 2), input_good=self.good)
+            what = "HALT (forced, no cancel)" if h.kind == "low_voltage" else "HALT"
+        else:
+            self.record(now, event, kind=h.kind, reason=h.reason)
+            what = "halt step " + event
+        self.ops.log("%s: %s vcell=%s uptime=%.1f" % (
+            what, h.reason, "unreadable" if v is None else "%.3f" % v, now), 4)
+
+    def _judge_cells(self, now, good):
+        """cells_high follows RESTED samples only: 120 s after the start and
+        after a burst (the board charges until GPIO 16 is driven), input good,
+        no halt. A notice, logged when it appears and when it clears."""
+        be = self.charge.burst_end
+        if (good is not True or self.halter.active or self.charge.burst
+                or now - self.start_t < CELLS_REST_S - EPS
+                or (be is not None and now - be < CELLS_REST_S - EPS)):
+            return
+        high = self.vcell > CELLS_HIGH_V
+        if high != self.cells_high:
+            self.ops.log("notice cells_high %s: rested vcell=%.3f" % ("on" if high else "off", self.vcell), 5)
+        self.cells_high = high
 
     def _log_changes(self, now, **cur):
         for key, val in cur.items():
             if key in self.prev and self.prev[key] != val:
                 self.ops.log("%s: %s -> %s" % (key, _fmt(self.prev[key]), _fmt(val)), 5)
         self.prev = cur
-        if cur["faults"] and now >= self.next_warn - EPS:
-            self.ops.log("FAULT %s last_error=%s" % (",".join(sorted(cur["faults"])), self.last_error), 4)
+        real = cur["faults"] - NOTICES
+        if real and now >= self.next_warn - EPS:
+            self.ops.log("FAULT %s last_error=%s" % (",".join(sorted(real)), self.last_error), 4)
             self.next_warn = now + FAULT_WARN_S
 
     def _status(self, now, good, charge, state, faults):
@@ -676,6 +787,10 @@ def loop(w, ops, clock, sleep, ticks=None):
                 ops.log("tick error %s: %s" % (type(e).__name__, str(e)[:200]), 3)
             if failed >= MAX_FAILED_TICKS:
                 ops.log("%d failed passes in a row: exit for a fresh start" % failed, 3)
+                try:
+                    w.record(clock(), "exit_failed_ticks", failed=failed, error=type(e).__name__)
+                except Exception:  # noqa: BLE001
+                    pass
                 sys.exit(1)
             next_t = None
             try:

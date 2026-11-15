@@ -31,6 +31,7 @@ class FakeSys:
         self.marker = marker
         self.eeprom = True
         self.calls, self.logs, self.notes, self.statuses = [], [], [], []
+        self.events, self.event_err = [], None
         self.nohalt_path = str(tmp_path / "nohalt")
 
     def boot_id(self):
@@ -100,6 +101,14 @@ class FakeSys:
         self.notes.append(msg)
         self.calls.append(("notify", msg))
 
+    def event(self, rec):
+        self.events.append(rec)
+        self.calls.append(("event", rec["event"]))
+        return self.event_err
+
+    def trim_events(self):
+        return None
+
     # helpers
     def actions(self):
         keep = ("marker", "kill", "stop_no_block", "is_active", "delete_marker",
@@ -144,7 +153,9 @@ def assert_ping_order(fs):
         first_ping = p.index(("notify", "WATCHDOG=1"))
         assert all(c[0] not in ("read_vcell", "ext5v") for c in p[:first_ping])
         if ("kill",) in p:
-            assert p.index(("stop_no_block",)) + 1 == first_ping
+            # only the (fsynced, local) event line sits between the kill and the ping
+            between = p[p.index(("stop_no_block",)) + 1:first_ping]
+            assert all(c[0] == "event" for c in between)
 
 
 # ---------------------------------------------------------------- decode and parse
@@ -940,17 +951,54 @@ def test_eeprom_not_checked_while_halting(tmp_path):
     assert fs.calls.count(("eeprom",)) == n
 
 
-def test_cells_high_on_first_reading(tmp_path):
+def test_cells_high_not_from_the_first_samples(tmp_path):
+    # Replaces test_cells_high_on_first_reading (B2): the board charges until
+    # GPIO 16 is driven, so the first samples after a start read high.
     fs, w = make(tmp_path)
-    fs.vcell = 3.96
-    run_ticks(w, 0.0, 1.0)
+    fs.vcell = 4.2
+    run_ticks(w, 0.0, 119.75)
+    assert all("cells_high" not in s["faults"] for s in fs.statuses)
+
+
+def test_cells_high_follows_rested_samples(tmp_path):
+    fs, w = make(tmp_path)
+    fs.vcell = 4.2
+    run_ticks(w, 0.0, 121.0)
     assert "cells_high" in fs.statuses[-1]["faults"]
-    fs2, w2 = make(tmp_path)
-    fs2.vcell = 3.90
-    run_ticks(w2, 0.0, 1.0)
-    fs2.vcell = 4.1
-    run_ticks(w2, 1.25, 3.0)
+    assert sum("notice cells_high on" in m for _, m in fs.logs) == 1
+    fs.vcell = 3.95
+    run_ticks(w, 121.25, 123.0)
+    assert "cells_high" not in fs.statuses[-1]["faults"]
+    assert sum("notice cells_high off" in m for _, m in fs.logs) == 1
+
+
+def test_cells_high_ignores_input_loss_and_halts_and_bursts(tmp_path):
+    fs, w = make(tmp_path)
+    w.nohalt = True
+    fs.vcell, fs.g6 = 4.2, 0
+    run_ticks(w, 0.0, 200.0)
+    assert "cells_high" not in fs.statuses[-1]["faults"]
+    fs2, w2 = make(tmp_path, hold=True)
+    fs2.vcell = 3.70
+    run_ticks(w2, 0.0, 121.0)                    # a burst runs from 120 s
+    assert w2.charge.state == "burst"
+    fs2.vcell = 4.0
+    run_ticks(w2, 121.25, 300.0)                 # ends at 240 s; rested from 360 s
     assert "cells_high" not in fs2.statuses[-1]["faults"]
+    run_ticks(w2, 300.25, 361.0)
+    assert "cells_high" in fs2.statuses[-1]["faults"]
+
+
+def test_cells_high_alone_gives_no_periodic_warning(tmp_path):
+    fs, w = make(tmp_path)
+    fs.vcell = 4.2
+    run_ticks(w, 0.0, 400.0)
+    assert "cells_high" in fs.statuses[-1]["faults"]
+    assert not any(m.startswith("FAULT") for _, m in fs.logs)
+    fs.g6_cfg = ("ip", "pn")                     # a real fault: named, cells_high is not
+    run_ticks(w, 400.25, 401.0)
+    warns = [m for _, m in fs.logs if m.startswith("FAULT")]
+    assert warns and "gpio6_cfg" in warns[0] and "cells_high" not in warns[0]
 
 
 def test_fault_warning_once_a_minute(tmp_path):
@@ -1182,8 +1230,9 @@ def test_w5_gpio6_path_before_the_gauge(tmp_path):
     fs2, w2 = make(tmp_path)
     fs2.vcell = 3.0
     run_ticks(w2, 0.0, 2.0)
-    p = fs2.calls[fs2.calls.index(("poweroff", "--force")) - 3:]
-    assert ("read_vcell",) in p
+    before = fs2.calls[:fs2.calls.index(("poweroff", "--force"))]
+    last_pass = before[max(i for i, c in enumerate(before) if c == ("read_pins",)):]
+    assert ("read_vcell",) in last_pass          # same pass as the gauge read
 
 
 def test_w6_ready_in_constructor_and_no_ext5v_while_halting(tmp_path):
@@ -1436,3 +1485,137 @@ def test_f5_ext5v_not_finite(monkeypatch, tmp_path):
         P, _ = fake_popen(outs={"vcgencmd": text})
         monkeypatch.setattr(wp.subprocess, "Popen", P)
         assert wp.System(str(tmp_path), str(tmp_path)).ext5v() is None
+
+
+# ---------------------------------------------------------------- bench round 1: events
+def ev_names(fs):
+    return [e["event"] for e in fs.events]
+
+
+def test_b1_event_lines_input_loss_halt(tmp_path):
+    fs, w = make(tmp_path)
+    fs.robot = ["active", "inactive"]
+    run_ticks(w, 0.0, 200.0, before=low_from(fs, 1.0))
+    assert ev_names(fs) == ["start", "halt", "kill", "stopped", "poweroff", "force",
+                            "force_force"] + ["force_force"] * (ev_names(fs).count("force_force") - 1)
+    st = fs.events[0]
+    assert st["version"] == wp.VERSION and st["nohalt"] is False and st["resumed_marker"] is False
+    h = fs.events[1]
+    assert set(h) == {"boot_id", "bt", "wall", "event", "kind", "reason", "vcell_v", "low_s",
+                      "input_good"}
+    assert h["kind"] == "input_loss" and h["low_s"] == 5.0 and h["input_good"] is False
+    assert h["bt"] == 6.0 and h["boot_id"] == "boot-1" and h["wall"] == 1.7e9
+    # the marker first, then the event line, then the poweroff call
+    c = fs.calls
+    assert c.index(("marker", "input_loss", None)) < c.index(("event", "halt"))
+    i_ev = c.index(("event", "poweroff"))
+    assert c[i_ev - 1][0] == "marker" and c[i_ev + 1] == ("poweroff", "--no-wall")
+    i_ff = c.index(("event", "force_force"))
+    assert c[i_ff + 1] == ("poweroff", "--force", "--force")
+
+
+def test_b1_event_lines_cancelled_halt(tmp_path):
+    fs, w = make(tmp_path)
+    fs.robot = ["active", "active", "inactive"]
+    run_ticks(w, 0.0, 20.0, before=lambda t: setattr(fs, "g6", 0 if 1.0 <= t < 7.0 else 1))
+    assert ev_names(fs) == ["start", "halt", "kill", "stopped", "cancel"]
+    assert fs.events[-1]["kind"] == "input_loss"
+
+
+def test_b1_event_lines_low_voltage_halt(tmp_path):
+    fs, w = make(tmp_path)
+    fs.vcell = 3.05
+    run_ticks(w, 0.0, 70.0)
+    assert ev_names(fs) == ["start", "tier", "halt", "force", "force_force"]
+    assert fs.events[1]["reason"].startswith("low_voltage_b") and fs.events[1]["vcell_v"] == 3.05
+    c = fs.calls
+    i = c.index(("event", "halt"))
+    assert c[i - 2] == ("marker", "low_voltage", 2.0) and c[i + 1] == ("poweroff", "--force")
+
+
+def test_b1_event_lines_resume(tmp_path):
+    fs, w = make(tmp_path, t0=145.0,
+                 marker={"kind": "input_loss", "reason": "r", "start": 99.0, "poweroff_at": 100.0})
+    assert ev_names(fs) == ["start", "resume"]
+    assert fs.events[0]["resumed_marker"] is True
+    r = fs.events[1]
+    assert (r["phase"], r["kind"], r["reason"]) == ("ladder", "input_loss", "r")
+    run_ticks(w, 145.0, 145.0)
+    assert ev_names(fs)[-1] == "force"
+
+
+def test_b1_write_error_does_not_stop_the_halt(tmp_path):
+    fs, w = make(tmp_path)
+    fs.event_err = "events: OSError: disk full"
+    run_ticks(w, 0.0, 30.0, before=low_from(fs, 1.0))
+    assert ("poweroff", "--no-wall") in fs.poweroffs()
+    assert any(s["last_error"] == "events: OSError: disk full" for s in fs.statuses)
+
+    class Raising(FakeSys):
+        def event(self, rec):
+            raise OSError("boom")
+    fs2 = Raising(tmp_path)
+    w2 = wp.Watcher(fs2, 0.0)
+    run_ticks(w2, 0.0, 30.0, before=low_from(fs2, 1.0))
+    assert ("poweroff", "--no-wall") in fs2.poweroffs()
+
+
+def test_b1_exit_failed_ticks_event(tmp_path):
+    fs, w = make(tmp_path)
+
+    def bad(now):
+        raise ValueError("x")
+    w.tick = bad
+    with pytest.raises(SystemExit):
+        wp.loop(w, fs, lambda: 5.0, lambda d: None)
+    e = fs.events[-1]
+    assert e["event"] == "exit_failed_ticks" and e["failed"] == 20 and e["error"] == "ValueError"
+
+
+def test_b1_system_event_appends_and_fsyncs(tmp_path, monkeypatch):
+    s = wp.System(str(tmp_path / "run"), str(tmp_path))
+    synced = []
+    real = wp.os.fsync
+    monkeypatch.setattr(wp.os, "fsync", lambda fd: (synced.append(fd), real(fd)))
+    for i in range(3):
+        assert s.event({"event": "kill", "i": i}) is None
+    lines = (tmp_path / "events.jsonl").read_text().splitlines()
+    assert [json.loads(l)["i"] for l in lines] == [0, 1, 2]
+    assert len(synced) == 3
+
+
+def test_b1_system_event_error_never_raises(tmp_path):
+    s = wp.System(str(tmp_path / "run"), str(tmp_path / "no" / "such" / "dir"))
+    err = s.event({"event": "halt"})
+    assert err.startswith("events: FileNotFoundError")
+    assert s.event({"bad": object()}).startswith("events: TypeError")
+
+
+def test_b1_size_cap_keeps_the_newest_half(tmp_path):
+    s = wp.System(str(tmp_path / "run"), str(tmp_path))
+    path = tmp_path / "events.jsonl"
+    line = json.dumps({"event": "kill", "pad": "x" * 100})
+    n = (300 * 1024) // (len(line) + 1)
+    path.write_text("".join(json.dumps({"event": "kill", "i": i, "pad": "x" * 100}) + "\n"
+                            for i in range(n)))
+    assert path.stat().st_size > wp.EVENTS_MAX_BYTES
+    assert s.trim_events() is None
+    data = path.read_text()
+    assert len(data.encode()) <= wp.EVENTS_MAX_BYTES // 2
+    recs = [json.loads(l) for l in data.splitlines()]   # whole lines only
+    assert recs[-1]["i"] == n - 1 and recs[0]["i"] > 0
+    assert not (tmp_path / "events.jsonl.tmp").exists()
+    assert s.trim_events() is None                       # small now: untouched
+    assert path.read_text() == data
+
+
+def test_b1_size_cap_problems_never_fail_the_start(tmp_path):
+    s = wp.System(str(tmp_path / "run"), str(tmp_path))
+    assert s.trim_events() is None                       # no file yet
+    fs = FakeSys(tmp_path)
+
+    def boom():
+        raise RuntimeError("trim")
+    fs.trim_events = boom
+    w = wp.Watcher(fs, 0.0)
+    assert fs.notes[0].startswith("READY=1") and "trim" in w.last_error
