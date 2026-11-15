@@ -189,14 +189,24 @@ class Bench:
                                                                   entry.get("level_after_set")), flush=True)
 
     def outlet_off_verified(self):
-        t = self.outlet("off")
-        for _ in range(10):
-            time.sleep(0.5)
+        """Outlet off, then verify switch == off through the API (retry 3x).
+        The state decides, not the reply: a command whose HTTP reply times
+        out can still have switched the outlet (seen on 2026-11-14)."""
+        t = None
+        for i in range(3):
+            t_try = now()
             try:
-                if self.outlet_state() == "off":
-                    return t
-            except Exception:
-                pass
+                t_try = self.outlet("off")
+            except Exception as e:  # noqa: BLE001
+                print("  outlet off error: %s" % e, flush=True)
+            t = t_try if t is None else t
+            for _ in range(10):
+                time.sleep(0.5)
+                try:
+                    if self.outlet_state() == "off":
+                        return t
+                except Exception:
+                    pass
         return t
 
     # ------------------------------------------------------------ pi
