@@ -144,8 +144,10 @@ the next flash (section 9.1).
   supplies its 5 V through that port (Kevin, 2026-11-13). The USB hub is
   removed.
 - The Pi 5 limits the current of all its USB ports together to 600 mA,
-  unless its firmware knows that the supply gives 5 A. The Arduino and the
-  receiver must stay below that limit. Nobody measured the receiver
+  unless its firmware knows that the supply gives 5 A or
+  `usb_max_current_enable=1` is set. It is set on this Pi (read
+  2026-11-15), so the limit is 1.6 A. The OAK-D Lite, the Arduino and the
+  receiver share it. Nobody measured the receiver
   current. The F-06A listing gives 35 mA (research, 2026-11-13).
 - The receiver gets its power from the same USB 5 V as the Arduino (Kevin,
   2026-11-13). The Arduino and the receiver do not connect to the 5 V of the
@@ -161,9 +163,11 @@ the next flash (section 9.1).
 - The receiver and the Arduino must have a common ground for the PWM
   signals. The USB ground connects the Arduino ground to the Pi ground.
 - The RTK rover gets 5 V from the Pi header (section 8).
-- Context: the OAK-D Lite takes its 5 V from the UPS through the cut 5 V
-  wire of its cord, not from the Pi (Kevin, 2026-11-13). This is the
-  "variant without the hub" in `docs/pi_power_architecture.md`.
+- The OAK-D Lite is on a USB port of the Pi for data AND power (Kevin,
+  2026-11-15; the cut-wire feed from the UPS of 2026-11-13 is gone). Thus
+  the Pi's USB budget carries the camera, the Arduino and the receiver.
+  The Pi has `usb_max_current_enable=1` in `config.txt` (read 2026-11-15),
+  so that budget is 1.6 A for all ports together, not 600 mA.
 
 ## 7. Arduino to Pi (USB serial)
 
