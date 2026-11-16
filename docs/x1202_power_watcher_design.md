@@ -267,7 +267,7 @@ Kevin's decisions:
 7. The `config.txt` or `gpio-hog` line, after the bench check. DECIDED by Kevin on 2026-11-14: add `gpio=16=op,dh` to `/boot/firmware/config.txt`. The line is on the Pi since 2026-11-14 23:00 (backup: `config.txt.bak-20261114-gpio16`). It is a hand step of the installation.
 8. An RTC cell for the Pi 5 (a part to buy). Kevin, 2026-11-14: the clock unit (finding 3) stays installed if it passes its bench test. The RTC cell stays open.
 9. The buck at about 12 V and the input connector. The connector is DECIDED by Kevin on 2026-11-15 (answer given in the session "Arduino and RC receiver schematics"): the barrel jack with a retention, not the XH input (section 8, step 8). The 12 V setting: Kevin set the buck to approximately 12 V before the stand test of 2026-11-15 (his report; the value was not measured in this session). The buck has a rating of 10 A and is on a 5 A fuse (Kevin, 2026-11-15, after the stand test). The stand test shows a limit on the robot that this rating does not explain ("Stand test on the robot").
-10. The EEPROM test (bench test 15).
+10. The EEPROM test (bench test 15). DECIDED by Kevin on 2026-11-15: the test is not done. Reasons: the installer and the watcher refuse a value other than `POWER_OFF_ON_HALT=1`, thus the robot does not operate in that condition; and a halt with the value 0 can leave the Pi halted with the 5 V on, where only a button starts it.
 11. Approval of push 1, each hand step and push 2.
 12. The storage rule. DECIDED by Kevin on 2026-11-15, after bench test 14: operator rule 4 (more than 6 weeks parked: remove the cells).
 
@@ -312,7 +312,7 @@ Bench tests of section 9 with the installed watcher (bench supply at 12.2 V on t
 | Robot's converter, no motion | 1 | 2026-11-15, 13:45. The Pi is on the robot, on the stand, not armed. The converter of the robot feeds the barrel jack (Kevin: set to approximately 12 V, rating 10 A, on a 5 A fuse). The OAK camera and the Arduino are on the USB ports of the Pi, and `wall-e` is in operation. Load: 4 cores at 100 % and an NVMe read for 177 s, with no charge burst. GPIO 6 at 4 Hz: 708 of 708 samples high. EXT5V was 5.05 V to 5.11 V (5.13 V to 5.20 V before the load). There was no undervoltage flag. The CPU temperature went from 49 C to 78.8 C in 3 min with the fan at 8500 rpm. Pass. Data: `docs/data/x1202_robot_20261114/stand_20261115/noload_samples_4hz.jsonl`. |
 | Stand test with the motors (section 9), on the robot's converter | 1 | 2026-11-15, 13:53 to 14:11. FAIL for the pass condition "no GPIO 6 low sample" when the CPU load is full. Pass with the usual load of the robot. Refer to "Stand test on the robot" below. Data: `docs/data/x1202_robot_20261114/stand_20261115/`. |
 
-Not done yet: test 2 (the pin voltage of GPIO 6 with the pull-down; needs a meter), test 10 (the hardware watchdog), the remaining time of test 13 (the hold soak is 24 h in the test plan; 5.8 h are done), test 15 (the EEPROM test; needs Kevin's approval), and the flat-cell LED check of test 12 (needs a person at the board).
+Not done yet: the shutdown part of test 10 (the hardware watchdog; the probes are installed and wait for one cycle of the main switch), the remaining time of test 13 (the hold soak is 24 h in the test plan; 5.8 h are done), and the flat-cell LED check of test 12 (needs a person at the board). Dropped by Kevin on 2026-11-15: test 2 (the pin voltage of GPIO 6; the pin cannot be reached with a meter in the stack) and test 15 (the EEPROM test; decision 10).
 
 Findings from the bench:
 
