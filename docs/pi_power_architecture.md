@@ -340,7 +340,7 @@ Conditions and follow-up work:
 6. When the RTC cell is in the Pi: add `dtparam=rtc_bbat_vchg=3000000` to `config.txt` (Kevin's word).
 7. With no date: bench tests 2, 10 and 15 of the design document, the flat-cell LED check, and a charge burst with the usual load while the motors are in operation (an observation, not a test with a pass condition).
 
-The operator rules stay in force (design document, section 4): rule 1 (the Pi does not start: main switch off, wait, on), rule 2 (after an e-stop, set the main switch to off), rule 3 (flat cells) and rule 4 (more than 6 weeks parked: remove the cells).
+The operator rules stay in force (design document, section 4): rule 1 (the Pi does not start: main switch off, wait, on), rule 2 (after an e-stop, set the main switch to off; a recommendation, Kevin accepts an occasional full charge), rule 3 (flat cells) and rule 4 (more than 6 weeks parked: remove the cells).
 
 Go/no-go, 2026-11-13: **not yet**. No result rejects option F. The primary functions are correct: the Pi starts when the input returns, there is no poll wake, the power-loss signal is clean, and a reboot does not cut the power. The board does not go on the robot until these items are closed:
 

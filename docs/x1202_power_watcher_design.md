@@ -96,7 +96,7 @@ A queued-job failure adds at most 60 s (the ladder). Two good 3 Ah cells hold ab
 The Pi stays off when the input returns before the board cuts its output, or after any halt with the input present. Recovery: input off for 4 s or more. The design is option 1, with operator rules:
 
 1. "If WALL-E does not start within 60 s after the main switch goes on, set the main switch to off, wait 5 s, and set it to on."
-2. "After an e-stop, set the main switch to off within some minutes." Else the board charges the cells to 4.2 V with the Pi off.
+2. "After an e-stop, set the main switch to off within some minutes." Else the board charges the cells to 4.2 V with the Pi off. Kevin, 2026-11-15: an occasional full charge is acceptable; the cells must not stay full all the time. This rule is a recommendation.
 3. Flat cells (tier (b) at boot): "If WALL-E does not start and the board shows one or no battery LED, leave the main switch on for at least 15 min, then set it to off for 5 s and to on." A 5 s off time does not charge the cells above 3.10 V. With the Pi off and the input present, the board charges the cells. Verify on the bench: what the battery LEDs show at about 3.1 V with the Pi off, and the charge time from 3.0 V to a rested 3.4 V.
 4. Storage (Kevin, 2026-11-15): "If WALL-E stays parked for more than 6 weeks, remove the two cells from the board." With the Pi off and the input off, the board takes 0.85 mA from the cells (bench test 14), and the board has no low-voltage cutoff.
 
