@@ -61,6 +61,10 @@ above that since 2026-11-10 (`docs/battery_settings.md`).
   gateway, or `host` in `config.py` goes stale.
 - The plug cannot be told to turn off on its own when the robot dies. See the
   shutdown paragraph above.
+- Alexa and the Kasa app see the plug too ("Wally"). In `hold` and `full`
+  the manager re-decides within 10 s, so a toggle from there is undone at the
+  next switch window. To take the plug by hand, use PLUG ON / PLUG OFF on the
+  robot page (mode `on` / `off`), or put a lamp on it instead.
 
 ## Kevin's calls (2026-11-16)
 1. The logic runs on the robot, not on the home dashboard.
