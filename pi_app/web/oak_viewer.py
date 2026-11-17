@@ -285,6 +285,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .charger-btn.active { background: #4ecdc4; color: #111; border-color: #4ecdc4; }
   .charger-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .charger-line { font-size: 14px; color: #cfd3dc; margin: 4px 0 6px; }
+  .charger-alert { padding: 6px 10px; border-radius: 6px; margin: 4px 0; font-size: 13px; }
+  .charger-alert.fault { background: #3d1a1f; color: #ff6b74; font-weight: 700; }
+  .charger-alert.warning { background: #3a2f15; color: #f0b344; }
+  .charger-alert.notice { background: #14263d; color: #6bb6ff; }
+  .charger-btn.charger-clear { background: #e63946; color: #fff; border-color: #e63946; margin: 4px 0 8px; }
   .follow-btn-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
   .follow-btn-hint { font-size: 11px; color: #555; }
   .tracking-panel { background: #1a1d27; border-radius: 8px; padding: 16px; margin-bottom: 16px;
@@ -493,7 +498,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <button type="button" class="charger-btn" id="c-btn-on" onclick="setChargerMode('on')">PLUG ON</button>
       <button type="button" class="charger-btn" id="c-btn-off" onclick="setChargerMode('off')">PLUG OFF</button>
     </div>
-    <div id="charger-hint" class="fm-target-info">Hold keeps the main pack between 45 and 55 %. Charge Full fills it once and returns to Hold after the next drive. Without a BMS reading for 2 min the plug goes off.</div>
+    <div id="charger-alerts"></div>
+    <button type="button" class="charger-btn charger-clear" id="c-btn-clear" style="display:none" onclick="clearChargerFault()">CLEAR FAULT</button>
+    <div id="charger-hint" class="fm-target-info">Hold keeps the main pack near 50 % by rested cell voltage (the BMS percentage drifts). Charge Full fills it once, balances the cells, and returns to Hold after the next drive. A fault holds the plug off until you clear it.</div>
   </div>
   <div id="fm-panel" class="fm-panel">
     <h2>Follow-Me Status <span id="fm-mode-badge" class="fm-badge">&mdash;</span></h2>
@@ -855,26 +862,53 @@ sse.onmessage = function(e) {
 };
 /* ── Charger plug panel (GET /api/charger, POST /api/charger/mode) ───── */
 var CHARGER_MODES = ['hold', 'full', 'on', 'off'];
+function chargerPackText(d) {
+  var parts = [];
+  if (d.soc_by_voltage != null) {
+    parts.push('about ' + d.soc_by_voltage + ' % by cell voltage' + (d.soc_pct == null ? '' : ' (BMS ' + d.soc_pct.toFixed(0) + ' %)'));
+  } else if (d.soc_pct != null) {
+    parts.push('BMS ' + d.soc_pct.toFixed(0) + ' %');
+  }
+  if (d.cell_min_mv != null && d.cell_max_mv != null) {
+    parts.push('cells ' + (d.cell_min_mv / 1000).toFixed(3) + ' to ' + (d.cell_max_mv / 1000).toFixed(3) + ' V (spread ' + (d.cell_max_mv - d.cell_min_mv).toFixed(0) + ' mV)');
+  }
+  if (d.pack_v != null) { parts.push(d.pack_v.toFixed(1) + ' V'); }
+  if (d.pack_a != null) { parts.push(d.pack_a.toFixed(1) + ' A'); }
+  if (d.temp_max_c != null) { parts.push(d.temp_max_c.toFixed(0) + ' C'); }
+  if (!d.bms_fresh) { parts.push('BMS reading stale'); }
+  return parts.join(' · ');
+}
+function renderChargerAlerts(el, alerts) {
+  if (!el) { return; }
+  while (el.firstChild) { el.removeChild(el.firstChild); }
+  (alerts || []).forEach(function(a) {
+    var div = document.createElement('div');
+    div.className = 'charger-alert ' + (a.level || 'notice');
+    div.textContent = (a.level === 'fault' ? 'FAULT: ' : '') + (a.text || a.code || '');
+    el.appendChild(div);
+  });
+}
 function applyChargerPanel(d) {
   var badge = document.getElementById('charger-badge');
   var line = document.getElementById('charger-line');
+  var clearBtn = document.getElementById('c-btn-clear');
   var buttons = CHARGER_MODES.map(function(m){ return document.getElementById('c-btn-' + m); });
   if (!badge || !line) { return; }
   if (!d || d.available === false) {
     badge.textContent = 'off';
     line.textContent = (d && d.reason) ? d.reason : 'not available';
     buttons.forEach(function(b){ if (b) { b.disabled = true; b.classList.remove('active'); } });
+    renderChargerAlerts(document.getElementById('charger-alerts'), []);
+    if (clearBtn) { clearBtn.style.display = 'none'; }
     return;
   }
   var on = d.plug_on;
-  badge.textContent = on == null ? 'plug ?' : (on ? 'plug ON' : 'plug off');
+  badge.textContent = d.fault ? 'FAULT' : (on == null ? 'plug ?' : (on ? 'plug ON' : 'plug off'));
   var modeLabel = {hold: 'HOLD 50 %', full: 'CHARGE FULL', on: 'ON (manual)', off: 'OFF (manual)'}[d.mode] || d.mode;
-  var pack = (d.soc_pct == null ? 'SOC —' : 'SOC ' + d.soc_pct.toFixed(0) + ' %') +
-             (d.pack_v == null ? '' : ' · ' + d.pack_v.toFixed(1) + ' V') +
-             (d.pack_a == null ? '' : ' · ' + d.pack_a.toFixed(1) + ' A') +
-             (d.bms_fresh ? '' : ' (stale)');
-  line.textContent = modeLabel + ' · ' + pack + ' · ' + (d.reason || '');
+  line.textContent = modeLabel + ' · ' + chargerPackText(d) + ' · ' + (d.reason || '');
   buttons.forEach(function(b, i){ if (b) { b.disabled = false; b.classList.toggle('active', d.mode === CHARGER_MODES[i]); } });
+  renderChargerAlerts(document.getElementById('charger-alerts'), d.alerts);
+  if (clearBtn) { clearBtn.style.display = d.fault ? '' : 'none'; }
 }
 function pollChargerPanel() {
   fetch('/api/charger', {cache: 'no-store'})
@@ -882,16 +916,18 @@ function pollChargerPanel() {
     .then(applyChargerPanel)
     .catch(function(){ applyChargerPanel({available: false, reason: 'fetch failed'}); });
 }
-function setChargerMode(mode) {
+function chargerPost(url, body) {
   var hint = document.getElementById('charger-hint');
   CHARGER_MODES.forEach(function(m){ var b = document.getElementById('c-btn-' + m); if (b) { b.disabled = true; } });
-  fetch('/api/charger/mode', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                              body: JSON.stringify({mode: mode})})
+  fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(body || {})})
     .then(function(r){ return r.json(); })
-    .then(function(d){ if (hint) { hint.textContent = (d.ok ? 'OK: ' : 'Refused: ') + (d.reason || ''); } })
+    .then(function(d){ if (hint) { hint.textContent = (d.ok ? 'OK: ' : 'Refused: ') + (d.reason || d.error || ''); } })
     .catch(function(e){ if (hint) { hint.textContent = 'Error: ' + e; } })
     .finally(function(){ setTimeout(pollChargerPanel, 1500); });
 }
+function setChargerMode(mode) { chargerPost('/api/charger/mode', {mode: mode}); }
+function clearChargerFault() { chargerPost('/api/charger/clear_fault', {}); }
 pollChargerPanel();
 setInterval(pollChargerPanel, 5000);
 var nettingEngaged = false;
@@ -1342,6 +1378,10 @@ _DEBUG_HTML = """<!DOCTYPE html>
       <div class="cell"><div class="k">Plug</div><span id="c-plug" class="pill grey">&mdash;</span></div>
       <div class="cell"><div class="k">Mode</div><span id="c-mode" class="val grey">&mdash;</span></div>
       <div class="cell"><div class="k">Pack</div><span id="c-pack" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Cells</div><span id="c-cells" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Temp / VESC V</div><span id="c-temp" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Last Full</div><span id="c-full" class="val grey">&mdash;</span></div>
+      <div class="cell" style="grid-column: 1 / -1;"><div class="k">Alerts</div><span id="c-alerts" class="val grey charger-reason">&mdash;</span></div>
       <div class="cell" style="grid-column: 1 / -1;"><div class="k">Decision</div><span id="c-reason" class="val grey charger-reason">&mdash;</span></div>
     </div>
     <div class="hint" id="c-hint">Read-only here; the mode buttons are on the main page.</div>
@@ -1648,17 +1688,32 @@ function applyCharger(d) {
   var hint = document.getElementById('c-hint');
   if (!d || d.available === false) {
     pill('c-plug', '—', 'grey'); val('c-mode', '—', 'grey'); val('c-pack', '—', 'grey');
+    val('c-cells', '—', 'grey'); val('c-temp', '—', 'grey'); val('c-full', '—', 'grey'); val('c-alerts', '—', 'grey');
     val('c-reason', d && d.reason ? d.reason : 'not available', 'grey');
     return;
   }
   var on = d.plug_on;
-  pill('c-plug', on == null ? 'UNKNOWN' : (on ? 'ON' : 'OFF'), on == null ? 'amber' : (on ? 'blue' : 'grey'));
+  pill('c-plug', d.fault ? 'FAULT' : (on == null ? 'UNKNOWN' : (on ? 'ON' : 'OFF')),
+       d.fault ? 'red' : (on == null ? 'amber' : (on ? 'blue' : 'grey')));
   var modeLabel = {hold: 'HOLD 50 %', full: 'CHARGE FULL', on: 'ON (manual)', off: 'OFF (manual)'}[d.mode] || d.mode;
-  val('c-mode', modeLabel, d.mode === 'off' ? 'amber' : '');
-  var pack = (d.soc_pct == null ? '—' : d.soc_pct.toFixed(0) + ' %') +
+  val('c-mode', modeLabel + (d.phase ? ' · ' + d.phase : ''), d.mode === 'off' ? 'amber' : '');
+  var pack = (d.soc_by_voltage == null ? '' : '≈' + d.soc_by_voltage + ' % by V · ') +
+             (d.soc_pct == null ? 'BMS —' : 'BMS ' + d.soc_pct.toFixed(0) + ' %') +
              (d.pack_v == null ? '' : ' · ' + d.pack_v.toFixed(1) + ' V') +
              (d.pack_a == null ? '' : ' · ' + d.pack_a.toFixed(1) + ' A');
   val('c-pack', pack + (d.bms_fresh ? '' : ' (stale)'), d.bms_fresh ? '' : 'amber');
+  if (d.cell_min_mv == null || d.cell_max_mv == null) { val('c-cells', '—', 'grey'); }
+  else {
+    var sp = d.cell_max_mv - d.cell_min_mv;
+    val('c-cells', (d.cell_min_mv / 1000).toFixed(3) + '–' + (d.cell_max_mv / 1000).toFixed(3) + ' V · Δ' + sp.toFixed(0) + ' mV', '');
+  }
+  val('c-temp', (d.temp_max_c == null ? '—' : d.temp_max_c.toFixed(0) + ' °C') +
+                (d.vesc_v == null ? ' · VESC —' : ' · VESC ' + d.vesc_v.toFixed(1) + ' V'), '');
+  val('c-full', d.days_since_full == null ? '—' : d.days_since_full.toFixed(1) + ' d ago', '');
+  var al = (d.alerts || []).map(function(a){ return '[' + a.level + '] ' + a.text; });
+  var worst = (d.alerts || []).some(function(a){ return a.level === 'fault'; }) ? 'red'
+            : (d.alerts || []).some(function(a){ return a.level === 'warning'; }) ? 'amber' : '';
+  val('c-alerts', al.length ? al.join('  |  ') : 'none', al.length ? worst : 'green');
   val('c-reason', d.reason || '—', d.plug_error ? 'red' : '');
   if (hint) {
     var ts = d.last_switch_epoch ? new Date(d.last_switch_epoch * 1000).toLocaleTimeString() : 'never';
@@ -2573,6 +2628,16 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         ok, reason = charge_manager.set_mode(mode)
         body = {"ok": bool(ok), "reason": reason, "mode": mode}
         return Response(json.dumps(body), status=200 if ok else 400,
+                        content_type="application/json")
+
+    @app.route("/api/charger/clear_fault", methods=["POST"])
+    def api_charger_clear_fault():
+        """Operator: clear a latched charger fault. It latches again if the cause persists."""
+        if charge_manager is None:
+            return Response(json.dumps({"error": "charger plug manager not running"}), status=503,
+                            content_type="application/json")
+        ok, reason = charge_manager.clear_fault()
+        return Response(json.dumps({"ok": bool(ok), "reason": reason}), status=200 if ok else 409,
                         content_type="application/json")
 
     @app.route("/api/telemetry")

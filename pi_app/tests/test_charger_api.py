@@ -14,11 +14,19 @@ class FakeManager:
     def __init__(self):
         self.mode = "hold"
         self.calls = []
+        self.fault = {"code": "cell_low", "text": "lowest cell 2.70 V", "epoch": 1.0}
 
     def get_status(self):
         return {"mode": self.mode, "plug_on": False, "want_on": False, "reason": "hold: 100 % at or over 55 %",
                 "soc_pct": 100.0, "pack_v": 54.5, "pack_a": 0.1, "bms_fresh": True, "plug_error": None,
                 "last_switch_epoch": None, "switch_count": 0, "updated_epoch": 1.0, "host": "192.0.2.9"}
+
+    def clear_fault(self):
+        self.calls.append("clear")
+        if self.fault:
+            self.fault = None
+            return True, "fault cleared; it latches again if the condition is still there"
+        return False, "no fault is latched"
 
     def set_mode(self, mode):
         self.calls.append(mode)
@@ -86,3 +94,25 @@ def test_buttons_on_the_main_page_only(without_manager):
     assert "Charger Plug" in debug
     assert "/api/charger/mode" not in debug
     assert 'id="c-btn-full"' not in debug
+
+
+def test_clear_fault(with_manager):
+    client, mgr = with_manager
+    resp = client.post("/api/charger/clear_fault")
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert mgr.fault is None
+    assert client.post("/api/charger/clear_fault").status_code == 409   # nothing latched now
+
+
+def test_clear_fault_without_manager_is_503(without_manager):
+    assert without_manager.post("/api/charger/clear_fault").status_code == 503
+
+
+def test_clear_fault_button_and_alerts_on_the_main_page_only(without_manager):
+    main = without_manager.get("/").get_data(as_text=True)
+    debug = without_manager.get("/debug").get_data(as_text=True)
+    assert "/api/charger/clear_fault" in main
+    assert 'id="charger-alerts"' in main
+    assert "/api/charger/clear_fault" not in debug
+    assert 'id="c-alerts"' in debug

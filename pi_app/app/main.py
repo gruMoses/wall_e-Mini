@@ -31,7 +31,7 @@ try:
     from pi_app.hardware.rtk_gps import RtkGpsReader
     from pi_app.hardware.bms import BmsService
     from pi_app.hardware.kasa_plug import KasaLegacyPlug
-    from pi_app.control.charge_manager import ChargeManager
+    from pi_app.control.charge_manager import ChargeManager, vesc_heatsink_temp
     from pi_app.web.oak_viewer import OakWebViewer
     from pi_app.control.controller import Controller, RCInputs, RC_STALE_TIMEOUT_S
     from pi_app.control.safety import SafetyEvent
@@ -68,7 +68,7 @@ except ModuleNotFoundError:
     from pi_app.hardware.rtk_gps import RtkGpsReader  # type: ignore
     from pi_app.hardware.bms import BmsService  # type: ignore
     from pi_app.hardware.kasa_plug import KasaLegacyPlug  # type: ignore
-    from pi_app.control.charge_manager import ChargeManager  # type: ignore
+    from pi_app.control.charge_manager import ChargeManager, vesc_heatsink_temp  # type: ignore
     from pi_app.web.oak_viewer import OakWebViewer  # type: ignore
     from pi_app.control.controller import Controller, RCInputs, RC_STALE_TIMEOUT_S  # type: ignore
     from pi_app.control.safety import SafetyEvent  # type: ignore
@@ -418,23 +418,6 @@ def run() -> int:
     else:
         print("Daly BMS disabled (set config.bms.enabled=True and bms_mac_address to enable)")
 
-    # Charger plug manager: the Kasa plug on the charger follows the BMS state
-    # of charge (hold 50 % / full / on / off). docs/charger_plug.md.
-    charge_manager = None
-    cp_cfg = getattr(config, "charger_plug", None)
-    if cp_cfg is not None and cp_cfg.enabled and cp_cfg.host and bms_service is not None:
-        try:
-            plug = KasaLegacyPlug(cp_cfg.host, cp_cfg.port, cp_cfg.plug_timeout_s)
-            state_path = Path(__file__).resolve().parents[2] / "logs" / cp_cfg.state_file
-            charge_manager = ChargeManager(cp_cfg, bms_service, plug, state_path)
-            charge_manager.start()
-            print(f"Charger plug manager started (plug {cp_cfg.host}, mode {charge_manager.get_status()['mode']})")
-        except Exception as e:
-            print(f"Charger plug manager init failed: {e} — continuing without it")
-            charge_manager = None
-    else:
-        print("Charger plug manager disabled (config.charger_plug.enabled + host, and the BMS)")
-
     motor_driver = None
     if VescCanDriver.detect():
         print("VESC over CAN detected; using VESC driver")
@@ -468,6 +451,32 @@ def run() -> int:
             getattr(getattr(config, "safety", None), "require_switch_off_at_startup", True)
         ),
     )
+
+    # Charger plug manager: the Kasa plug on the charger keeps the pack near
+    # 50 % (hold), charges it full on Kevin's word, and refuses an unhealthy
+    # pack. It reads the BMS, and the VESC pack voltage as an independent
+    # reading for a dark BMS. docs/charger_plug.md.
+    charge_manager = None
+    cp_cfg = getattr(config, "charger_plug", None)
+    if (cp_cfg is not None and cp_cfg.enabled and (cp_cfg.host or cp_cfg.mac)
+            and bms_service is not None):
+        try:
+            plug = KasaLegacyPlug(cp_cfg.host, cp_cfg.port, cp_cfg.plug_timeout_s,
+                                  mac=cp_cfg.mac, discovery_targets=cp_cfg.discovery_targets)
+            state_path = Path(__file__).resolve().parents[2] / "logs" / cp_cfg.state_file
+            charge_manager = ChargeManager(
+                cp_cfg, bms_service, plug, state_path,
+                vesc_voltage_fn=getattr(motor_driver, "get_voltage", None),
+                vesc_temp_fn=lambda: vesc_heatsink_temp(motor_driver),
+            )
+            charge_manager.start()
+            print(f"Charger plug manager started (plug {plug.host}, MAC {cp_cfg.mac or 'none'}, "
+                  f"mode {charge_manager.get_status()['mode']})")
+        except Exception as e:
+            print(f"Charger plug manager init failed: {e} — continuing without it")
+            charge_manager = None
+    else:
+        print("Charger plug manager disabled (config.charger_plug.enabled + host or mac, and the BMS)")
     if oak_reader is not None:
         _fresh_fn = getattr(oak_reader, "get_detection_freshness", None)
         if callable(_fresh_fn):
@@ -963,6 +972,10 @@ def run() -> int:
             # MANUAL and armed, and it is off in FOLLOW_ME and WAYPOINT_NAV.
             if pose_worker is not None:
                 pose_worker.set_pose_enabled(controller.pose_wanted())
+
+            # The charger plug manager never starts a charge while armed.
+            if charge_manager is not None:
+                charge_manager.note_armed(cmd.is_armed)
 
             # P3: BMS discharge FET safety — rate-limited warning + post-grace safety timeout.
             if bms_service is not None and cmd.is_armed:

@@ -1377,42 +1377,147 @@ class ArmsUpConfig:
 class ChargerPlugConfig:
     """The Kasa Wi-Fi plug that powers WALL-E's charger (docs/charger_plug.md).
 
-    pi_app/control/charge_manager.py switches the plug from the BMS state of
-    charge: mode ``hold`` keeps the pack near 50 %, ``full`` charges it once on
-    Kevin's word, ``on``/``off`` are manual. Kevin's rules (2026-11-16): the
-    logic runs on the robot; no charging without a battery reading; after a
-    full charge and a drive the mode returns to hold by itself.
+    pi_app/control/charge_manager.py switches the plug: mode ``hold`` keeps the
+    pack near 50 %, ``full`` charges it once on Kevin's word, ``on``/``off`` are
+    manual. Kevin's rules (2026-11-16): the logic runs on the robot; the plug is
+    found by MAC; do not charge an unhealthy pack; flag imbalance (he taps
+    Charge Full to balance); a dark BMS gets wake pulses and, when the pack is
+    low, a bounded rescue top-up; a full charge returns to hold after a drive.
+    The numbers come from this pack's own logs:
+    docs/charger_plug_research_2026-11-16.md.
     """
     enabled: bool = True
-    # Kasa EP10 "Wally" (hw 1.0, fw 1.0.5, MAC 58:D8:12:F1:ED:DE), paired 2026-11-16.
-    # Give it a DHCP reservation on the Omada gateway. Empty = manager off.
+    # Kasa EP10 "Wally" (hw 1.0, fw 1.0.5), paired 2026-11-16. The MAC is the
+    # identity; host is only the first guess (no DHCP reservation needed).
     host: str = "192.168.84.100"
+    mac: str = "58:D8:12:F1:ED:DE"
     port: int = 9999                      # original Kasa protocol (pi_app/hardware/kasa_plug.py)
+    discovery_targets: tuple[str, ...] = ("255.255.255.255", "192.168.87.255")
     plug_timeout_s: float = 3.0
     poll_s: float = 10.0
     default_mode: str = "hold"            # used when logs/charger_state.json is missing
-    # hold: plug on at/under hold_on_pct, off at/over hold_off_pct. 45-55 is a
-    # 10-point band: about 25 min of the 4 A charger per cycle, a few cycles a week.
-    hold_on_pct: float = 45.0
-    hold_off_pct: float = 55.0
-    # hold never switches on above this pack voltage (4.0 V/cell, about 80 %):
-    # a guard against a drifted BMS state of charge.
-    hold_max_voltage_v: float = 52.0
-    # full: done when SOC or pack voltage says full and the charger current has
-    # tapered, held for full_done_hold_s; top up again at full_retop_pct;
-    # back to hold once SOC has been at/over full_return_pct and then under it.
+    capacity_ah: float = 7.0
+    expected_cells: int = 13
+
+    # "Rested": plug off, small current, and time since the last charge / load.
+    rest_max_current_a: float = 0.5
+    rest_load_current_a: float = 1.0
+    rest_after_charge_s: float = 300.0
+    rest_after_load_s: float = 120.0
+
+    # hold: the trigger is the rested cell voltage ((min + max) / 2). 3.70 V is
+    # about 43 % on this pack; the top-up is sized to hold_target_soc_pct from
+    # ocv_table and counted in Ah (about 1 Ah, 17 min, six times a day).
+    # Do NOT move the trigger to the BMS percentage: it undercounts the idle
+    # drain by about 16 % and the pack walks down (2026-11-15/16 logs).
+    hold_on_cell_v: float = 3.70
+    hold_on_cell_min_mv: float = 3600.0   # weakest cell this low also starts a top-up
+    hold_target_soc_pct: float = 57.0
+    hold_charge_min_ah: float = 0.35
+    hold_charge_max_ah: float = 4.0
+    hold_charge_default_ah: float = 0.7   # a charge adopted mid-way (restart, wake pulse)
+    hold_stop_cell_v_charging: float = 3.83   # under charge; backstop above the Ah target
+    hold_max_voltage_v: float = 52.0      # never start a hold charge above this pack voltage
+    hold_min_interval_s: float = 1800.0   # hold charges start no closer than this
+    charge_rate_floor_a: float = 3.0      # for time limits (the charger gives 3.6 A)
+    charge_time_margin_s: float = 600.0
+
+    # full: done when the pack is full AND the current has tapered, held for
+    # full_done_hold_s; a top-up when the rested cells fall to full_retop_cell_v;
+    # back to hold once the cells were above full_seen_cell_v and rest at or
+    # under full_return_cell_v (a drive).
     full_done_soc_pct: float = 100.0
-    full_done_voltage_v: float = 54.3     # charger ends at 54.6 V (XM2703)
+    full_done_voltage_v: float = 54.3     # the charger holds 54.4 V at the end
+    full_done_cell_max_mv: float = 4170.0
     full_done_current_a: float = 0.3
     full_done_hold_s: float = 120.0
-    full_retop_pct: float = 95.0
-    full_return_pct: float = 60.0
-    # hold/full with no fresh BMS reading for this long: plug off until one returns.
+    full_retop_cell_v: float = 4.08       # about 91 %
+    full_return_cell_v: float = 3.80      # about 62 %
+    full_seen_cell_v: float = 4.00
+    full_max_charge_s: float = 14400.0    # 4 h; empty to full takes about 2.5 h
+    full_expire_s: float = 172800.0       # nobody drove for 48 h: back to hold
+    full_min_temp_c: float = 10.0         # cold + high state of charge plates lithium
+
+    # Health. Soft limits pause hold/full; fault_* latch until Kevin clears them.
+    charge_min_temp_c: float = 5.0        # Li-ion: no fast charge under 5 C
+    charge_max_temp_c: float = 45.0
+    cell_max_stop_mv: float = 4230.0      # the BMS trips at 4250
+    fault_cell_min_mv: float = 3000.0     # at rest (the BMS cuts off at 3000 under load): a person decides
+    fault_cell_min_any_mv: float = 2500.0 # at any current: the cell was driven under its floor
+    implausible_polls: int = 3            # pack vs cell voltages disagree this many polls: fault
+    vesc_bms_max_diff_v: float = 1.5      # BMS vs VESC pack voltage at rest: warning
+    charge_rise_check_ah: float = 0.6     # a hold charge this far in...
+    charge_rise_min_v: float = 0.010      # ...must have raised the cells this much (normal: 0.045)
+    fault_temp_max_c: float = 50.0
+    fault_temp_rise_c: float = 10.0       # a normal charge warms the pack 0 to 2 C
+    max_session_ah: float = 8.5
+    overrun_grace_s: float = 300.0
+
+    # Plug on but no current (the charger lead is not on the robot): off, retry.
+    no_current_a: float = 0.5
+    no_current_after_s: float = 300.0
+    no_current_retry_s: float = 900.0
+    no_current_max_cell_v: float = 4.10
+
+    # Cell spread (max - min) at rest, against this pack's normal: about 30 mV
+    # in the middle (one cell group is about 10 % weaker), under 10 mV at the
+    # top. (notice, warning, fault) in mV. Below spread_mid_zone_cell_v the weak
+    # group falls away (330 mV at 3.35 V) and the spread is not evaluated.
+    spread_mid_zone_cell_v: float = 3.65
+    spread_top_zone_cell_v: float = 3.95
+    spread_mid_mv: tuple[float, float, float] = (45.0, 60.0, 100.0)
+    spread_top_mv: tuple[float, float, float] = (20.0, 35.0, 60.0)
+    spread_baseline_mv: tuple[float, float] = (30.0, 8.0)   # (middle, top)
+    spread_debounce_s: float = 300.0
+    spread_charge_debounce_s: float = 60.0   # the fault level also counts under charge
+    full_due_days: float = 30.0           # notice: no full charge (no balancing) for this long
+
+    # BMS dark. Plug off after soc_unknown_off_s. Wake pulses and the rescue
+    # need an independent reading from the VESCs (pack voltage and heatsink
+    # temperature) and a healthy last BMS reading. Both stop for good when the
+    # pack voltage does not answer the charger; the rescue also stops when the
+    # pack does not keep what it got (Grok review a41299a1, 2026-11-16: blind
+    # charging must not feed a failing cell).
     soc_unknown_off_s: float = 120.0
     bms_max_age_s: float = 30.0           # a BMS sample older than this is not fresh
-    min_switch_interval_s: float = 60.0   # automatic switches no closer than this
+    wake_enabled: bool = True
+    wake_first_after_s: float = 600.0
+    wake_pulse_s: float = 180.0
+    wake_max_voltage_v: float = 52.0      # no pulse on a nearly full pack
+    wake_backoff_s: tuple[float, ...] = (1800.0, 3600.0, 7200.0)
+    wake_max_per_day: int = 3
+    rescue_enabled: bool = True
+    rescue_voltage_v: float = 46.8        # 3.60 V per cell, about 25 %
+    rescue_charge_s: float = 720.0        # about 0.7 Ah
+    rescue_interval_s: float = 3600.0     # start to start
+    rescue_max_per_day: int = 10          # the idle load needs about 8
+    rescue_min_hold_s: float = 5400.0     # a healthy pack keeps a rescue about 3 h
+    rescue_min_gain_v: float = 0.2
+    dark_response_after_s: float = 120.0  # by then the VESC voltage must have risen...
+    dark_response_min_v: float = 0.2      # ...this much (normal: 0.4 V at 3.6 A)
+    dark_stop_voltage_v: float = 53.5
+    dark_min_vesc_temp_c: float = 8.0     # the heatsink runs a little above the pack
+    dark_max_vesc_temp_c: float = 45.0
+
+    # Dead-man: while a charge runs in hold/full the manager keeps a countdown
+    # in the plug itself ("off in plug_deadman_s"). A dead Pi or a lost Wi-Fi
+    # link then ends the charge without the robot. Not armed in manual "on".
+    plug_deadman_s: float = 300.0
+    plug_deadman_refresh_s: float = 60.0
+
+    min_switch_interval_s: float = 60.0   # automatic ON no sooner than this after a switch
     state_file: str = "charger_state.json"  # under logs/ (survives deploy restarts)
     plug_off_on_system_stop: bool = True  # halt/poweroff: plug off in hold/full
+
+    # Rested cell voltage ((min + max) / 2, V) -> state of charge (%), measured
+    # on this pack 2026-11-11..16. About 3 points of uncertainty; display and
+    # top-up sizing only.
+    ocv_table: tuple[tuple[float, float], ...] = (
+        (3.40, 7.0), (3.49, 12.0), (3.56, 17.0), (3.587, 22.0), (3.612, 27.0),
+        (3.639, 32.0), (3.668, 37.0), (3.696, 42.0), (3.721, 47.0), (3.750, 52.0),
+        (3.776, 57.0), (3.80, 62.0), (3.821, 66.0), (3.869, 71.0), (3.922, 76.0),
+        (3.978, 82.0), (4.040, 87.0), (4.091, 92.0), (4.168, 97.0), (4.20, 100.0),
+    )
 
 
 @dataclass(frozen=True)
