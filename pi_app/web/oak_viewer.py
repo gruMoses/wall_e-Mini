@@ -279,6 +279,12 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .follow-btn.deactivate { background: #e63946; color: #fff; }
   .follow-btn.deactivate:hover { background: #d32836; }
   .follow-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+  .charger-btns { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 10px; }
+  .charger-btn { padding: 10px 16px; border: 1px solid #444; border-radius: 6px; background: #1d2130;
+                 color: #cfd3dc; font-weight: 700; font-size: 14px; cursor: pointer; }
+  .charger-btn.active { background: #4ecdc4; color: #111; border-color: #4ecdc4; }
+  .charger-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .charger-line { font-size: 14px; color: #cfd3dc; margin: 4px 0 6px; }
   .follow-btn-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
   .follow-btn-hint { font-size: 11px; color: #555; }
   .tracking-panel { background: #1a1d27; border-radius: 8px; padding: 16px; margin-bottom: 16px;
@@ -477,6 +483,17 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <h2>Netting Mute <span id="netting-badge" class="fm-badge">off</span></h2>
     <button id="netting-btn" class="follow-btn activate" onclick="toggleNetting()">NETTING LOADED: MUTE CORRIDOR</button>
     <div id="netting-hint" class="fm-target-info">Tap with the netting already over the lens, armed, in MANUAL. Ignores the depth corridor while the mesh stays on the lens (reading under 0.55 m). Drops by itself the moment the corridor sees past it, on a person, dog, cat or livestock (not birds), on disarm, on leaving MANUAL, or after 15 min; tap again after any drop. The 0.8 m person/animal stop stays on.</div>
+  </div>
+  <div id="charger-panel" class="fm-panel">
+    <h2>Charger Plug <span id="charger-badge" class="fm-badge">&mdash;</span></h2>
+    <div class="charger-line" id="charger-line">&hellip;</div>
+    <div class="charger-btns">
+      <button type="button" class="charger-btn" id="c-btn-hold" onclick="setChargerMode('hold')">HOLD 50 %</button>
+      <button type="button" class="charger-btn" id="c-btn-full" onclick="setChargerMode('full')">CHARGE FULL</button>
+      <button type="button" class="charger-btn" id="c-btn-on" onclick="setChargerMode('on')">PLUG ON</button>
+      <button type="button" class="charger-btn" id="c-btn-off" onclick="setChargerMode('off')">PLUG OFF</button>
+    </div>
+    <div id="charger-hint" class="fm-target-info">Hold keeps the main pack between 45 and 55 %. Charge Full fills it once and returns to Hold after the next drive. Without a BMS reading for 2 min the plug goes off.</div>
   </div>
   <div id="fm-panel" class="fm-panel">
     <h2>Follow-Me Status <span id="fm-mode-badge" class="fm-badge">&mdash;</span></h2>
@@ -836,6 +853,47 @@ sse.onmessage = function(e) {
     hint.textContent = 'System must be armed (ch3 high)';
   }
 };
+/* ── Charger plug panel (GET /api/charger, POST /api/charger/mode) ───── */
+var CHARGER_MODES = ['hold', 'full', 'on', 'off'];
+function applyChargerPanel(d) {
+  var badge = document.getElementById('charger-badge');
+  var line = document.getElementById('charger-line');
+  var buttons = CHARGER_MODES.map(function(m){ return document.getElementById('c-btn-' + m); });
+  if (!badge || !line) { return; }
+  if (!d || d.available === false) {
+    badge.textContent = 'off';
+    line.textContent = (d && d.reason) ? d.reason : 'not available';
+    buttons.forEach(function(b){ if (b) { b.disabled = true; b.classList.remove('active'); } });
+    return;
+  }
+  var on = d.plug_on;
+  badge.textContent = on == null ? 'plug ?' : (on ? 'plug ON' : 'plug off');
+  var modeLabel = {hold: 'HOLD 50 %', full: 'CHARGE FULL', on: 'ON (manual)', off: 'OFF (manual)'}[d.mode] || d.mode;
+  var pack = (d.soc_pct == null ? 'SOC —' : 'SOC ' + d.soc_pct.toFixed(0) + ' %') +
+             (d.pack_v == null ? '' : ' · ' + d.pack_v.toFixed(1) + ' V') +
+             (d.pack_a == null ? '' : ' · ' + d.pack_a.toFixed(1) + ' A') +
+             (d.bms_fresh ? '' : ' (stale)');
+  line.textContent = modeLabel + ' · ' + pack + ' · ' + (d.reason || '');
+  buttons.forEach(function(b, i){ if (b) { b.disabled = false; b.classList.toggle('active', d.mode === CHARGER_MODES[i]); } });
+}
+function pollChargerPanel() {
+  fetch('/api/charger', {cache: 'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(applyChargerPanel)
+    .catch(function(){ applyChargerPanel({available: false, reason: 'fetch failed'}); });
+}
+function setChargerMode(mode) {
+  var hint = document.getElementById('charger-hint');
+  CHARGER_MODES.forEach(function(m){ var b = document.getElementById('c-btn-' + m); if (b) { b.disabled = true; } });
+  fetch('/api/charger/mode', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                              body: JSON.stringify({mode: mode})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ if (hint) { hint.textContent = (d.ok ? 'OK: ' : 'Refused: ') + (d.reason || ''); } })
+    .catch(function(e){ if (hint) { hint.textContent = 'Error: ' + e; } })
+    .finally(function(){ setTimeout(pollChargerPanel, 1500); });
+}
+pollChargerPanel();
+setInterval(pollChargerPanel, 5000);
 var nettingEngaged = false;
 function toggleNetting() {
   const btn = document.getElementById('netting-btn');
@@ -1169,6 +1227,7 @@ _DEBUG_HTML = """<!DOCTYPE html>
   .pill.amber { background: #3a2f15; color: #f0b344; }
   .pill.blue  { background: #14263d; color: #6bb6ff; }
   .pill.grey  { background: #262a36; color: #9aa2b1; }
+  .charger-reason { font-size: 13px; font-weight: 400; color: #cfd3dc; }
   .val { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; color: #e0e0e0; }
   .val.green { color: #4ecdc4; } .val.red { color: #ff6b74; }
   .val.amber { color: #f0b344; } .val.blue { color: #6bb6ff; } .val.grey { color: #7f8798; }
@@ -1275,6 +1334,17 @@ _DEBUG_HTML = """<!DOCTYPE html>
       <div class="cell"><div class="k">Charging</div><span id="b-chg" class="pill grey">&mdash;</span></div>
       <div class="cell"><div class="k">Discharge FET</div><span id="b-dfet" class="pill grey">&mdash;</span></div>
     </div>
+  </div>
+
+  <div class="panel" id="p-charger">
+    <h2>Charger Plug</h2>
+    <div class="grid">
+      <div class="cell"><div class="k">Plug</div><span id="c-plug" class="pill grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Mode</div><span id="c-mode" class="val grey">&mdash;</span></div>
+      <div class="cell"><div class="k">Pack</div><span id="c-pack" class="val grey">&mdash;</span></div>
+      <div class="cell" style="grid-column: 1 / -1;"><div class="k">Decision</div><span id="c-reason" class="val grey charger-reason">&mdash;</span></div>
+    </div>
+    <div class="hint" id="c-hint">Read-only here; the mode buttons are on the main page.</div>
   </div>
 
   <div class="panel" id="p-ups">
@@ -1572,6 +1642,38 @@ function pollUps() {
 }
 pollUps();
 setInterval(pollUps, 1000);
+
+/* ── Charger plug (GET /api/charger only: this board is read-only) ────── */
+function applyCharger(d) {
+  var hint = document.getElementById('c-hint');
+  if (!d || d.available === false) {
+    pill('c-plug', '—', 'grey'); val('c-mode', '—', 'grey'); val('c-pack', '—', 'grey');
+    val('c-reason', d && d.reason ? d.reason : 'not available', 'grey');
+    return;
+  }
+  var on = d.plug_on;
+  pill('c-plug', on == null ? 'UNKNOWN' : (on ? 'ON' : 'OFF'), on == null ? 'amber' : (on ? 'blue' : 'grey'));
+  var modeLabel = {hold: 'HOLD 50 %', full: 'CHARGE FULL', on: 'ON (manual)', off: 'OFF (manual)'}[d.mode] || d.mode;
+  val('c-mode', modeLabel, d.mode === 'off' ? 'amber' : '');
+  var pack = (d.soc_pct == null ? '—' : d.soc_pct.toFixed(0) + ' %') +
+             (d.pack_v == null ? '' : ' · ' + d.pack_v.toFixed(1) + ' V') +
+             (d.pack_a == null ? '' : ' · ' + d.pack_a.toFixed(1) + ' A');
+  val('c-pack', pack + (d.bms_fresh ? '' : ' (stale)'), d.bms_fresh ? '' : 'amber');
+  val('c-reason', d.reason || '—', d.plug_error ? 'red' : '');
+  if (hint) {
+    var ts = d.last_switch_epoch ? new Date(d.last_switch_epoch * 1000).toLocaleTimeString() : 'never';
+    hint.textContent = 'plug ' + (d.host || '') + ' · last switch ' + ts + ' · switches ' + (d.switch_count || 0) +
+                       ' · mode buttons are on the main page';
+  }
+}
+function pollCharger() {
+  fetch('/api/charger', {cache: 'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(applyCharger)
+    .catch(function(){ applyCharger({available: false, reason: 'fetch failed'}); });
+}
+pollCharger();
+setInterval(pollCharger, 5000);
 
 /* ── Temperature history (canvas, bounded ring buffer, no deps) ─────── */
 var TEMP_WINDOW_MS = 10 * 60 * 1000;   // 10 minutes of history
@@ -2167,7 +2269,7 @@ def _stream_cap_response(kind: str, cap: int) -> "Response":
 # ---------------------------------------------------------------------------
 
 def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader=None,
-               estop_check=None) -> Flask:  # recorder may be None
+               estop_check=None, charge_manager=None) -> Flask:  # recorder may be None
     """Create the Flask app wired to the given OakRecorder and Controller instances.
 
     ``estop_check``: optional zero-arg callable returning True while the
@@ -2446,6 +2548,32 @@ def create_app(recorder, config: OakWebViewerConfig, controller=None, oak_reader
         # other end. Idempotent with the response's call_on_close.
         if on_close is not None:
             on_close()
+
+    # -- Charger plug (Kasa plug on the charger, pi_app/control/charge_manager.py) --
+
+    @app.route("/api/charger")
+    def api_charger():
+        """Charger plug status: mode, plug state, the last decision and its inputs."""
+        if charge_manager is None:
+            return Response(json.dumps({"available": False,
+                                        "reason": "charger plug manager not running"}),
+                            content_type="application/json")
+        body = charge_manager.get_status()
+        body["available"] = True
+        return Response(json.dumps(body), content_type="application/json")
+
+    @app.route("/api/charger/mode", methods=["POST"])
+    def api_charger_mode():
+        """Operator mode: JSON {"mode": "hold"|"full"|"on"|"off"}. Applies at once."""
+        if charge_manager is None:
+            return Response(json.dumps({"error": "charger plug manager not running"}), status=503,
+                            content_type="application/json")
+        payload = request.get_json(silent=True)
+        mode = payload.get("mode") if isinstance(payload, dict) else None
+        ok, reason = charge_manager.set_mode(mode)
+        body = {"ok": bool(ok), "reason": reason, "mode": mode}
+        return Response(json.dumps(body), status=200 if ok else 400,
+                        content_type="application/json")
 
     @app.route("/api/telemetry")
     def api_telemetry():
@@ -2757,8 +2885,10 @@ class OakWebViewer:
     """Runs the Flask web viewer on a daemon thread."""
 
     def __init__(self, config: OakWebViewerConfig, recorder, controller=None,
-                 oak_reader=None, motor_driver=None, imu_reader=None) -> None:
+                 oak_reader=None, motor_driver=None, imu_reader=None,
+                 charge_manager=None) -> None:
         self._config = config
+        self._charge_manager = charge_manager
         self._recorder = recorder
         self._controller = controller
         self._oak_reader = oak_reader
@@ -2795,6 +2925,7 @@ class OakWebViewer:
                 controller=self._controller,
                 oak_reader=self._oak_reader,
                 estop_check=self._session_estopped,
+                charge_manager=self._charge_manager,
             )
 
             try:

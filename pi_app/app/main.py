@@ -30,6 +30,8 @@ try:
     from pi_app.hardware.oak_recorder import OakRecorder, RecordingTelemetry
     from pi_app.hardware.rtk_gps import RtkGpsReader
     from pi_app.hardware.bms import BmsService
+    from pi_app.hardware.kasa_plug import KasaLegacyPlug
+    from pi_app.control.charge_manager import ChargeManager
     from pi_app.web.oak_viewer import OakWebViewer
     from pi_app.control.controller import Controller, RCInputs, RC_STALE_TIMEOUT_S
     from pi_app.control.safety import SafetyEvent
@@ -65,6 +67,8 @@ except ModuleNotFoundError:
     from pi_app.hardware.oak_recorder import OakRecorder, RecordingTelemetry  # type: ignore
     from pi_app.hardware.rtk_gps import RtkGpsReader  # type: ignore
     from pi_app.hardware.bms import BmsService  # type: ignore
+    from pi_app.hardware.kasa_plug import KasaLegacyPlug  # type: ignore
+    from pi_app.control.charge_manager import ChargeManager  # type: ignore
     from pi_app.web.oak_viewer import OakWebViewer  # type: ignore
     from pi_app.control.controller import Controller, RCInputs, RC_STALE_TIMEOUT_S  # type: ignore
     from pi_app.control.safety import SafetyEvent  # type: ignore
@@ -414,6 +418,23 @@ def run() -> int:
     else:
         print("Daly BMS disabled (set config.bms.enabled=True and bms_mac_address to enable)")
 
+    # Charger plug manager: the Kasa plug on the charger follows the BMS state
+    # of charge (hold 50 % / full / on / off). docs/charger_plug.md.
+    charge_manager = None
+    cp_cfg = getattr(config, "charger_plug", None)
+    if cp_cfg is not None and cp_cfg.enabled and cp_cfg.host and bms_service is not None:
+        try:
+            plug = KasaLegacyPlug(cp_cfg.host, cp_cfg.port, cp_cfg.plug_timeout_s)
+            state_path = Path(__file__).resolve().parents[2] / "logs" / cp_cfg.state_file
+            charge_manager = ChargeManager(cp_cfg, bms_service, plug, state_path)
+            charge_manager.start()
+            print(f"Charger plug manager started (plug {cp_cfg.host}, mode {charge_manager.get_status()['mode']})")
+        except Exception as e:
+            print(f"Charger plug manager init failed: {e} — continuing without it")
+            charge_manager = None
+    else:
+        print("Charger plug manager disabled (config.charger_plug.enabled + host, and the BMS)")
+
     motor_driver = None
     if VescCanDriver.detect():
         print("VESC over CAN detected; using VESC driver")
@@ -470,6 +491,7 @@ def run() -> int:
                 oak_reader=oak_reader,
                 motor_driver=motor_driver,
                 imu_reader=imu,
+                charge_manager=charge_manager,
             )
             oak_web_viewer.start()
             print(f"Web viewer at http://0.0.0.0:{config.oak_web_viewer.port}/")
@@ -1536,6 +1558,11 @@ def run() -> int:
         try:
             if gps_reader is not None:
                 gps_reader.stop()
+        except Exception:
+            pass
+        try:
+            if charge_manager is not None:
+                charge_manager.stop()
         except Exception:
             pass
         try:

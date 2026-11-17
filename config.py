@@ -1374,6 +1374,48 @@ class ArmsUpConfig:
 
 
 @dataclass(frozen=True)
+class ChargerPlugConfig:
+    """The Kasa Wi-Fi plug that powers WALL-E's charger (docs/charger_plug.md).
+
+    pi_app/control/charge_manager.py switches the plug from the BMS state of
+    charge: mode ``hold`` keeps the pack near 50 %, ``full`` charges it once on
+    Kevin's word, ``on``/``off`` are manual. Kevin's rules (2026-11-16): the
+    logic runs on the robot; no charging without a battery reading; after a
+    full charge and a drive the mode returns to hold by itself.
+    """
+    enabled: bool = True
+    # Kasa EP10 "Wally" (hw 1.0, fw 1.0.5, MAC 58:D8:12:F1:ED:DE), paired 2026-11-16.
+    # Give it a DHCP reservation on the Omada gateway. Empty = manager off.
+    host: str = "192.168.84.100"
+    port: int = 9999                      # original Kasa protocol (pi_app/hardware/kasa_plug.py)
+    plug_timeout_s: float = 3.0
+    poll_s: float = 10.0
+    default_mode: str = "hold"            # used when logs/charger_state.json is missing
+    # hold: plug on at/under hold_on_pct, off at/over hold_off_pct. 45-55 is a
+    # 10-point band: about 25 min of the 4 A charger per cycle, a few cycles a week.
+    hold_on_pct: float = 45.0
+    hold_off_pct: float = 55.0
+    # hold never switches on above this pack voltage (4.0 V/cell, about 80 %):
+    # a guard against a drifted BMS state of charge.
+    hold_max_voltage_v: float = 52.0
+    # full: done when SOC or pack voltage says full and the charger current has
+    # tapered, held for full_done_hold_s; top up again at full_retop_pct;
+    # back to hold once SOC has been at/over full_return_pct and then under it.
+    full_done_soc_pct: float = 100.0
+    full_done_voltage_v: float = 54.3     # charger ends at 54.6 V (XM2703)
+    full_done_current_a: float = 0.3
+    full_done_hold_s: float = 120.0
+    full_retop_pct: float = 95.0
+    full_return_pct: float = 60.0
+    # hold/full with no fresh BMS reading for this long: plug off until one returns.
+    soc_unknown_off_s: float = 120.0
+    bms_max_age_s: float = 30.0           # a BMS sample older than this is not fresh
+    min_switch_interval_s: float = 60.0   # automatic switches no closer than this
+    state_file: str = "charger_state.json"  # under logs/ (survives deploy restarts)
+    plug_off_on_system_stop: bool = True  # halt/poweroff: plug off in hold/full
+
+
+@dataclass(frozen=True)
 class BmsConfig:
     """Configuration for the BMS Bluetooth link (JHB-R24TH-V1.3, Daly-app compatible)."""
     enabled: bool = True                   # enabled -- BMS MAC confirmed 2026-04-01
@@ -1693,6 +1735,9 @@ class Config:
 
     # Daly BMS Bluetooth communication
     bms: BmsConfig = BmsConfig()
+
+    # Kasa plug on the charger (ChargeManager)
+    charger_plug: ChargerPlugConfig = ChargerPlugConfig()
 
     # Debug settings
     log_imu_data: bool = False
