@@ -153,7 +153,12 @@ class ChargePolicy:
         self._no_current_retry_t = 0.0
         self._offplug_charge_since: Optional[float] = None
         self._last_hold_start_t: Optional[float] = None
-        self._implausible_count = 0
+        # A hard-fault condition seen on fewer than fault_confirm_polls polls in a
+        # row: the plug goes off at once, the latch waits. The BMS reader does not
+        # check frame checksums and one garbled frame (281.5 A, 2026-11-16) must
+        # not hold the charger off until a person comes.
+        self._suspects: Dict[str, Tuple[int, str]] = {}
+        self._suspect_seen: set = set()
         self._vesc_diff_count = 0
         self._mode_age0 = 0.0                 # age of the mode when this process started
         self._mode_t0: Optional[float] = None
@@ -199,6 +204,7 @@ class ChargePolicy:
     def clear_fault(self) -> bool:
         had = self.fault is not None
         self.fault = None
+        self._suspects.clear()
         self._spread_level = "ok"
         self._spread_cand = None
         return had
@@ -227,6 +233,14 @@ class ChargePolicy:
     def _latch(self, code: str, text: str) -> None:
         if self.fault is None:
             self.fault = {"code": code, "text": text}
+
+    def _suspect(self, code: str, text: str) -> None:
+        """A hard-fault condition on this poll: latch after fault_confirm_polls in a row."""
+        n = self._suspects.get(code, (0, ""))[0] + 1
+        self._suspects[code] = (n, text)
+        self._suspect_seen.add(code)
+        if n >= self.cfg.fault_confirm_polls:
+            self._latch(code, text)
 
     def _session_limit_s(self, s: _Session) -> Optional[float]:
         cfg = self.cfg
@@ -291,7 +305,9 @@ class ChargePolicy:
         cmax = _num(inp.cell_max_mv, 1500.0, 4500.0)
         fresh = (bool(inp.bms_fresh) and v is not None and cmin is not None
                  and cmax is not None and cmax >= cmin)
-        a = _num(inp.pack_a, -500.0, 500.0) if fresh else None
+        # The charger gives 3.6 A. More charge current than max_charge_current_a
+        # while parked is a garbled frame: the sample's current is not used.
+        a = _num(inp.pack_a, -cfg.max_discharge_current_a, cfg.max_charge_current_a) if fresh else None
         if fresh and a is not None and abs(a) > cfg.rest_load_current_a:
             self._last_load_t = now
 
@@ -317,11 +333,15 @@ class ChargePolicy:
         elif fresh:
             self._offplug_charge_since = None
         if fresh:
+            self._suspect_seen = set()
             charging = bool(on and a is not None and a >= cfg.rest_load_current_a)
             self._update_spread(rested, charging, cell_mid, spread, now)
             self._check_hard_faults(inp, a, v, cmin, cmax)
             self._check_vesc_agreement(inp, rested, v, alerts)
         self._check_session_faults(inp, now, fresh, cell_mid)
+        if fresh:
+            for code in [c for c in self._suspects if c not in self._suspect_seen]:
+                del self._suspects[code]        # not seen on this poll: the count starts again
 
         want, reason, phase, full_completed = self._decide_mode(
             inp, now, fresh, on, rested, soc, v, a, cmin, cmax, cell_mid, alerts)
@@ -411,8 +431,7 @@ class ChargePolicy:
         cfg = self.cfg
         s = self._session
         if (s is not None and now - s.t0 >= cfg.no_current_after_s and a is not None
-                and a < cfg.no_current_a and cell_mid < cfg.no_current_max_cell_v):
-            self._no_current_retry_t = now + cfg.no_current_retry_s
+                and a < cfg.no_current_a):
             return True
         return False
 
@@ -437,6 +456,7 @@ class ChargePolicy:
             if limit is not None and now - s.t0 >= limit:
                 return False, f"hold: time limit after +{s.ah:.2f} Ah", "idle"
             if self._no_current(now, a, cell_mid, alerts):
+                self._no_current_retry_t = now + cfg.no_current_retry_s
                 return False, "hold: " + (self._waiting_for_charger(now, alerts) or ""), "waiting"
             return True, f"hold: charging, +{s.ah:.2f} of {target:.2f} Ah", "charging"
         if v > cfg.hold_max_voltage_v:
@@ -486,7 +506,16 @@ class ChargePolicy:
                 self._latch("charge_overrun", f"the full charge did not finish in {limit / 3600.0:.0f} h")
                 return False, f"FAULT: {self.fault['text']}", "fault", False
             if self._no_current(now, a, cell_mid, alerts):
+                if cell_mid >= cfg.full_retop_cell_v:
+                    # Many chargers do not start on a pack that is nearly full.
+                    # Call it the top; the top-up rule tries again lower down.
+                    self.topped = True
+                    return False, (f"full: the charger does not start at {cell_mid:.2f} V per cell; "
+                                   "the pack is near full"), "idle", False
+                self._no_current_retry_t = now + cfg.no_current_retry_s
                 return False, "full: " + (self._waiting_for_charger(now, alerts) or ""), "waiting", False
+            if a is not None and a < cfg.no_current_a:
+                return True, f"full: plug on, waiting for the charger to start ({cell_mid:.2f} V per cell)", "charging", False
             return True, f"full: charging ({cell_mid:.2f} V per cell, {a if a is not None else 0.0:.1f} A)", "charging", False
         if self.topped:
             if rested and cell_mid <= cfg.full_retop_cell_v:
@@ -522,35 +551,32 @@ class ChargePolicy:
             return "warm", f"pack {hi_t:.0f} C, too warm to charge (limit {cfg.charge_max_temp_c:.0f} C)"
         if cmax >= cfg.cell_max_stop_mv:
             return "cell_high", f"highest cell {cmax / 1000.0:.3f} V"
-        if self._implausible_count > 0:
-            return "bms_data", (f"BMS voltages disagree (pack {v:.1f} V, cells "
-                                f"{cmin / 1000.0:.2f} to {cmax / 1000.0:.2f} V)")
+        if self._suspects:
+            code = sorted(self._suspects)[0]
+            n, text = self._suspects[code]
+            return "suspect", f"{text} (poll {n} of {cfg.fault_confirm_polls} before it latches)"
         return None
 
     def _check_hard_faults(self, inp, a, v, cmin, cmax) -> None:
         cfg = self.cfg
         hit = HARD_FLAGS & set(inp.error_flags)
         if hit:
-            self._latch("bms_flag", "the BMS reports " + ", ".join(sorted(hit)))
+            self._suspect("bms_flag", "the BMS reports " + ", ".join(sorted(hit)))
         if inp.num_cells is not None and int(inp.num_cells) != int(cfg.expected_cells):
-            self._latch("cell_count", f"the BMS reports {inp.num_cells} cells, expected {cfg.expected_cells}")
+            self._suspect("cell_count", f"the BMS reports {inp.num_cells} cells, expected {cfg.expected_cells}")
         at_rest = a is not None and abs(a) <= cfg.rest_load_current_a
         if cmin < cfg.fault_cell_min_any_mv or (cmin < cfg.fault_cell_min_mv and at_rest):
-            self._latch("cell_low", f"lowest cell {cmin / 1000.0:.2f} V: deeply discharged. Charge it by hand "
-                                    "(charger straight into the wall) while you watch, then clear this fault")
+            self._suspect("cell_low", f"lowest cell {cmin / 1000.0:.2f} V: deeply discharged. Charge it by hand "
+                                      "(charger straight into the wall) while you watch, then clear this fault")
         n = cfg.expected_cells
-        if n * cmin / 1000.0 - 1.0 <= v <= n * cmax / 1000.0 + 1.0:
-            self._implausible_count = 0
-        else:
-            self._implausible_count += 1
-            if self._implausible_count >= cfg.implausible_polls:
-                self._latch("bms_data", f"BMS voltages disagree (pack {v:.1f} V, cells "
-                                        f"{cmin / 1000.0:.2f} to {cmax / 1000.0:.2f} V)")
+        if not (n * cmin / 1000.0 - 1.0 <= v <= n * cmax / 1000.0 + 1.0):
+            self._suspect("bms_data", f"BMS voltages disagree (pack {v:.1f} V, cells "
+                                      f"{cmin / 1000.0:.2f} to {cmax / 1000.0:.2f} V)")
         tmax = _num(inp.temp_max_c, -40, 120)
         if tmax is not None and tmax >= cfg.fault_temp_max_c:
-            self._latch("over_temp", f"pack at {tmax:.0f} C")
+            self._suspect("over_temp", f"pack at {tmax:.0f} C")
         if self._spread_level == "fault" and self._spread_snapshot is not None:
-            sp, cv, _ = self._spread_snapshot
+            sp, cv, _ = self._spread_snapshot      # already held for minutes: latch now
             self._latch("cell_spread", f"cell spread {sp:.0f} mV at {cv:.2f} V per cell: a cell group is failing")
 
     def _check_vesc_agreement(self, inp, rested, v, alerts) -> None:
@@ -576,9 +602,9 @@ class ChargePolicy:
         if (s.kind == "hold" and s.start_cell_v is not None and cell_mid is not None
                 and s.ah >= cfg.charge_rise_check_ah
                 and cell_mid - s.start_cell_v < cfg.charge_rise_min_v):
-            self._latch("charge_no_rise",
-                        f"{s.ah:.2f} Ah went in and the cells did not rise "
-                        f"({s.start_cell_v:.3f} to {cell_mid:.3f} V)")
+            self._suspect("charge_no_rise",
+                          f"{s.ah:.2f} Ah went in and the cells did not rise "
+                          f"({s.start_cell_v:.3f} to {cell_mid:.3f} V)")
         limit = self._session_limit_s(s)
         if limit is not None and s.kind != "full" and now - s.t0 >= limit + cfg.overrun_grace_s:
             self._latch("charge_overrun",
@@ -588,8 +614,8 @@ class ChargePolicy:
             self._latch("charge_overfill", f"{s.ah:.1f} Ah went in during one charge (pack {cfg.capacity_ah:.0f} Ah)")
         tmax = _num(inp.temp_max_c, -40, 120) if fresh else None
         if tmax is not None and s.start_tmax is not None and tmax - s.start_tmax >= cfg.fault_temp_rise_c:
-            self._latch("temp_rise", f"pack warmed {tmax - s.start_tmax:.0f} C during the charge "
-                                     f"({s.start_tmax:.0f} to {tmax:.0f} C)")
+            self._suspect("temp_rise", f"pack warmed {tmax - s.start_tmax:.0f} C during the charge "
+                                       f"({s.start_tmax:.0f} to {tmax:.0f} C)")
 
     def _update_spread(self, rested, charging, cell_mid, spread, now) -> None:
         cfg = self.cfg

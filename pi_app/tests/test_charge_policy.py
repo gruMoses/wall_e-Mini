@@ -33,6 +33,13 @@ def codes(dec):
     return [a["code"] for a in dec.alerts]
 
 
+def three(p, t, **kw):
+    """The same reading on three polls in a row (a fault needs that to latch)."""
+    for i in range(3):
+        d = p.decide(inp(**kw), t + 10 * i)
+    return d
+
+
 class Curve(unittest.TestCase):
     def test_interpolation_and_clamps(self):
         t = cfg().ocv_table
@@ -233,37 +240,61 @@ class Inhibits(unittest.TestCase):
 class Faults(unittest.TestCase):
     def test_bms_hardware_flag_latches_and_blocks_manual_on(self):
         p = settled()
-        d = p.decide(inp(cell=3.60, flags=("Charge FET Failure",)), REST)
+        d = three(p, REST, cell=3.60, flags=("Charge FET Failure",))
         self.assertIs(d.want_on, False)
         self.assertEqual(p.fault["code"], "bms_flag")
         self.assertEqual(d.alerts[0]["level"], "fault")
-        d = p.decide(inp(cell=3.60), REST + 10)               # the flag is gone: still latched
+        d = p.decide(inp(cell=3.60), REST + 30)               # the flag is gone: still latched
         self.assertIs(d.want_on, False)
         p.set_mode("on")
-        self.assertIs(p.decide(inp(cell=3.60), REST + 20).want_on, False)
+        self.assertIs(p.decide(inp(cell=3.60), REST + 40).want_on, False)
         self.assertTrue(p.clear_fault())
-        self.assertIs(p.decide(inp(cell=3.60), REST + 30).want_on, True)
+        self.assertIs(p.decide(inp(cell=3.60), REST + 50).want_on, True)
         self.assertFalse(p.clear_fault())
+
+    def test_one_garbled_poll_pauses_but_does_not_latch(self):
+        p = settled()
+        d = p.decide(inp(cell=3.60, flags=("Charge FET Failure",)), REST)
+        self.assertIs(d.want_on, False)                       # off at once
+        self.assertEqual(d.phase, "inhibited")
+        self.assertIn("poll 1 of 3", d.reason)
+        self.assertIsNone(p.fault)
+        d = p.decide(inp(cell=3.60), REST + 10)               # the next poll is clean
+        self.assertIs(d.want_on, True)
+        # Two bad, one good, two bad: never three in a row.
+        for i, bad in enumerate((True, True, False, True, True)):
+            p.decide(inp(cell=3.60, cells=12 if bad else 13), REST + 20 + 10 * i)
+        self.assertIsNone(p.fault)
+
+    def test_a_garbled_current_is_not_counted(self):
+        p = settled("full")
+        p.decide(inp(cell=3.80), REST)
+        p.decide(inp(cell=3.85, a=3.6, plug_on=True), REST + 10)
+        p.decide(inp(cell=3.85, a=3.6, plug_on=True), REST + 20)
+        d = p.decide(inp(cell=3.85, a=281.5, plug_on=True), REST + 30)   # seen on the robot 2026-11-16
+        self.assertAlmostEqual(d.info["session"]["ah"], 0.01, places=2)
+        self.assertIs(d.want_on, True)
+        self.assertIsNone(p.fault)
 
     def test_bms_overvoltage_or_overcurrent_trip_latches(self):
         for flag in ("Cell OVP Trip", "Pack OVP Trip", "Charge OCP Trip"):
             p = settled("full")
-            d = p.decide(inp(cell=4.20, spread=40.0, a=0.0, plug_on=True, flags=(flag,)), REST)
+            d = three(p, REST, cell=4.20, spread=40.0, a=0.0, plug_on=True, flags=(flag,))
             self.assertIs(d.want_on, False, flag)
             self.assertEqual(p.fault["code"], "bms_flag", flag)
-            d = p.decide(inp(cell=4.18, spread=20.0), REST + 10)     # released: still latched
+            d = p.decide(inp(cell=4.18, spread=20.0), REST + 40)     # released: still latched
             self.assertIs(d.want_on, False, flag)
 
     def test_deeply_discharged_cell(self):
         p = settled()
-        p.decide(inp(cell=3.1, spread=400.0, a=-20.0), REST)   # 2.90 V under load: sag, not a fault
+        three(p, REST, cell=3.1, spread=400.0, a=-20.0)        # 2.90 V under load: sag, not a fault
         self.assertIsNone(p.fault)
-        d = p.decide(inp(cell=3.1, spread=400.0, a=-0.3), REST + 10)   # 2.90 V at rest
+        d = three(p, REST + 30, cell=3.1, spread=400.0, a=-0.3)   # 2.90 V at rest
         self.assertEqual(p.fault["code"], "cell_low")
         self.assertIn("by hand", p.fault["text"])
         self.assertIs(d.want_on, False)
         q = settled()
-        q.decide(inp(cell=2.9, spread=900.0, a=-25.0), REST)   # 2.45 V even under load
+        three(q, REST, cell=2.9, spread=900.0, a=-25.0)        # 2.45 V even under load
         self.assertEqual(q.fault["code"], "cell_low")
 
     def test_amp_hours_without_a_voltage_rise(self):
@@ -278,10 +309,10 @@ class Faults(unittest.TestCase):
 
     def test_cell_count_and_over_temperature(self):
         p = settled()
-        p.decide(inp(cells=12), REST)
+        three(p, REST, cells=12)
         self.assertEqual(p.fault["code"], "cell_count")
         q = settled()
-        q.decide(inp(temp=50.0), REST)
+        three(q, REST, temp=50.0)
         self.assertEqual(q.fault["code"], "over_temp")
 
     def test_temperature_rise_during_a_charge(self):
@@ -290,7 +321,7 @@ class Faults(unittest.TestCase):
         p.decide(inp(cell=3.85, a=3.6, plug_on=True, temp=24.0), REST + 10)
         d = p.decide(inp(cell=3.90, a=3.6, plug_on=True, temp=33.0), REST + 600)
         self.assertIsNone(p.fault)
-        d = p.decide(inp(cell=3.95, a=3.6, plug_on=True, temp=34.0), REST + 700)
+        d = three(p, REST + 700, cell=3.95, a=3.6, plug_on=True, temp=34.0)
         self.assertEqual(p.fault["code"], "temp_rise")
         self.assertIs(d.want_on, False)
 
@@ -476,6 +507,21 @@ class Full(unittest.TestCase):
         self.assertIs(d.want_on, False)
         self.assertIn("no_current", codes(d))
         self.assertFalse(p.topped)
+
+    def test_a_charger_that_will_not_start_on_a_nearly_full_pack(self):
+        p = settled("full")
+        p.decide(inp(cell=4.15, spread=6.0), REST)
+        d = p.decide(inp(cell=4.15, spread=6.0, a=-0.3, plug_on=True), REST + 10)   # seen on the robot
+        self.assertIs(d.want_on, True)
+        self.assertIn("waiting for the charger to start", d.reason)
+        d = p.decide(inp(cell=4.15, spread=6.0, a=-0.3, plug_on=True), REST + 311)
+        self.assertIs(d.want_on, False)
+        self.assertIn("does not start", d.reason)
+        self.assertTrue(p.topped)
+        self.assertFalse(d.full_completed)                      # not a completed full charge
+        self.assertNotIn("no_current", codes(d))
+        d = p.decide(inp(cell=4.14, spread=6.0), REST + 330)    # no on/off cycling near the top
+        self.assertIs(d.want_on, False)
 
     def test_idle_drain_on_a_full_pack_is_not_a_taper(self):
         p = ChargePolicy(cfg(full_done_hold_s=0.0), "full")

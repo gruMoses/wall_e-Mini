@@ -40,6 +40,11 @@ A fault latches. The plug stays off in every mode until you clear the fault
 (CLEAR FAULT on the main page, or `POST /api/charger/clear_fault`). It
 latches again if the cause is still there. A fault survives a restart.
 
+A fault condition must show on 3 polls in a row (about 30 s) before it
+latches. The plug goes off on the first poll. The reason: the BMS reader
+does not check frame checksums, and one garbled frame read 281.5 A on
+2026-11-16. For the same reason a charge current above 6 A is not counted.
+
 | Fault | Trigger |
 |---|---|
 | `bms_flag` | The BMS reports Charge FET Failure, Discharge FET Failure, Cell Mismatch, Cell Voltage Diff Trip, Temp Sensor Diff Trip, Cell OVP Trip, Pack OVP Trip or Charge OCP Trip |
@@ -124,6 +129,12 @@ then the guards. Kevin accepted that for these bounded cases (2026-11-16).
 - Armed: no charge starts and a running one stops (`on` mode excepted).
 - Plug on but no current for 5 min (the charger lead is not on the robot):
   plug off, next try after 15 min, notice on the page.
+- The same in `full` with the cells at 4.08 V or more: the charger does not
+  start on a nearly full pack. The plug goes off and the charge counts as
+  the top, with no retry until the top-up level. Seen on 2026-11-16: 6.5 min
+  with the plug on at 53.9 V and no charge current, charger and lead in
+  place (Kevin). CHARGE FULL on a pack above about 53 V can therefore do
+  nothing until the pack has come down.
 - Charge current with the plug off for 2 min (the charger is on another
   outlet, or the plug's relay is stuck): warning. The robot cannot stop that
   charge.

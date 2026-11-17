@@ -157,9 +157,31 @@ Replay with the final policy: hold mode, no fault and one charge decision as
 in section 9; full mode over the three charges of section 6, complete at
 18:04, 10:40 and 17:51, each 2 min after the current fell to 0.3 A at 54.5 V.
 
-## 11. Not known, not tested
+## 11. First live test (2026-11-16 19:51, commit 5b5ac17)
+Charge Full for 6.5 min on the robot, pack at 53.9 V (cells 4.145 to
+4.151 V), then back to Hold.
+
+- The plug went on at once and off at once. PASS.
+- The dead-man countdown in the plug read 281 s, fell to 241 s and was back
+  at 281 to 284 s each minute; it was removed when the plug went off. PASS.
+- The charger gave no current: the BMS read -0.3 A for the whole test.
+  Kevin confirmed that the charger was on the plug with its lead on the
+  robot. So the XM2703 does not start a charge on a pack at 53.9 V
+  (4.146 V per cell) after its mains comes back. It did start at 51.2 to
+  51.9 V. The policy now ends that case as "the charger does not start" in
+  place of a plug that stays on.
+- One BMS poll read 281.5 A, and the amp-hour count took 0.78 Ah from it.
+  The BMS reader (`pi_app/hardware/bms.py`) does not check the frame
+  checksum. The 13 112 samples of section 1 hold no such value. Changes: a
+  charge current above 6 A is not used, and a fault needs 3 polls in a row.
+  The checksum itself is a separate job: that reader also feeds the pack-low
+  motor cutoff.
+
+## 12. Not known, not tested
 - The cell model, so the true capacity (7.0 Ah assumed) and the datasheet
   temperature limits.
+- Whether the charger starts at the 4.08 V top-up level (53.0 V). It started
+  at 51.2 to 51.9 V and did not at 53.9 V.
 - A wake pulse on a sleeping BMS at 50 %. Daly's rule says it works.
 - The rescue top-up. It needs a dark BMS and a pack under 46.8 V.
 - A hold cycle on the robot. The first one is due when the pack reaches

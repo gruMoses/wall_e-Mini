@@ -1444,7 +1444,10 @@ class ChargerPlugConfig:
     cell_max_stop_mv: float = 4230.0      # the BMS trips at 4250
     fault_cell_min_mv: float = 3000.0     # at rest (the BMS cuts off at 3000 under load): a person decides
     fault_cell_min_any_mv: float = 2500.0 # at any current: the cell was driven under its floor
-    implausible_polls: int = 3            # pack vs cell voltages disagree this many polls: fault
+    fault_confirm_polls: int = 3          # a fault condition latches after this many polls in a row
+    implausible_polls: int = 3            # BMS vs VESC voltage apart this many rested polls: warning
+    max_charge_current_a: float = 6.0     # more than this into the pack while parked is a garbled frame
+    max_discharge_current_a: float = 60.0
     vesc_bms_max_diff_v: float = 1.5      # BMS vs VESC pack voltage at rest: warning
     charge_rise_check_ah: float = 0.6     # a hold charge this far in...
     charge_rise_min_v: float = 0.010      # ...must have raised the cells this much (normal: 0.045)
@@ -1457,7 +1460,6 @@ class ChargerPlugConfig:
     no_current_a: float = 0.5
     no_current_after_s: float = 300.0
     no_current_retry_s: float = 900.0
-    no_current_max_cell_v: float = 4.10
 
     # Cell spread (max - min) at rest, against this pack's normal: about 30 mV
     # in the middle (one cell group is about 10 % weaker), under 10 mV at the

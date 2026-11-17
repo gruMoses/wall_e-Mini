@@ -128,6 +128,10 @@ class Persistence(unittest.TestCase):
             plug.on = True
             bms.flags = ["Charge FET Failure"]
             st = mgr.tick(now=0.0)
+            self.assertFalse(plug.on)                           # off on the first poll
+            self.assertIsNone(st["fault"])                      # latched on the third
+            mgr.tick(now=10.0)
+            st = mgr.tick(now=20.0)
             self.assertEqual(st["fault"]["code"], "bms_flag")
             self.assertIsNotNone(st["fault"]["epoch"])
             self.assertFalse(plug.on)
