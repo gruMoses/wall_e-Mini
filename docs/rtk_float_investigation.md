@@ -86,7 +86,7 @@ Decisive test (Kevin runs it, clear day, near solar noon):
 
 Do not swap the base to a power bank as a first test (Grok session `01a1bd74-8f67-7620-b6d9-b728f30cdc6d`). The swap restarts the base and its survey-in. A boost converter at 5 V is not a quiet supply. A float result removes nothing, because the PV wiring still radiates. The PV-off test covers both the conducted and the radiated path, and the base stays powered.
 
-Monitor options (2026-11-08). The base has no documented data port: the DFRobot wiki lists only Type-C power, a 5–10 V terminal, the SMA antenna connector and a power LED. Radio facts from the wiki: Semtech LLCC68, 915 MHz, 22 dBm, "pre-configured", and one base serves several rovers. Spreading factor, bandwidth, sync word, channel and framing are not documented. Order (Grok session `01a1bd79-cdaa-7d51-a49e-e51e3ac13d3a`):
+Monitor options (2026-11-08). The base has no data port outside the case (inside there is header P1, section 2.6): the DFRobot wiki lists only Type-C power, a 5–10 V terminal, the SMA antenna connector and a power LED. Radio facts from the wiki: Semtech LLCC68, 915 MHz, 22 dBm, "pre-configured", and one base serves several rovers. Spreading factor, bandwidth, sync word, channel and framing are not documented. Order (Grok session `01a1bd79-cdaa-7d51-a49e-e51e3ac13d3a`):
 
 1. The robot is the free monitor. It logs fix, satellites and differential age while parked and disarmed (verified in `arm_20261107_121745.log`). Park it at the 2026-11-07 spot on clear days and join its log to `pv_power`. It shows correlation, not the mechanism.
 2. A receive-only 915 MHz listener (an ESP32 board with an SX1262 radio) on Wi-Fi, in channel-activity or RSSI mode, logged beside `pv_power`. It needs no decode to tell whether the base is on the air. Bursts present with a dead differential age at the robot means the base transmits and the robot does not use it. No bursts means the base radio or its power. Board (picked 2026-11-08, Grok session `01a1bd7f-f62e-71f3-9005-ff44f9cb313c`): Heltec WiFi LoRa 32 V3, US915. WARNING: The firmware must never call a transmit function; a transmitter on 915 MHz can jam the base link. The V3 needs Vext on (active low) and the RF switch set to receive (SX1262 DIO2), or it hears nothing.
@@ -153,6 +153,49 @@ five questions of 2026-11-12:
 5. Range up to 1.5 km in the open. No antenna guidance beyond upright and
    clear of metal.
 
+### 2.6 Inside the boards (DFRobot schematics, read 2026-11-19)
+
+Sources: rover TEL0171 V1.0 (2024-05-09),
+`https://img.dfrobot.com.cn/wiki/5ea64bf6cf1d8c7738ad2881/87f50e19ace99aae86a93d8d35a0f130.pdf`;
+base TEL0169 V1.0 (2024-08-22), in the EU kit's zip
+`https://dfimg.dfrobot.com/wiki/21144/KIT0198-EU_gnss-rtk-high-precision-rositioning-kit_schematics_v1.zip`
+(also in `~/Downloads`). The LoRa radio is not on either board: it is a
+separate module on a 4- or 6-pin connector, so the base board is probably
+the same in the US kit. Confirm when the case is open.
+
+Base (TEL0169): U1 Quectel LC29H(BS), U3 CS32L010 microcontroller (ChipSea),
+U2 JW3651 buck to 3.3 V, USB-C and a 5-10 V input. The GNSS module's UART1
+output (TXD1, pin 20) goes straight to the radio connector P3 and, through
+R2 (0 ohm), to a 4-pin header **P1: 1 TX, 2 RX, 3 GND, 4 3V3**. P1 pin 2
+carries the base's RTCM as it leaves the LC29H, before the radio module
+frames it. P1 pin 1 reaches the LC29H's RXD1 through diode D1, in parallel
+with the microcontroller (diode-AND, R9 pull-up). Test points: T4 1PPS,
+T5 GNSS RESET_N, T2/T3 microcontroller SWD, T6 its reset. So the base does
+have a data port inside the case; the "no data port" statements of
+2026-11-08 meant the outside of the case.
+
+A listen-only tap on P1 pin 2 and pin 3 gives the message set, the rate,
+the L5/E5a content and the 1005 coordinate (questions 2 and 3 above)
+without DFRobot. 3.3 V logic: use a 3.3 V adapter or an ESP32, never a 5 V
+adapter, and do not power anything from P1 pin 4. The baud rate is not on
+the schematic (the rover's radio link runs at 19,200, register 94). Writing
+`$PQTMCFGSVIN` through pin 1 is possible, but the microcontroller may
+configure the LC29H again at each boot; test whether a setting persists.
+Opening the base restarts it and its survey-in, which shifts RTK
+coordinates recorded before (waypoints).
+
+Rover (TEL0171): U1 Quectel LC29H(DA), U2 APM32F103C8T6 microcontroller
+(Geehy; the I2C co-processor at 0x20), U3 HM6245 3.3 V regulator, U4
+RS2227 switch between UART and I2C (SW1), Q4/Q5 2N7002 shifters to the
+Gravity port P3. The radio module plugs into **P1 "LoRa/4G": 1 TX, 2 RX,
+3 GND, 4 3V3**, which goes to the microcontroller's USART2, not to the
+GNSS module. The microcontroller relays the corrections on USART1 (PA9)
+through diode D2 into the LC29H's RXD1 (pin 21, R19 pull-up). The LC29H's
+TXD1 (pin 20) returns the full NMEA to PA10. No header is on these two
+lines: tap at D2/R19 (the corrections the LC29H actually receives) and at
+pin 20 (all NMEA, including GSV for C/N0). Test points: T2 1PPS,
+T3 GNSS RESET_N, T8/T11 SWD, T4 the microcontroller's reset.
+
 The test is faster and more certain with per-satellite carrier-to-noise density (C/N0) in the log, which the rover driver does not read yet (GSV sentences, possibly in `get_all_gnss()`, register 91). With C/N0, compare the midday value with the value near sunset, and compare satellites near the sun with satellites far from it (solar radio noise).
 
 ## 3. Ranked causes
@@ -182,7 +225,7 @@ WARNING: This test moves the robot. Kevin does it, and says when he starts.
 1. Power LED on? When was it last power-cycled? Has it ever run for hours without interruption?
 2. Photograph the sky from the antenna position. Note metal within 2 m, the roof, the eaves, and whether the antenna sits on a ground plane.
 3. Confirm both LoRa antennas are screwed on, vertical, and clear of metal. Confirm both radios are the 915 MHz US variant.
-4. Get a USB-TTL adapter on the base UART (LC29HBS). CAUTION: the base has no documented data port (2026-11-08); this step needs the case open and the module pinout. Do it on a bench, never on the roof. Read `$PQTMVERNO` (firmware) and `$PQTMCFGSVIN,R` (survey-in mode and stored position). Log the transmitted 1005/1006 coordinate for several minutes: frozen or moving?
+4. Get a USB-TTL adapter on the base UART (LC29HBS). CAUTION: the port is header P1 inside the case (section 2.6: pin 2 is the LC29H's output, pin 3 GND, 3.3 V logic); this step needs the case open. Do it on a bench, never on the roof. Read `$PQTMVERNO` (firmware) and `$PQTMCFGSVIN,R` (survey-in mode and stored position). Log the transmitted 1005/1006 coordinate for several minutes: frozen or moving?
 5. Freeze the coordinate: `$PQTMCFGSVIN,W,1,300,15,0,0,0` (300-epoch survey-in, then lock) or a fixed position. Save and power-cycle to confirm it persists.
 6. Decode the RTCM stream (RTKLIB `str2str`, `pyrtcm`): list every message number and rate. Required: 1005 or 1006; MSM for each constellation in use; 1230 if GLONASS MSM is sent.
 7. Size the stream against the radio: measure bytes per second; read the spreading factor, bandwidth and air rate at both ends; they must match, and the air rate must exceed the payload with margin.
