@@ -91,7 +91,7 @@ Monitor options (2026-11-08). The base has no documented data port: the DFRobot 
 1. The robot is the free monitor. It logs fix, satellites and differential age while parked and disarmed (verified in `arm_20261107_121745.log`). Park it at the 2026-11-07 spot on clear days and join its log to `pv_power`. It shows correlation, not the mechanism.
 2. A receive-only 915 MHz listener (an ESP32 board with an SX1262 radio) on Wi-Fi, in channel-activity or RSSI mode, logged beside `pv_power`. It needs no decode to tell whether the base is on the air. Bursts present with a dead differential age at the robot means the base transmits and the robot does not use it. No bursts means the base radio or its power. Board (picked 2026-11-08, Grok session `01a1bd7f-f62e-71f3-9005-ff44f9cb313c`): Heltec WiFi LoRa 32 V3, US915. WARNING: The firmware must never call a transmit function; a transmitter on 915 MHz can jam the base link. The V3 needs Vext on (active low) and the RF switch set to receive (SX1262 DIO2), or it hears nothing.
 3. Decode the link with the same listener: find the frequency by RSSI, then try spreading factor, bandwidth and sync word until packets decode, and look for RTCM3 frames (preamble 0xD3). If that works, the RTCM stream shows base restarts (a changed 1005 coordinate), the byte rate, and (with MSM4 or MSM7) the base's signal strength. The decoded stream can also feed a home-built rover (any dual-band RTK module). Risk: an unknown framing or frequency hopping. CAD and RSSI see only the frequency, spreading factor and bandwidth that are programmed, so the search is a sweep (902–928 MHz, SF5–SF11, BW 125/250/500 kHz, both sync words, both IQ settings). An implicit header, a custom sync word or hopping can stop the decode while CAD still fires. If the sweep finds nothing, the next tool is a USB SDR waterfall, not another LoRa board.
-4. A second KIT0198-US is the plug-and-play rover. The wiki suggests that one base serves any number of rovers, but that a rover from another kit hears this base is not verified. Ask DFRobot before buying. Never re-pair the robot's rover to another base.
+4. A second KIT0198-US is the plug-and-play rover. The wiki suggests that one base serves any number of rovers, and DFRobot confirmed on 2026-11-18 that a rover from another kit hears this base (section 2.5). Never re-pair the robot's rover to another base.
 
 ### 2.4 Listener results (2026-11-12)
 
@@ -132,6 +132,26 @@ A firmware defect in the first listener build hid all packets for a few
 hours: the receive loop restarted the radio on every interrupt,
 including "preamble detected". Version 1.2.0 raises the interrupt line
 only for reception outcomes.
+
+### 2.5 DFRobot answers (email of 2026-11-18)
+
+Gmail thread `1a1d308576f000ad`. DFRobot technical support answered the
+five questions of 2026-11-12:
+
+1. A rover from a second KIT0198-US hears this base and can serve as a
+   monitor; one base serves several rovers. The LoRa packet format and a
+   way for a third-party receiver to get the RTCM: not public, escalated,
+   they will follow up.
+2. Base and rover are both L1/L5 (already in section 1). The RTCM message
+   set, its rate, and whether L5/E5a observations are sent: not public,
+   escalated. Cause 2 in section 3 stays open.
+3. No configuration port is listed on the base. Whether the message set
+   and survey-in or fixed position can be set: not public, escalated.
+4. LoRa RSSI/SNR is not available over I2C or UART and is not planned.
+   Use the differential age and the fix quality (the robot logs both).
+   Closed: the listener stays the only RSSI source.
+5. Range up to 1.5 km in the open. No antenna guidance beyond upright and
+   clear of metal.
 
 The test is faster and more certain with per-satellite carrier-to-noise density (C/N0) in the log, which the rover driver does not read yet (GSV sentences, possibly in `get_all_gnss()`, register 91). With C/N0, compare the midday value with the value near sunset, and compare satellites near the sun with satellites far from it (solar radio noise).
 
