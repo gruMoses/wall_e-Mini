@@ -426,7 +426,7 @@ Status: the unit is installed on the Pi since 2026-11-14 at 23:44. Kevin decided
 
 Limits:
 
-- The unit does not make the clock correct. On 2026-11-14 at 23:52 the clock of the Pi was 6.5 min behind the real time and `NTPSynchronized` was `no`. The clock is correct only after a time synchronization, or with an RTC cell.
+- The unit does not make the clock correct. On 2026-11-14 at 23:52 the clock of the Pi was 6.5 min behind the real time and `NTPSynchronized` was `no`. The clock is correct only after a time synchronization, or with an RTC cell. The RTC cell is in the Pi and charges since 2026-11-23 (`docs/pi_power_architecture.md` 7.6 item 6). The unit stays installed as the backup for a flat cell.
 - The test shows that the unit prevents the rename, which is the first step of the loss. The loss itself (a deleted file) did not occur in the 2 cycles without the unit: in those boots `fake-hwclock` restored a time in 2026, and the renamed file was not the oldest file.
 - Not tested: a boot with all three time sources missing.
 - A power cut without a halt occurred one time, on 2026-11-15 (finding 8). At the next boot `journald` renamed the journal of the cut boot, which is correct for a file that was not closed. The journals of the cut boot and of the two boots before it stayed readable (`journalctl --list-boots`). The unit ran one time and raised the clock by 1935 s (source: the clock file of `systemd-timesyncd`). This is one observation, not a test.
