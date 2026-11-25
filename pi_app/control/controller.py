@@ -555,24 +555,28 @@ class Controller:
         inhibit: bool,
         bms_current_a: Optional[float] = None,
         charge_fet_on: Optional[bool] = None,
+        plug_charge: Optional[bool] = None,
     ) -> None:
         """Set or clear the charger inhibit flag.
 
         When True, process() will output neutral and stop the motors regardless
         of RC/BT commands.  Call with False when the BMS is unreachable (fail-open).
 
-        ``bms_current_a`` / ``charge_fet_on`` are optional context for the one-line
-        ENGAGE/RELEASE transition log below — charger_inhibit was previously logged
-        NOWHERE, which is why the 2026-06-13 motor-cutout incident took a field-log
-        deep-dive to root-cause instead of a grep.
+        ``bms_current_a`` / ``charge_fet_on`` / ``plug_charge`` (the charger plug
+        is on in a running charge, ChargeManager.holds_plug_on) are optional
+        context for the one-line ENGAGE/RELEASE transition log below —
+        charger_inhibit was previously logged NOWHERE, which is why the
+        2026-06-13 motor-cutout incident took a field-log deep-dive to
+        root-cause instead of a grep.
         """
         inhibit = bool(inhibit)
         if inhibit != self._charger_inhibit:
             _logger.warning(
-                "charger_inhibit %s — bms_current_a=%s charge_fet_on=%s",
+                "charger_inhibit %s — bms_current_a=%s charge_fet_on=%s plug_charge=%s",
                 "ENGAGED (motors forced neutral)" if inhibit else "RELEASED",
                 bms_current_a,
                 charge_fet_on,
+                plug_charge,
             )
         self._charger_inhibit = inhibit
 

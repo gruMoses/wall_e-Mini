@@ -33,9 +33,18 @@ Health (Kevin, 2026-11-16: do not charge an unhealthy pack):
   with no voltage rise.
 * soft inhibits block ``hold`` and ``full`` while they last: pack too cold
   or too warm, a cell near the BMS over-voltage trip, a BMS temperature
-  trip, the charge FET open, the robot armed.
+  trip, the charge FET open.
 * the cell spread is flagged against this pack's normal (about 30 mV in the
   middle, under 10 mV at the top); a fixed small threshold would cry wolf.
+
+Armed (Kevin, 2026-11-25, audit N1): no charge starts while the robot is
+armed. A hold or full charge that is already running keeps going under all
+its normal stop rules, so the charger inhibit stays on while it runs (the
+manager reports it to the main loop). "Running" means the BMS showed charge
+current on ``armed_keep_charge_polls`` polls of the session while the robot
+was disarmed. Anything else goes off at the arm: a plug that is on with no
+current (the lead is not on the robot), a dark-BMS wake or rescue pulse (no
+current reading), a plug switched on from the Kasa app while armed.
 
 BMS dark (no fresh reading): the plug goes off after ``soc_unknown_off_s``.
 Then, only while the VESCs give an independent pack voltage and temperature
@@ -97,6 +106,9 @@ class ChargeDecision:
     alerts: Tuple[Dict[str, str], ...] = ()
     full_completed: bool = False
     info: Dict[str, Any] = field(default_factory=dict)
+    # A hold or full charge is running (see the module docstring, "Armed"):
+    # it goes on when the robot arms, and the charger inhibit follows it.
+    charge_running: bool = False
 
 
 @dataclass
@@ -108,6 +120,7 @@ class _Session:
     target_ah: Optional[float] = None
     start_tmax: Optional[float] = None
     start_cell_v: Optional[float] = None    # first cell voltage under charge current
+    charge_polls: int = 0                   # polls with charge current while disarmed
 
 
 def _num(x: Any, lo: float, hi: float) -> Optional[float]:
@@ -199,7 +212,8 @@ class ChargePolicy:
             # The plug is on: the new mode owns the charge from here.
             t = self._session.last_t if now is None else now
             self._session = _Session(kind=self._kind_for_mode(), t0=t, last_t=t,
-                                     start_tmax=self._session.start_tmax)
+                                     start_tmax=self._session.start_tmax,
+                                     charge_polls=self._session.charge_polls)
 
     def clear_fault(self) -> bool:
         had = self.fault is not None
@@ -229,6 +243,13 @@ class ChargePolicy:
 
     def _kind_for_mode(self) -> str:
         return {"hold": "hold", "full": "full", "on": "manual"}.get(self.mode, "manual")
+
+    def _charge_running(self) -> bool:
+        """A hold or full charge the BMS saw charging while the robot was
+        disarmed: the one charge that goes on when the robot arms."""
+        s = self._session
+        return bool(s is not None and s.kind in ("hold", "full")
+                    and s.charge_polls >= self.cfg.armed_keep_charge_polls)
 
     def _latch(self, code: str, text: str) -> None:
         if self.fault is None:
@@ -282,6 +303,11 @@ class ChargePolicy:
                         s.start_cell_v = (cmin + cmax) / 2000.0
                 if s.start_tmax is None and fresh:
                     s.start_tmax = _num(inp.temp_max_c, -40, 120)
+            if (fresh and a is not None and a >= self.cfg.rest_load_current_a
+                    and not inp.armed):
+                # Counted only while disarmed: a charge that first shows
+                # current while armed never counts as running.
+                self._session.charge_polls += 1
             self._pending = (None, None)
         elif self._session is not None:
             self._session = None
@@ -345,6 +371,9 @@ class ChargePolicy:
 
         want, reason, phase, full_completed = self._decide_mode(
             inp, now, fresh, on, rested, soc, v, a, cmin, cmax, cell_mid, alerts)
+        running = self._charge_running()
+        if inp.armed and running and want is not False:
+            reason = "robot armed, charge already running (no drive until it ends): " + reason
 
         if self.fault is not None:
             alerts.insert(0, {"level": "fault", "code": self.fault["code"], "text": self.fault["text"]})
@@ -370,7 +399,8 @@ class ChargePolicy:
             "session": ({"kind": s.kind, "ah": round(s.ah, 3), "age_s": round(now - s.t0),
                          "target_ah": s.target_ah} if s is not None else None),
         }
-        return ChargeDecision(want, reason, self.mode, phase, tuple(alerts), full_completed, info)
+        return ChargeDecision(want, reason, self.mode, phase, tuple(alerts), full_completed, info,
+                              charge_running=running)
 
     def _decide_mode(self, inp, now, fresh, on, rested, soc, v, a, cmin, cmax, cell_mid, alerts):
         mode = self.mode
@@ -380,7 +410,11 @@ class ChargePolicy:
             return False, f"FAULT: {self.fault['text']}", "fault", False
         if mode == "on":
             return True, "mode on (manual)", "manual", False
-        if inp.armed:
+        if inp.armed and not self._charge_running():
+            # No charge starts while armed, and a plug that is on without a
+            # running charge goes off: lead off the robot, charger not started
+            # yet, a dark-BMS pulse, a switch from the Kasa app.
+            self._pending = (None, None)
             return False, "robot armed: no charging", "armed", False
         if not fresh:
             return self._decide_dark(inp, now, on, alerts) + (False,)
@@ -420,7 +454,8 @@ class ChargePolicy:
                 self._mode_t0 = now
                 if self._session is not None:
                     self._session = _Session(kind="hold", t0=now, last_t=now,
-                                             start_tmax=self._session.start_tmax)
+                                             start_tmax=self._session.start_tmax,
+                                             charge_polls=self._session.charge_polls)
             else:
                 return self._decide_full(inp, now, on, rested, soc, v, a, cmax, cell_mid, alerts)
         return self._decide_hold(now, on, rested, v, a, cmin, cell_mid, alerts) + (False,)
@@ -716,6 +751,10 @@ class ChargePolicy:
             if kind == "rescue":
                 self._last_rescue_end_t = now
 
+        if inp.armed:
+            # Here only with a charge running at the arm: the 2 min without a
+            # reading are over, so it ends, and no pulse or rescue starts.
+            return False, f"no BMS reading for {mins:.0f} min, robot armed: charger off", "armed"
         if vesc is None:
             return say(f"no BMS reading for {mins:.0f} min and no VESC voltage: charger off", False, "dark")
         gate = self._dark_gate(inp)

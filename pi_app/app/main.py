@@ -690,14 +690,23 @@ def run() -> int:
                 gps_reading = gps_reader.get_reading()
                 controller.set_gps_reading(gps_reading)
             # Update charger inhibit from BMS (fail-open: False when BMS unreachable).
-            # Also force inhibit when the discharge FET safety timeout has fired.
+            # Also force inhibit when the discharge FET safety timeout has fired,
+            # and while the charger plug is on in a running charge: the BMS term
+            # releases in the taper under 2.0 A with the charger powered, and a
+            # charge running at the arm goes on (audit N1, Kevin 2026-11-25).
             bms_link = None
             if bms_service is not None:
                 _bms_st_for_inhibit = bms_service.get_state()
+                _plug_charge = bool(
+                    charge_manager is not None
+                    and getattr(bms_cfg, "charger_inhibit_enabled", True)
+                    and charge_manager.holds_plug_on()
+                )
                 controller.set_charger_inhibit(
-                    bms_service.is_charging() or _bms_safety_stopped,
+                    bms_service.is_charging() or _bms_safety_stopped or _plug_charge,
                     bms_current_a=_bms_st_for_inhibit.pack_current_a if _bms_st_for_inhibit else None,
                     charge_fet_on=_bms_st_for_inhibit.charge_fet_on if _bms_st_for_inhibit else None,
+                    plug_charge=_plug_charge,
                 )
                 # Observation only: journal WARNING on the dark/restored edges
                 # and the data age for the run log, the status line and the SSE.
@@ -973,7 +982,8 @@ def run() -> int:
             if pose_worker is not None:
                 pose_worker.set_pose_enabled(controller.pose_wanted())
 
-            # The charger plug manager never starts a charge while armed.
+            # The charger plug manager never starts a charge while armed; a
+            # charge running at the arm goes on (and holds the inhibit above).
             if charge_manager is not None:
                 charge_manager.note_armed(cmd.is_armed)
 

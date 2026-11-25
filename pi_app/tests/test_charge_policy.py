@@ -736,6 +736,182 @@ class Dark(unittest.TestCase):
 
 
 
+class ArmedDuringACharge(unittest.TestCase):
+    """Kevin, 2026-11-25 (audit N1): a charge already running keeps going when
+    the robot arms, so the charger inhibit stays on while it runs. No charge
+    starts while armed. "Running": a hold or full charge with charge current
+    on 2 polls while the robot was disarmed."""
+
+    def running_hold(self):
+        p = settled()
+        self.assertIs(p.decide(inp(cell=3.70), REST).want_on, True)
+        d = p.decide(inp(cell=3.72, a=3.6, plug_on=True), REST + 10)
+        self.assertFalse(d.charge_running)                      # one poll of current is not enough
+        d = p.decide(inp(cell=3.72, a=3.6, plug_on=True), REST + 20)
+        self.assertTrue(d.charge_running)
+        return p, REST + 20
+
+    def test_arm_during_a_running_hold_charge_keeps_it_on_to_its_normal_end(self):
+        p, t = self.running_hold()
+        ticks = 0
+        while True:
+            t += 10
+            d = p.decide(inp(cell=3.73 + 0.0007 * ticks, a=3.6, plug_on=True, armed=True), t)
+            if d.want_on is False:
+                break
+            self.assertTrue(d.charge_running)
+            self.assertIn("robot armed, charge already running", d.reason)
+            ticks += 1
+            self.assertLess(ticks, 200)
+        self.assertIn("top-up complete", d.reason)              # the Ah target, as when disarmed
+        self.assertIsNone(p.fault)
+        d = p.decide(inp(cell=3.78, armed=True), t + 10)        # plug off: the session is over
+        self.assertIs(d.want_on, False)
+        self.assertEqual(d.phase, "armed")
+        self.assertFalse(d.charge_running)
+        self.assertIsNone(d.info["session"])
+
+    def test_arm_during_a_running_full_charge_keeps_it_on_through_the_taper(self):
+        p = settled("full")
+        self.assertIs(p.decide(inp(cell=3.90), REST).want_on, True)
+        t = REST
+        for _ in range(2):
+            t += 10
+            d = p.decide(inp(cell=4.05, spread=8.0, a=3.6, plug_on=True), t)
+        self.assertTrue(d.charge_running)
+        for a in (1.9, 1.2, 0.7):                               # under the BMS inhibit's 2.0 A
+            t += 10
+            d = p.decide(inp(cell=4.15, spread=8.0, a=a, plug_on=True, armed=True), t)
+            self.assertIs(d.want_on, True, a)
+            self.assertTrue(d.charge_running, a)
+        t_done = t + 10
+        while t < t_done + 300:
+            t += 10
+            d = p.decide(inp(cell=4.19, spread=8.0, a=0.2, plug_on=True, armed=True, soc=100.0), t)
+            if d.want_on is False:
+                break
+        self.assertTrue(d.full_completed)                       # the normal end: full and tapered 120 s
+        self.assertEqual(t - t_done, 120)
+        d = p.decide(inp(cell=4.19, spread=8.0, a=-0.3, armed=True), t + 10)
+        self.assertIs(d.want_on, False)
+        self.assertFalse(d.charge_running)
+
+    def test_the_normal_stop_rules_still_end_it_while_armed(self):
+        p, t = self.running_hold()
+        d = p.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True, temp=46.0), t + 10)
+        self.assertIs(d.want_on, False)
+        self.assertEqual(d.phase, "inhibited")
+        q, t = self.running_hold()
+        d = three(q, t + 10, cell=3.73, a=3.6, plug_on=True, armed=True, flags=("Charge FET Failure",))
+        self.assertEqual(q.fault["code"], "bms_flag")
+        self.assertIs(d.want_on, False)
+        r, t = self.running_hold()
+        d = r.decide(inp(cell=3.84, a=3.6, plug_on=True, armed=True), t + 10)
+        self.assertIs(d.want_on, False)
+        self.assertIn("top of the band", d.reason)
+        s, t = self.running_hold()
+        d = s.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True, fet=False), t + 10)
+        self.assertIs(d.want_on, False)
+        self.assertIn("charge FET", d.reason)
+
+    def test_arm_with_no_session_starts_nothing(self):
+        p = settled()
+        d = p.decide(inp(cell=3.60, armed=True), REST)
+        self.assertIs(d.want_on, False)
+        self.assertEqual(d.phase, "armed")
+        self.assertFalse(d.charge_running)
+        q = settled("full")
+        d = q.decide(inp(cell=3.75, armed=True), REST)
+        self.assertIs(d.want_on, False)
+        self.assertEqual(d.phase, "armed")
+        # Disarmed: both start as before.
+        self.assertIs(p.decide(inp(cell=3.60), REST + 10).want_on, True)
+        self.assertIs(q.decide(inp(cell=3.75), REST + 10).want_on, True)
+
+    def test_a_plug_switched_on_while_armed_goes_off(self):
+        p = settled()
+        self.assertIs(p.decide(inp(cell=3.70), REST).want_on, True)   # the start is asked for...
+        d = p.decide(inp(cell=3.70, armed=True), REST + 5)            # ...the robot arms before the switch
+        self.assertIs(d.want_on, False)
+        for i in range(3):                                            # the Kasa app switches it on, current flows
+            d = p.decide(inp(cell=3.72, a=3.6, plug_on=True, armed=True), REST + 10 + 10 * i)
+            self.assertIs(d.want_on, False)
+            self.assertEqual(d.phase, "armed")
+            self.assertFalse(d.charge_running)
+
+    def test_a_plug_on_without_charge_current_goes_off_at_the_arm(self):
+        p = settled()
+        p.decide(inp(cell=3.70), REST)
+        for i in range(3):                                            # the lead is not on the robot
+            d = p.decide(inp(cell=3.70, a=-0.3, plug_on=True), REST + 10 + 10 * i)
+            self.assertIs(d.want_on, True)
+            self.assertFalse(d.charge_running)
+        d = p.decide(inp(cell=3.70, a=-0.3, plug_on=True, armed=True), REST + 40)
+        self.assertIs(d.want_on, False)
+        self.assertEqual(d.phase, "armed")
+        q = settled()                                                  # the charger was just starting
+        q.decide(inp(cell=3.70), REST)
+        q.decide(inp(cell=3.72, a=3.6, plug_on=True), REST + 10)
+        d = q.decide(inp(cell=3.72, a=3.6, plug_on=True, armed=True), REST + 20)
+        self.assertIs(d.want_on, False)
+
+    def test_dark_pulses_end_at_the_arm(self):
+        p = ChargePolicy(cfg(), "hold")
+        p.decide(inp(fresh=False), 0.0)
+        self.assertIs(p.decide(inp(fresh=False, vesc=48.0), 600.0).want_on, True)      # wake pulse
+        d = p.decide(inp(fresh=False, vesc=48.3, plug_on=True), 610.0)
+        self.assertIs(d.want_on, True)
+        self.assertFalse(d.charge_running)
+        d = p.decide(inp(fresh=False, vesc=48.3, plug_on=True, armed=True), 620.0)
+        self.assertIs(d.want_on, False)
+        self.assertEqual(d.phase, "armed")
+        q = ChargePolicy(cfg(), "hold")
+        q.decide(inp(fresh=False), 0.0)
+        self.assertIs(q.decide(inp(fresh=False, vesc=46.5), 120.0).want_on, True)      # rescue
+        q.decide(inp(fresh=False, vesc=46.8, plug_on=True), 130.0)
+        self.assertIs(q.decide(inp(fresh=False, vesc=46.9, plug_on=True, armed=True), 140.0).want_on, False)
+
+    def test_bms_dark_during_an_armed_charge_ends_it_after_2_min_and_starts_nothing(self):
+        p, t = self.running_hold()
+        t0 = t + 10
+        d = p.decide(inp(fresh=False, plug_on=True, armed=True, vesc=46.0), t0)
+        self.assertIsNone(d.want_on)                            # as when disarmed: 2 min as it is
+        self.assertTrue(d.charge_running)
+        self.assertIsNone(p.decide(inp(fresh=False, plug_on=True, armed=True, vesc=46.0), t0 + 119).want_on)
+        d = p.decide(inp(fresh=False, plug_on=True, armed=True, vesc=46.0), t0 + 120)
+        self.assertIs(d.want_on, False)
+        self.assertEqual(d.phase, "armed")
+        for k in range(1, 4):                                   # no rescue, no wake pulse while armed
+            self.assertIs(p.decide(inp(fresh=False, armed=True, vesc=46.0), t0 + 120 + 600 * k).want_on, False)
+        d = p.decide(inp(fresh=False, vesc=46.0), t0 + 3000)    # disarmed: the dark rules as before
+        self.assertIs(d.want_on, True)
+        self.assertEqual(d.phase, "rescue")
+
+    def test_disarm_during_the_charge_changes_nothing(self):
+        p, t = self.running_hold()
+        self.assertIs(p.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True), t + 10).want_on, True)
+        d = p.decide(inp(cell=3.73, a=3.6, plug_on=True), t + 20)
+        self.assertIs(d.want_on, True)
+        self.assertTrue(d.charge_running)
+        self.assertNotIn("robot armed", d.reason)
+
+    def test_an_operator_mode_change_keeps_the_running_charge(self):
+        p, t = self.running_hold()
+        p.set_mode("full", t + 5)
+        d = p.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True), t + 10)
+        self.assertIs(d.want_on, True)
+        self.assertTrue(d.charge_running)
+        self.assertEqual(d.info["session"]["kind"], "full")
+        p.set_mode("on", t + 15)                                # manual: not covered, unchanged
+        d = p.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True), t + 20)
+        self.assertIs(d.want_on, True)
+        self.assertFalse(d.charge_running)
+        p.set_mode("off", t + 25)
+        d = p.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True), t + 30)
+        self.assertIs(d.want_on, False)
+        self.assertFalse(d.charge_running)
+
+
 class Agreement(unittest.TestCase):
     def test_bms_and_vesc_pack_voltage(self):
         p = settled()

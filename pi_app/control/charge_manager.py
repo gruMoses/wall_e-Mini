@@ -22,8 +22,18 @@ shutting down (e-stop halt, main switch off, ``poweroff``) and the mode is an
 automatic one; a plain service restart (deploy) leaves the plug alone and the
 next process decides again within a poll or two.
 
+Charger inhibit (audit N1, Kevin 2026-11-25): a charge already running goes
+on when the robot arms, and ``holds_plug_on()`` tells the main loop while
+the plug is on in such a charge; the main loop adds it to the BMS current
+inhibit. The BMS term alone releases in the taper under 2.0 A with the
+charger still powered. Each poll that sees the plug sets the state again;
+when the polls stop seeing it (plug unreachable, thread hung) it runs out
+by itself after ``plug_deadman_s``, when the plug's own countdown has ended
+the charge.
+
 This thread never touches motion. The main control loop does not wait on it;
-it only tells it the armed state (``note_armed``, one attribute write).
+it only tells it the armed state (``note_armed``, one attribute write) and
+reads ``holds_plug_on()`` (one attribute read and a clock).
 """
 
 from __future__ import annotations
@@ -131,6 +141,9 @@ class ChargeManager:
         self._deadman_last_t: Optional[float] = None
         self._deadman_armed = False
         self._deadman_fails = 0
+        # Charger inhibit term: until this clock time the plug counts as on in
+        # a running charge. None = no. Read by the main loop, written by tick().
+        self._plug_hold_until: Optional[float] = None
         self._status: Dict[str, Any] = {
             "mode": self._policy.mode,
             "plug_on": None,
@@ -144,7 +157,7 @@ class ChargeManager:
             "alerts": [], "fault": self._fault_dict(), "session": None, "topped": False,
             "last_full_epoch": self._last_full_epoch, "days_since_full": None,
             "plug_error": None, "last_switch_epoch": None, "switch_count": 0,
-            "deadman": "off", "updated_epoch": None,
+            "deadman": "off", "holds_plug_on": False, "updated_epoch": None,
             "host": getattr(plug, "host", getattr(cfg, "host", "")),
             "mac": getattr(cfg, "mac", ""),
         }
@@ -223,6 +236,16 @@ class ChargeManager:
     def note_armed(self, armed: bool) -> None:
         """Called by the main loop every tick; one attribute write."""
         self._armed = bool(armed)
+
+    def holds_plug_on(self, now: Optional[float] = None) -> bool:
+        """True while the plug is on in a running hold or full charge: the
+        charger is powered and its lead is on the robot. The main loop adds
+        this to the charger inhibit. Called every control tick: no lock, no I/O.
+        """
+        until = self._plug_hold_until
+        if until is None:
+            return False
+        return (self._clock() if now is None else now) < until
 
     def set_mode(self, mode: Any) -> "tuple[bool, str]":
         if not isinstance(mode, str) or mode not in MODES:
@@ -404,6 +427,19 @@ class ChargeManager:
 
         if plug_err is None:
             self._service_deadman(plug_on, dec.mode, now)
+            # The plug answered: the inhibit term follows it now (plug on in a
+            # running charge, after this poll's switch). A plug that does not
+            # answer keeps the last answer until the plug's own off-countdown
+            # has ended the charge (re-armed at most every refresh, so it fires
+            # by the last answer + plug_deadman_s), then fails open like the
+            # BMS term: a plug outage (8.4 h on 2026-11-24) must not hold the
+            # robot for hours.
+            if plug_on and dec.charge_running:
+                poll_s = float(getattr(self._cfg, "poll_s", 10.0))
+                hold_s = max(float(getattr(self._cfg, "plug_deadman_s", 0.0) or 0.0), 3.0 * poll_s)
+                self._plug_hold_until = now + hold_s
+            else:
+                self._plug_hold_until = None
 
         alerts: List[Dict[str, str]] = list(dec.alerts)
         if self._deadman_fails >= _PLUG_FAILS_FOR_ALERT:
@@ -442,6 +478,7 @@ class ChargeManager:
                 "temp_min_c": inp.temp_min_c, "temp_max_c": inp.temp_max_c,
                 "vesc_v": inp.vesc_v, "vesc_temp_c": inp.vesc_temp_c, "armed": inp.armed,
                 "deadman": "armed" if self._deadman_armed else "off",
+                "holds_plug_on": self.holds_plug_on(now),
                 "alerts": alerts, "fault": self._fault_dict(),
                 "session": dec.info.get("session"), "topped": dec.info.get("topped"),
                 "last_full_epoch": self._last_full_epoch, "days_since_full": round(days, 1),

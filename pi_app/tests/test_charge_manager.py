@@ -377,6 +377,223 @@ class ModeAge(unittest.TestCase):
             self.assertEqual(saved(path)["mode"], "hold")
 
 
+def running_charge(test, tmp, mode="full"):
+    """A manager with a charge running (charge current on 2 polls, disarmed).
+    Returns (mgr, bms, plug, time of the last poll)."""
+    mgr, bms, plug, _, _ = make(tmp, state={"mode": mode})
+    bms.cell, bms.spread = (3.69, 30.0) if mode == "hold" else (3.90, 8.0)
+    t = 0.0
+    mgr.tick(now=t)
+    if mode == "hold":
+        t = REST                                   # hold starts on a rested reading
+        mgr.tick(now=t)
+    test.assertTrue(plug.on)
+    test.assertFalse(mgr.holds_plug_on(t))         # no charge current seen yet
+    bms.a = 3.6
+    for _ in range(2):
+        t += 10.0
+        mgr.tick(now=t)
+    test.assertTrue(mgr.holds_plug_on(t))
+    return mgr, bms, plug, t
+
+
+class ArmedChargeInhibit(unittest.TestCase):
+    """Audit N1 (Kevin, 2026-11-25): a charge already running goes on at the
+    arm, and holds_plug_on() keeps the charger inhibit on while the plug is on
+    in it, also in the taper under the BMS inhibit's 2.0 A."""
+
+    def test_arm_during_a_running_charge_keeps_the_plug_on_and_the_inhibit(self):
+        for mode in ("hold", "full"):
+            with tempfile.TemporaryDirectory() as tmp:
+                mgr, bms, plug, t = running_charge(self, tmp, mode)
+                arms0 = plug.arms
+                mgr.note_armed(True)
+                for _ in range(18):
+                    t += 10.0
+                    bms.cell += 0.001
+                    st = mgr.tick(now=t)
+                    self.assertTrue(plug.on, (mode, t))
+                    self.assertTrue(mgr.holds_plug_on(t), (mode, t))
+                self.assertTrue(st["armed"])
+                self.assertTrue(st["holds_plug_on"])
+                self.assertIn("robot armed, charge already running", st["reason"])
+                self.assertEqual(plug.sets, [True], mode)              # never switched off
+                # The dead-man is still re-armed every 60 s while armed.
+                self.assertEqual(plug.arms - arms0, 3, mode)
+                self.assertEqual(plug.timer, 300.0)
+                self.assertEqual(st["deadman"], "armed")
+
+    def test_taper_under_2_a_with_the_plug_on_and_armed_keeps_the_inhibit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "full")
+            mgr.note_armed(True)
+            bms.cell = 4.15
+            for a in (1.9, 1.4, 0.9, 0.6):                 # the BMS inhibit is released here
+                bms.a = a
+                t += 10.0
+                mgr.tick(now=t)
+                self.assertTrue(plug.on, a)
+                self.assertTrue(mgr.holds_plug_on(t), a)
+                self.assertTrue(mgr.holds_plug_on(t + 9.9), a)   # and between the polls
+
+    def test_the_end_of_the_charge_while_armed_switches_off_and_releases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "hold")
+            mgr.note_armed(True)
+            bms.cell = 3.84                                 # top of the band under charge
+            t += 10.0
+            st = mgr.tick(now=t)
+            self.assertFalse(plug.on)
+            self.assertFalse(mgr.holds_plug_on(t))          # released with the switch, not later
+            self.assertFalse(st["holds_plug_on"])
+            self.assertIn("top of the band", st["reason"])
+            self.assertIsNone(plug.timer)                   # the dead-man removed with the plug off
+            bms.cell, bms.a = 3.60, -0.3                    # low again: no new charge while armed
+            for k in range(1, 10):
+                st = mgr.tick(now=t + 600.0 * k)
+                self.assertFalse(plug.on)
+                self.assertEqual(st["phase"], "armed")
+                self.assertFalse(mgr.holds_plug_on(t + 600.0 * k))
+            self.assertEqual(plug.sets, [True, False])
+
+    def test_arm_with_no_session_starts_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, _, _ = make(tmp)
+            mgr.note_armed(True)
+            bms.cell = 3.60
+            for t in (0.0, REST, REST + 600.0):
+                st = mgr.tick(now=t)
+                self.assertFalse(mgr.holds_plug_on(t))
+            self.assertEqual(plug.sets, [])
+            self.assertEqual(st["phase"], "armed")
+
+    def test_plug_on_with_the_lead_off_never_holds_the_inhibit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, _, _ = make(tmp)
+            bms.cell = 3.69
+            mgr.tick(now=0.0)
+            mgr.tick(now=REST)
+            self.assertTrue(plug.on)
+            for t in (REST + 10.0, REST + 20.0, REST + 30.0):    # no current: the lead is off the robot
+                mgr.tick(now=t)
+                self.assertFalse(mgr.holds_plug_on(t))
+            mgr.note_armed(True)
+            mgr.tick(now=REST + 40.0)
+            self.assertFalse(plug.on)                       # off at the arm, as before
+            self.assertFalse(mgr.holds_plug_on(REST + 40.0))
+
+    def test_disarm_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "hold")
+            mgr.note_armed(True)
+            mgr.tick(now=t + 10.0)
+            mgr.note_armed(False)
+            st = mgr.tick(now=t + 20.0)
+            self.assertTrue(plug.on)
+            self.assertTrue(mgr.holds_plug_on(t + 20.0))
+            self.assertNotIn("robot armed", st["reason"])
+            bms.cell = 3.84                                 # the end, disarmed: as before
+            mgr.tick(now=t + 30.0)
+            self.assertFalse(plug.on)
+            self.assertFalse(mgr.holds_plug_on(t + 30.0))
+
+    def test_an_unreachable_plug_or_a_hung_thread_releases_after_the_deadman(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "full")
+            mgr.note_armed(True)
+            seen = t
+            plug.fail_get = True
+            for dt in (10.0, 100.0, 299.0):
+                mgr.tick(now=seen + dt)
+                self.assertTrue(mgr.holds_plug_on(seen + dt), dt)    # it may still be on
+            mgr.tick(now=seen + 300.0)
+            self.assertFalse(mgr.holds_plug_on(seen + 300.0))        # its own countdown has ended it
+            plug.fail_get = False
+            plug.on = False                                          # the countdown switched it off
+            mgr.tick(now=seen + 310.0)
+            self.assertFalse(mgr.holds_plug_on(seen + 310.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "full")
+            self.assertTrue(mgr.holds_plug_on(t + 299.0))             # no tick at all (thread hung)
+            self.assertFalse(mgr.holds_plug_on(t + 300.0))
+
+    def test_manual_on_does_not_hold_the_inhibit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "full")
+            mgr.set_mode("on")
+            mgr.tick(now=t + 10.0)
+            self.assertTrue(plug.on)
+            self.assertFalse(mgr.holds_plug_on(t + 10.0))
+
+
+class ArmedChargeReleaseRamps(unittest.TestCase):
+    """The end of a charge while armed releases the inhibit through the slew
+    ramp of cce9b06: a held stick does not reach the motors in one tick. The
+    inhibit is fed as main.py feeds it (BMS term or plug term)."""
+
+    def test_release_after_the_charge_ends_ramps_from_neutral(self):
+        from unittest.mock import patch
+        from config import config as default_config
+        from pi_app.control.controller import Controller, RCInputs
+        from pi_app.control.mapping import CENTER_OUTPUT_VALUE as C
+        from pi_app.control.safety import SafetyParams
+
+        class Motor:
+            def set_tracks(self, left_byte, right_byte):
+                pass
+
+            def stop(self):
+                pass
+
+            def get_telemetry(self):
+                return SimpleNamespace(left_rpm=0, right_rpm=0, pack_low_latched=False)
+
+        class Relay:
+            def set_armed(self, armed):
+                pass
+
+        class Shutdown:
+            def schedule_shutdown(self, delay_seconds):
+                pass
+
+        self.assertTrue(default_config.slew_limiter.snap_first_command)    # the production config
+        step = int(round(float(default_config.slew_limiter.manual_accel_bps) * 0.1))
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "hold")
+            bms.a = 1.5                                     # under 2.0 A: the BMS term is off
+            clock = {"t": 10.0}
+            with patch("pi_app.control.controller.time.monotonic", side_effect=lambda: clock["t"]):
+                c = Controller(motor_driver=Motor(), arm_relay=Relay(), shutdown_scheduler=Shutdown(),
+                               safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0))
+
+                def tick(stick):
+                    clock["t"] += 0.1
+                    plug_term = mgr.holds_plug_on(t)
+                    c.set_charger_inhibit(False or plug_term, plug_charge=plug_term)
+                    cmd, _, telem = c.process(
+                        RCInputs(ch1_us=stick, ch2_us=stick, ch3_us=1900, ch4_us=1000, ch5_us=1000,
+                                 last_update_mono_s=clock["t"]), now_epoch_s=clock["t"])
+                    self.assertTrue(cmd.is_armed)
+                    return (cmd.left_byte, cmd.right_byte), telem["charger_inhibit"]
+
+                tick(1500)                                  # armed at rest during the charge
+                mgr.note_armed(True)
+                t += 10.0
+                mgr.tick(now=t)
+                engaged = [tick(2000) for _ in range(3)]    # stick full forward
+                bms.cell = 3.84                             # the charge ends
+                t += 10.0
+                mgr.tick(now=t)
+                self.assertFalse(plug.on)
+                released = [tick(2000) for _ in range(3)]
+        for out, inhibit in engaged:
+            self.assertEqual(out, (C, C))
+            self.assertTrue(inhibit)
+        for k, (out, inhibit) in enumerate(released, start=1):
+            self.assertFalse(inhibit)
+            self.assertEqual(out, (C + k * step, C + k * step), released)
+
+
 class Stop(unittest.TestCase):
     def test_stop_switches_off_only_on_system_shutdown_in_auto_modes(self):
         with tempfile.TemporaryDirectory() as tmp:

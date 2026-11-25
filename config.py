@@ -1511,6 +1511,14 @@ class ChargerPlugConfig:
     plug_deadman_s: float = 300.0
     plug_deadman_refresh_s: float = 60.0
 
+    # Armed (Kevin, 2026-11-25, audit N1): a charge already running keeps going
+    # when the robot is armed, so the charger inhibit stays on while it runs;
+    # no charge starts while armed. "Running" = a hold or full charge with
+    # charge current (rest_load_current_a or more) on this many polls while
+    # disarmed. A plug that is on with the lead off the robot is not a charge
+    # and must not hold an armed robot for the 5 min of no_current_after_s.
+    armed_keep_charge_polls: int = 2
+
     min_switch_interval_s: float = 60.0   # automatic ON no sooner than this after a switch
     state_file: str = "charger_state.json"  # under logs/ (survives deploy restarts)
     plug_off_on_system_stop: bool = True  # halt/poweroff: plug off in hold/full
