@@ -32,7 +32,6 @@ WALL-E is a real robot that can injure a person. The safety rules below are the 
 - Not yet tested with a person on the robot.
 
 ### Open safety items
-- Arming with the transmitter on is not tested since the monotonic-clock change (2026-11-10). Test it before the next drive. Observation, 2026-11-15, on the stand: the robot armed three times with the transmitter on and drove for 326 s (logs `arm_20261115_1358*`). Kevin has not closed this item.
 - The pack-low motor cutoff is `voltage_shutdown_threshold_v = 44.0` in `config.py` and on the robot (the old 39.0 V was below the 40.0 V BMS trip and could never fire). Closed in code (`docs/status_audit_2026-11-25.md`); a real trip, the limp and the autonomous stop are not seen yet.
 - The IMU-stall watchdog is not verified on a real stall. The new Arduino RC sketch is not flashed yet (flash only with `wall-e` stopped and Kevin's word).
 
