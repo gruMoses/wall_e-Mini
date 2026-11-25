@@ -142,8 +142,10 @@ then the guards. Kevin accepted that for these bounded cases (2026-11-16).
 - OFF is never delayed. An automatic ON waits 60 s after the last switch.
 - System shutdown (ch5 e-stop halt, main switch off, `poweroff`): plug off
   in `hold` and `full`. A `wall-e` restart (every deploy) leaves the plug
-  alone. A hard power loss of the Pi mid-charge leaves the plug on; the
-  charger then ends the charge itself at 54.6 V.
+  alone. A hard power loss of the Pi mid-charge leaves the plug on in
+  mode `on` only; the charger then ends the charge itself at 54.6 V. In
+  `hold` and `full`, the dead-man timer in the plug ends the charge in 5
+  minutes or less (see "Dead-man timer in the plug").
 
 ## Operating it
 - Phone: main page on port 8080, panel "Charger Plug": HOLD 50 % / CHARGE

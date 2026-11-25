@@ -1,6 +1,6 @@
 # Next session: start here
 
-Updated 2026-11-10: a full audit of the documents against the code is in `docs/status_audit_2026-11-10.md`. Start there. It has the open safety gaps in priority order, the UPS battery incident of 2026-11-08, and the list of stale statements. Kevin's answers that day: the BMS targets in `docs/battery_settings.md` are applied; VESC part A is not applied; the new UPS cells stay; the east-field test plan is still wanted, but not now. This document does not have the 2026-11-08 drive review or the RTK sunset work (refer to `docs/rtk_float_investigation.md`).
+Updated 2026-11-25: the current audit is `docs/status_audit_2026-11-25.md`. Start there. It has the open safety gaps in priority order and the list of stale statements. The older audit, `docs/status_audit_2026-11-10.md`, is history (it has the UPS battery incident of 2026-11-08). Kevin's answers on 2026-11-10: the BMS targets in `docs/battery_settings.md` are applied; VESC part A was applied on 2026-11-11 (commit `886bbb6`, `docs/battery_settings.md`); the new UPS cells stay; the east-field test plan is still wanted, but not now. This document does not have the 2026-11-08 drive review or the RTK sunset work (refer to `docs/rtk_float_investigation.md`).
 
 Updated 2026-11-06 (evening): the VIO runs are DONE (`docs/depthai_upgrade.md`
 section 5: works with the RAW IMU reports, 90.6 deg for a 90 deg turn, 6.79 m

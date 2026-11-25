@@ -337,8 +337,8 @@ the next flash (section 9.1).
   LoRa radio takes about 4.2 mA in receive. The HM6245 is a linear LDO, so
   the 5 V current is about the 3.3 V current. Estimate: 60 mA to 90 mA at
   5 V, with short peaks below about 150 mA.
-- Other devices on bus 1: the UPS HAT (B) INA219 at 0x42 on the robot, and
-  the X1202 MAX17040 gauge at 0x36 on the bench. `i2c-bus-guard.service`
+- Other devices on bus 1: the Geekworm X1202 (go 2026-11-15) is on the robot: its MAX17040
+  gauge is at 0x36. The UPS HAT (B) (INA219 at 0x42) is retired. `i2c-bus-guard.service`
   unlocks a stuck bus (`docs/i2c_bus_guard.md`).
 - The Pi 5 has fixed 1.8 kOhm pull-ups to 3.3 V on GPIO2 and GPIO3. If the
   rover board pulls SDA and SCL up to its own 5 V supply, the lines rest
@@ -347,10 +347,9 @@ the next flash (section 9.1).
 
 ## 9. Safety findings
 
-Status of findings 1, 5, 6 and 7 (2026-11-13): **fixed in code, not
-deployed, not flashed.** The Pi change and the sketch change are on a
-branch, not on `main`. Nothing in this section ran on the robot. The
-deploy order is in section 9.1. Kevin's decisions of 2026-11-13 are in the
+Status of findings 1, 5, 6 and 7 (updated 2026-11-25): **the Pi side is
+fixed, on `main` and on the robot** (`fccfdfe`, `1681f39`, `cf78a73`,
+`903d897`). **The new Arduino sketch is not flashed.** The deploy order is in section 9.1. Kevin's decisions of 2026-11-13 are in the
 code: hold last good (100 ms), held low 0.2 s to clear a latch, CH4 loss
 gives MANUAL armed, CH5 back high is the e-stop, the CRC, and the Model X
 code removed. Later the same day: every FOLLOW_ME exit sets the CH4 latch,

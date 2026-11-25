@@ -1,5 +1,11 @@
 # Status audit, 2026-11-10
 
+> Superseded by `docs/status_audit_2026-11-25.md`. This document is history. Out of date:
+> - Section 1: items 1 to 6 are fixed.
+> - Section 3: the pack-low latch is deployed at 44.0 V (`config.py`).
+> - Section 6: VESC part A was applied on 2026-11-11.
+> - Section 9.6: the pack-low latch is deployed.
+
 This document records an audit of the documents against the code on `main` at commit `ec57850`. It uses Simplified Technical English where practical.
 
 Method: five read-only review agents (safety and arming; follow-me and vision; heading, GPS and waypoint navigation; power and services; the backlog), a Grok check of the settings in `CLAUDE.md` against `config.py`, the full test suite on the Mac, and the live robot after it came back on the network at 10:31.

@@ -204,7 +204,7 @@
     <span class="spec"><b>~1.2&nbsp;m/s</b> <span class="u">top speed</span></span>
     <span class="spec"><b>~30&nbsp;Hz</b> <span class="u">control loop</span></span>
     <span class="spec"><b>13S</b> <span class="u">Li-ion + Daly BMS</span></span>
-    <span class="spec"><b>UPSPlus</b> <span class="u">18650 HAT</span></span>
+    <span class="spec"><b>X1202</b> <span class="u">2-cell Pi power HAT</span></span>
     <span class="spec"><b>RTK&nbsp;GPS</b> <span class="u">waypoint nav</span></span>
     <span class="spec"><b>~580</b> <span class="u">unit tests</span></span>
   </div>
@@ -303,9 +303,9 @@
       <div class="rung"><span class="lvl r">RC</span><div class="body"><b>ch3 arm / ch5 e-stop are authoritative.</b> ch5 latches emergency + shutdown; a &gt;1&nbsp;s RC-stale watchdog disarms. Final gate: not-armed&nbsp;→&nbsp;motors neutral.</div></div>
       <div class="rung"><span class="lvl c">SEE</span><div class="body"><b>Obstacle tiers</b> slow then stop on depth; a <b>person/animal inside 0.8&nbsp;m</b> forces a full stop; stale depth (&gt;0.5&nbsp;s) halts autonomy.</div></div>
       <div class="rung"><span class="lvl">CHG</span><div class="body"><b>Charger inhibit</b> — BMS-detected charging refuses drive commands, debounced (≥2&nbsp;A over consecutive polls) so a regen blip can't false-trip; <b>fail-open</b> after 30&nbsp;s of BLE silence.</div></div>
-      <div class="rung"><span class="lvl">PACK</span><div class="body"><b>BMS FET / pack-low guard</b> — discharge-FET grace at arm, then force-neutral if it stays off; VESC low-voltage watchdog triggers graceful OS shutdown at <b>39&nbsp;V</b> (13S @ 3.0&nbsp;V/cell) held 10&nbsp;s, latched.</div></div>
+      <div class="rung"><span class="lvl">PACK</span><div class="body"><b>BMS FET / pack-low guard</b> — discharge-FET grace at arm, then force-neutral if it stays off; pack-low motor cutoff at <b>44.0&nbsp;V</b> (13S @ 3.38&nbsp;V/cell) held 30&nbsp;s, latched; then a MANUAL limp home at walking pace down to a 42.0&nbsp;V floor (autonomous modes never limp).</div></div>
       <div class="rung"><span class="lvl g">HAND</span><div class="body"><b>Phone deadman</b> — 250&nbsp;ms server-side watchdog, latched e-stop from any client, single-driver lock, speed caps.</div></div>
-      <div class="rung"><span class="lvl g">UPS</span><div class="body"><b>Graceful shutdown chain</b> — UPSPlus HAT keeps the Pi alive through pack cutoff; voltage-keyed AC detection (debounced) with auto-recovery on power return.</div></div>
+      <div class="rung"><span class="lvl g">UPS</span><div class="body"><b>Graceful shutdown chain</b> — Geekworm X1202 (2 cells) keeps the Pi alive through pack cutoff; the <b>walle-power</b> watcher halts the Pi 5&nbsp;s after the input goes off, and the board restarts it when the input returns.</div></div>
     </div>
   </section>
 
@@ -316,15 +316,15 @@
     <div class="grid">
       <div class="card">
         <h3>13S main pack</h3>
-        <p>13-series Li-ion drives both VESCs. VESC STATUS frames carry pack voltage; a sustained-low watchdog at <span class="k">39&nbsp;V</span> triggers a clean shutdown before cells are stressed.</p>
+        <p>13-series Li-ion drives both VESCs. VESC STATUS frames carry pack voltage; a sustained-low cutoff at <span class="k">44.0&nbsp;V</span> (30&nbsp;s) stops the motors, 1&nbsp;V above the BMS trip at the worst-case sag.</p>
       </div>
       <div class="card">
         <h3>Daly BMS<span class="tag">BLE</span></h3>
         <p>Daly SPIM08HP over Bluetooth polls <b>SOC, per-cell voltages, temp &amp; MOSFET status</b> every 8&nbsp;s. Auto-reconnects; failures never block the control loop. Drives charger-inhibit &amp; pack-low logic.</p>
       </div>
       <div class="card green">
-        <h3>UPSPlus HAT<span class="tag">18650</span></h3>
-        <p>18650-backed UPS powers the Pi so main-pack cutoff never yanks power mid-write. Voltage-keyed AC detection + debounce drives the graceful-shutdown countdown, with auto-recovery when power returns.</p>
+        <h3>Geekworm X1202<span class="tag">2 cells</span></h3>
+        <p>The X1202 board with two cells powers the Pi so main-pack cutoff never yanks power mid-write. The <b>walle-power</b> watcher halts the Pi 5&nbsp;s after the input goes off; the board restarts the Pi when the input returns.</p>
       </div>
     </div>
   </section>
