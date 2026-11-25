@@ -112,6 +112,23 @@ Result, by the rule in the plan: PV noise rejected as the cause of losing a fix 
 
 Interpretation: this is the first fix at midday in the record (section 2.2 has none earlier than 3 h before sunset). Every fix needs a long stationary wait (17-65 min on 2026-11-24 and today), and the robot is mostly parked in the evening. That makes slow ambiguity resolution plus sampling bias (cause 2 in the test plan; causes 1 and 2 in section 3: thin correction epochs, L1-only) the leading explanation, and PV noise a weak one. Next: log per-satellite C/N0 and signal ids (GSV) from the rover, and keep a park-and-wait table (time from standstill to fix, at any hour).
 
+### 2.3b Spectrum at the rover antenna (2026-11-25): no GNSS self-jamming; the robot raises the 915 MHz floor
+
+Instrument: TinySA Ultra+ ZS407 (firmware 1.4-200) on a Raspberry Pi 3B `tinysa` (Wi-Fi WHITE ROCK ROAD, 192.168.84.139, user `tiny`, key login from the Mac). Tool `/home/tiny/tinysa.py` (`scan START STOP [POINTS] [RBW] --avg N --csv FILE`), sweeps saved in `/home/tiny/sweeps/`. LNA on, ultra auto, spur rejection on: without it the Ultra shows its own spurs at 1602.84 MHz and 1160-1191 MHz. Antenna: a small whip right above the rover's GNSS antenna, mostly clear sky; robot disarmed. The robot was switched off at its main switch for the OFF sweeps (16:42) and back on at 16:47.
+
+| Band (RBW auto, 450 points) | Robot ON (16:40) | Robot OFF (16:42) |
+|---|---|---|
+| 1100-1700 MHz | -110.5 dBm | -110.5 dBm |
+| GPS L1 / E1, 1565-1586 | -124.3 | -124.6 |
+| GLONASS L1, 1595-1610 | -124.7 | -124.8 |
+| BeiDou B1I, 1555-1565 | -124.2 | -124.1 |
+| L5 / E5a, 1164-1190 | -114.9 | -115.1 |
+| 900-930 MHz (LoRa) | -111.5 (again -111.8 at 16:47) | -115.8 |
+
+No point more than 6 dB above the floor in any GNSS band, robot on or off. The L1 floor is about -171 dBm/Hz (about 47 kHz RBW), within about 3 dB of thermal noise, so the robot does not raise the GNSS noise at the antenna by more than about 1 dB. Strong self-jamming is ruled out as the cause of float (weaker effects stay possible; the rover's own C/N0 would show them).
+
+In 900-930 MHz the robot ON adds narrow carriers at 904.0, 916.0 and 928.1 MHz (about -90 dBm, a comb about 12.03 MHz apart) and raises the floor by about 4 dB. They are gone with the robot off and back after it restarted. The base's LoRa is at 915.01 MHz (a burst caught at 914.9 MHz, -96 dBm, with the robot off). So the robot's own electronics take some margin off its correction link. That fits the about 10 % late corrections at the parking spot (section 2.3a) and makes the link a stronger suspect than the GNSS band. Source not isolated yet (candidates: Pi 5, OAK USB, VESCs, X1202 / buck converters, Arduino, BMS radio).
+
 ### 2.4 Listener results (2026-11-12)
 
 The receive-only listener of option 2 is built: Heltec WiFi LoRa 32 V3,
