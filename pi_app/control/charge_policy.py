@@ -48,6 +48,10 @@ that is on with the robot free to drive. Anything else goes off at the arm:
 a plug that is on with no current (the lead is not on the robot), a
 dark-BMS wake or rescue pulse (no current reading), a plug switched on from
 the Kasa app while armed, a running charge whose plug term has run out.
+Once a charge is decided OFF while the robot is armed, it is over: it stays
+OFF (also after a disarm) until the plug is seen off, so a failed OFF can
+never make it count again; the inhibit still follows the plug while it
+reads on.
 
 BMS dark (no fresh reading): the plug goes off after ``soc_unknown_off_s``.
 Then, only while the VESCs give an independent pack voltage and temperature
@@ -127,6 +131,10 @@ class _Session:
     start_tmax: Optional[float] = None
     start_cell_v: Optional[float] = None    # first cell voltage under charge current
     charge_polls: int = 0                   # polls with charge current while disarmed
+    # Decided OFF while the robot was armed: the charge is over until the plug
+    # is seen off (the session ends), whatever the plug term says later. A
+    # failed OFF can then never re-qualify it.
+    finished: bool = False
 
 
 def _num(x: Any, lo: float, hi: float) -> Optional[float]:
@@ -219,7 +227,8 @@ class ChargePolicy:
             t = self._session.last_t if now is None else now
             self._session = _Session(kind=self._kind_for_mode(), t0=t, last_t=t,
                                      start_tmax=self._session.start_tmax,
-                                     charge_polls=self._session.charge_polls)
+                                     charge_polls=self._session.charge_polls,
+                                     finished=self._session.finished)
 
     def clear_fault(self) -> bool:
         had = self.fault is not None
@@ -378,6 +387,11 @@ class ChargePolicy:
         want, reason, phase, full_completed = self._decide_mode(
             inp, now, fresh, on, rested, soc, v, a, cmin, cmax, cell_mid, alerts)
         running = self._charge_running()
+        if inp.armed and want is False and self._session is not None:
+            # Over for this arm: a failed OFF must not let the next poll's
+            # plug term keep it again or re-arm the countdown (Grok re-review
+            # of 57bbfc1). The inhibit still follows the plug while it reads on.
+            self._session.finished = True
         if inp.armed and running and inp.plug_inhibit and want is not False:
             reason = "robot armed, charge already running (no drive until it ends): " + reason
 
@@ -416,6 +430,9 @@ class ChargePolicy:
             return False, f"FAULT: {self.fault['text']}", "fault", False
         if mode == "on":
             return True, "mode on (manual)", "manual", False
+        if self._session is not None and self._session.finished:
+            return False, "charge stopped while the robot was armed: waiting for the plug to go off", \
+                ("armed" if inp.armed else "stopping"), False
         if inp.armed and not (self._charge_running() and inp.plug_inhibit):
             # No charge starts while armed, and a plug that is on without a
             # running charge goes off: lead off the robot, charger not started
@@ -463,7 +480,8 @@ class ChargePolicy:
                 if self._session is not None:
                     self._session = _Session(kind="hold", t0=now, last_t=now,
                                              start_tmax=self._session.start_tmax,
-                                             charge_polls=self._session.charge_polls)
+                                             charge_polls=self._session.charge_polls,
+                                             finished=self._session.finished)
             else:
                 return self._decide_full(inp, now, on, rested, soc, v, a, cmax, cell_mid, alerts)
         return self._decide_hold(now, on, rested, v, a, cmin, cell_mid, alerts) + (False,)

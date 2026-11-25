@@ -354,6 +354,13 @@ class ChargeManager:
         logger.warning("Charger plug %s: %s", "ON" if on else "OFF", reason)
         return True
 
+    def _deadman_times(self) -> "tuple[float, float]":
+        """(countdown s, refresh s): one source for the plug's countdown and
+        for the inhibit term that must outlast it."""
+        secs = float(getattr(self._cfg, "plug_deadman_s", 0.0) or 0.0)
+        refresh = float(getattr(self._cfg, "plug_deadman_refresh_s", 60.0))
+        return secs, refresh
+
     def _service_deadman(self, plug_on: Optional[bool], mode: str, now: float,
                          want_on: Optional[bool] = None) -> None:
         """Keep the plug's own off-countdown armed while it is on in hold/full;
@@ -361,13 +368,12 @@ class ChargeManager:
         Not re-armed while the policy wants the plug off: when the OFF switch
         failed, the countdown already running must end the charge."""
         arm = getattr(self._plug, "arm_off_timer", None)
-        secs = float(getattr(self._cfg, "plug_deadman_s", 0.0) or 0.0)
+        secs, refresh = self._deadman_times()
         if not callable(arm) or secs <= 0.0:
             return
         if plug_on and mode in ("hold", "full"):
             if want_on is False:
                 return
-            refresh = float(getattr(self._cfg, "plug_deadman_refresh_s", 60.0))
             if (self._deadman_last_t is None or self._deadman_fails
                     or now - self._deadman_last_t >= refresh):
                 try:
@@ -405,16 +411,17 @@ class ChargeManager:
         open like the BMS term: a plug outage (8.4 h on 2026-11-24) must not
         hold the robot for hours.
         """
-        cfg = self._cfg
-        hold_s = max(float(getattr(cfg, "plug_deadman_s", 0.0) or 0.0)
-                     + float(getattr(cfg, "plug_deadman_refresh_s", 0.0) or 0.0),
-                     3.0 * float(getattr(cfg, "poll_s", 10.0)))
+        secs, refresh = self._deadman_times()
+        hold_s = max(secs + refresh, 3.0 * float(getattr(self._cfg, "poll_s", 10.0)))
+        if self._plug_hold_until is not None and now >= self._plug_hold_until:
+            self._plug_hold_until = None        # run out: None means "not holding"
         if plug_err is None:
+            # A charge the policy finished while armed still holds the robot
+            # while the plug reads on (safe side); the policy keeps it OFF.
             self._plug_hold_until = now + hold_s if (plug_on and charge_running) else None
         elif (charge_running and not self._prev_charge_running
               and self._plug_hold_until is None):
-            # Seeded once; a hold that has run out is never set again
-            # without an answer from the plug.
+            # Seeded on the edge only; failed reads never extend a hold.
             self._plug_hold_until = now + hold_s
         self._prev_charge_running = bool(charge_running)
 

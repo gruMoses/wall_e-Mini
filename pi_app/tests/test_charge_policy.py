@@ -906,6 +906,33 @@ class ArmedDuringACharge(unittest.TestCase):
         self.assertEqual(d.phase, "armed")
         self.assertNotIn("robot armed, charge already running", d.reason)
 
+    def test_an_off_decided_while_armed_finishes_the_charge_until_the_plug_is_seen_off(self):
+        """Grok re-review of 57bbfc1: after an OFF decided while armed, a plug
+        that still reads on (failed OFF) and a plug term that holds again
+        never re-qualify the charge, also after a disarm."""
+        p, t = self.running_hold()
+        d = p.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True, held=False), t + 10)
+        self.assertIs(d.want_on, False)                         # the term is not there: stop
+        for k in range(2, 5):                                   # the plug still reads on, the term holds
+            d = p.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True, held=True), t + 10 * k)
+            self.assertIs(d.want_on, False, k)
+            self.assertEqual(d.phase, "armed")
+            self.assertTrue(d.charge_running)                   # so the manager keeps the robot held
+        d = p.decide(inp(cell=3.73, a=3.6, plug_on=True), t + 50)      # disarmed, still on
+        self.assertIs(d.want_on, False)
+        self.assertEqual(d.phase, "stopping")
+        d = p.decide(inp(cell=3.73, a=3.6), t + 60)             # seen off: the session is over
+        self.assertIsNone(d.info["session"])
+        self.assertIs(p.decide(inp(cell=3.69), REST + 10 + 1800).want_on, True)   # the next start, as before
+
+    def test_a_normal_stop_while_armed_is_not_undone_by_a_failed_off(self):
+        p, t = self.running_hold()
+        d = p.decide(inp(cell=3.84, a=3.6, plug_on=True, armed=True, held=True), t + 10)
+        self.assertIn("top of the band", d.reason)
+        d = p.decide(inp(cell=3.80, a=3.6, plug_on=True, armed=True, held=True), t + 20)
+        self.assertIs(d.want_on, False)                         # back under the ceiling: still over
+        self.assertIn("waiting for the plug to go off", d.reason)
+
     def running_full(self, cell=4.05):
         p = settled("full")
         self.assertIs(p.decide(inp(cell=3.90), REST).want_on, True)

@@ -589,6 +589,86 @@ class ArmedChargeInhibit(unittest.TestCase):
             mgr.tick(now=t + 300.0)
             self.assertFalse(mgr.holds_plug_on(t + 300.0))
 
+    def test_a_failed_off_after_the_term_ran_out_never_requalifies_the_charge(self):
+        """Grok re-review of 57bbfc1 (must-fix): the term runs out with the
+        plug silent, the plug answers "on" again and the OFF fails. The hold
+        written on that poll keeps the robot held (the plug is on) but must
+        not keep the charge or re-arm the countdown: it stays OFF until the
+        plug is seen off. Run well past 360 s."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "full")      # term until 20 + 360
+            mgr.note_armed(True)
+            plug.fail_get = True
+            for k in range(1, 37):                                     # silent plug, 30 .. 380 s
+                st = mgr.tick(now=t + 10.0 * k)
+            self.assertFalse(mgr.holds_plug_on(380.0))
+            self.assertIs(st["want_on"], False)                        # the term ran out: stop
+            plug.fail_get = False
+            plug.fail_set = True                                       # the plug is still on, OFF fails
+            arms0 = plug.arms
+            for k in range(1, 90):                                     # 390 .. 1270 s
+                now = 380.0 + 10.0 * k
+                st = mgr.tick(now=now)
+                self.assertTrue(plug.on, now)
+                self.assertIs(st["want_on"], False, now)               # never kept again
+                self.assertTrue(mgr.holds_plug_on(now), now)           # powered: the robot stays held
+            self.assertEqual(plug.arms, arms0)                         # the countdown never pushed out
+            self.assertIn("waiting for the plug to go off", st["reason"])
+            plug.fail_set = False
+            mgr.tick(now=1280.0)
+            self.assertFalse(plug.on)
+            self.assertFalse(mgr.holds_plug_on(1280.0))
+            st = mgr.tick(now=1290.0)                                  # seen off: the session is over
+            self.assertIsNone(st["session"])
+            self.assertEqual(st["phase"], "armed")                     # and no new charge while armed
+
+    def test_a_running_edge_after_an_expired_term_seeds_it_again(self):
+        """Grok re-review should-fix 2: a hold that ran out on failed reads
+        must not block the seed on a later false-to-true edge."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, _, _ = make(tmp, state={"mode": "full"})
+            bms.cell, bms.spread = 4.10, 8.0
+            mgr.tick(now=0.0)
+            plug.fail_get = True
+            bms.a = 1.5
+            mgr.tick(now=10.0)
+            mgr.tick(now=20.0)                                         # seeded, until 380
+            for t in range(30, 400, 10):
+                mgr.tick(now=float(t))
+            self.assertFalse(mgr.holds_plug_on(390.0))
+            mgr.set_mode("on")                                         # manual: not a running charge
+            mgr.tick(now=400.0)
+            self.assertFalse(mgr.holds_plug_on(400.0))
+            mgr.set_mode("full")                                       # running again: the edge
+            mgr.tick(now=410.0)
+            self.assertTrue(mgr.holds_plug_on(410.0))
+            self.assertTrue(mgr.holds_plug_on(769.0))
+            self.assertFalse(mgr.holds_plug_on(770.0))
+
+    def test_the_term_and_the_countdown_use_one_refresh_default(self):
+        """Grok re-review should-fix 3: a config without plug_deadman_refresh_s
+        gives 60 s to both, so the term still outlasts the countdown."""
+        class NoRefresh:
+            def __init__(self, cfg):
+                self._c = cfg
+
+            def __getattr__(self, name):
+                if name == "plug_deadman_refresh_s":
+                    raise AttributeError(name)
+                return getattr(self._c, name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "full")      # last poll at 20
+            mgr._cfg = NoRefresh(mgr._cfg)
+            mgr.tick(now=30.0)
+            self.assertTrue(mgr.holds_plug_on(30.0 + 359.0))
+            self.assertFalse(mgr.holds_plug_on(30.0 + 360.0))          # 300 + 60, not 300 + 0
+            arms0 = plug.arms
+            mgr.tick(now=59.0)
+            self.assertEqual(plug.arms, arms0)
+            mgr.tick(now=60.0)                                         # re-armed after 60 s
+            self.assertEqual(plug.arms, arms0 + 1)
+
     def test_charger_inhibit_switched_off_in_config_stops_the_charge_at_the_arm(self):
         with tempfile.TemporaryDirectory() as tmp:
             mgr, bms, plug, _, _ = make(tmp, state={"mode": "full"}, inhibit=False)

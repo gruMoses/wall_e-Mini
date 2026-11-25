@@ -151,6 +151,10 @@ The rules:
   while the robot was disarmed.
 - The charge is kept only while the plug source holds the robot. A charger
   is never left on for an armed robot that is free to drive.
+- Once a charge is stopped while the robot is armed, it is over. If the plug
+  does not switch off, the manager keeps sending OFF, does not arm the
+  countdown again, and the robot stays held while the plug reads on. This
+  holds also after a disarm, until the plug is seen off.
 - Anything else goes off at the arm, as before. That is a plug that is on
   with no current (the lead is not on the robot), a charger that has not
   started yet, a wake pulse or a rescue in the dark, a plug that the Kasa
