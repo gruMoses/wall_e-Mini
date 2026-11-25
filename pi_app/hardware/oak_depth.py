@@ -1443,6 +1443,11 @@ class OakDepthReader:
         # device-absent wait (supervisor ticking) from a worker thread that
         # is stuck inside depthai (nothing ticking, pipeline_running stale).
         self._last_supervisor_ts = 0.0
+        # Camera absent at boot (2026-11-25, see _await_first_device): set by
+        # start(wait_for_device=True); _awaiting_device is True while the
+        # worker polls USB for a camera that has never been seen.
+        self._wait_for_device_at_start = False
+        self._awaiting_device = False
         self._last_rgb_poll_ts = 0.0
         self._last_pipeline_error_msg = ""
         self._last_depth_error_msg = ""
@@ -1464,10 +1469,19 @@ class OakDepthReader:
         except Exception:
             return False
 
-    def start(self) -> None:
+    def start(self, wait_for_device: bool = False) -> None:
+        """Start the worker thread.
+
+        ``wait_for_device`` True: the camera was not on USB at startup. The
+        worker first polls USB (``_await_first_device``) and opens the
+        device session only once the camera enumerates. Until then every
+        reading stays stale, as for a camera that died mid-run. False (the
+        camera was found): the session opens at once, as before.
+        """
         with self._lock:
             if self._thread is not None:
                 return
+            self._wait_for_device_at_start = bool(wait_for_device)
         self._stop_event.clear()
         thread = threading.Thread(
             target=self._run_pipeline, name="OakDepthReader", daemon=True
@@ -1900,6 +1914,7 @@ class OakDepthReader:
             imu_watchdog = bool(self._imu_watchdog_enabled)
             imu_sample_ts = self._imu_state.timestamp
             supervisor_ts = self._last_supervisor_ts
+            awaiting_device = bool(self._awaiting_device)
             thread = self._thread
             vision_iter_samples = list(self._vision_iter_samples)
             hand_detect_samples = list(self._hand_detect_samples)
@@ -1967,6 +1982,8 @@ class OakDepthReader:
         return {
             "pipeline_running": running,
             "connected": connected,
+            # True while a camera absent at startup has not been seen yet.
+            "awaiting_device": awaiting_device,
             "reconnect_count": reconnect_count,
             "last_disconnect_ts": last_disconnect_ts if last_disconnect_ts > 0.0 else None,
             "last_disconnect_age_s": round(last_disconnect_age_s, 3) if last_disconnect_age_s is not None else None,
@@ -2130,6 +2147,85 @@ class OakDepthReader:
     # 10 s polling for the device to re-enumerate. The final value repeats.
     _RECONNECT_BACKOFF_S = (2.0, 5.0, 10.0)
 
+    # Camera absent at startup (_await_first_device): USB poll schedule in
+    # seconds, the final value repeats; and the interval of the reminder
+    # line while the camera is still missing.
+    _BOOT_WAIT_BACKOFF_S = (1.0, 2.0, 5.0)
+    _BOOT_WAIT_REMIND_S = 600.0
+
+    def _await_first_device(self) -> bool:
+        """Wait for a camera that was not on USB when the service started.
+
+        Audit 2026-11-25 section 2 item 4, Kevin's decision 2026-11-25. The
+        reader runs without the camera, so every consumer sees what it sees
+        when a camera dies mid-run: depth stale (MANUAL at the stale-depth
+        floor, the autonomous modes at 0), the detection stream stale
+        (FOLLOW_ME and WAYPOINT_NAV refused), no IMU samples (heading
+        stale). The device session opens here once the camera enumerates,
+        with no service restart.
+
+        Polls ``detect()`` (USB enumeration) only. No ``dai.Device`` is
+        opened against an absent camera, so a failed open and its depthai
+        teardown are never run in a loop. The supervisor heartbeat is
+        stamped on every poll, so the hang monitor sees a live wait and
+        not a hung worker (vision_hang_s). Journal: one line at the first
+        miss, one every ``_BOOT_WAIT_REMIND_S`` while it lasts, one when the
+        camera is found.
+
+        Returns True when the camera is seen, False when ``stop()`` ends the
+        wait.
+        """
+        t0 = time.monotonic()
+        polls = 0
+        missed_logged = False
+        next_remind = t0 + float(self._BOOT_WAIT_REMIND_S)
+        steady_s = float(self._BOOT_WAIT_BACKOFF_S[-1])
+        with self._lock:
+            self._awaiting_device = True
+        try:
+            while not self._stop_event.is_set():
+                with self._lock:
+                    self._last_supervisor_ts = time.monotonic()
+                try:
+                    found = bool(self.detect())
+                except Exception:
+                    found = False
+                polls += 1
+                now = time.monotonic()
+                if found:
+                    logger.warning(
+                        "OAK-D found on USB %.0f s after start (%d polls): "
+                        "opening the device session",
+                        now - t0, polls,
+                    )
+                    return True
+                if not missed_logged:
+                    missed_logged = True
+                    logger.warning(
+                        "OAK-D not on USB at startup: polling every %g s, no "
+                        "device open until it enumerates. Depth, detections and "
+                        "IMU stay stale until then (MANUAL at the stale-depth "
+                        "floor, FOLLOW_ME and WAYPOINT_NAV refused)",
+                        steady_s,
+                    )
+                elif now >= next_remind:
+                    next_remind = now + float(self._BOOT_WAIT_REMIND_S)
+                    logger.warning(
+                        "OAK-D still not on USB %.0f min after start; polling "
+                        "every %g s",
+                        (now - t0) / 60.0, steady_s,
+                    )
+                backoff_s = self._BOOT_WAIT_BACKOFF_S[
+                    min(polls - 1, len(self._BOOT_WAIT_BACKOFF_S) - 1)
+                ]
+                if self._stop_event.wait(timeout=backoff_s):
+                    return False
+            return False
+        finally:
+            with self._lock:
+                self._awaiting_device = False
+                self._last_supervisor_ts = time.monotonic()
+
     def _run_pipeline(self) -> None:
         """Supervisor loop: owns one device session at a time and re-establishes
         it after a USB disconnect / re-enumeration without a service restart.
@@ -2145,6 +2241,11 @@ class OakDepthReader:
         # supervisor loop (a wedged import) would otherwise be invisible.
         with self._lock:
             self._last_supervisor_ts = time.monotonic()
+            wait_first = self._wait_for_device_at_start
+        # Camera absent at startup: no session is attempted until it
+        # enumerates. stop() during the wait ends the thread here.
+        if wait_first and not self._await_first_device():
+            return
         try:
             import depthai as dai
             import numpy as np

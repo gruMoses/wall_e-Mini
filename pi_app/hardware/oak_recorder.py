@@ -631,6 +631,9 @@ class OakRecorder:
         self._latest_depth_frame: np.ndarray | None = None
 
         self._recording_queues: dict | None = None
+        # start(wait_for_queues=False): the camera was absent at startup, so
+        # update() fetches the queues once the device session opens.
+        self._lazy_queue_fetch = False
 
         # Always-on preview frame for the web viewer (rate-limited to avoid excessive CPU)
         self._latest_annotated_jpeg: bytes | None = None
@@ -692,8 +695,14 @@ class OakRecorder:
 
     # -- Lifecycle -----------------------------------------------------------
 
-    def start(self, oak_reader) -> None:
-        """Begin monitoring. Call after oak_reader.start()."""
+    def start(self, oak_reader, wait_for_queues: bool = True) -> None:
+        """Begin monitoring. Call after oak_reader.start().
+
+        ``wait_for_queues`` False (the camera was absent at startup,
+        2026-11-25): do not block startup up to 15 s for a device that is
+        not there; update() takes the queues on the first tick after the
+        device session opens.
+        """
         # Kept so annotation can source the SAME per-unit intrinsics the
         # obstacle corridor runs on. Deriving geometry separately is how the
         # overlay ended up drawing 81 deg while the corridor used 70 deg.
@@ -711,6 +720,10 @@ class OakRecorder:
                 target=self._h265_writer_loop, name="OakH265Writer", daemon=True
             )
             self._h265_thread.start()
+
+        if not wait_for_queues:
+            self._lazy_queue_fetch = True
+            return
 
         # Get recording queues from the reader (blocks until device ready)
         self._recording_queues = oak_reader.get_recording_queues(timeout_s=15.0)
@@ -898,7 +911,11 @@ class OakRecorder:
 
     def _poll_device_queues(self) -> None:
         if self._recording_queues is None:
-            return
+            if not self._lazy_queue_fetch:
+                return
+            self._fetch_queues_now()
+            if self._recording_queues is None:
+                return
 
         # H.265 encoded packets
         h265_q = self._recording_queues.get("h265")
@@ -916,6 +933,25 @@ class OakRecorder:
                 pass
 
         # (RGB and depth previews are now handled directly in update())
+
+    def _fetch_queues_now(self) -> None:
+        """Take the recording queues if the device session is open (no wait).
+
+        Only for start(wait_for_queues=False). Stops trying after the first
+        success, like the blocking fetch at start() it replaces.
+        """
+        reader = getattr(self, "_oak_reader", None)
+        if reader is None:
+            return
+        try:
+            queues = reader.get_recording_queues(timeout_s=0.0)
+        except Exception:
+            queues = None
+        if not queues:
+            return
+        self._recording_queues = queues
+        self._lazy_queue_fetch = False
+        logger.warning("OAK recorder connected to device queues (camera found after start)")
 
     def _live_intrinsics(self, frame) -> tuple | None:
         """(fx, fy, cx, cy) from the device for this frame's size, or None.

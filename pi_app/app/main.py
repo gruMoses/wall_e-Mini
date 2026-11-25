@@ -53,6 +53,7 @@ try:
     from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, NoSignalRun, restart_permitted
     from pi_app.app.imu_stall import ImuStallMonitor, imu_status_text
     from pi_app.app.phone_override import fresh_override_bytes
+    from pi_app.app.oak_startup import start_oak_reader
     from pi_app.control.netting_mute import near_share, detection_drops_mute
     from pi_app.control.person_stop_hold import NeutralTimer, rc_link_live
     from config import config
@@ -90,6 +91,7 @@ except ModuleNotFoundError:
     from pi_app.app.vision_hang import VisionHangMonitor, RestartBudget, NoSignalRun, restart_permitted  # type: ignore
     from pi_app.app.imu_stall import ImuStallMonitor, imu_status_text  # type: ignore
     from pi_app.app.phone_override import fresh_override_bytes  # type: ignore
+    from pi_app.app.oak_startup import start_oak_reader  # type: ignore
     from pi_app.control.netting_mute import near_share, detection_drops_mute  # type: ignore
     from pi_app.control.person_stop_hold import NeutralTimer, rc_link_live  # type: ignore
     from config import config  # type: ignore
@@ -197,16 +199,23 @@ def run() -> int:
     follow_me_ctrl = None
     gesture_ctrl = None
     pose_worker = None
+    oak_present_at_boot = False
     if config.obstacle_avoidance.enabled or config.follow_me.enabled:
         try:
-            if OakDepthReader.detect():
-                rec_cfg = (
-                    config.oak_recording
-                    if (config.oak_recording.enabled and not disable_recording)
-                    else None
-                )
-                gesture_cfg = config.gesture if config.gesture.enabled else None
-                oak_reader = OakDepthReader(
+            rec_cfg = (
+                config.oak_recording
+                if (config.oak_recording.enabled and not disable_recording)
+                else None
+            )
+            gesture_cfg = config.gesture if config.gesture.enabled else None
+            # Built and started with or without the camera (audit 2026-11-25,
+            # section 2 item 4; Kevin 2026-11-25). Absent at boot, the reader
+            # waits for it: depth, detections and IMU stay stale, so MANUAL
+            # gets the stale-depth floor and FOLLOW_ME / WAYPOINT_NAV are
+            # refused, as for a camera that dies mid-run. Everything below
+            # comes up when the camera connects (pi_app/app/oak_startup.py).
+            oak_reader, oak_present_at_boot = start_oak_reader(
+                lambda: OakDepthReader(
                     config.obstacle_avoidance, config.follow_me,
                     recording_config=rec_cfg,
                     gesture_config=gesture_cfg,
@@ -214,38 +223,38 @@ def run() -> int:
                     imu_packet_mode=str(getattr(config.imu_steering, "oak_imu_packet_mode", "latest")),
                     imu_max_packets_per_poll=int(getattr(config.imu_steering, "oak_imu_max_packets_per_poll", 4)),
                     detection_config=getattr(config, "oak_detection", None),
+                ),
+                OakDepthReader.detect,
+            )
+            if config.obstacle_avoidance.enabled:
+                obstacle_ctrl = ObstacleAvoidanceController(config.obstacle_avoidance)
+                print("  Obstacle avoidance enabled")
+            if config.follow_me.enabled:
+                follow_me_ctrl = FollowMeController(config.follow_me)
+                print("  Follow Me mode available (Ch4 switch to activate)")
+            if gesture_cfg is not None:
+                gesture_ctrl = GestureStateMachine(
+                    activation_sequence=gesture_cfg.activation_sequence,
+                    stop_gesture=gesture_cfg.stop_gesture,
+                    hold_frames=gesture_cfg.hold_frames,
+                    sequence_timeout_s=gesture_cfg.sequence_timeout_s,
+                    cooldown_s=gesture_cfg.cooldown_s,
                 )
-                oak_reader.start()
-                print("OAK-D Lite detected and started")
-                if config.obstacle_avoidance.enabled:
-                    obstacle_ctrl = ObstacleAvoidanceController(config.obstacle_avoidance)
-                    print("  Obstacle avoidance enabled")
-                if config.follow_me.enabled:
-                    follow_me_ctrl = FollowMeController(config.follow_me)
-                    print("  Follow Me mode available (Ch4 switch to activate)")
-                if gesture_cfg is not None:
-                    gesture_ctrl = GestureStateMachine(
-                        activation_sequence=gesture_cfg.activation_sequence,
-                        stop_gesture=gesture_cfg.stop_gesture,
-                        hold_frames=gesture_cfg.hold_frames,
-                        sequence_timeout_s=gesture_cfg.sequence_timeout_s,
-                        cooldown_s=gesture_cfg.cooldown_s,
+                print("  Hand-gesture Follow Me activation enabled (3-4-3 / palm stop)")
+            if rec_cfg is not None:
+                try:
+                    oak_recorder = OakRecorder(
+                        config.oak_recording,
+                        roi_vertical_offset_pct=getattr(config.obstacle_avoidance, "roi_vertical_offset_pct", 0.0),
+                        obstacle_config=config.obstacle_avoidance,
                     )
-                    print("  Hand-gesture Follow Me activation enabled (3-4-3 / palm stop)")
-                if rec_cfg is not None:
-                    try:
-                        oak_recorder = OakRecorder(
-                            config.oak_recording,
-                            roi_vertical_offset_pct=getattr(config.obstacle_avoidance, "roi_vertical_offset_pct", 0.0),
-                            obstacle_config=config.obstacle_avoidance,
-                        )
-                        oak_recorder.start(oak_reader)
-                        print("  Activity-triggered recording enabled")
-                    except Exception as e:
-                        print(f"  Recording init failed: {e} — continuing without recording")
-                        oak_recorder = None
-            else:
-                print("OAK-D Lite not detected — obstacle avoidance / Follow Me disabled")
+                    # Absent at boot: no 15 s wait for the device; the recorder
+                    # takes its queues once the session opens.
+                    oak_recorder.start(oak_reader, wait_for_queues=oak_present_at_boot)
+                    print("  Activity-triggered recording enabled")
+                except Exception as e:
+                    print(f"  Recording init failed: {e} — continuing without recording")
+                    oak_recorder = None
         except Exception as e:
             print(f"OAK-D Lite initialization failed: {e}")
             print("  Continuing without depth camera")
@@ -340,7 +349,16 @@ def run() -> int:
                 # Only claim the source when the IMU actually came up. The
                 # compensator swallows init failures, so this line used to print
                 # "enabled (source: oak_d)" over a dead IMU.
-                if imu_compensator.get_status().is_available:
+                if imu_compensator.get_status().is_available and (
+                    imu_source_used == "oak_d" and not oak_present_at_boot
+                ):
+                    # The 3 s gyro calibration above saw no samples: bias
+                    # starts at 0 and the stationary tracker learns it.
+                    print(
+                        "  IMU steering: OAK-D IMU waiting for the camera, heading "
+                        "stale until it connects (no boot gyro calibration)"
+                    )
+                elif imu_compensator.get_status().is_available:
                     print(f"  IMU steering compensation enabled (source: {imu_source_used})")
                 else:
                     print(
