@@ -1300,7 +1300,7 @@ button{cursor:pointer;font-family:inherit;}
 .appnav{display:flex;gap:6px;padding:5px 14px 0;flex-shrink:0;}
 .appnav a{
   flex:1;text-align:center;text-decoration:none;
-  font:800 10px/1 inherit;letter-spacing:.12em;color:var(--t2);
+  font-weight:800;font-size:10px;line-height:1;letter-spacing:.12em;color:var(--t2);
   border:1px solid var(--bd);border-radius:var(--r-chip);
   background:var(--s2);padding:7px 4px;
 }
@@ -2053,7 +2053,8 @@ function renderAll() {
   var bc = document.getElementById('c-batt');
   if (s.battery_v != null) {
     bc.textContent = s.battery_v.toFixed(1) + ' V' + (window.__battPct || '');
-    bc.className   = 'chip' + (s.battery_v < 21.0 ? ' warn' : '');
+    /* 13S pack: warn below 3.5 V per cell (45.5 V); the motor cutoff is 44.0 V. */
+    bc.className   = 'chip' + (s.battery_v < 45.5 ? ' warn' : '');
   } else {
     bc.textContent = 'BATT —'; bc.className = 'chip';
   }
