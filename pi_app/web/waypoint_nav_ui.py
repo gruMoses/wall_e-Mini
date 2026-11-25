@@ -61,6 +61,8 @@ _NAV_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/drive/manifest.json">
+<meta name="theme-color" content="#080a0f">
 <title>WALL-E Mini — Navigate</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -396,6 +398,7 @@ _NAV_HTML = r"""<!DOCTYPE html>
 <!-- Mode Toolbar -->
 <div class="toolbar">
   <a href="/" class="back-btn" title="Dashboard">&larr;</a>
+  <a href="/drive" class="back-btn" title="Drive">&#9654;</a>
   <button class="back-btn" title="Help / Shortcuts" onclick="toggleHelp(true)">?</button>
   <button class="mode-btn active" data-mode="navigate" onclick="setMode('navigate')">
     <svg viewBox="0 0 24 24"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/></svg>

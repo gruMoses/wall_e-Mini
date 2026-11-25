@@ -1087,6 +1087,7 @@ _MANIFEST_JSON = json.dumps({
     "short_name": "W-E Drive",
     "description": "Fail-safe phone controller for WALL-E Mini",
     "start_url": "/drive",
+    "scope": "/",
     "display": "standalone",
     "orientation": "portrait",
     "theme_color": "#080a0f",
@@ -1296,6 +1297,14 @@ button{cursor:pointer;font-family:inherit;}
   border-bottom:1px solid var(--bd);
   padding:10px 14px;flex-shrink:0;
 }
+.appnav{display:flex;gap:6px;padding:5px 14px 0;flex-shrink:0;}
+.appnav a{
+  flex:1;text-align:center;text-decoration:none;
+  font:800 10px/1 inherit;letter-spacing:.12em;color:var(--t2);
+  border:1px solid var(--bd);border-radius:var(--r-chip);
+  background:var(--s2);padding:7px 4px;
+}
+.appnav a:active{color:var(--text);border-color:var(--blue-bd);}
 .hud-r{display:flex;align-items:center;gap:7px;}
 .hud-r+.hud-r{margin-top:9px;}
 .sp{flex:1;}
@@ -1543,6 +1552,13 @@ button{cursor:pointer;font-family:inherit;}
   <span id="a2hs-msg">Tap <b>&#8679; Share</b> &rarr; <b>Add to Home Screen</b> for full-screen mode</span>
   <button id="a2hs-dismiss">&#x2715;</button>
 </div>
+
+<!-- App navigation (links only; leaving /drive ends the session as before) -->
+<nav class="appnav" id="appnav">
+  <a href="/">HOME</a>
+  <a href="/navigate">NAVIGATE</a>
+  <a href="/map">MAP</a>
+</nav>
 
 <!-- HUD — link status + CAM toggle in header, compact chip rows below -->
 <div class="hud">
@@ -2036,7 +2052,7 @@ function renderAll() {
   /* battery */
   var bc = document.getElementById('c-batt');
   if (s.battery_v != null) {
-    bc.textContent = s.battery_v.toFixed(1) + ' V';
+    bc.textContent = s.battery_v.toFixed(1) + ' V' + (window.__battPct || '');
     bc.className   = 'chip' + (s.battery_v < 21.0 ? ' warn' : '');
   } else {
     bc.textContent = 'BATT —'; bc.className = 'chip';
@@ -2193,6 +2209,34 @@ function updateCamFromStatus(s) {
 
 /* ---- start ---- */
 connect();
+</script>
+<script>
+/* Battery percentage: read-only poll of the dashboard API; never touches the drive loop. */
+(function () {
+  window.__battPct = '';
+  function poll() {
+    try {
+      fetch('/api/charger', {cache: 'no-store'})
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          var t = '';
+          if (d && d.soc_by_voltage != null && isFinite(d.soc_by_voltage)) {
+            t = ' \u00b7 \u2248' + Math.round(d.soc_by_voltage) + '%';
+          } else if (d && d.soc_pct != null && isFinite(d.soc_pct)) {
+            t = ' \u00b7 BMS ' + Math.round(d.soc_pct) + '%';
+          }
+          window.__battPct = t;
+          var bc = document.getElementById('c-batt');
+          if (bc && /V/.test(bc.textContent)) {
+            bc.textContent = bc.textContent.replace(/ \u00b7.*$/, '') + t;
+          }
+        })
+        .catch(function () {});
+    } catch (e) {}
+  }
+  poll();
+  setInterval(poll, 30000);
+})();
 </script>
 </body>
 </html>"""

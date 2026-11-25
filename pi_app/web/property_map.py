@@ -234,6 +234,8 @@ _MAP_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+<link rel="manifest" href="/drive/manifest.json">
+<meta name="theme-color" content="#080a0f">
 <title>WALL-E Mini — Property Map</title>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -349,6 +351,7 @@ body {
 <div id="topbar">
   <div class="topbar-left">
     <a href="/">&larr; Dashboard</a>
+    <a href="/drive">Drive</a>
     <h1>Property Map</h1>
   </div>
   <div class="topbar-right">

@@ -215,6 +215,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="manifest" href="/drive/manifest.json">
+<meta name="theme-color" content="#080a0f">
 <title>WALL-E Mini — OAK-D Viewer</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -348,6 +350,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <header>
   <h1>WALL-E Mini — OAK-D Live</h1>
   <div class="hdr-right">
+    <a href="/drive" class="nav-link">Drive</a>
     <a href="/map" class="nav-link">Map</a>
     <a href="/navigate" class="nav-link">Navigate</a>
     <a href="/calibrate" class="nav-link">Calibrate</a>
