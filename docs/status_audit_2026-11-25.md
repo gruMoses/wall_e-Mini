@@ -6,6 +6,14 @@ Method: one read-only pass. The code on `main` at `eb4a9af` (the last code chang
 
 WARNING: The safety rules in `CLAUDE.md` hold whatever this document says. Ask Kevin if the wheels are blocked before each command that can move them.
 
+## 0. Deployed later on 2026-11-25 (Kevin's decisions, each Grok-reviewed, full suite green)
+
+1. Section 2 item 6, hard-stop turn: FIXED, `574e19c` + `f40bef0`, all modes. Forward stops at once; the turn ramps; no track crosses 126 in one tick. Live 10:25.
+2. Section 2 item 2 / N1, charger with the robot armed: FIXED for a running charge, `9f4b1c4`..`0ae2af1`. A charge running at the arm goes on and holds the robot; tap PLUG OFF to drive. No charge starts while armed (PLUG ON included). Remaining limit (plug off, lead on): `docs/charger_plug.md`. Also fixed: a failed OFF no longer re-arms the plug countdown (that bug was on main). Live 10:30.
+3. Section 2 item 4, OAK missing at boot: FIXED, `a9c6fc2`..`d028d1d`. The reader waits for the camera; MANUAL at the 10 % floor until each camera session's first detection packet, and whenever person detections are stale (more than 1.5 s), even on fresh depth (Kevin). Live 10:35; first packet 4 s after start.
+4. Arming with the transmitter on: closed by Kevin (`abd3732`).
+5. Phone app over Tailscale HTTPS (`docs/phone_app_tailscale.md`), app nav and battery percent `777d754`, `c68c370`. Live 10:40.
+
 ## 1. Summary
 
 1. **Highest open gap: the Arduino still runs the old firmware.** By its code, a channel that loses its pulse keeps its last value. If the receiver loses power or a lead comes off, the Pi sees the last stick, arm and e-stop values with no end. The corrected sketch is in the repo and is not flashed (section 2, item 1).
