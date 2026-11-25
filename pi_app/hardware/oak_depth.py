@@ -2435,6 +2435,11 @@ class OakDepthReader:
                 return False
             if found is None:
                 return None
+            # A poll that returned is a live supervisor (as in the boot
+            # wait); without this the backoff plus this wait (~20 s) came
+            # close to vision_hang_s.
+            with self._lock:
+                self._last_supervisor_ts = time.monotonic()
             if found:
                 return True
             remaining = deadline - time.monotonic()

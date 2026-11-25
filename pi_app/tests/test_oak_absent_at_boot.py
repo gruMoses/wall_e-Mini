@@ -341,6 +341,32 @@ class TestReaderWaitsForAbsentCamera(unittest.TestCase):
         self.assertTrue(_wait_until(lambda: not self.reader._thread.is_alive()))
         self.assertEqual(self.session.opened, [])
 
+    def test_reconnect_wait_keeps_the_heartbeat(self):
+        # Backoff plus this wait came close to vision_hang_s (about 20 s
+        # against 30 s on the robot) because no returned poll stamped it.
+        def slow_detect():
+            time.sleep(0.02)
+            return False
+
+        self.reader.detect = slow_detect
+        self.reader._wait_for_device = types.MethodType(
+            OakDepthReader._wait_for_device, self.reader)
+        with self.reader._lock:
+            self.reader._last_supervisor_ts = time.monotonic()
+        worker = threading.Thread(target=self.reader._wait_for_device, args=(HANG_S * 3,),
+                                  daemon=True)
+        with self.reader._lock:
+            self.reader._thread = worker   # get_health() judges this thread
+        worker.start()
+        time.sleep(HANG_S * 2.2)
+        h = self.reader.get_health()
+        self.assertTrue(worker.is_alive())
+        self.assertFalse(h["vision_hung"], h["vision_worker_age_s"])
+        self.assertLess(h["vision_worker_age_s"], HANG_S)
+        worker.join(timeout=3.0)
+        with self.reader._lock:
+            self.reader._thread = None
+
     def test_reconnect_wait_never_calls_a_slow_but_normal_enumeration_blocked(self):
         # Each detect() has its own bound; the end of timeout_s must not
         # shrink it to nothing and report a 20 ms enumeration as blocked.
@@ -1273,10 +1299,23 @@ class TestHeadingRebase(unittest.TestCase):
         self.assertAlmostEqual(imu.read()["heading_deg"], math.degrees(0.1), places=4)
 
     def test_deferred_bias_commit_rebases_the_heading(self):
-        imu = OakImuReader(self.reader, yaw_rate_source="gyro_y")
+        self._commit_then_step(sign=1.0)
+
+    def test_rebase_with_an_inverted_mount_inverts_the_next_step_once(self):
+        # yaw_axis_sign -1 (camera mounted with +Y up): the first step after
+        # the commit is the cum delta inverted exactly once, never twice.
+        data = self._commit_then_step(sign=-1.0)
+        self.assertAlmostEqual(data["heading_deg"], (-math.degrees(0.05)) % 360.0, places=4)
+        self.assertNotAlmostEqual(data["heading_deg"], math.degrees(0.05), places=2)
+
+    def _commit_then_step(self, sign):
+        imu = OakImuReader(self.reader, yaw_rate_source="gyro_y",
+                           yaw_axis_sign_auto=False)
+        imu.yaw_axis_sign = sign
         imu.calibrate_gyro(duration_s=0.02)
         imu._defer_duration_s = 0.2
         self.assertTrue(imu._bias_uncalibrated)
+        self.assertEqual(imu.yaw_axis_sign, sign)
         cum = 0.0
         statuses = []
         resets0 = imu.get_health()["count_cum_reset"]
@@ -1296,8 +1335,10 @@ class TestHeadingRebase(unittest.TestCase):
         self._sample(cum + 0.05)
         data = imu.read()
         self.assertNotIn(data["integrate_status"], ("uncalibrated", "stale"))
-        self.assertAlmostEqual(data["heading_deg"], math.degrees(0.05), places=4)
-        self.assertEqual(imu.yaw_axis_sign, 1.0)
+        self.assertAlmostEqual(data["heading_deg"],
+                               math.degrees(0.05 * sign) % 360.0, places=4)
+        self.assertEqual(imu.yaw_axis_sign, sign, "the commit leaves the sign alone")
+        return data
 
     def test_commit_drops_a_gps_heading_lock(self):
         from pi_app.control.gps_heading_align import GpsHeadingAligner
