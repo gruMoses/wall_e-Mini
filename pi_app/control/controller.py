@@ -43,6 +43,10 @@ from pi_app.hardware.rtk_gps import GpsReading
 from config import config
 
 RC_STALE_TIMEOUT_S = 1.0
+# Longest tick the hard-stop turn ramp honours (two 30 Hz frames). One late
+# tick (0.5 s at 250 bytes/s) must not put the full pivot on in one step
+# while the person is still inside the stop (Grok review of 94efade).
+HARD_STOP_SLEW_MAX_DT_S = 2.0 / 30.0
 
 
 def _vision_fail_closed() -> dict:
@@ -1419,6 +1423,7 @@ class Controller:
         target_right: int,
         max_accel_delta: float,
         max_decel_delta: float,
+        allow_forward: bool = True,
     ) -> tuple[int, int]:
         """Final-stage output for a hard stop: the forward part stops at
         once, the turn part ramps (Kevin, 2026-11-25; status audit
@@ -1436,13 +1441,16 @@ class Controller:
         neutral, always allowed here). The target of a hard stop has no
         forward part (scale 0, or neutral), so the output is a pivot at
         most, and the pivot reaches its target at the mode's accel rate.
+
+        ``allow_forward`` False (the e-stop): the net forward is held at 0
+        whatever the target, so a forward target cannot pass.
         """
         c = CENTER_OUTPUT_VALUE
         left = Controller._hard_stop_track(prev_left, target_left, max_accel_delta, max_decel_delta)
         right = Controller._hard_stop_track(prev_right, target_right, max_accel_delta, max_decel_delta)
         target_net = (target_left - c) + (target_right - c)
         net = (left - c) + (right - c)
-        hi = max(0, target_net)
+        hi = max(0, target_net) if allow_forward else 0
         lo = min(0, target_net)
         if net > hi:
             excess = net - hi
@@ -3018,9 +3026,12 @@ class Controller:
             mode_for_slew = self._mode
             slewc_enabled = bool(getattr(slewc, "enabled", False))
             hard_stop_threshold = float(getattr(slewc, "hard_stop_scale_threshold", 0.0))
-            hard_stop_active = bool(self._safety_state.emergency_active) or any(
+            emergency_stop = bool(self._safety_state.emergency_active) or any(
                 e is SafetyEvent.EMERGENCY_TRIGGERED for e in events
-            ) or (is_forward_motion and obstacle_scale <= hard_stop_threshold)
+            )
+            hard_stop_active = emergency_stop or (
+                is_forward_motion and obstacle_scale <= hard_stop_threshold
+            )
             slew_bypassed = False
 
             if slewc_enabled:
@@ -3050,9 +3061,17 @@ class Controller:
                     # snap_first_command does not apply here: the turn
                     # ramps on the first command after a re-arm too.
                     # slew_bypassed: the target reached the motors in full
-                    # this tick (nothing ramped).
+                    # this tick (nothing ramped). The ramp step honours at
+                    # most HARD_STOP_SLEW_MAX_DT_S, so a late tick cannot
+                    # put the full pivot on at once. On the e-stop no
+                    # forward passes at all (allow_forward False; update_
+                    # safety disarms on the e-stop, so this is the safe side
+                    # of a state the armed branch does not see in service).
                     accel_bps, decel_bps = self._slew_rates_for_mode(mode_for_slew)
-                    dt_s = max(0.0, mono_now - self._slew_last_update)
+                    dt_s = min(
+                        max(0.0, mono_now - self._slew_last_update),
+                        HARD_STOP_SLEW_MAX_DT_S,
+                    )
                     left, right = self._hard_stop_tracks(
                         self._slew_last_left,
                         self._slew_last_right,
@@ -3060,6 +3079,7 @@ class Controller:
                         right_in,
                         max(0.0, accel_bps * dt_s),
                         max(0.0, decel_bps * dt_s),
+                        allow_forward=not emergency_stop,
                     )
                     slew_bypassed = (left == left_in and right == right_in)
                     self._slew_initialized = True

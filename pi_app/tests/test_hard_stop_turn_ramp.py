@@ -18,12 +18,13 @@ import unittest
 from unittest.mock import patch
 
 from config import ObstacleAvoidanceConfig, FollowMeConfig, config as default_config
-from pi_app.control.controller import Controller, RCInputs
+from pi_app.control.controller import Controller, RCInputs, HARD_STOP_SLEW_MAX_DT_S
 from pi_app.control.follow_me import FollowMeController, PersonDetection
 from pi_app.control.mapping import CENTER_OUTPUT_VALUE as C
 from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
 from pi_app.control.safety import SafetyParams
 from pi_app.control.state import AutonomyCommand
+from pi_app.tests.test_waypoint_nav_heading_guard import _clock, _Rig
 
 SLEW = default_config.slew_limiter
 DT = 0.04  # 25 Hz: integer slew steps at the production rates
@@ -35,6 +36,7 @@ def _step(bps: float) -> int:
 
 MANUAL_STEP = _step(SLEW.manual_accel_bps)
 FOLLOW_STEP = _step(SLEW.follow_me_accel_bps)
+WAYPOINT_STEP = _step(SLEW.waypoint_nav_accel_bps)
 
 
 class _Motor:
@@ -90,8 +92,8 @@ class _Harness:
             safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
         )
 
-    def tick(self, ch1=1500, ch2=1500, ch4=1000, ch5=1000):
-        self.clock["t"] += DT
+    def tick(self, ch1=1500, ch2=1500, ch4=1000, ch5=1000, dt=DT):
+        self.clock["t"] += dt
         self.c.set_obstacle_data(distance_m=self.dist, age_s=0.0)
         if self.detections is not None:
             self.c.set_person_detections(self.detections)
@@ -159,6 +161,49 @@ class TestHardStopTracksRule(unittest.TestCase):
         out = self._run((C, 110), (151, 101))
         self.assertEqual(out, (136, 116))
         self.assertEqual(_net(out), 0)
+
+    def _check_invariants(self, prev, target, out, allow_forward):
+        tn = _net(target)
+        hi = max(0, tn) if allow_forward else 0
+        lo = min(0, tn)
+        case = (prev, target, out, allow_forward)
+        self.assertGreaterEqual(_net(out), lo, case)
+        self.assertLessEqual(_net(out), hi, case)
+        for p, t, o in zip(prev, target, out):
+            self.assertTrue(0 <= o <= 254, case)
+            self.assertFalse(_crossed(p, o), case)
+            self.assertLessEqual(abs(o - C), max(abs(p - C), abs(t - C)), case)
+            if abs(o - C) > abs(p - C):
+                self.assertLessEqual(abs(o - C) - abs(p - C), self.A, case)
+                self.assertGreater((o - C) * (t - C), 0, case)
+        # Nothing to ramp and nothing to clamp: the target passes in full.
+        if lo <= tn <= hi and all(
+            (p - C) * (t - C) >= 0 and abs(t - C) <= abs(p - C)
+            for p, t in zip(prev, target)
+        ):
+            self.assertEqual(out, target, case)
+
+    def test_fuzz_any_target_including_nonzero_net(self):
+        values = [0, 1, 40, 90, 120, 125, C, 127, 140, 170, 210, 253, 254]
+        for allow_forward in (True, False):
+            for pl in values:
+                for pr in values:
+                    for tl in values:
+                        for tr in values:
+                            out = Controller._hard_stop_tracks(
+                                pl, pr, tl, tr, self.A, self.D,
+                                allow_forward=allow_forward)
+                            self._check_invariants((pl, pr), (tl, tr), out, allow_forward)
+
+    def test_estop_clamp_lets_no_forward_target_pass(self):
+        prev = (C, C)
+        for _ in range(20):
+            prev = Controller._hard_stop_tracks(prev[0], prev[1], 254, 200, self.A, self.D,
+                                                allow_forward=False)
+            self.assertEqual(prev, (C, C))
+        # Moving forward when it engages: neutral at once.
+        self.assertEqual(Controller._hard_stop_tracks(254, 183, 254, 183, self.A, self.D,
+                                                      allow_forward=False), (C, C))
 
     def test_no_step_ever_crosses_grows_too_fast_or_adds_forward(self):
         values = [0, 40, 90, 120, 125, C, 127, 140, 170, 210, 254]
@@ -346,16 +391,67 @@ class TestManualHardStop(unittest.TestCase):
         self.assertTrue(cmd.emergency_active)
         self.assertEqual(h.shutdown.scheduled, [5.0])
 
-    def test_emergency_in_the_hard_stop_branch_is_neutral_at_once(self):
-        """update_safety disarms on the e-stop, so the armed branch never
-        sees emergency_active in service. Force it to cover the clause."""
+    def test_armed_emergency_clause_passes_no_forward(self):
+        """Not the real e-stop path: update_safety disarms on ch5, so the
+        armed branch never sees emergency_active in service (the test above
+        is the real path). Force armed + emergency_active to cover the
+        hard-stop clause: a held forward stick passes no forward, the output
+        is neutral at once and stays there."""
         h = _Harness(self)
         self._drive_to_steady(h, self.FWD_RIGHT)
         h.c._safety_state.emergency_active = True
-        out, telem, cmd, _ = h.tick(1500, 1500)
-        self.assertTrue(cmd.is_armed)
-        self.assertTrue(telem["slew_hard_stop_active"])
+        for _ in range(10):
+            out, telem, cmd, _ = h.tick(*self.FWD_RIGHT)
+            self.assertTrue(cmd.is_armed)
+            self.assertTrue(telem["slew_hard_stop_active"])
+            self.assertGreater(_net((telem["slew_in_left"], telem["slew_in_right"])), 0)
+            self.assertEqual(out, (C, C))
+        out, _, _, _ = h.tick(1500, 1500)
         self.assertEqual(out, (C, C))
+
+    def test_late_tick_inside_the_stop_keeps_the_ramp_step_bounded(self):
+        """Grok review of 94efade: one late tick (0.5 s at 250 bytes/s)
+        must not put the full pivot on in one step."""
+        h = _Harness(self)
+        self._drive_to_steady(h, self.FWD_RIGHT)
+        h.dist = 0.0
+        first, telem, _, _ = h.tick(*self.FWD_RIGHT)
+        self.assertEqual(first, (C, C))
+        target = (telem["slew_in_left"], telem["slew_in_right"])
+        self.assertGreater(target[0] - C, 2 * MANUAL_STEP)
+        bound = int(round(SLEW.manual_accel_bps * HARD_STOP_SLEW_MAX_DT_S)) + 1
+        self.assertGreater(SLEW.manual_accel_bps * 0.5, target[0] - C)  # uncapped = full pivot
+        out, _, _, _ = h.tick(*self.FWD_RIGHT, dt=0.5)
+        self.assertEqual(_net(out), 0)
+        self.assertGreater(out[0], C)
+        self.assertLessEqual(out[0] - C, bound)
+        self.assertLessEqual(C - out[1], bound)
+        self.assertLess(out[0] - out[1], target[0] - target[1])
+        # A late tick never delays a stop: release the stick after a gap.
+        out, _, _, _ = h.tick(1500, 1500, dt=0.5)
+        self.assertEqual(out, (C, C))
+
+    def test_rail_clip_plus_one_target_through_process(self):
+        """Sticks at the rails: the 0.8 m stop gives (253, 0) or (0, 253),
+        net forward +1 from the clip at 0. The output never exceeds it and
+        the pivot reaches it."""
+        for sticks, want in (((2000, 1000), (253, 0)), ((1000, 2000), (0, 253))):
+            h = _Harness(self)
+            h.tick()  # arm at rest
+            h.dist = 0.0
+            prev = (C, C)
+            out = telem = None
+            for _ in range(30):
+                out, telem, _, _ = h.tick(*sticks)
+                target = (telem["slew_in_left"], telem["slew_in_right"])
+                self.assertEqual(target, want)
+                self.assertEqual(_net(target), 1)
+                self.assertIn(_net(out), (0, 1), (sticks, out))
+                for p, o in zip(prev, out):
+                    self.assertFalse(_crossed(p, o))
+                    self.assertLessEqual(abs(o - C) - abs(p - C), MANUAL_STEP + 1)
+                prev = out
+            self.assertEqual(out, want)
 
 
 class TestFollowMeHardStop(unittest.TestCase):
@@ -396,6 +492,51 @@ class TestFollowMeHardStop(unittest.TestCase):
             prev = out
         self.assertLess(outs[0][0] - outs[0][1], target[0] - target[1])
         self.assertEqual(outs[-1], target)  # the pivot is not frozen
+
+
+class TestWaypointNavHardStop(unittest.TestCase):
+    """WAYPOINT_NAV takes the same hard-stop branch at its own rates."""
+
+    def test_waypoint_nav_turn_at_stop_ramps_at_waypoint_rates(self):
+        clock = {"t": 1000.0}
+        with _clock(clock):
+            rig = _Rig(clock)
+            rig.ctrl._obstacle_avoidance = ObstacleAvoidanceController(ObstacleAvoidanceConfig())
+            rig.ctrl.set_obstacle_data(distance_m=5.0, age_s=0.0)
+            self.assertIsNone(rig.ctrl.activate_waypoint_nav())
+            for _ in range(10):
+                cmd, _, telem = rig.tick(dt=DT)
+            self.assertEqual(telem["nav_state"], "DRIVE")
+            self.assertGreater(cmd.left_byte, C)
+            # A forward turn from the nav, then the 0.8 m stop.
+            nav_cmd = AutonomyCommand(source="test", left_byte=200, right_byte=150,
+                                      steering_input=0.5, nav_state="DRIVE")
+            rig.ctrl._compute_waypoint_autonomy_command = (
+                lambda telemetry, mono_now: (nav_cmd, False, False))
+            for _ in range(40):
+                cmd, _, telem = rig.tick(dt=DT)
+            prev = (cmd.left_byte, cmd.right_byte)
+            self.assertFalse(telem["slew_hard_stop_active"])
+            rig.ctrl.set_obstacle_data(distance_m=0.0, age_s=0.0)
+            outs = []
+            for _ in range(30):
+                cmd, _, telem = rig.tick(dt=DT)
+                self.assertEqual(telem["mode"], "WAYPOINT_NAV")
+                self.assertTrue(telem["slew_hard_stop_active"])
+                outs.append((cmd.left_byte, cmd.right_byte))
+        target = (telem["slew_in_left"], telem["slew_in_right"])
+        self.assertEqual(_net(target), 0)
+        self.assertGreater(target[0] - target[1], 4 * WAYPOINT_STEP)
+        self.assertEqual(outs[0], (C, C))  # forward off at once, R does not cross
+        for out in outs:
+            self.assertEqual(_net(out), 0, outs)
+            for p, o in zip(prev, out):
+                self.assertFalse(_crossed(p, o), outs)
+                self.assertLessEqual(abs(o - C) - abs(p - C), WAYPOINT_STEP + 1, outs)
+            prev = out
+        # Slower than MANUAL: after 3 ramp ticks the turn is at most 3 steps.
+        self.assertLessEqual(outs[3][0] - C, 3 * (WAYPOINT_STEP + 1))
+        self.assertEqual(outs[-1], target)
 
 
 if __name__ == "__main__":
