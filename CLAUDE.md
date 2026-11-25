@@ -33,7 +33,7 @@ WALL-E is a real robot that can injure a person. The safety rules below are the 
 
 ### Open safety items
 - Arming with the transmitter on is not tested since the monotonic-clock change (2026-11-10). Test it before the next drive. Observation, 2026-11-15, on the stand: the robot armed three times with the transmitter on and drove for 326 s (logs `arm_20261115_1358*`). Kevin has not closed this item.
-- The pack-low motor cutoff is now `voltage_shutdown_threshold_v = 44.0` in `config.py` (the old 39.0 V was below the 40.0 V BMS trip and could never fire). The old CLAUDE.md still listed this as open; confirm with `docs/status_audit_2026-11-10.md` before relying on it.
+- The pack-low motor cutoff is `voltage_shutdown_threshold_v = 44.0` in `config.py` and on the robot (the old 39.0 V was below the 40.0 V BMS trip and could never fire). Closed in code (`docs/status_audit_2026-11-25.md`); a real trip, the limp and the autonomous stop are not seen yet.
 - The IMU-stall watchdog is not verified on a real stall. The new Arduino RC sketch is not flashed yet (flash only with `wall-e` stopped and Kevin's word).
 
 ## Do not (each has cost a drive or nearly hurt someone)
@@ -92,7 +92,7 @@ Use pytest, not `unittest discover` (it collects zero cases from the pytest-styl
 
 ## Docs index — read when
 - `docs/known-issues-history.md`: before work on any subsystem with a past incident; full known-issues text, branches, the old field-test handoff.
-- `docs/status_audit_2026-11-10.md`: before you plan work; open safety gaps in priority order.
+- `docs/status_audit_2026-11-25.md`: before you plan work; open safety gaps in priority order, decisions waiting for Kevin. `docs/status_audit_2026-11-10.md` is the history behind it.
 - `docs/subsystems-reference.md`: motor output, waypoint nav, BMS, logging detail.
 - `docs/camera-calibration.md`: before you touch any camera geometry, FOV or height filter.
 - `docs/follow-me-tuning.md`: before you change follow-me gains, speed, corridor or arms-up.
