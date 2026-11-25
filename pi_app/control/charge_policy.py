@@ -42,9 +42,12 @@ armed. A hold or full charge that is already running keeps going under all
 its normal stop rules, so the charger inhibit stays on while it runs (the
 manager reports it to the main loop). "Running" means the BMS showed charge
 current on ``armed_keep_charge_polls`` polls of the session while the robot
-was disarmed. Anything else goes off at the arm: a plug that is on with no
-current (the lead is not on the robot), a dark-BMS wake or rescue pulse (no
-current reading), a plug switched on from the Kasa app while armed.
+was disarmed. It is kept while armed only while the manager's plug term
+holds the charger inhibit (``ChargeInputs.plug_inhibit``): never a charger
+that is on with the robot free to drive. Anything else goes off at the arm:
+a plug that is on with no current (the lead is not on the robot), a
+dark-BMS wake or rescue pulse (no current reading), a plug switched on from
+the Kasa app while armed, a running charge whose plug term has run out.
 
 BMS dark (no fresh reading): the plug goes off after ``soc_unknown_off_s``.
 Then, only while the VESCs give an independent pack voltage and temperature
@@ -95,6 +98,9 @@ class ChargeInputs:
     vesc_v: Optional[float] = None       # pack voltage from the VESCs, independent of the BMS
     vesc_temp_c: Optional[float] = None  # VESC heatsink temperature, the ambient proxy in the dark
     armed: bool = False
+    # The manager's plug term holds the charger inhibit now (holds_plug_on).
+    # A running charge is kept while armed only when this is True.
+    plug_inhibit: bool = False
 
 
 @dataclass(frozen=True)
@@ -372,7 +378,7 @@ class ChargePolicy:
         want, reason, phase, full_completed = self._decide_mode(
             inp, now, fresh, on, rested, soc, v, a, cmin, cmax, cell_mid, alerts)
         running = self._charge_running()
-        if inp.armed and running and want is not False:
+        if inp.armed and running and inp.plug_inhibit and want is not False:
             reason = "robot armed, charge already running (no drive until it ends): " + reason
 
         if self.fault is not None:
@@ -410,10 +416,12 @@ class ChargePolicy:
             return False, f"FAULT: {self.fault['text']}", "fault", False
         if mode == "on":
             return True, "mode on (manual)", "manual", False
-        if inp.armed and not self._charge_running():
+        if inp.armed and not (self._charge_running() and inp.plug_inhibit):
             # No charge starts while armed, and a plug that is on without a
             # running charge goes off: lead off the robot, charger not started
-            # yet, a dark-BMS pulse, a switch from the Kasa app.
+            # yet, a dark-BMS pulse, a switch from the Kasa app. A running
+            # charge is kept only while the plug term holds the inhibit: a
+            # charger never stays on for an armed robot that is free to drive.
             self._pending = (None, None)
             return False, "robot armed: no charging", "armed", False
         if not fresh:

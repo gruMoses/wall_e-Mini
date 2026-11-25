@@ -26,10 +26,11 @@ Charger inhibit (audit N1, Kevin 2026-11-25): a charge already running goes
 on when the robot arms, and ``holds_plug_on()`` tells the main loop while
 the plug is on in such a charge; the main loop adds it to the BMS current
 inhibit. The BMS term alone releases in the taper under 2.0 A with the
-charger still powered. Each poll that sees the plug sets the state again;
-when the polls stop seeing it (plug unreachable, thread hung) it runs out
-by itself after ``plug_deadman_s``, when the plug's own countdown has ended
-the charge.
+charger still powered. The policy keeps a charge while armed only while
+this term holds. Each poll that sees the plug sets the term again; when
+the polls stop seeing it (plug unreachable, thread hung) it runs out by
+itself after ``plug_deadman_s`` + ``plug_deadman_refresh_s``, when the
+plug's own countdown has ended the charge (see ``_update_plug_hold``).
 
 This thread never touches motion. The main control loop does not wait on it;
 it only tells it the armed state (``note_armed``, one attribute write) and
@@ -91,8 +92,12 @@ class ChargeManager:
                  clock: Callable[[], float] = time.monotonic,
                  vesc_voltage_fn: Optional[Callable[[], Optional[float]]] = None,
                  wall_clock: Callable[[], float] = time.time,
-                 vesc_temp_fn: Optional[Callable[[], Optional[float]]] = None) -> None:
+                 vesc_temp_fn: Optional[Callable[[], Optional[float]]] = None,
+                 drive_inhibit_enabled: bool = True) -> None:
         self._cfg = cfg
+        # BmsConfig.charger_inhibit_enabled. Off: holds_plug_on() is always
+        # False, so the policy also stops a charge at the arm, as before.
+        self._drive_inhibit_enabled = bool(drive_inhibit_enabled)
         self._bms = bms_service
         self._plug = plug
         self._state_path = Path(state_path)
@@ -144,6 +149,7 @@ class ChargeManager:
         # Charger inhibit term: until this clock time the plug counts as on in
         # a running charge. None = no. Read by the main loop, written by tick().
         self._plug_hold_until: Optional[float] = None
+        self._prev_charge_running = False
         self._status: Dict[str, Any] = {
             "mode": self._policy.mode,
             "plug_on": None,
@@ -243,7 +249,7 @@ class ChargeManager:
         this to the charger inhibit. Called every control tick: no lock, no I/O.
         """
         until = self._plug_hold_until
-        if until is None:
+        if until is None or not self._drive_inhibit_enabled:
             return False
         return (self._clock() if now is None else now) < until
 
@@ -289,8 +295,9 @@ class ChargeManager:
             self._wake.wait(timeout=poll_s)
             self._wake.clear()
 
-    def _read_inputs(self, plug_on: Optional[bool]) -> ChargeInputs:
-        kw: Dict[str, Any] = {"plug_on": plug_on, "armed": bool(self._armed)}
+    def _read_inputs(self, plug_on: Optional[bool], now: float) -> ChargeInputs:
+        kw: Dict[str, Any] = {"plug_on": plug_on, "armed": bool(self._armed),
+                              "plug_inhibit": self.holds_plug_on(now)}
         try:
             st = self._bms.get_state()
             link = self._bms.get_link_health()
@@ -347,14 +354,19 @@ class ChargeManager:
         logger.warning("Charger plug %s: %s", "ON" if on else "OFF", reason)
         return True
 
-    def _service_deadman(self, plug_on: Optional[bool], mode: str, now: float) -> None:
+    def _service_deadman(self, plug_on: Optional[bool], mode: str, now: float,
+                         want_on: Optional[bool] = None) -> None:
         """Keep the plug's own off-countdown armed while it is on in hold/full;
-        remove it otherwise (a leftover would end a manual "on" after minutes)."""
+        remove it otherwise (a leftover would end a manual "on" after minutes).
+        Not re-armed while the policy wants the plug off: when the OFF switch
+        failed, the countdown already running must end the charge."""
         arm = getattr(self._plug, "arm_off_timer", None)
         secs = float(getattr(self._cfg, "plug_deadman_s", 0.0) or 0.0)
         if not callable(arm) or secs <= 0.0:
             return
         if plug_on and mode in ("hold", "full"):
+            if want_on is False:
+                return
             refresh = float(getattr(self._cfg, "plug_deadman_refresh_s", 60.0))
             if (self._deadman_last_t is None or self._deadman_fails
                     or now - self._deadman_last_t >= refresh):
@@ -378,12 +390,40 @@ class ChargeManager:
             except Exception:
                 pass    # the plug is unreachable: try again next poll
 
+    def _update_plug_hold(self, plug_on: Optional[bool], plug_err: Optional[str],
+                          charge_running: bool, now: float) -> None:
+        """Set the charger-inhibit term that holds_plug_on() reads.
+
+        The plug answered: the term follows it (on in a running charge, after
+        this poll's switch). The plug did not answer: the term is never
+        refreshed, except once on the poll where the charge becomes running
+        (the policy goes by the last known plug state, so a charge can become
+        running with no answer at all). Either way it runs out by itself
+        plug_deadman_s + plug_deadman_refresh_s after the last setting: by
+        then the plug's own countdown, re-armed at most at that poll (and the
+        re-arm may still be in flight), has ended the charge. Then it fails
+        open like the BMS term: a plug outage (8.4 h on 2026-11-24) must not
+        hold the robot for hours.
+        """
+        cfg = self._cfg
+        hold_s = max(float(getattr(cfg, "plug_deadman_s", 0.0) or 0.0)
+                     + float(getattr(cfg, "plug_deadman_refresh_s", 0.0) or 0.0),
+                     3.0 * float(getattr(cfg, "poll_s", 10.0)))
+        if plug_err is None:
+            self._plug_hold_until = now + hold_s if (plug_on and charge_running) else None
+        elif (charge_running and not self._prev_charge_running
+              and self._plug_hold_until is None):
+            # Seeded once; a hold that has run out is never set again
+            # without an answer from the plug.
+            self._plug_hold_until = now + hold_s
+        self._prev_charge_running = bool(charge_running)
+
     def tick(self, now: Optional[float] = None) -> Dict[str, Any]:
         """One poll. Public for tests; the thread calls it every poll_s."""
         if now is None:
             now = self._clock()
         plug_on, plug_err = self._read_plug()
-        inp = self._read_inputs(plug_on)
+        inp = self._read_inputs(plug_on, now)
 
         with self._lock:
             prev_mode = self._status.get("mode")
@@ -425,21 +465,12 @@ class ChargeManager:
             else:
                 reason = f"{reason}; switch FAILED"
 
+        # The inhibit term BEFORE the countdown re-arm below: that call can
+        # block for the plug timeout, and the term must already cover the
+        # countdown it is about to restart.
+        self._update_plug_hold(plug_on, plug_err, dec.charge_running, now)
         if plug_err is None:
-            self._service_deadman(plug_on, dec.mode, now)
-            # The plug answered: the inhibit term follows it now (plug on in a
-            # running charge, after this poll's switch). A plug that does not
-            # answer keeps the last answer until the plug's own off-countdown
-            # has ended the charge (re-armed at most every refresh, so it fires
-            # by the last answer + plug_deadman_s), then fails open like the
-            # BMS term: a plug outage (8.4 h on 2026-11-24) must not hold the
-            # robot for hours.
-            if plug_on and dec.charge_running:
-                poll_s = float(getattr(self._cfg, "poll_s", 10.0))
-                hold_s = max(float(getattr(self._cfg, "plug_deadman_s", 0.0) or 0.0), 3.0 * poll_s)
-                self._plug_hold_until = now + hold_s
-            else:
-                self._plug_hold_until = None
+            self._service_deadman(plug_on, dec.mode, now, dec.want_on)
 
         alerts: List[Dict[str, str]] = list(dec.alerts)
         if self._deadman_fails >= _PLUG_FAILS_FOR_ALERT:

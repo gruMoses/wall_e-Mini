@@ -79,7 +79,10 @@ in the plug itself: "off in 5 min". It arms the rule again every minute. If
 the Pi halts, hangs or loses the Wi-Fi link, the plug ends the charge
 without the robot. Manual `on` has no countdown. A timer that you set in the
 Kasa app is replaced. Tested on the plug on 2026-11-16. The countdown is
-also kept while the robot is armed.
+also kept while the robot is armed. It is not armed again while the manager
+wants the plug off: if the OFF switch fails, the countdown that is already
+in the plug ends the charge within 5 min (before 2026-11-25 a failed OFF
+pushed it out every minute).
 
 ## Cell imbalance
 The BMS balancer starts at 4000 mV per cell (about 83 %). A 50 % hold never
@@ -146,6 +149,8 @@ The rules:
   the countdown in the plug.
 - "Runs" means: the BMS showed 1.0 A or more of charge current on 2 polls
   while the robot was disarmed.
+- The charge is kept only while the plug source holds the robot. A charger
+  is never left on for an armed robot that is free to drive.
 - Anything else goes off at the arm, as before. That is a plug that is on
   with no current (the lead is not on the robot), a charger that has not
   started yet, a wake pulse or a rescue in the dark, a plug that the Kasa
@@ -156,9 +161,22 @@ The rules:
 - Disarming changes nothing.
 - Manual `on` is not covered. Arming does not switch it, and only the BMS
   source can hold the robot.
-- The plug does not answer: the plug source keeps the last answer for 5 min,
-  then releases. By then the plug's countdown has ended the charge. A hung
-  manager thread also releases after 5 min.
+- The plug does not answer: the plug source keeps the last answer for 6 min
+  (the 5 min countdown and 1 min for a refresh in progress), then releases.
+  By then the plug's countdown has ended the charge, and the manager no
+  longer keeps it for an armed robot. A hung manager thread also releases
+  after 6 min.
+- A charge can start to count as running while the plug does not answer
+  (the manager goes by the last known state). The plug source is then set
+  on that poll, once. Further polls with no answer do not extend it.
+- With `charger_inhibit_enabled` off (`config.bms`), there is no plug
+  source, and arming stops a charge as before.
+- After a restart (every deploy) the manager must see the current again on
+  2 polls before a charge counts as running: about 25 to 35 s, because the
+  BMS reconnects first. The arm interlock covers the start: the robot does
+  not arm until the arm switch has been seen off. If you cycle the switch
+  in that time, the plug source does not hold the robot, and the plug goes
+  off within 10 s, as before this change.
 
 WARNING: A charge that runs when you arm holds the robot still until it
 ends. A hold charge takes about 17 min. A full charge takes about 1.5 h

@@ -468,6 +468,8 @@ def run() -> int:
                 cp_cfg, bms_service, plug, state_path,
                 vesc_voltage_fn=getattr(motor_driver, "get_voltage", None),
                 vesc_temp_fn=lambda: vesc_heatsink_temp(motor_driver),
+                # Off: no plug term, and a charge stops at the arm as before.
+                drive_inhibit_enabled=bool(getattr(bms_cfg, "charger_inhibit_enabled", True)),
             )
             charge_manager.start()
             print(f"Charger plug manager started (plug {plug.host}, MAC {cp_cfg.mac or 'none'}, "
@@ -697,11 +699,7 @@ def run() -> int:
             bms_link = None
             if bms_service is not None:
                 _bms_st_for_inhibit = bms_service.get_state()
-                _plug_charge = bool(
-                    charge_manager is not None
-                    and getattr(bms_cfg, "charger_inhibit_enabled", True)
-                    and charge_manager.holds_plug_on()
-                )
+                _plug_charge = bool(charge_manager is not None and charge_manager.holds_plug_on())
                 controller.set_charger_inhibit(
                     bms_service.is_charging() or _bms_safety_stopped or _plug_charge,
                     bms_current_a=_bms_st_for_inhibit.pack_current_a if _bms_st_for_inhibit else None,

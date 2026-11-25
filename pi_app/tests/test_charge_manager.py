@@ -48,8 +48,11 @@ class FakePlug:
         self.timer = None            # seconds armed, None = no countdown
         self.arms = 0
         self.fail_timer = False
+        self.on_arm = None           # called inside arm_off_timer (a call in flight)
 
     def arm_off_timer(self, seconds):
+        if self.on_arm is not None:
+            self.on_arm()
         if self.fail_timer:
             raise RuntimeError("countdown refused")
         self.timer = seconds
@@ -84,7 +87,7 @@ class Wall:
         return self.t
 
 
-def make(tmp, state=None, stopping=False, vesc=None, **kw):
+def make(tmp, state=None, stopping=False, vesc=None, inhibit=True, **kw):
     cfg = ChargerPlugConfig(**kw)
     path = Path(tmp) / "charger_state.json"
     if state is not None:
@@ -92,7 +95,7 @@ def make(tmp, state=None, stopping=False, vesc=None, **kw):
     bms, plug, wall = FakeBms(), FakePlug(), Wall()
     mgr = ChargeManager(cfg, bms, plug, path, system_stopping=lambda: stopping,
                         clock=lambda: 0.0, vesc_voltage_fn=(lambda: vesc), wall_clock=wall,
-                        vesc_temp_fn=(lambda: 21.0))
+                        vesc_temp_fn=(lambda: 21.0), drive_inhibit_enabled=inhibit)
     return mgr, bms, plug, path, wall
 
 
@@ -503,19 +506,101 @@ class ArmedChargeInhibit(unittest.TestCase):
             mgr.note_armed(True)
             seen = t
             plug.fail_get = True
-            for dt in (10.0, 100.0, 299.0):
+            # 300 s countdown + 60 s refresh: one re-arm in flight cannot outlast it.
+            for dt in (10.0, 100.0, 299.0, 359.0):
                 mgr.tick(now=seen + dt)
                 self.assertTrue(mgr.holds_plug_on(seen + dt), dt)    # it may still be on
-            mgr.tick(now=seen + 300.0)
-            self.assertFalse(mgr.holds_plug_on(seen + 300.0))        # its own countdown has ended it
+            st = mgr.tick(now=seen + 360.0)
+            self.assertFalse(mgr.holds_plug_on(seen + 360.0))        # its own countdown has ended it
+            self.assertEqual(st["phase"], "armed")                   # and the policy no longer keeps it
             plug.fail_get = False
             plug.on = False                                          # the countdown switched it off
-            mgr.tick(now=seen + 310.0)
-            self.assertFalse(mgr.holds_plug_on(seen + 310.0))
+            mgr.tick(now=seen + 370.0)
+            self.assertFalse(mgr.holds_plug_on(seen + 370.0))
         with tempfile.TemporaryDirectory() as tmp:
             mgr, bms, plug, t = running_charge(self, tmp, "full")
-            self.assertTrue(mgr.holds_plug_on(t + 299.0))             # no tick at all (thread hung)
+            self.assertTrue(mgr.holds_plug_on(t + 359.0))             # no tick at all (thread hung)
+            self.assertFalse(mgr.holds_plug_on(t + 360.0))
+
+    def test_a_charge_that_becomes_running_with_no_plug_answer_seeds_the_term(self):
+        """Grok review of e920479 (must-fix): the plug goes on, then stops
+        answering; the BMS shows a taper current (1.0 to 2.0 A, under the BMS
+        inhibit) on two disarmed polls. The term is seeded on that poll, is
+        never refreshed by a failed read, and the charge is kept while armed
+        only while it holds."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, _, _ = make(tmp, state={"mode": "full"})
+            bms.cell, bms.spread = 4.10, 8.0
+            mgr.tick(now=0.0)
+            self.assertTrue(plug.on)                             # switched on, countdown armed at 0
+            plug.fail_get = True
+            bms.a = 1.5
+            mgr.tick(now=10.0)
+            self.assertFalse(mgr.holds_plug_on(10.0))            # one poll of current: not running yet
+            st = mgr.tick(now=20.0)                              # running, the plug did not answer
+            self.assertTrue(mgr.holds_plug_on(20.0))
+            self.assertTrue(st["holds_plug_on"])
+            mgr.note_armed(True)
+            st = mgr.tick(now=30.0)
+            self.assertIs(st["want_on"], True)                   # kept: the term holds the robot
+            self.assertTrue(mgr.holds_plug_on(30.0))
+            for t in (100.0, 200.0, 300.0):                      # failed reads do not refresh it
+                mgr.tick(now=t)
+            self.assertTrue(mgr.holds_plug_on(379.0))
+            self.assertFalse(mgr.holds_plug_on(380.0))           # seed + 360 s
+            st = mgr.tick(now=390.0)
+            self.assertIs(st["want_on"], False)                  # no longer kept while armed
+            self.assertEqual(st["phase"], "armed")
+            self.assertFalse(mgr.holds_plug_on(390.0))
+            self.assertEqual(plug.arms, 1)                       # the countdown from t=0 was never pushed out
+
+    def test_the_term_is_stored_before_a_blocking_countdown_rearm(self):
+        """Grok should-fix 1: arm_off_timer can block for the plug timeout and
+        restarts the plug's 5 min countdown; the term must already cover it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "full")      # countdown armed at 0, last poll 20
+            self.assertEqual(t, 20.0)
+            probe = []
+            late = 80.0                  # a late poll (slow plug calls delay the thread)
+            plug.on_arm = lambda: probe.append((mgr.holds_plug_on(late + 303.0),
+                                                mgr.holds_plug_on(late + 360.0)))
+            mgr.tick(now=late)                                         # re-arm due here
+            # While the re-arm is in flight, a 3 s call + the new 300 s
+            # countdown is already covered (the hold of the poll at 20 s ends at 380 s).
+            self.assertEqual(probe, [(True, False)])
+
+    def test_a_failed_off_does_not_push_the_countdown_out(self):
+        """Grok should-fix 2 (also on main before this change): when the OFF
+        switch fails, the countdown already in the plug must end the charge."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "hold")      # countdown armed at REST
+            mgr.note_armed(True)
+            arms0 = plug.arms
+            plug.fail_set = True
+            bms.cell = 3.84                                            # the policy wants it off
+            for k in range(1, 30):
+                st = mgr.tick(now=t + 10.0 * k)
+                self.assertTrue(plug.on)
+                self.assertIs(st["want_on"], False)
+                self.assertTrue(mgr.holds_plug_on(t + 10.0 * k))       # powered: the robot stays held
+            self.assertEqual(plug.arms, arms0)                         # never re-armed in 290 s
+            self.assertEqual(plug.timer, 300.0)                        # the running countdown is left alone
+            plug.on = False                                            # the countdown switched it off
+            mgr.tick(now=t + 300.0)
             self.assertFalse(mgr.holds_plug_on(t + 300.0))
+
+    def test_charger_inhibit_switched_off_in_config_stops_the_charge_at_the_arm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, _, _ = make(tmp, state={"mode": "full"}, inhibit=False)
+            bms.cell, bms.spread = 3.90, 8.0
+            mgr.tick(now=0.0)
+            bms.a = 3.6
+            mgr.tick(now=10.0)
+            mgr.tick(now=20.0)
+            self.assertFalse(mgr.holds_plug_on(20.0))
+            mgr.note_armed(True)
+            mgr.tick(now=30.0)
+            self.assertFalse(plug.on)                                  # as before this change
 
     def test_manual_on_does_not_hold_the_inhibit(self):
         with tempfile.TemporaryDirectory() as tmp:
