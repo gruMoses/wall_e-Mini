@@ -622,9 +622,11 @@ class ArmedChargeInhibit(unittest.TestCase):
             self.assertIsNone(st["session"])
             self.assertEqual(st["phase"], "armed")                     # and no new charge while armed
 
-    def test_a_running_edge_after_an_expired_term_seeds_it_again(self):
-        """Grok re-review should-fix 2: a hold that ran out on failed reads
-        must not block the seed on a later false-to-true edge."""
+    def test_an_expired_term_is_cleared_and_a_new_charge_seeds_it_again(self):
+        """Grok re-review should-fix 2: a hold that ran out on failed reads is
+        cleared ("None" means not holding), so it can never block a later
+        seed. (Since 8751e9f's follow-up every charge kind counts, so the
+        running edge comes only with a new session.)"""
         with tempfile.TemporaryDirectory() as tmp:
             mgr, bms, plug, _, _ = make(tmp, state={"mode": "full"})
             bms.cell, bms.spread = 4.10, 8.0
@@ -636,14 +638,17 @@ class ArmedChargeInhibit(unittest.TestCase):
             for t in range(30, 400, 10):
                 mgr.tick(now=float(t))
             self.assertFalse(mgr.holds_plug_on(390.0))
-            mgr.set_mode("on")                                         # manual: not a running charge
-            mgr.tick(now=400.0)
-            self.assertFalse(mgr.holds_plug_on(400.0))
-            mgr.set_mode("full")                                       # running again: the edge
+            self.assertIsNone(mgr._plug_hold_until)                    # cleared, not left stale
+            plug.fail_get = False
+            plug.on = False                                            # the countdown switched it off
+            mgr.tick(now=400.0)                                        # seen off; full starts again
+            self.assertTrue(plug.on)
+            plug.fail_get = True
             mgr.tick(now=410.0)
-            self.assertTrue(mgr.holds_plug_on(410.0))
-            self.assertTrue(mgr.holds_plug_on(769.0))
-            self.assertFalse(mgr.holds_plug_on(770.0))
+            mgr.tick(now=420.0)                                        # running again, plug silent
+            self.assertTrue(mgr.holds_plug_on(420.0))
+            self.assertTrue(mgr.holds_plug_on(779.0))
+            self.assertFalse(mgr.holds_plug_on(780.0))
 
     def test_the_term_and_the_countdown_use_one_refresh_default(self):
         """Grok re-review should-fix 3: a config without plug_deadman_refresh_s
@@ -682,13 +687,86 @@ class ArmedChargeInhibit(unittest.TestCase):
             mgr.tick(now=30.0)
             self.assertFalse(plug.on)                                  # as before this change
 
-    def test_manual_on_does_not_hold_the_inhibit(self):
+    def test_plug_on_and_plug_off_after_an_armed_off_keep_the_robot_held(self):
+        """Grok re-review of 8751e9f (must-fix): PLUG OFF and PLUG ON rebuild
+        the session as "manual". After an armed OFF with the plug still
+        reading on, neither frees the robot, PLUG ON does not switch the
+        charger back on, and neither removes or re-arms the countdown."""
         with tempfile.TemporaryDirectory() as tmp:
-            mgr, bms, plug, t = running_charge(self, tmp, "full")
-            mgr.set_mode("on")
-            mgr.tick(now=t + 10.0)
+            mgr, bms, plug, t = running_charge(self, tmp, "hold")      # countdown armed at REST
+            mgr.note_armed(True)
+            plug.fail_set = True
+            bms.a = 1.2                                                # taper: the BMS term is off
+            bms.cell = 3.84                                            # top of the band: OFF, it fails
+            st = mgr.tick(now=t + 10.0)
+            self.assertIs(st["want_on"], False)
             self.assertTrue(plug.on)
-            self.assertFalse(mgr.holds_plug_on(t + 10.0))
+            arms0, timer0 = plug.arms, plug.timer
+            self.assertEqual(timer0, 300.0)
+            for k, mode in enumerate(("off", "on", "full", "on", "off"), start=2):
+                mgr.set_mode(mode)
+                now = t + 10.0 * k
+                st = mgr.tick(now=now)
+                self.assertIs(st["want_on"], False, mode)              # never back on
+                self.assertTrue(plug.on, mode)
+                self.assertTrue(mgr.holds_plug_on(now), mode)          # the robot stays held
+                self.assertEqual((plug.arms, plug.timer), (arms0, timer0), mode)   # countdown left alone
+            plug.fail_set = False
+            mgr.set_mode("on")
+            st = mgr.tick(now=t + 100.0)
+            self.assertFalse(plug.on)                                  # the OFF goes through
+            self.assertFalse(mgr.holds_plug_on(t + 100.0))
+            st = mgr.tick(now=t + 110.0)                               # seen off: PLUG ON, armed
+            self.assertFalse(plug.on)                                  # no new charge while armed
+            self.assertEqual(st["phase"], "armed")
+            mgr.note_armed(False)
+            mgr.tick(now=t + 200.0)
+            self.assertTrue(plug.on)                                   # disarmed: manual is manual
+            self.assertIsNone(plug.timer)                              # and has no countdown
+
+    def test_a_plug_on_charge_running_at_the_arm_keeps_going_with_a_countdown(self):
+        """PLUG ON follows the same armed rule as hold and full: a charge that
+        runs at the arm goes on and holds the robot; while armed it has the
+        countdown, so the plug term may run out with it; nothing starts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, _, _ = make(tmp, state={"mode": "on"})
+            bms.cell, bms.spread = 3.90, 8.0
+            mgr.tick(now=0.0)
+            self.assertTrue(plug.on)
+            self.assertIsNone(plug.timer)                              # manual: no countdown
+            bms.a = 3.6
+            mgr.tick(now=10.0)
+            mgr.tick(now=20.0)
+            self.assertTrue(mgr.holds_plug_on(20.0))
+            mgr.note_armed(True)
+            st = mgr.tick(now=30.0)
+            self.assertTrue(plug.on)
+            self.assertIs(st["want_on"], True)
+            self.assertTrue(mgr.holds_plug_on(30.0))
+            self.assertEqual(plug.timer, 300.0)                        # countdown while armed
+            arms0 = plug.arms
+            mgr.tick(now=90.0)
+            self.assertEqual(plug.arms, arms0 + 1)                     # refreshed every 60 s
+            mgr.note_armed(False)
+            mgr.tick(now=100.0)
+            self.assertTrue(plug.on)
+            self.assertIsNone(plug.timer)                              # disarmed: removed again
+
+    def test_plug_on_with_no_charge_goes_off_at_the_arm_and_starts_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, _, _ = make(tmp, state={"mode": "on"})
+            mgr.tick(now=0.0)
+            self.assertTrue(plug.on)                                   # no current: the lead is off
+            mgr.note_armed(True)
+            st = mgr.tick(now=10.0)
+            self.assertFalse(plug.on)
+            self.assertEqual(st["phase"], "armed")
+            for t in (20.0, 100.0, 1000.0):
+                mgr.tick(now=t)
+                self.assertFalse(plug.on)
+            mgr.note_armed(False)
+            mgr.tick(now=1010.0)
+            self.assertTrue(plug.on)
 
 
 class ArmedChargeReleaseRamps(unittest.TestCase):

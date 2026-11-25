@@ -48,6 +48,9 @@ that is on with the robot free to drive. Anything else goes off at the arm:
 a plug that is on with no current (the lead is not on the robot), a
 dark-BMS wake or rescue pulse (no current reading), a plug switched on from
 the Kasa app while armed, a running charge whose plug term has run out.
+These rules hold in every mode, PLUG ON included (audit N3): nothing starts
+while armed, and a charge that runs at the arm holds the robot while its
+plug reads on, also after a change to ``on`` or ``off``.
 Once a charge is decided OFF while the robot is armed, it is over: it stays
 OFF (also after a disarm) until the plug is seen off, so a failed OFF can
 never make it count again; the inhibit still follows the plug while it
@@ -260,10 +263,14 @@ class ChargePolicy:
         return {"hold": "hold", "full": "full", "on": "manual"}.get(self.mode, "manual")
 
     def _charge_running(self) -> bool:
-        """A hold or full charge the BMS saw charging while the robot was
-        disarmed: the one charge that goes on when the robot arms."""
+        """A charge the BMS saw charging while the robot was disarmed: the one
+        charge that goes on when the robot arms, and that holds the robot
+        while its plug reads on. Any mode, PLUG ON and PLUG OFF included: an
+        operator mode change rebuilds the session as "manual" and must not
+        free the robot while the charger is still on (Grok re-review of
+        8751e9f). Not a dark wake or rescue pulse (no current reading)."""
         s = self._session
-        return bool(s is not None and s.kind in ("hold", "full")
+        return bool(s is not None and s.kind in ("hold", "full", "manual")
                     and s.charge_polls >= self.cfg.armed_keep_charge_polls)
 
     def _latch(self, code: str, text: str) -> None:
@@ -428,19 +435,21 @@ class ChargePolicy:
             return False, "mode off", "manual", False
         if self.fault is not None:
             return False, f"FAULT: {self.fault['text']}", "fault", False
-        if mode == "on":
-            return True, "mode on (manual)", "manual", False
+        # The armed rules come before mode "on": they hold in every mode.
         if self._session is not None and self._session.finished:
             return False, "charge stopped while the robot was armed: waiting for the plug to go off", \
                 ("armed" if inp.armed else "stopping"), False
         if inp.armed and not (self._charge_running() and inp.plug_inhibit):
-            # No charge starts while armed, and a plug that is on without a
-            # running charge goes off: lead off the robot, charger not started
-            # yet, a dark-BMS pulse, a switch from the Kasa app. A running
-            # charge is kept only while the plug term holds the inhibit: a
-            # charger never stays on for an armed robot that is free to drive.
+            # No charge starts while armed, PLUG ON included (Kevin's rule,
+            # audit N3), and a plug that is on without a running charge goes
+            # off: lead off the robot, charger not started yet, a dark-BMS
+            # pulse, a switch from the Kasa app. A running charge is kept only
+            # while the plug term holds the inhibit: a charger never stays on
+            # for an armed robot that is free to drive.
             self._pending = (None, None)
             return False, "robot armed: no charging", "armed", False
+        if mode == "on":
+            return True, "mode on (manual)", "manual", False
         if not fresh:
             return self._decide_dark(inp, now, on, alerts) + (False,)
         self._dark_reset()

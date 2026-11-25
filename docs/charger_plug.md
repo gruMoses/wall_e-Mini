@@ -28,7 +28,7 @@ flagged. Set up 2026-11-16. The measurements behind every number are in
 |---|---|---|
 | `hold` (default) | On when the rested cell voltage is 3.70 V or less (about 43 %). The top-up is sized to 57 % from the pack's rest curve and counted in amp-hours: about 1 Ah, 17 min, six times a day with the main switch on. Charges start at least 30 min apart. | never |
 | `full` | On until the pack is full by voltage (54.3 V, or a cell at 4.17 V) and the charge current is under 0.3 A for 2 min. A top-up when the rested cells fall to 4.08 V. | by itself: when the cells were above 4.00 V and rest at 3.80 V or less (a drive), or 48 h after the command |
-| `on`, `off` | Manual. | never |
+| `on`, `off` | Manual. While the robot is armed, `on` follows the rules in "Armed". | never |
 
 WARNING: Do not change the hold trigger to the BMS percentage. The BMS
 undercounts the idle drain by about 16 %. A hold on its percentage lets the
@@ -77,7 +77,8 @@ BMS warnings do not stop a charge. This pack shows "Cell OVP Warning" and
 While the plug is on in `hold` or `full`, the manager keeps a countdown rule
 in the plug itself: "off in 5 min". It arms the rule again every minute. If
 the Pi halts, hangs or loses the Wi-Fi link, the plug ends the charge
-without the robot. Manual `on` has no countdown. A timer that you set in the
+without the robot. Manual `on` has no countdown, except while the robot is
+armed during a running charge. A timer that you set in the
 Kasa app is replaced. Tested on the plug on 2026-11-16. The countdown is
 also kept while the robot is armed. It is not armed again while the manager
 wants the plug off: if the OFF switch fails, the countdown that is already
@@ -135,8 +136,8 @@ then the guards. Kevin accepted that for these bounded cases (2026-11-16).
 ## Armed: the charger inhibit (Kevin, 2026-11-25)
 The charger inhibit holds the motors at neutral. It has two sources:
 - The BMS: charge FET on and more than 2.0 A, 2 polls in a row.
-- The plug: the plug is on in a running `hold` or `full` charge. The main
-  loop reads it on every tick.
+- The plug: the plug is on in a running charge, in any mode. The main loop
+  reads it on every tick.
 
 The plug source covers the end of a charge. There the current falls under
 2.0 A while the charger is still on.
@@ -154,7 +155,8 @@ The rules:
 - Once a charge is stopped while the robot is armed, it is over. If the plug
   does not switch off, the manager keeps sending OFF, does not arm the
   countdown again, and the robot stays held while the plug reads on. This
-  holds also after a disarm, until the plug is seen off.
+  holds also after a disarm and after a mode change (PLUG ON does not switch
+  it back on), until the plug is seen off.
 - Anything else goes off at the arm, as before. That is a plug that is on
   with no current (the lead is not on the robot), a charger that has not
   started yet, a wake pulse or a rescue in the dark, a plug that the Kasa
@@ -163,8 +165,13 @@ The rules:
   once. The motors ramp up from neutral. A held stick does not step to the
   motors.
 - Disarming changes nothing.
-- Manual `on` is not covered. Arming does not switch it, and only the BMS
-  source can hold the robot.
+- These rules hold in every mode, PLUG ON included (2026-11-25). PLUG ON
+  starts nothing while the robot is armed. A plug that is on in PLUG ON
+  with no charge goes off at the arm, and on again at the disarm. A charge
+  that runs at the arm in PLUG ON goes on and holds the robot until you tap
+  PLUG OFF. While armed it has the countdown.
+- A mode change does not free the robot. After PLUG OFF, PLUG ON or another
+  mode, the plug source still holds while the plug reads on.
 - The plug does not answer: the plug source keeps the last answer for 6 min
   (the 5 min countdown and 1 min for a refresh in progress), then releases.
   By then the plug's countdown has ended the charge, and the manager no
@@ -181,6 +188,11 @@ The rules:
   not arm until the arm switch has been seen off. If you cycle the switch
   in that time, the plug source does not hold the robot, and the plug goes
   off within 10 s, as before this change.
+- A restart also forgets that a charge was stopped while armed. If that
+  plug did not switch off, the new process takes it as a running charge
+  again once it sees the current on 2 polls. It then holds the robot while
+  the plug reads on, and the normal rules apply. A latched fault survives
+  the restart.
 
 WARNING: A charge that runs when you arm holds the robot still until it
 ends. A hold charge takes about 17 min. A full charge takes about 1.5 h
@@ -193,14 +205,15 @@ To drive during a charge:
 
 If you take the lead off first and then arm, the robot waits for the
 no-current rule: about 10 s when the charge has run 5 min, otherwise until
-it has run 5 min. PLUG OFF ends the wait at once.
+it has run 5 min. PLUG OFF ends the wait at once. In PLUG ON there is no
+such rule: the robot waits until you tap PLUG OFF.
 
 Known limit: with the plug off, nothing knows that the lead is on the robot.
 In `hold` the plug is off about 22 h of 24. If you arm then with the lead
 on, the robot can drive off with it. The same holds after the end of a
 charge, in the first 20 to 30 s of a charge (before the current shows on 2
-polls), during a wake pulse or a rescue in the dark, in manual `on` in the
-taper, and when a charger does not start on a nearly full pack. Take the
+polls), during a wake pulse or a rescue in the dark, and when a charger
+does not start on a nearly full pack. Take the
 lead off before you arm.
 
 ## Other behaviour

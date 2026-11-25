@@ -178,7 +178,10 @@ class Hold(unittest.TestCase):
         self.assertIs(d.want_on, False)
         self.assertEqual(d.phase, "armed")
         p.set_mode("on")
-        self.assertIs(p.decide(inp(cell=3.60, armed=True), REST + 1).want_on, True)   # manual is manual
+        # 2026-11-25 (audit N3, Grok re-review of 8751e9f): no charge starts
+        # while armed, PLUG ON included. It was "manual is manual" here.
+        self.assertIs(p.decide(inp(cell=3.60, armed=True), REST + 1).want_on, False)
+        self.assertIs(p.decide(inp(cell=3.60), REST + 2).want_on, True)     # disarmed: manual is manual
 
 
 class Inhibits(unittest.TestCase):
@@ -933,6 +936,29 @@ class ArmedDuringACharge(unittest.TestCase):
         self.assertIs(d.want_on, False)                         # back under the ceiling: still over
         self.assertIn("waiting for the plug to go off", d.reason)
 
+    def test_plug_on_follows_the_same_armed_rule(self):
+        """Audit N3 / Grok re-review of 8751e9f: PLUG ON starts nothing while
+        armed, keeps a charge that runs at the arm only while the plug term
+        holds the robot, and turns a plug with no charge off."""
+        p = ChargePolicy(cfg(), "on")
+        self.assertIs(p.decide(inp(cell=3.90, armed=True), 0.0).want_on, False)     # nothing starts
+        self.assertIs(p.decide(inp(cell=3.90), 10.0).want_on, True)                 # disarmed: on
+        for t in (20.0, 30.0):
+            d = p.decide(inp(cell=3.90, a=3.6, plug_on=True), t)
+        self.assertTrue(d.charge_running)
+        d = p.decide(inp(cell=3.90, a=3.6, plug_on=True, armed=True, held=True), 40.0)
+        self.assertIs(d.want_on, True)                                              # running and held
+        d = p.decide(inp(cell=3.90, a=3.6, plug_on=True, armed=True, held=False), 50.0)
+        self.assertIs(d.want_on, False)                                             # not held: off, over
+        d = p.decide(inp(cell=3.90, a=3.6, plug_on=True, armed=True, held=True), 60.0)
+        self.assertIs(d.want_on, False)
+        q = ChargePolicy(cfg(), "on")
+        q.decide(inp(cell=3.90), 0.0)
+        q.decide(inp(cell=3.90, a=-0.3, plug_on=True), 10.0)                        # on, no current
+        d = q.decide(inp(cell=3.90, a=-0.3, plug_on=True, armed=True, held=True), 20.0)
+        self.assertIs(d.want_on, False)
+        self.assertEqual(d.phase, "armed")
+
     def running_full(self, cell=4.05):
         p = settled("full")
         self.assertIs(p.decide(inp(cell=3.90), REST).want_on, True)
@@ -973,14 +999,14 @@ class ArmedDuringACharge(unittest.TestCase):
         self.assertIs(d.want_on, True)
         self.assertTrue(d.charge_running)
         self.assertEqual(d.info["session"]["kind"], "full")
-        p.set_mode("on", t + 15)                                # manual: not covered, unchanged
+        p.set_mode("on", t + 15)                                # PLUG ON: the charge goes on, held
         d = p.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True, held=True), t + 20)
         self.assertIs(d.want_on, True)
-        self.assertFalse(d.charge_running)
-        p.set_mode("off", t + 25)
+        self.assertTrue(d.charge_running)
+        p.set_mode("off", t + 25)                               # PLUG OFF: off, but held while it reads on
         d = p.decide(inp(cell=3.73, a=3.6, plug_on=True, armed=True, held=True), t + 30)
         self.assertIs(d.want_on, False)
-        self.assertFalse(d.charge_running)
+        self.assertTrue(d.charge_running)
 
 
 class Agreement(unittest.TestCase):

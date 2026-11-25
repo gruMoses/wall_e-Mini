@@ -362,18 +362,21 @@ class ChargeManager:
         return secs, refresh
 
     def _service_deadman(self, plug_on: Optional[bool], mode: str, now: float,
-                         want_on: Optional[bool] = None) -> None:
-        """Keep the plug's own off-countdown armed while it is on in hold/full;
+                         want_on: Optional[bool] = None, armed: bool = False) -> None:
+        """Keep the plug's own off-countdown armed while it is on in hold/full,
+        and in manual "on" while the robot is armed (a charge kept for an
+        armed robot always has one, so the plug term may run out with it);
         remove it otherwise (a leftover would end a manual "on" after minutes).
-        Not re-armed while the policy wants the plug off: when the OFF switch
-        failed, the countdown already running must end the charge."""
+        Neither re-armed nor removed while the policy wants the plug off and
+        it still reads on, in any mode: the countdown already running must
+        end the charge when the OFF switch fails."""
         arm = getattr(self._plug, "arm_off_timer", None)
         secs, refresh = self._deadman_times()
         if not callable(arm) or secs <= 0.0:
             return
-        if plug_on and mode in ("hold", "full"):
-            if want_on is False:
-                return
+        if plug_on and want_on is False:
+            return
+        if plug_on and (mode in ("hold", "full") or (mode == "on" and armed)):
             if (self._deadman_last_t is None or self._deadman_fails
                     or now - self._deadman_last_t >= refresh):
                 try:
@@ -477,7 +480,7 @@ class ChargeManager:
         # countdown it is about to restart.
         self._update_plug_hold(plug_on, plug_err, dec.charge_running, now)
         if plug_err is None:
-            self._service_deadman(plug_on, dec.mode, now, dec.want_on)
+            self._service_deadman(plug_on, dec.mode, now, dec.want_on, inp.armed)
 
         alerts: List[Dict[str, str]] = list(dec.alerts)
         if self._deadman_fails >= _PLUG_FAILS_FOR_ALERT:
