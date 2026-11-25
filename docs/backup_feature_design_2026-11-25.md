@@ -1,6 +1,6 @@
 # Design: back-up in FOLLOW_ME (2026-11-25, revision 2)
 
-Status: DESIGN ONLY. No code exists for the motion. Nothing here is approved. Revision 2 applies the Grok safety review of the same day (section 11). Before any code that can move the robot: Kevin's answers (section 9) and a second Grok review of this revision (section 10).
+Status: DESIGN ONLY. No code exists for the motion. Revision 2 applies the Grok safety review of the same day (section 11). Kevin answered section 9 on 2026-11-25 (decisions at the top of section 9). Before any code that can move the robot: a second Grok review of this revision (section 10).
 
 Relation to `docs/backup_pump_design.md` (approved 2026-09-24): that document stays the record for the pump signal (its section 5). This document replaces its sections 6 and 7 (motion and safety), because the person stop hold, the RC latches, the pack guard and `wheel_ground_scale` are all newer than it.
 
@@ -8,11 +8,11 @@ Relation to `docs/backup_pump_design.md` (approved 2026-09-24): that document st
 
 1. **The trigger is not arms up.** Raised hands leave the frame when Kevin is closer than about 3.5 m to 4.5 m (bench, 2026-09-24, `docs/NEXT_SESSION.md` section 2). The behaviour happens at 1.5 m to 3 m, where arms up reads "down". Motion runs only on a signal that passes the 10-minute false-start trial and works at 2 m. Today that means the pump (`fm-pump`, `dfbda57`, log only, never trialled). Arms up may run log-only for data.
 2. **Version 1 reverses straight. It does not keep Kevin centred.** A steer command at low reverse speed drives one track forward: the robot pivots, the front corner sweeps toward a person beside it, and the rear swings over ground no sensor sees (review A1).
-3. **The robot reverses only over the straight piece of ground it just drove forward over, and Grok requires a rear sensor before any run on the ground** (review A2). Kevin faces the camera while he signals; he cannot see the ground in the shadow of the chassis.
+3. **The robot reverses only over the straight piece of ground it just drove forward over** (review A2). Kevin faces the camera while he signals; he cannot see the ground in the shadow of the chassis. Grok requires a rear sensor before any run on the ground. Kevin's decision (2026-11-25): no rear sensor required; ground runs are supervised (a spotter who sees behind the robot, the transmitter in Kevin's hand). The sensor gate stays in the design for when one is fitted.
 
 ## 1. Behaviour
 
-Plain words: Kevin is being followed in a straight line. He turns, faces the robot, gives the signal and walks slowly toward it. The robot ramps into a slow, straight reverse and holds the range it had at the start. It goes back no farther than the straight segment it just drove. He drops the signal: the robot stops. It then stands still, both tracks at neutral, until he is clearly seen walking away. Any doubt ends the movement.
+Plain words: Kevin is being followed in a straight line. He turns, faces the robot, gives the signal and walks slowly toward it. The robot ramps into a slow, straight reverse and holds the range it had at the start. It goes back no farther than the straight segment it just drove. He drops the signal: the robot stops. Forward then stays at zero until he is clearly seen walking away; it may pivot in place to keep him centred, as at the 0.8 m stop. Any doubt ends the movement.
 
 States (new, inside FOLLOW_ME only; the mode stays FOLLOW_ME). The module runs on every tick while the state is not OFF, also after the enable latch drops.
 
@@ -21,8 +21,8 @@ States (new, inside FOLLOW_ME only; the mode stays FOLLOW_ME). The module runs o
 | OFF | follow-me command, unchanged | READY when the enable latch is on (section 5, item 4) |
 | READY | follow-me command, unchanged | BACKING when every entry gate passes (section 2) |
 | BACKING | equal reverse bytes on both tracks (section 3). Both bytes are 126 or less on every tick | SETTLE on a normal end; LOCKED on a fault end; OFF on any FOLLOW_ME exit |
-| SETTLE | both tracks neutral. No follow-me pivot (open question 3) | READY on the evidence in section 3.4 |
-| LOCKED | both tracks neutral | OFF only by FOLLOW_ME off and on, or disarm |
+| SETTLE | forward part 0; the follow-me pivot passes (Kevin, 2026-11-25, question 3) | READY on the evidence in section 3.4 |
+| LOCKED | forward part 0; the follow-me pivot passes (Kevin, 2026-11-25) | OFF only by FOLLOW_ME off and on, or disarm |
 
 Every exit from BACKING. "Ramp" means the reverse target goes to neutral through the slew limiter (FOLLOW_ME decel 250 bytes/s: 32 bytes in 0.13 s). "Write" means neutral goes to the VESC on that same tick (`motor.stop()` or `set_tracks(126, 126)`) and the slew is held at neutral (`_hold_slew_at_neutral`), so whatever comes next ramps from neutral. A stop may be immediate; a release never is.
 
@@ -57,7 +57,7 @@ All must hold on the same tick. Counts are **new camera results** (a new NN sequ
 9. No stop: obstacle distance above 0.0 and the person stop hold not active.
 10. Robot stopped: both track eRPM present, 100 ms old or less, 300 or less, and the emitted bytes at neutral, for 0.5 s.
 11. Straight segment (section 3.3): 0.5 m or more left after the margin, heading fresh, current yaw inside the segment band.
-12. Rear sensor fitted, healthy and clear. Without one, back-up runs on the stand only (test plan).
+12. Rear sensor, if one is fitted: healthy and clear. Not required (Kevin, 2026-11-25); without one, ground runs are supervised only (test plan steps 6 and 7).
 13. Not SETTLE, not LOCKED, session budget left, moves left in this arm session.
 
 A refused start is logged with the first gate that failed. The pending start is consumed; it does not wait for the gate to clear.
@@ -114,7 +114,7 @@ A refused start is logged with the first gate that failed. The pending start is 
 | 2 | Signal source hung or slow | Input sample older than 0.3 s: exit 1 |
 | 3 | Identity swap | One `track_id` for the movement; exit 6 on a change, on a range step above 0.5 m or a centre step above 0.2 between fresh samples, or on any second person box in view, overlapping or not |
 | 4 | Signal end missed | "Active" must be seen again and again. A missed frame stops; it never continues |
-| 5 | Kevin walks faster than the robot backs | Range below 1.0 m: exit 5, LOCKED, both tracks neutral. The robot is standing when he reaches it (section 4.1) |
+| 5 | Kevin walks faster than the robot backs | Range below 1.0 m: exit 5, LOCKED, forward 0 (the follow-me pivot passes, Kevin 2026-11-25). The robot does not drive toward him when he reaches it (section 4.1) |
 | 6 | Person, child or animal behind | Rear sensor (gate 12, exit 6), straight segment only (3.3), no steer, 0.33 m/s, 8 s. See open question 6 |
 | 7 | Backs into an obstacle | Stall: measured wheel speed below 30 % of commanded, summed over the movement to 0.5 s after the ramp. Time with no eRPM adds to that sum and never resets it. eRPM older than 100 ms is missing: exit 6. `RpmPlausibilityGate` trip: exit 6. WARNING: a soft body does not stall the wheels; only the rear sensor covers it |
 | 8 | Slope, runs away downhill | Measured reverse speed above 0.5 m/s for 0.3 s: exit 6. First ground tests on level ground |
@@ -134,7 +134,7 @@ Today the stop scales only the forward part (`is_forward_motion` in `Controller.
 
 1. A stop-tier trigger or an active hold ends BACKING and refuses a start. Back-up does not "back away" from a close person.
 2. Why: inside about 1 m the box is clipped and the range is garbage (2026-11-08). The robot would reverse blind on a target it can no longer identify. A standing robot that Kevin walks up to harms nobody.
-3. The whole band from 1.0 m down to 0.8 m goes to LOCKED with both tracks neutral. `end_min_range_m` equals `person_stop_hold_release_m`, and SETTLE there would chatter on range noise.
+3. The whole band from 1.0 m down to 0.8 m goes to LOCKED with forward 0 (the follow-me pivot passes, Kevin 2026-11-25). `end_min_range_m` equals `person_stop_hold_release_m`, and SETTLE there would chatter on range noise.
 4. Kevin's ruling of 2026-11-08 (a pivot passes the 0.8 m stop in FOLLOW_ME) is not changed for normal FOLLOW_ME. SETTLE and LOCKED are new states, not that stop; whether they pivot is open question 3.
 
 ### 4.2 The person stop hold
@@ -178,7 +178,7 @@ Rules from CLAUDE.md, and where each one lands:
 | `entry_center_norm` / `exit_center_norm` | 0.20 / 0.30 | no steer in version 1 |
 | `max_move_s` / `max_move_m` / `session_budget_m` | 8.0 / 2.5 / 6.0 | |
 | `segment_yaw_band_deg` / `segment_margin_m` / `segment_min_m` / `segment_max_age_s` | 8 / 0.3 / 0.5 / 30 | section 3.3 |
-| `rear_sensor_required` | True | False only on the stand |
+| `rear_sensor_required` | False | Kevin, 2026-11-25: ground runs supervised. True once a sensor is fitted |
 | `signal_max_age_s` / `det_max_age_s` / `rc_max_age_s` | 0.3 / 0.3 / 0.3 | |
 | `erpm_max_age_s` | 0.1 | |
 | `alone_s` / `track_stable_s` / `still_s` / `still_max_erpm` | 1.0 / 1.0 / 0.5 / 300 | |
@@ -197,9 +197,9 @@ WARNING: A push that changes follow-me code restarts `wall-e` and reaches the ro
 1. **Unit tests** (`pi_app/tests/test_backup_move.py`): each gate alone refuses; each exit row gives its motor result; both bytes 126 or less on every BACKING tick over random inputs; no start on control-tick repeats; a segment restarts on yaw, pivot and stale heading and ages out; reverse never passes the segment; SETTLE holds through one far sample and through a jump; no forward step on the SETTLE release tick; the calibration and RC-stale returns write neutral; an exception writes neutral; a frozen eRPM and a one-good-sample dropout both end the movement; the two latches refuse each other; a second POST does not refill the count; the hard-stop bypass never crosses neutral (the 2026-11-05 held stick).
 2. **Replay**, no motion: the follow-me drives of 2026-11-06 and 2026-11-08 (goats, the 0.66 s close-frame release), the 2026-09-25 frozen log, the 2026-09-24 pump and arms-up logs. Pass: zero would-start on every drive; the frozen log never passes gate 3.
 3. **Log only on the robot**: no path to the motors. Journal lines `BACKUP would-start` / `would-stop`, with the segment length. Kevin works in front of the robot for 10 minutes (the hard cases of `docs/backup_pump_design.md` section 9, step 1), then signals 10 times at each of 2 m, 3 m and 4 m, each after a normal follow. Pass: no false start; 9 of 10 starts at 2 m; how often a segment of 0.5 m or more was there.
-4. **Stand, wheels off the ground**, cap 20 bytes, `rear_sensor_required` False. Measure signal end to wheels stopped (target 1.0 s or less for the pump); stick, ch4, ch3, web stop, calibration entry each to stopped; time cap; RC unplugged; a hand over the lens; a second person walks in.
-5. **Rear sensor on the stand** (after Kevin has chosen and fitted one): trigger it by hand during a movement, unplug it, short it. Each must end the movement and refuse the next start.
-6. **Ground, short.** Not before step 5 passes. Level garage floor, cap 20 bytes, `max_move_m` 1.0, a spotter beside the robot who sees behind it, Kevin with the transmitter in his hand. Push a soft object (a foam block) against the rear sensor during a movement.
+4. **Stand, wheels off the ground**, cap 20 bytes. Measure signal end to wheels stopped (target 1.0 s or less for the pump); stick, ch4, ch3, web stop, calibration entry each to stopped; time cap; RC unplugged; a hand over the lens; a second person walks in.
+5. **Rear sensor on the stand**, only if one is fitted: trigger it by hand during a movement, unplug it, short it. Each must end the movement and refuse the next start.
+6. **Ground, short.** Not before step 4 passes (and step 5, if a sensor is fitted). Level garage floor, cap 20 bytes, `max_move_m` 1.0, a spotter beside the robot who sees behind it, Kevin with the transmitter in his hand, nobody and nothing behind the robot. With a sensor fitted, push a soft object (a foam block) against it during a movement.
 7. **Ground, full**: 32 bytes, 2.5 m, level grass; then one slope run. Check that a turn before the stop refuses the start.
 8. Not before step 7 passes and Kevin says so: `enabled` True without the latch.
 
@@ -208,6 +208,12 @@ WARNING: A push that changes follow-me code restarts `wall-e` and reaches the ro
 Steer in reverse, reverse beyond the straight segment, MANUAL, WAYPOINT_NAV, a second person in view, motion on the arms-up signal.
 
 ## 9. Open questions for Kevin
+
+Kevin's decisions, 2026-11-25 (in chat):
+- Q1: the pump only. Arms up runs log-only.
+- Q3: the follow-me pivot passes in SETTLE and LOCKED (forward stays 0). This differs from the recommendation below.
+- Q6: no rear sensor required; ground runs supervised (spotter who sees behind the robot, transmitter in hand). This differs from Grok's read and the recommendation below; both reads are kept for the record.
+- Q2, Q4, Q5, Q7, Q8, Q9, Q10: accepted as recommended.
 
 1. **Trigger.** Drop arms up for this feature and move only on the pump, after its 10-minute false-start trial? Arms up would still log for data. Recommendation (Grok's, and mine now): yes. Arms up reads "down" at exactly the range where you need the robot to move.
 2. **After the stop.** Stay put until you are clearly seen 0.5 m farther away (5 good polls), or go back to the 1.2 m follow distance at once? Recommendation: stay put.
@@ -234,7 +240,7 @@ Steer in reverse, reverse beyond the straight segment, MANUAL, WAYPOINT_NAV, a s
 6. Stall sums (failure 7, 9): can the 100 ms age rule cause a dropout loop that makes the feature unusable, and is that the right side to fail on?
 7. Rear sensor: what must the fail-safe wiring and health check be for a bumper (normally closed, broken wire reads as hit)? Is contact-only sensing enough at 0.33 m/s with a 0.13 s ramp (about 3 cm)?
 8. Item 9 of section 5: is the "toward neutral only" rule for the bypass complete, and does it change any live MANUAL behaviour that Kevin relies on?
-9. LOCKED for the whole 1.0 m to 0.8 m band: any case where both tracks neutral there is worse than today's FOLLOW_ME pivot?
+9. LOCKED for the whole 1.0 m to 0.8 m band, with the follow-me pivot passing (Kevin's choice): can the pivot right after a reverse, or with a person inside 1.0 m, sweep a track or a corner into that person? Is the pivot's own slew and steer cap enough there?
 10. What does revision 2 still miss?
 
 ## 11. Grok safety review, 2026-11-25 (session 536379f5)
