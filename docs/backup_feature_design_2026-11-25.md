@@ -223,7 +223,7 @@ Kevin's decisions, 2026-11-25 (in chat):
 - Q3: the follow-me pivot passes in SETTLE and LOCKED (forward stays 0). This differs from the recommendation below.
 - Q6: no rear sensor required; ground runs supervised (spotter who sees behind the robot, transmitter in hand). This differs from Grok's read and the recommendation below; both reads are kept for the record.
 - Q2, Q4, Q5, Q7, Q8, Q9, Q10: accepted as recommended.
-- Q11: OPEN (new in revision 3).
+- Q11: yes (2026-11-25). Inside 1.0 m the pivot in SETTLE and LOCKED is capped at about 8 bytes and held at 0 while the range is still falling.
 
 1. **Trigger.** Drop arms up for this feature and move only on the pump, after its 10-minute false-start trial? Arms up would still log for data. Recommendation (Grok's, and mine now): yes. Arms up reads "down" at exactly the range where you need the robot to move.
 2. **After the stop.** Stay put until you are clearly seen 0.5 m farther away (5 good polls), or go back to the 1.2 m follow distance at once? Recommendation: stay put.
@@ -239,7 +239,7 @@ Kevin's decisions, 2026-11-25 (in chat):
 8. **Session budget.** Keep the 6 m net-reverse cap on top of the segment rule? Recommendation: yes; it costs nothing.
 9. **Animals in view.** Back-up refuses when any other person, dog, cat, goat, sheep, cow or horse is in the frame. With goats around this will refuse often. Recommendation: strict for version 1. (Chickens are not a stop class.)
 10. **Too close.** Inside 1.0 m the robot stops and locks until you toggle FOLLOW_ME; it does not keep backing away. Recommendation: keep (Grok agrees).
-11. **Pivot close to you (new, open).** You allowed the pivot in SETTLE and LOCKED. Grok asks for one limit on it: while you are inside 1.0 m, cap the pivot at about 8 bytes (a quarter of the normal 32), and hold it at 0 while your range is still falling (you are still walking in). Reason: a corner of a 0.82 m wide body swings toward a person who is stepping up to it. This limits the pivot you allowed; it does not remove it. Recommendation (Grok's, and mine): yes.
+11. **Pivot close to you (DECIDED 2026-11-25: yes).** You allowed the pivot in SETTLE and LOCKED. Grok asks for one limit on it: while you are inside 1.0 m, cap the pivot at about 8 bytes (a quarter of the normal 32), and hold it at 0 while your range is still falling (you are still walking in). Reason: a corner of a 0.82 m wide body swings toward a person who is stepping up to it. This limits the pivot you allowed; it does not remove it. Recommendation (Grok's, and mine): yes.
 
 ## 10. What the Grok check of the code diff must verify
 
