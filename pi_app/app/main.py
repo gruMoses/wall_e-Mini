@@ -508,7 +508,7 @@ def run() -> int:
             # WAYPOINT_NAV are refused and MANUAL stays at the stale floor.
             controller.set_vision_freshness_getter(
                 lambda: {"age_s": float("inf"), "stale": True, "seq": None,
-                         "seq_stuck_packets": 0}
+                         "seq_stuck_packets": 0, "session_seen": False}
             )
             print(
                 "WARNING: OAK-D reader has no get_detection_freshness(); "

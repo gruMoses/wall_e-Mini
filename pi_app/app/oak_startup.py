@@ -12,14 +12,15 @@ the camera, so the two cases are the same. The reader then polls USB
 (``OakDepthReader._await_first_device``) and opens the session when the
 camera enumerates; everything built on it comes up with no restart.
 
-Kept out of main.py so a test can drive it without importing the hardware
-stack.
+Kept out of main.py so a test can drive it without importing main.py (which
+pulls in the whole hardware stack).
 """
 
 from __future__ import annotations
 
-import threading
 from typing import Callable, Optional
+
+from pi_app.hardware.oak_depth import UsbProbe
 
 # How long the startup USB enumeration may take. ``detect()`` calls
 # depthai's getAllAvailableDevices(), which has no timeout of its own.
@@ -27,23 +28,9 @@ DETECT_TIMEOUT_S = 10.0
 
 
 def bounded_detect(detect: Callable[[], bool], timeout_s: float) -> Optional[bool]:
-    """``detect()`` in a daemon thread. True / False, or None if it has not
-    returned within ``timeout_s`` (the thread is left to finish on its own;
-    a call stuck inside depthai cannot be interrupted)."""
-    box: dict = {}
-
-    def run() -> None:
-        try:
-            box["found"] = bool(detect())
-        except Exception:
-            box["found"] = False
-
-    thread = threading.Thread(target=run, name="OakUsbDetect", daemon=True)
-    thread.start()
-    thread.join(timeout=max(0.0, float(timeout_s)))
-    if thread.is_alive():
-        return None
-    return bool(box.get("found", False))
+    """``detect()`` bounded by ``timeout_s``: True / False, or None if it has
+    not returned (UsbProbe; the call is left to finish on its own)."""
+    return UsbProbe(detect).poll(timeout_s)
 
 
 def start_oak_reader(make_reader: Callable[[], object],
@@ -57,14 +44,20 @@ def start_oak_reader(make_reader: Callable[[], object],
     not return: ``start(wait_for_device=True)``, so the worker waits for it
     and every reading stays stale until then.
     """
-    found = bounded_detect(detect, detect_timeout_s)
+    probe = UsbProbe(detect)
+    found = probe.poll(detect_timeout_s)
     present = bool(found)
     reader = make_reader()
     if present:
         reader.start()
         print("OAK-D Lite detected and started")
+    elif found is None:
+        # The enumeration is still running: the reader waits on this same
+        # call, so two getAllAvailableDevices() never overlap.
+        reader.start(wait_for_device=True, usb_probe=probe)
     else:
         reader.start(wait_for_device=True)
+    if not present:
         why = (
             f"USB enumeration did not return in {detect_timeout_s:g} s"
             if found is None else "not on USB"

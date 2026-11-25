@@ -50,12 +50,14 @@ HARD_STOP_SLEW_MAX_DT_S = 2.0 / 30.0
 
 
 def _vision_fail_closed() -> dict:
-    """Freshness dict used when the getter fails. Stale, age unknown."""
+    """Freshness dict used when the getter fails. Stale, age unknown, and
+    no detection packet known for the current session."""
     return {
         "age_s": float("inf"),
         "stale": True,
         "seq": None,
         "seq_stuck_packets": 0,
+        "session_seen": False,
     }
 
 
@@ -658,7 +660,11 @@ class Controller:
 
         * ``first_packet`` (2026-11-25, Grok): the current OAK device session
           (boot, late connect, reconnect) has not delivered its first
-          detection packet (reader ``session_seen`` False). All modes.
+          detection packet. Fail closed: only ``session_seen`` exactly True
+          counts as delivered; missing, None, 0 or any non-bool does not.
+          All modes (FOLLOW_ME / WAYPOINT_NAV keep running if the stream is
+          not stale, with the forward part capped at 0; a pure pivot
+          passes, as at the 0.8 m stop).
         * ``stale`` (Kevin, 2026-11-25): MANUAL only. The detection stream
           is older than ``OakDetectionConfig.vision_stale_s`` (the limit
           that ends FOLLOW_ME), the sequence is not advancing, or the getter
@@ -675,7 +681,7 @@ class Controller:
         fresh = self._vision_freshness_now()
         if not isinstance(fresh, dict):
             fresh = _vision_fail_closed()
-        if fresh.get("session_seen", True) is False:
+        if fresh.get("session_seen") is not True:
             return "first_packet"
         if self._mode == "MANUAL" and bool(fresh.get("stale", True)):
             return "stale"

@@ -684,9 +684,14 @@ class OakImuReader:
             self._defer_t0_dev = None
             if not stationary:
                 return False
+        if not all(math.isfinite(float(v)) for v in raw_dps):
+            # A corrupt sample is not a still sample: restart the window.
+            self._defer_samples = []
+            self._defer_t0_dev = None
+            return False
         if self._defer_t0_dev is None:
             self._defer_t0_dev = dev_ts
-        self._defer_samples.append(tuple(raw_dps))
+        self._defer_samples.append(tuple(float(v) for v in raw_dps))
         span = dev_ts - self._defer_t0_dev
         if span < self._defer_duration_s or len(self._defer_samples) < 10:
             return False
@@ -696,6 +701,10 @@ class OakImuReader:
             sum(y for _, y, _ in self._defer_samples) / n,
             sum(z for _, _, z in self._defer_samples) / n,
         )
+        if not all(math.isfinite(v) for v in bias):
+            self._defer_samples = []
+            self._defer_t0_dev = None
+            return False
         self.gyro_bias_dps = bias
         self._bias_uncalibrated = False
         self._defer_samples = []
@@ -995,7 +1004,30 @@ class OakImuReader:
             yaw_rate_world_dps = 0.0
             yaw_rate_rads = 0.0
 
-        if not self._initialized:
+        no_sample = not math.isfinite(age_s) or age_s > self._stale_age_s
+        if not self._initialized and use_producer and no_sample:
+            # Nothing to seed from yet (camera absent / IMU not started).
+            # Seeding zero cums here would apply the producer's first real
+            # cum as a heading step; stay uninitialised and report stale.
+            yaw_rate_world_dps = self._consume_producer_yaw(
+                cum_x=cum_x,
+                cum_y=cum_y,
+                cum_z=cum_z,
+                cum_grav=cum_grav,
+                generation=generation,
+                producer_integrated=producer_integrated,
+                age_s=age_s,
+                dev_ts=dev_ts,
+                host_ts=host_ts,
+                roll_acc=roll_acc,
+                pitch_acc=pitch_acc,
+                gx=gx,
+                gy=gy,
+                gz=gz,
+                yaw_rate_world_dps=yaw_rate_world_dps,
+                cadence_avg_s=cadence_avg_s,
+            )
+        elif not self._initialized:
             self.roll_rad = roll_acc
             self.pitch_rad = pitch_acc
             self.yaw_rad = 0.0
@@ -1082,10 +1114,31 @@ class OakImuReader:
         # Deferred gyro calibration (see __init__). A stale sample keeps its
         # own, stronger status.
         status_out = self._integrate_status
-        if self._bias_uncalibrated and not self._deferred_bias_step(
-            age_s, dev_ts, stationary, (gx_raw_dps, gy_raw_dps, gz_raw_dps)
-        ):
-            if status_out != "stale":
+        if self._bias_uncalibrated:
+            if self._deferred_bias_step(
+                age_s, dev_ts, stationary, (gx_raw_dps, gy_raw_dps, gz_raw_dps)
+            ):
+                # The yaw integrated so far used bias 0. Start the heading
+                # over from here, as a boot calibration does (heading 0 at
+                # the calibrated, still moment), and drop the cum consumed
+                # before the bias: re-seed the producer baseline. Counted as
+                # a cum reset, so the controller's frame check drops a GPS
+                # heading lock taken on the uncalibrated heading. yaw_axis_sign
+                # and the source are not touched.
+                self.yaw_rad = 0.0
+                self._seed_producer_cums(
+                    cum_x, cum_y, cum_z, cum_grav, generation, producer_integrated
+                )
+                self._seed_sample_clocks(dev_ts, host_ts)
+                self._count_cum_reset += 1
+                self._count_restart += 1
+                self._integrate_status = "restart"
+                self._last_consumed_delta_rad = 0.0
+                self._last_yaw_rate_world_dps = 0.0
+                yaw_rate_world_dps = 0.0
+                heading_deg = 0.0
+                status_out = "restart"
+            elif status_out != "stale":
                 status_out = "uncalibrated"
 
         return {

@@ -21,6 +21,7 @@ matters: ``_poll_depth`` on a depth frame, the session-start reset
 detection packet. Depth and detections are switched separately.
 """
 
+import math
 import shutil
 import sys
 import tempfile
@@ -54,7 +55,7 @@ from pi_app.control.imu_steering import ImuSteeringCompensator
 from pi_app.control.mapping import CENTER_OUTPUT_VALUE
 from pi_app.control.obstacle_avoidance import ObstacleAvoidanceController
 from pi_app.control.safety import SafetyParams
-from pi_app.hardware.oak_depth import ObjectDetection, OakDepthReader
+from pi_app.hardware.oak_depth import ObjectDetection, OakDepthReader, UsbProbe
 from pi_app.hardware.oak_imu import OakImuReader
 from pi_app.hardware.oak_recorder import OakRecorder
 from pi_app.tests.test_waypoint_nav_heading_guard import _clock, _Rig
@@ -340,6 +341,20 @@ class TestReaderWaitsForAbsentCamera(unittest.TestCase):
         self.assertTrue(_wait_until(lambda: not self.reader._thread.is_alive()))
         self.assertEqual(self.session.opened, [])
 
+    def test_reconnect_wait_never_calls_a_slow_but_normal_enumeration_blocked(self):
+        # Each detect() has its own bound; the end of timeout_s must not
+        # shrink it to nothing and report a 20 ms enumeration as blocked.
+        def slow_detect():
+            time.sleep(0.02)
+            return False
+
+        self.reader.detect = slow_detect
+        self.reader._BOOT_WAIT_DETECT_TIMEOUT_S = 0.5
+        self.reader._wait_for_device = types.MethodType(
+            OakDepthReader._wait_for_device, self.reader)
+        for timeout_s in (0.01, 0.1, 0.26, 0.3):
+            self.assertIs(self.reader._wait_for_device(timeout_s), False, timeout_s)
+
     def test_camera_present_at_boot_skips_the_wait(self):
         # Unchanged path: start() opens the session at once; no USB poll.
         self.usb.present = True
@@ -419,8 +434,69 @@ class TestBlockedUsbEnumeration(unittest.TestCase):
         reader, present = start_oak_reader(lambda: rec, self.reader.detect, detect_timeout_s=0.05)
         self.assertLess(time.monotonic() - t0, 1.0)
         self.assertFalse(present)
-        self.assertEqual(rec.start_calls, [{"wait_for_device": True}])
+        self.assertEqual(len(rec.start_calls), 1)
+        call = rec.start_calls[0]
+        self.assertTrue(call["wait_for_device"])
+        # The still-running startup enumeration goes to the reader.
+        self.assertIsInstance(call["usb_probe"], UsbProbe)
+        self.assertTrue(call["usb_probe"].in_flight)
         self.assertIsNone(bounded_detect(self.reader.detect, 0.05))
+
+    def test_one_enumeration_in_flight_across_startup_and_reader(self):
+        # Startup times out on a blocked detect(); the reader's boot wait
+        # waits on that same call instead of starting a second one.
+        made = []
+
+        def make():
+            made.append(self.reader)
+            return self.reader
+
+        reader, present = start_oak_reader(make, self.reader.detect, detect_timeout_s=0.05)
+        self.assertFalse(present)
+        time.sleep(0.3)
+        self.assertEqual(len(self.calls), 1, "no second getAllAvailableDevices()")
+        self.answer = True
+        self.release.set()
+        self.assertTrue(_wait_until(lambda: len(self.session.opened) == 1))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_reconnect_wait_is_bounded_and_one_in_flight(self):
+        # The reconnect path (_wait_for_device) used detect() unbounded.
+        self.reader._wait_for_device = types.MethodType(
+            OakDepthReader._wait_for_device, self.reader)
+        t0 = time.monotonic()
+        self.assertIsNone(self.reader._wait_for_device(0.1))
+        self.assertLess(time.monotonic() - t0, 0.5)
+        self.assertIsNone(self.reader._wait_for_device(0.1))
+        self.assertEqual(len(self.calls), 1)
+        self.reader._stop_event.set()
+        t0 = time.monotonic()
+        self.assertFalse(self.reader._wait_for_device(5.0))
+        self.assertLess(time.monotonic() - t0, 0.5, "stop() ends the wait")
+
+    def test_supervisor_waits_out_a_blocked_reconnect_enumeration(self):
+        # After a drop the supervisor must not look alive while detect() is
+        # stuck: no heartbeat and no device open until it returns.
+        self.reader._wait_for_device = types.MethodType(
+            OakDepthReader._wait_for_device, self.reader)
+        self.reader._RECONNECT_BACKOFF_S = (0.02,)
+        self.usb.present = True
+        self.answer = True
+        self.release.set()            # first enumeration is not needed: start()
+        self.session.detections = True
+        self.reader.start()
+        self.assertTrue(_wait_until(lambda: len(self.session.opened) == 1))
+        self.release.clear()          # the next detect() blocks
+        with self.assertLogs(OAK_LOGGER, level="WARNING") as logs:
+            self.session.drop()
+            time.sleep(HANG_S * 2.5)
+        self.assertEqual(len(self.session.opened), 1, "no device open while blocked")
+        self.assertTrue(self.reader.get_health()["vision_hung"])
+        out = [r.getMessage() for r in logs.records]
+        self.assertEqual(sum("reconnect wait" in m for m in out), 1, out)
+        self.release.set()
+        self.assertTrue(_wait_until(lambda: len(self.session.opened) == 2))
+        self.assertTrue(_wait_until(lambda: not self.reader.get_health()["vision_hung"]))
 
 
 # ---------------------------------------------------------------------------
@@ -952,10 +1028,27 @@ class TestDeferredGyroCalibration(unittest.TestCase):
 
     def test_no_samples_at_boot_defers(self):
         self.assertTrue(self.imu._bias_uncalibrated)
-        # First read "uncalibrated" (not "init"); with no sample at all the
-        # stronger "stale" wins after that. Both are stale for the hold.
-        self.assertEqual(self.imu.read()["integrate_status"], "uncalibrated")
+        # No sample: "stale" (stronger than "uncalibrated") from the first
+        # read, and the reader stays uninitialised (no zero cums seeded).
         self.assertEqual(self.imu.read()["integrate_status"], "stale")
+        self.assertEqual(self.imu.read()["integrate_status"], "stale")
+        self.assertFalse(self.imu._initialized)
+
+    def test_non_finite_gyro_samples_never_clear_it(self):
+        nan, inf = float("nan"), float("inf")
+        for i in range(30):
+            raw = (nan, 0.1, 0.1) if i % 2 else (0.1, inf, 0.1)
+            self.assertFalse(self._step(1.0 + 0.1 * i, raw=raw))
+        self.assertTrue(self.imu._bias_uncalibrated)
+        # One corrupt sample in an otherwise still window restarts it.
+        for i in range(8):
+            self.assertFalse(self._step(5.0 + 0.1 * i))
+        self.assertFalse(self._step(5.8, raw=(0.1, nan, 0.1)))
+        for i in range(10):
+            self.assertFalse(self._step(5.9 + 0.1 * i))
+        self.assertTrue(self._step(6.9))
+        self.assertFalse(self.imu._bias_uncalibrated)
+        self.assertTrue(all(math.isfinite(v) for v in self.imu.gyro_bias_dps))
 
     def test_still_window_sets_the_bias(self):
         done = [self._step(1.0 + 0.1 * i) for i in range(11)]
@@ -997,6 +1090,240 @@ class TestDeferredGyroCalibration(unittest.TestCase):
         self.assertFalse(self.imu._bias_uncalibrated)
         self.assertAlmostEqual(self.imu.gyro_bias_dps[1], 0.2, places=6)
         self.assertNotEqual(self.imu.read()["integrate_status"], "uncalibrated")
+
+
+# ---------------------------------------------------------------------------
+# Grok re-review (should-fix 1 and 4): session_seen fails closed, and the
+# autonomous modes across a session with no detection packet yet.
+# ---------------------------------------------------------------------------
+
+class TestSessionSeenFailsClosed(unittest.TestCase):
+
+    def _scale(self, getter_value):
+        fresh = {"v": getter_value}
+        ctrl = _getter_ctrl(fresh)
+        ctrl.set_obstacle_data(5.0, 0.0)
+        _cmd, _ev, telem = ctrl.process(FWD_RC, now_epoch_s=10.1)
+        return telem
+
+    def test_fresh_dict_without_session_seen_gives_the_floor(self):
+        base = {"age_s": 0.1, "stale": False, "seq": 3, "seq_stuck_packets": 0}
+        telem = self._scale(dict(base))
+        self.assertFalse(telem["vision_stale"])
+        self.assertAlmostEqual(telem["obstacle_throttle_scale"], STALE_FLOOR)
+        self.assertEqual(telem["obstacle_detections_floor"], "first_packet")
+        for bad in (None, 0, 1, "yes", False):
+            telem = self._scale(dict(base, session_seen=bad))
+            self.assertAlmostEqual(telem["obstacle_throttle_scale"], STALE_FLOOR, msg=bad)
+        self.assertEqual(self._scale(dict(base, session_seen=True))["obstacle_throttle_scale"], 1.0)
+
+    def test_fail_closed_dicts_carry_session_seen_false(self):
+        from pi_app.control.controller import _vision_fail_closed
+        self.assertIs(_vision_fail_closed()["session_seen"], False)
+        self.assertIs(_vision_fail_closed()["stale"], True)
+
+
+class _PacketGap:
+    """Freshness getter: stream fresh, then a new session with no packet yet."""
+
+    def __init__(self):
+        self.seen = True
+
+    def __call__(self):
+        return {"age_s": 0.1, "stale": False, "seq": 5, "seq_stuck_packets": 0,
+                "session_seen": self.seen}
+
+
+class TestAutonomousAcrossFirstPacketGap(unittest.TestCase):
+    """stale still False, session_seen False (a reconnect shorter than
+    vision_stale_s). FOLLOW_ME / WAYPOINT_NAV keep their mode (only a stale
+    stream ends them); the forward part is capped at 0; a pure pivot
+    passes, as at the 0.8 m stop (Kevin, 2026-11-08)."""
+
+    def test_follow_me_keeps_the_mode_and_loses_the_forward_part(self):
+        gap = _PacketGap()
+        fm = FollowMeController(default_config.follow_me)
+        ctrl = Controller(
+            motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown(),
+            obstacle_avoidance=ObstacleAvoidanceController(default_config.obstacle_avoidance),
+            follow_me=fm,
+            safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
+        )
+        ctrl.set_vision_freshness_getter(gap)
+        far = PersonDetection(x_m=0.0, z_m=4.0, confidence=0.9, bbox=(0.45, 0.2, 0.55, 0.8))
+
+        def tick(rc):
+            ctrl.set_person_detections([far])
+            ctrl.set_obstacle_data(5.0, 0.0)
+            out = ctrl.process(rc, now_epoch_s=time.time())
+            time.sleep(0.02)
+            return out
+
+        tick(ARMED_RC)
+        for _ in range(40):
+            cmd, _ev, telem = tick(FM_RC)
+        self.assertEqual(ctrl._mode, "FOLLOW_ME")
+        self.assertEqual(telem["obstacle_throttle_scale"], 1.0)
+        self.assertGreater(cmd.left_byte + cmd.right_byte, 2 * CENTER_OUTPUT_VALUE + 10)
+
+        gap.seen = False
+        cmd, _ev, telem = tick(FM_RC)
+        self.assertEqual(ctrl._mode, "FOLLOW_ME", "stale is False: no FOLLOW_ME exit")
+        self.assertEqual(telem["obstacle_detections_floor"], "first_packet")
+        self.assertEqual(telem["obstacle_throttle_scale"], 0.0)
+        self.assertLessEqual(abs(cmd.left_byte + cmd.right_byte - 2 * CENTER_OUTPUT_VALUE), 1,
+                             "forward part zeroed")
+
+        gap.seen = True
+        _cmd, _ev, telem = tick(FM_RC)
+        self.assertEqual(telem["obstacle_throttle_scale"], 1.0)
+        self.assertIsNone(telem["obstacle_detections_floor"])
+
+    def _nav_rig(self, clock, heading, gap):
+        rig = _Rig(clock, heading=heading)
+        rig.ctrl._obstacle_avoidance = ObstacleAvoidanceController(
+            default_config.obstacle_avoidance)
+        rig.ctrl.set_vision_freshness_getter(gap)
+        self.assertIsNone(rig.ctrl.activate_waypoint_nav())
+        return rig
+
+    @staticmethod
+    def _tick(rig):
+        rig.ctrl.set_obstacle_data(5.0, 0.0)
+        return rig.tick()
+
+    def test_waypoint_drive_keeps_the_mode_and_loses_the_forward_part(self):
+        clock = {"t": 1000.0}
+        gap = _PacketGap()
+        with _clock(clock):
+            rig = self._nav_rig(clock, 0.0, gap)
+            for _ in range(15):
+                cmd, _ev, telem = self._tick(rig)
+            self.assertEqual(telem["nav_state"], "DRIVE")
+            self.assertGreater(cmd.left_byte + cmd.right_byte, 2 * CENTER_OUTPUT_VALUE + 10)
+            gap.seen = False
+            cmd, _ev, telem = self._tick(rig)
+        self.assertEqual(rig.ctrl._mode, "WAYPOINT_NAV")
+        self.assertNotIn("waypoint_nav_exit_reason", telem)
+        self.assertEqual(telem["obstacle_detections_floor"], "first_packet")
+        self.assertEqual(telem["obstacle_throttle_scale"], 0.0)
+        self.assertLessEqual(abs(cmd.left_byte + cmd.right_byte - 2 * CENTER_OUTPUT_VALUE), 1)
+
+    def test_waypoint_align_pure_pivot_passes(self):
+        def run(seen):
+            clock = {"t": 1000.0}
+            gap = _PacketGap()
+            gap.seen = seen
+            with _clock(clock):
+                rig = self._nav_rig(clock, 90.0, gap)
+                out = []
+                for _ in range(10):
+                    cmd, _ev, telem = self._tick(rig)
+                    out.append((cmd.left_byte, cmd.right_byte, telem["nav_state"],
+                                telem["obstacle_throttle_scale"]))
+            return rig, out
+
+        rig_live, live = run(True)
+        rig_gap, gapped = run(False)
+        self.assertEqual(rig_gap.ctrl._mode, "WAYPOINT_NAV")
+        self.assertTrue(all(state == "ALIGN" for _l, _r, state, _s in gapped))
+        self.assertTrue(all(s == 0.0 for _l, _r, _st, s in gapped))
+        last_l, last_r = gapped[-1][0], gapped[-1][1]
+        self.assertEqual((last_l - CENTER_OUTPUT_VALUE) * (last_r - CENTER_OUTPUT_VALUE) < 0,
+                         True, "a pivot: tracks on opposite sides of neutral")
+        self.assertEqual([(l, r) for l, r, _st, _s in gapped],
+                         [(l, r) for l, r, _st, _s in live], "same pivot bytes")
+
+
+# ---------------------------------------------------------------------------
+# Grok re-review (should-fix 3): the deferred bias rebases the heading, and
+# a read without a sample does not seed the cum baseline.
+# ---------------------------------------------------------------------------
+
+class TestHeadingRebase(unittest.TestCase):
+
+    def setUp(self):
+        self.reader = OakDepthReader(default_config.obstacle_avoidance, default_config.follow_me)
+        self.dev = 1.0
+        self.packets = 0
+
+    def _sample(self, cum_y, stationary=True):
+        self.dev += 0.025
+        self.packets += 3
+        with self.reader._lock:
+            st = self.reader._imu_state
+            st.gx_rads, st.gy_rads, st.gz_rads = (np.radians(v) for v in GYRO_RAW_DPS)
+            st.ay_mss = -9.81
+            st.timestamp = time.monotonic()
+            st.device_timestamp_s = self.dev
+            st.cum_yaw_y_rad = cum_y
+            st.producer_packets_integrated = self.packets
+            st.stationary = stationary
+
+    def test_sample_less_read_does_not_seed_a_heading_step(self):
+        imu = OakImuReader(self.reader, yaw_rate_source="gyro_y")
+        for _ in range(3):
+            self.assertEqual(imu.read()["integrate_status"], "stale")
+        self.assertFalse(imu._initialized)
+        # The producer already holds 0.5 rad of cum when the first sample
+        # reaches the reader: no step, the baseline is seeded from it.
+        self._sample(0.5)
+        self.assertAlmostEqual(imu.read()["heading_deg"], 0.0, places=6)
+        self._sample(0.6)
+        self.assertAlmostEqual(imu.read()["heading_deg"], math.degrees(0.1), places=4)
+
+    def test_deferred_bias_commit_rebases_the_heading(self):
+        imu = OakImuReader(self.reader, yaw_rate_source="gyro_y")
+        imu.calibrate_gyro(duration_s=0.02)
+        imu._defer_duration_s = 0.2
+        self.assertTrue(imu._bias_uncalibrated)
+        cum = 0.0
+        statuses = []
+        resets0 = imu.get_health()["count_cum_reset"]
+        for _ in range(12):
+            cum += 0.01            # yaw integrated at bias 0 while still
+            self._sample(cum)
+            data = imu.read()
+            statuses.append(data["integrate_status"])
+            if not imu._bias_uncalibrated:
+                break
+        self.assertFalse(imu._bias_uncalibrated)
+        self.assertEqual(statuses[-1], "restart")
+        self.assertTrue(all(st == "uncalibrated" for st in statuses[1:-1]), statuses)
+        self.assertEqual(data["heading_deg"], 0.0, "heading starts over at the commit")
+        self.assertEqual(imu.get_health()["count_cum_reset"], resets0 + 1)
+        # Only motion after the commit moves the heading, same sign as ever.
+        self._sample(cum + 0.05)
+        data = imu.read()
+        self.assertNotIn(data["integrate_status"], ("uncalibrated", "stale"))
+        self.assertAlmostEqual(data["heading_deg"], math.degrees(0.05), places=4)
+        self.assertEqual(imu.yaw_axis_sign, 1.0)
+
+    def test_commit_drops_a_gps_heading_lock(self):
+        from pi_app.control.gps_heading_align import GpsHeadingAligner
+        from config import GpsHeadingAlignConfig
+        imu = OakImuReader(self.reader, yaw_rate_source="gyro_y")
+        comp = ImuSteeringCompensator(
+            replace(default_config.imu_steering, calibration_timeout_s=0.02), imu)
+        imu._defer_duration_s = 0.2
+        aligner = GpsHeadingAligner(GpsHeadingAlignConfig(enabled=True))
+        ctrl = Controller(
+            motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown(),
+            imu_compensator=comp, gps_heading_aligner=aligner,
+        )
+        ctrl._check_imu_frame_continuity(100.0)   # marker before
+        aligner._locked = True                    # a lock taken while uncalibrated
+        aligner._offset_deg = 12.0
+        cum = 0.0
+        for _ in range(12):
+            cum += 0.01
+            self._sample(cum)
+            imu.read()
+            if not imu._bias_uncalibrated:
+                break
+        self.assertFalse(imu._bias_uncalibrated)
+        ctrl._check_imu_frame_continuity(102.0)
+        self.assertFalse(aligner.locked)
 
 
 # ---------------------------------------------------------------------------

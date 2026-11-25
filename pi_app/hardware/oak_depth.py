@@ -1221,6 +1221,61 @@ class TrackletTracker:
         return assigned
 
 
+class UsbProbe:
+    """USB enumeration (``detect()``) with a bound and at most one call in flight.
+
+    ``detect()`` calls depthai's ``getAllAvailableDevices()``, which has no
+    timeout of its own. ``poll()`` runs it in a daemon thread and waits at
+    most ``timeout_s``. A call that has not returned is waited on again by
+    the next ``poll()`` instead of starting another one, so callers that
+    share one probe (main.py's startup check, then the reader's boot wait
+    and reconnect wait) never run two enumerations at once. A thread stuck
+    inside depthai cannot be killed; the hang monitor's process exit ends it.
+    """
+
+    def __init__(self, detect) -> None:
+        self._detect = detect
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._box: dict | None = None
+
+    @property
+    def in_flight(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def poll(self, timeout_s: float, stop_event: threading.Event | None = None) -> Optional[bool]:
+        """True / False from ``detect()``, or None when it has not returned
+        within ``timeout_s`` (blocked) or ``stop_event`` is set."""
+        with self._lock:
+            if self._thread is None:
+                box: dict = {}
+                detect = self._detect
+
+                def run() -> None:
+                    try:
+                        box["found"] = bool(detect())
+                    except Exception:
+                        box["found"] = False
+
+                thread = threading.Thread(target=run, name="OakUsbProbe", daemon=True)
+                thread.start()
+                self._thread, self._box = thread, box
+            thread, box = self._thread, self._box
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while thread.is_alive():
+            if stop_event is not None and stop_event.is_set():
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return None
+            thread.join(timeout=min(0.05, remaining))
+        with self._lock:
+            if self._thread is thread:
+                self._thread, self._box = None, None
+        return bool(box.get("found", False))
+
+
 class OakDepthReader:
     """Background OAK-D Lite reader following the ArduinoRCReader thread pattern."""
 
@@ -1455,7 +1510,9 @@ class OakDepthReader:
         # worker polls USB for a camera that has never been seen.
         self._wait_for_device_at_start = False
         self._awaiting_device = False
-        self._usb_probe = None  # (thread, result) of a detect() in flight
+        # USB enumeration with a bound, one call in flight (UsbProbe). The
+        # lambda resolves self.detect at call time (tests patch it).
+        self._usb_probe = UsbProbe(lambda: self.detect())
         self._last_rgb_poll_ts = 0.0
         self._last_pipeline_error_msg = ""
         self._last_depth_error_msg = ""
@@ -1477,7 +1534,7 @@ class OakDepthReader:
         except Exception:
             return False
 
-    def start(self, wait_for_device: bool = False) -> None:
+    def start(self, wait_for_device: bool = False, usb_probe: "UsbProbe | None" = None) -> None:
         """Start the worker thread.
 
         ``wait_for_device`` True: the camera was not on USB at startup. The
@@ -1485,11 +1542,17 @@ class OakDepthReader:
         device session only once the camera enumerates. Until then every
         reading stays stale, as for a camera that died mid-run. False (the
         camera was found): the session opens at once, as before.
+
+        ``usb_probe``: main.py's startup probe when its enumeration had not
+        returned. The reader then waits on that same call instead of
+        starting a second ``getAllAvailableDevices()`` next to it.
         """
         with self._lock:
             if self._thread is not None:
                 return
             self._wait_for_device_at_start = bool(wait_for_device)
+            if usb_probe is not None:
+                self._usb_probe = usb_probe
         self._stop_event.clear()
         thread = threading.Thread(
             target=self._run_pipeline, name="OakDepthReader", daemon=True
@@ -2176,40 +2239,9 @@ class OakDepthReader:
     _BOOT_WAIT_DETECT_TIMEOUT_S = 5.0
 
     def _probe_usb(self, timeout_s: float) -> Optional[bool]:
-        """``detect()`` bounded by ``timeout_s``. Returns True / False, or
-        None when the enumeration has not returned (blocked) or stop() came.
-
-        ``detect()`` calls depthai's ``getAllAvailableDevices()``, which has
-        no timeout. It runs in a daemon thread; at most one is in flight, so
-        a blocked call is waited on again by the next poll instead of
-        starting another. A thread stuck inside depthai cannot be killed;
-        the process exit of the hang monitor ends it.
-        """
-        probe = self._usb_probe
-        if probe is None:
-            box: dict = {}
-
-            def run() -> None:
-                try:
-                    box["found"] = bool(self.detect())
-                except Exception:
-                    box["found"] = False
-
-            thread = threading.Thread(target=run, name="OakUsbProbe", daemon=True)
-            thread.start()
-            probe = (thread, box)
-            self._usb_probe = probe
-        thread, box = probe
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
-        while thread.is_alive():
-            if self._stop_event.is_set():
-                return None
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                return None
-            thread.join(timeout=min(0.05, remaining))
-        self._usb_probe = None
-        return bool(box.get("found", False))
+        """``detect()`` bounded by ``timeout_s`` (UsbProbe, one call in
+        flight). True / False, or None when blocked or stop() came."""
+        return self._usb_probe.poll(timeout_s, self._stop_event)
 
     def _await_first_device(self) -> bool:
         """Wait for a camera that was not on USB when the service started.
@@ -2378,30 +2410,53 @@ class OakDepthReader:
             # we don't burn cycles building a pipeline against an absent device.
             # Bounded so a permanently-missing device still loops (and so a test
             # without the helper present is unaffected).
-            self._wait_for_device(timeout_s=backoff_s)
+            if self._wait_for_device(timeout_s=backoff_s) is None:
+                self._wait_while_usb_blocked()
         with self._lock:
             self._pipeline_dead = False
             self._connected = False
 
-    def _wait_for_device(self, timeout_s: float) -> bool:
-        """Poll the availability helper until a device appears or timeout/stop.
+    def _wait_for_device(self, timeout_s: float) -> Optional[bool]:
+        """Poll USB enumeration until a device appears, timeout, or stop.
 
-        Best-effort: any error in the helper is swallowed and treated as
-        "unknown / proceed", so a missing or mocked-out ``detect()`` never blocks
-        the supervisor. Returns True if a device was seen, else False.
+        Each ``detect()`` is bounded by ``_BOOT_WAIT_DETECT_TIMEOUT_S``
+        (``_probe_usb``, not by what is left of ``timeout_s``, so a normal
+        enumeration near the deadline is not mistaken for a blocked one)
+        and polled every 0.25 s within ``timeout_s``. Returns True if a
+        device was seen, False if not (or stop()), None if an enumeration
+        did not return within its bound. A detect() error counts as "not
+        seen", so a missing or mocked-out ``detect()`` never blocks the
+        supervisor.
         """
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         while not self._stop_event.is_set():
-            try:
-                if self.detect():
-                    return True
-            except Exception:
+            found = self._probe_usb(float(self._BOOT_WAIT_DETECT_TIMEOUT_S))
+            if self._stop_event.is_set():
                 return False
-            if time.monotonic() >= deadline:
+            if found is None:
+                return None
+            if found:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
                 return False
-            if self._stop_event.wait(timeout=0.25):
+            if self._stop_event.wait(timeout=min(0.25, remaining)):
                 return False
         return False
+
+    def _wait_while_usb_blocked(self) -> None:
+        """The enumeration of the reconnect wait has not returned: wait on
+        it with no heartbeat and no device open, as the boot wait does, so
+        the hang monitor sees a stuck worker. Returns when it returns or on
+        stop()."""
+        logger.warning(
+            "OAK-D USB enumeration has not returned (reconnect wait); waiting "
+            "on it (heartbeat stopped, the vision hang monitor takes over if "
+            "it stays blocked)"
+        )
+        while not self._stop_event.is_set():
+            if self._probe_usb(float(self._BOOT_WAIT_DETECT_TIMEOUT_S)) is not None:
+                return
 
     def _camera_fps_kw(self) -> dict:
         """kwargs for Camera.requestOutput: fps= only when camera_fps > 0."""
