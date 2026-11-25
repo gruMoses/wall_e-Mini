@@ -1183,7 +1183,11 @@ class SlewLimiterConfig:
     waypoint_nav_accel_bps: float = 140.0
     waypoint_nav_decel_bps: float = 220.0
 
-    # Hard-stop behavior: bypass slew limiter when a stop-critical governor is active.
+    # Hard-stop behavior when a stop-critical governor is active (scale 0 on
+    # a forward command, e-stop): the forward part stops at once and the
+    # turn part ramps at the mode rates (Controller._hard_stop_tracks,
+    # 2026-11-25). False: the hard stop takes the normal slew with
+    # emergency_decel_bps as the decel rate.
     bypass_on_hard_stop: bool = True
     hard_stop_scale_threshold: float = 0.0
     # If bypass is disabled, this fast decel cap can still be used by caller logic.

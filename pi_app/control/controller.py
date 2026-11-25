@@ -1384,6 +1384,80 @@ class Controller:
         stepped = previous + int(round(limit if delta > 0 else -limit))
         return max(MIN_OUTPUT, min(MAX_OUTPUT, stepped))
 
+    @staticmethod
+    def _hard_stop_track(
+        previous: int,
+        target: int,
+        max_accel_delta: float,
+        max_decel_delta: float,
+    ) -> int:
+        """One track's output in a hard stop (see ``_hard_stop_tracks``).
+
+        - A step toward neutral that stays on the same side (or ends at
+          neutral) passes at once: the stop is never delayed.
+        - A step that would cross neutral stops AT neutral this tick (also a
+          step toward neutral, so at once). The far side ramps from neutral
+          on the next ticks: a track never changes side in one tick.
+        - A step away from neutral (from neutral too) goes through
+          ``_slew_toward_target`` at the mode's rates.
+        """
+        prev_off = previous - CENTER_OUTPUT_VALUE
+        tgt_off = target - CENTER_OUTPUT_VALUE
+        if prev_off * tgt_off < 0:
+            return CENTER_OUTPUT_VALUE
+        if abs(tgt_off) <= abs(prev_off):
+            return target
+        return Controller._slew_toward_target(
+            previous, target, max_accel_delta, max_decel_delta
+        )
+
+    @staticmethod
+    def _hard_stop_tracks(
+        prev_left: int,
+        prev_right: int,
+        target_left: int,
+        target_right: int,
+        max_accel_delta: float,
+        max_decel_delta: float,
+    ) -> tuple[int, int]:
+        """Final-stage output for a hard stop: the forward part stops at
+        once, the turn part ramps (Kevin, 2026-11-25; status audit
+        2026-11-25, section 2, item 6).
+
+        The old bypass copied the target to the motors, so a stick held
+        forward and to one side at the 0.8 m stop became a full pivot in one
+        tick, and a track could jump from one side of neutral to the other.
+
+        Each track follows ``_hard_stop_track``. A ramped track lags its
+        target, which would leave some forward (or reverse) motion in the
+        pair, so the net forward of the output is then held between 0 and
+        the target's net forward: the excess is taken off a track on that
+        side by moving it toward neutral, never past it (a step toward
+        neutral, always allowed here). The target of a hard stop has no
+        forward part (scale 0, or neutral), so the output is a pivot at
+        most, and the pivot reaches its target at the mode's accel rate.
+        """
+        c = CENTER_OUTPUT_VALUE
+        left = Controller._hard_stop_track(prev_left, target_left, max_accel_delta, max_decel_delta)
+        right = Controller._hard_stop_track(prev_right, target_right, max_accel_delta, max_decel_delta)
+        target_net = (target_left - c) + (target_right - c)
+        net = (left - c) + (right - c)
+        hi = max(0, target_net)
+        lo = min(0, target_net)
+        if net > hi:
+            excess = net - hi
+            cut_l = min(max(0, left - c), excess)
+            cut_r = min(max(0, right - c), excess - cut_l)
+            left -= cut_l
+            right -= cut_r
+        elif net < lo:
+            excess = lo - net
+            lift_l = min(max(0, c - left), excess)
+            lift_r = min(max(0, c - right), excess - lift_l)
+            left += lift_l
+            right += lift_r
+        return left, right
+
     def _slew_rates_for_mode(self, mode: str) -> tuple[float, float]:
         slewc = getattr(config, "slew_limiter", None)
         if slewc is None:
@@ -2970,12 +3044,27 @@ class Controller:
                     self._slew_last_left = left
                     self._slew_last_right = right
                 elif hard_stop_active and bypass_on_hard_stop:
-                    slew_bypassed = True
-                    left = left_in
-                    right = right_in
+                    # Hard stop (scale 0 on a forward command, e-stop): the
+                    # forward part stops at once, the turn part ramps at the
+                    # mode's rates (_hard_stop_tracks; Kevin, 2026-11-25).
+                    # snap_first_command does not apply here: the turn
+                    # ramps on the first command after a re-arm too.
+                    # slew_bypassed: the target reached the motors in full
+                    # this tick (nothing ramped).
+                    accel_bps, decel_bps = self._slew_rates_for_mode(mode_for_slew)
+                    dt_s = max(0.0, mono_now - self._slew_last_update)
+                    left, right = self._hard_stop_tracks(
+                        self._slew_last_left,
+                        self._slew_last_right,
+                        left_in,
+                        right_in,
+                        max(0.0, accel_bps * dt_s),
+                        max(0.0, decel_bps * dt_s),
+                    )
+                    slew_bypassed = (left == left_in and right == right_in)
                     self._slew_initialized = True
-                    # The stop itself is immediate (bypass). Its release must
-                    # ramp from here, not snap: a False flag would let
+                    # The stop itself is immediate. Its release must ramp
+                    # from here, not snap: a False flag would let
                     # snap_first_command pass the held stick in one tick.
                     self._slew_seen_non_neutral = True
                     self._slew_last_update = mono_now

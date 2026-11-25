@@ -14,6 +14,7 @@ import math
 import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -1016,9 +1017,19 @@ class TestHeldStopPassesPivot(unittest.TestCase):
         c.set_obstacle_data(dist, 0.0)
         cmd, _, _ = c.process(_rc(2000, 2000), now_epoch_s=100.1)
         self.assertEqual((cmd.left_byte, cmd.right_byte), (CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE))
-        c = self._armed()
-        c.set_obstacle_data(dist, 0.0)
-        cmd, _, _ = c.process(_rc(2000, 1000), now_epoch_s=100.1)
+        # Since 2026-11-25 (Kevin) the turn part of a hard stop ramps at the
+        # mode rates instead of passing in one tick, so drive 1 s at 30 Hz on
+        # a fake clock. The common mode stays at neutral on every tick.
+        clock = {"t": 1000.0}
+        with patch("pi_app.control.controller.time.monotonic",
+                   side_effect=lambda: clock["t"]):
+            c = self._armed()
+            for _ in range(30):
+                clock["t"] += 1 / 30
+                c.set_obstacle_data(dist, 0.0)
+                cmd, _, _ = c.process(_rc(2000, 1000), now_epoch_s=100.1)
+                self.assertLessEqual(
+                    abs(cmd.left_byte + cmd.right_byte - 2 * CENTER_OUTPUT_VALUE), 1)
         # The pivot passes: tracks opposite, the common mode at neutral (one
         # byte of rounding from the half-byte differential).
         self.assertGreater(abs(cmd.left_byte - cmd.right_byte), 40)
