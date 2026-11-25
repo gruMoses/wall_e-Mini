@@ -258,6 +258,9 @@ class Controller:
         self._vision_fresh_cache: dict | None = None
         self._vision_getter_fail_logged = False
         self._vision_stale_episode_logged = False
+        # Reason of the live-detections floor on the last obstacle tick
+        # (_detections_floor_reason), for one journal line per change.
+        self._det_floor_reason: Optional[str] = None
         self._hand_data: HandData | None = None
         self._pose_sample: PoseSample | None = None
         self._pose_status: dict = {}
@@ -644,19 +647,54 @@ class Controller:
             return False
         return bool(fresh.get("stale", True))
 
-    def _vision_session_unseen(self) -> bool:
-        """First-packet gate (2026-11-25): True while the current OAK device
-        session has not delivered its first detection packet.
+    def _detections_floor_reason(self) -> Optional[str]:
+        """Why the obstacle scale is capped at the stale floor this tick, or None.
 
-        Only an explicit ``session_seen`` False from the reader counts. No
-        getter, a getter without the key, or a failed getter (fail-closed
-        dict) leaves it False: this gate adds no general "stale detections
-        floor MANUAL" rule.
+        The person/animal stop tier needs live detections; depth alone does
+        not give the 0.8 m stop. ``compute_throttle_scale(detections_unseen=
+        True)`` caps the fresh-depth scale at the mode's stale floor (MANUAL
+        ``manual_stale_throttle_scale``, autonomous 0.0); a stop-tier
+        distance of 0 still stops, and the netting mute does not lift it.
+
+        * ``first_packet`` (2026-11-25, Grok): the current OAK device session
+          (boot, late connect, reconnect) has not delivered its first
+          detection packet (reader ``session_seen`` False). All modes.
+        * ``stale`` (Kevin, 2026-11-25): MANUAL only. The detection stream
+          is older than ``OakDetectionConfig.vision_stale_s`` (the limit
+          that ends FOLLOW_ME), the sequence is not advancing, or the getter
+          failed (fail-closed dict, stale). FOLLOW_ME and WAYPOINT_NAV leave
+          on a stale stream earlier in the tick, so they are unchanged.
+
+        No freshness getter means no detection stream is configured (no OAK
+        reader: main.py registers one whenever the reader exists, a
+        fail-closed one if the reader lacks the method), and nothing is
+        gated, as for the FOLLOW_ME / WAYPOINT_NAV vision gates.
         """
+        if not callable(self._vision_freshness_getter):
+            return None
         fresh = self._vision_freshness_now()
         if not isinstance(fresh, dict):
-            return False
-        return fresh.get("session_seen", True) is False
+            fresh = _vision_fail_closed()
+        if fresh.get("session_seen", True) is False:
+            return "first_packet"
+        if self._mode == "MANUAL" and bool(fresh.get("stale", True)):
+            return "stale"
+        return None
+
+    def _note_detections_floor(self, reason: Optional[str]) -> None:
+        """One journal line when the live-detections floor engages or lifts."""
+        if reason == self._det_floor_reason:
+            return
+        if reason is not None:
+            _logger.warning(
+                "obstacle scale capped at the stale floor: person detections %s "
+                "(depth alone gives no person stop)",
+                "not yet received this OAK session" if reason == "first_packet"
+                else "stale",
+            )
+        elif self._det_floor_reason is not None:
+            _logger.warning("person detections live again: stale floor lifted (slew ramps)")
+        self._det_floor_reason = reason
 
     def _merge_vision_telemetry(self, telemetry: dict) -> None:
         """Stamp vision age/stale when the gate is active. No-op otherwise."""
@@ -2955,12 +2993,15 @@ class Controller:
         )
         telemetry["netting_mute"] = netting.as_dict()
         if self._obstacle_avoidance is not None and self._obstacle_distance_m is not None:
+            _det_floor = self._detections_floor_reason()
+            self._note_detections_floor(_det_floor)
+            telemetry["obstacle_detections_floor"] = _det_floor
             obstacle_scale = self._obstacle_avoidance.compute_throttle_scale(
                 self._obstacle_distance_m,
                 self._obstacle_age_s if self._obstacle_age_s is not None else 999.0,
                 is_manual=(self._mode == "MANUAL"),
                 corridor_muted=netting.active,
-                detections_unseen=self._vision_session_unseen(),
+                detections_unseen=_det_floor is not None,
             )
             if is_forward_motion:
                 # Scale only the common-mode (forward) component; preserve the

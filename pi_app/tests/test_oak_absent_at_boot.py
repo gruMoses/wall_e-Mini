@@ -28,6 +28,7 @@ import threading
 import time
 import types
 import unittest
+import unittest.mock
 from dataclasses import replace
 
 import numpy as np
@@ -195,11 +196,15 @@ class _Session:
         return True
 
 
-def _make_reader(usb, *, boot=(0.01, 0.02, 0.05), remind=600.0, detect_timeout=5.0):
+def _make_reader(usb, *, boot=(0.01, 0.02, 0.05), remind=600.0, detect_timeout=5.0,
+                 vision_stale_s=None):
+    det_cfg = replace(default_config.oak_detection, vision_hang_s=HANG_S)
+    if vision_stale_s is not None:
+        det_cfg = replace(det_cfg, vision_stale_s=vision_stale_s)
     reader = OakDepthReader(
         default_config.obstacle_avoidance,
         default_config.follow_me,
-        detection_config=replace(default_config.oak_detection, vision_hang_s=HANG_S),
+        detection_config=det_cfg,
     )
     reader.detect = usb.detect  # instance attribute shadows the staticmethod
     reader._BOOT_WAIT_BACKOFF_S = boot
@@ -281,10 +286,10 @@ class TestReaderWaitsForAbsentCamera(unittest.TestCase):
         self.assertTrue(thread.is_alive())
         self.assertTrue(_wait_until(lambda: self.reader.get_detection_freshness()["session_seen"]))
         self.assertFalse(self.reader.get_detection_freshness()["stale"])
-        h = self.reader.get_health()
-        self.assertFalse(h["awaiting_device"])
-        self.assertFalse(h["critical_stale"])
-        self.assertLess(self.reader.get_min_distance()[1], STALE_S)
+        # Depth is polled after detections in each iteration: wait for it.
+        self.assertTrue(_wait_until(lambda: self.reader.get_min_distance()[1] < STALE_S))
+        self.assertTrue(_wait_until(lambda: not self.reader.get_health()["critical_stale"]))
+        self.assertFalse(self.reader.get_health()["awaiting_device"])
 
     def test_journal_first_miss_and_connect_only(self):
         with self.assertLogs(OAK_LOGGER, level="WARNING") as logs:
@@ -468,13 +473,14 @@ class _ControllerRig(unittest.TestCase):
     """Reader + Controller wired as in main.py (registration and per-tick feed)."""
 
     present_at_boot = False
+    vision_stale_s = None   # None: the config value (1.5 s)
 
     def setUp(self):
         self.usb = _UsbCamera(present=self.present_at_boot)
         self.made = []
 
         def make():
-            reader = _make_reader(self.usb)
+            reader = _make_reader(self.usb, vision_stale_s=self.vision_stale_s)
             self.session = _with_session(reader, self.usb)
             self.made.append(reader)
             return reader
@@ -723,26 +729,215 @@ class TestFirstPacketGateUnit(unittest.TestCase):
         self.assertEqual(self.oa.compute_throttle_scale(
             0.0, 0.0, is_manual=True, detections_unseen=True), 0.0)
 
-    def test_controller_ignores_a_missing_key_and_a_failed_getter(self):
-        # No general "stale detections" rule: only an explicit False gates.
-        ctrl = Controller(
-            motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown(),
-            obstacle_avoidance=self.oa,
-            safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
-        )
-        ctrl.set_vision_freshness_getter(lambda: {"age_s": 9.0, "stale": True})
-        ctrl.process(ARMED_RC, now_epoch_s=10.0)
-        ctrl.set_obstacle_data(5.0, 0.0)
-        _cmd, _ev, telem = ctrl.process(FWD_RC, now_epoch_s=10.1)
-        self.assertEqual(telem["obstacle_throttle_scale"], 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Kevin, 2026-11-25: MANUAL never runs above the stale floor on depth alone
+# while person detections are stale.
+# ---------------------------------------------------------------------------
+
+def _getter_ctrl(fresh):
+    ctrl = Controller(
+        motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown(),
+        obstacle_avoidance=ObstacleAvoidanceController(default_config.obstacle_avoidance),
+        safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
+    )
+    ctrl.set_vision_freshness_getter(lambda: fresh["v"])
+    ctrl.process(ARMED_RC, now_epoch_s=10.0)
+    return ctrl
+
+
+def _fresh(age, seen=True):
+    return {"age_s": age, "stale": age > 1.5, "seq": 1, "seq_stuck_packets": 0,
+            "session_seen": seen}
+
+
+class TestStaleDetectionsFloor(unittest.TestCase):
+
+    def _scale(self, ctrl, dist=5.0, bt=None):
+        ctrl.set_obstacle_data(dist, 0.0)
+        rc = ARMED_RC if bt is not None else FWD_RC
+        _cmd, _ev, telem = ctrl.process(rc, now_epoch_s=10.1, bt_override_bytes=bt)
+        return telem
+
+    def test_same_limit_as_follow_me(self):
+        reader = OakDepthReader(default_config.obstacle_avoidance, default_config.follow_me,
+                                detection_config=default_config.oak_detection)
+        self.assertEqual(reader._vision_stale_s, 1.5)
+        self.assertEqual(default_config.oak_detection.vision_stale_s, 1.5)
+
+    def test_stale_stream_floors_manual_fresh_does_not(self):
+        fresh = {"v": _fresh(0.2)}
+        ctrl = _getter_ctrl(fresh)
+        self.assertEqual(self._scale(ctrl)["obstacle_throttle_scale"], 1.0)
+        fresh["v"] = _fresh(1.5)          # at the limit: not stale
+        self.assertEqual(self._scale(ctrl)["obstacle_throttle_scale"], 1.0)
+        fresh["v"] = _fresh(1.6)
+        telem = self._scale(ctrl)
+        self.assertAlmostEqual(telem["obstacle_throttle_scale"], STALE_FLOOR)
+        self.assertEqual(telem["obstacle_detections_floor"], "stale")
+
+    def test_phone_manual_gets_the_floor(self):
+        fresh = {"v": _fresh(3.0)}
+        ctrl = _getter_ctrl(fresh)
+        telem = self._scale(ctrl, bt=(254, 254))
+        self.assertAlmostEqual(telem["obstacle_throttle_scale"], STALE_FLOOR)
+        self.assertLessEqual(telem["slew_in_left"] - CENTER_OUTPUT_VALUE, FLOOR_FWD_MAX)
+
+    def test_failed_getter_and_bad_answers_give_the_floor(self):
+        # Changed on purpose from 4f0cedc (Kevin, 2026-11-25): a failed
+        # getter, a non-dict answer and a dict without "stale" are stale.
+        fresh = {"v": _fresh(0.2)}
+        ctrl = _getter_ctrl(fresh)
 
         def boom():
             raise RuntimeError("reader gone")
 
-        ctrl.set_vision_freshness_getter(boom)
-        ctrl.set_obstacle_data(5.0, 0.0)
-        _cmd, _ev, telem = ctrl.process(FWD_RC, now_epoch_s=10.2)
+        for getter in (boom, lambda: None, lambda: {"age_s": 0.1}):
+            ctrl.set_vision_freshness_getter(getter)
+            telem = self._scale(ctrl)
+            self.assertAlmostEqual(telem["obstacle_throttle_scale"], STALE_FLOOR, msg=getter)
+        ctrl.set_vision_freshness_getter(lambda: fresh["v"])
+        self.assertEqual(self._scale(ctrl)["obstacle_throttle_scale"], 1.0)
+
+    def test_stop_tier_still_stops_and_depth_corridor_still_works(self):
+        fresh = {"v": _fresh(3.0)}
+        ctrl = _getter_ctrl(fresh)
+        self.assertEqual(self._scale(ctrl, dist=0.0)["obstacle_throttle_scale"], 0.0)
+        # A corridor reading keeps working under the cap: min(corridor, floor).
+        corridor = ObstacleAvoidanceController(default_config.obstacle_avoidance)
+        want = min(STALE_FLOOR, corridor.compute_throttle_scale(0.3, 0.0, is_manual=True))
+        self.assertAlmostEqual(self._scale(ctrl, dist=0.3)["obstacle_throttle_scale"], want)
+
+    def test_no_getter_means_no_detection_stream(self):
+        # No OAK reader configured: nothing to be stale (main.py registers
+        # a getter, fail-closed if needed, whenever the reader exists).
+        ctrl = Controller(
+            motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown(),
+            obstacle_avoidance=ObstacleAvoidanceController(default_config.obstacle_avoidance),
+            safety_params=SafetyParams(debounce_seconds=0.0, arm_high_persist_s=0.0),
+        )
+        ctrl.process(ARMED_RC, now_epoch_s=10.0)
+        self.assertEqual(self._scale(ctrl)["obstacle_throttle_scale"], 1.0)
+
+    def test_netting_mute_does_not_lift_the_floor(self):
+        clock = {"t": 1000.0}
+        fresh = {"v": _fresh(0.2)}
+        with unittest.mock.patch("pi_app.control.controller.time.monotonic",
+                                 lambda: clock["t"]):
+            ctrl = Controller(
+                motor_driver=FakeMotor(), arm_relay=FakeRelay(), shutdown_scheduler=FakeShutdown(),
+                obstacle_avoidance=ObstacleAvoidanceController(default_config.obstacle_avoidance),
+            )
+            ctrl._safety_state.is_armed = True
+            ctrl.set_vision_freshness_getter(lambda: fresh["v"])
+
+            def tick():
+                clock["t"] += 1.0 / 30.0
+                ctrl.set_obstacle_data(0.41, 0.0, near_share=0.95)
+                ctrl.set_detection_present(False)
+                rc = RCInputs(ch1_us=1800, ch2_us=1800, ch3_us=1900, ch4_us=1000,
+                              ch5_us=1000, last_update_mono_s=clock["t"])
+                return ctrl.process(rc)[2]
+
+            tick()
+            ok, why = ctrl.request_netting_mute(True)
+            self.assertTrue(ok, why)
+            telem = tick()
+            self.assertTrue(telem["netting_mute"]["active"])
+            self.assertEqual(telem["obstacle_throttle_scale"], 1.0)
+            fresh["v"] = _fresh(2.0)
+            telem = tick()
+            self.assertTrue(telem["netting_mute"]["active"])
+            self.assertAlmostEqual(telem["obstacle_throttle_scale"], STALE_FLOOR)
+            fresh["v"] = _fresh(0.2)
+            self.assertEqual(tick()["obstacle_throttle_scale"], 1.0)
+
+    def test_journal_line_on_engage_and_lift_only(self):
+        fresh = {"v": _fresh(0.2)}
+        ctrl = _getter_ctrl(fresh)
+        with self.assertLogs("pi_app.control.controller", level="WARNING") as logs:
+            self._scale(ctrl)
+            fresh["v"] = _fresh(2.0)
+            for _ in range(5):
+                self._scale(ctrl)
+            fresh["v"] = _fresh(0.2)
+            for _ in range(5):
+                self._scale(ctrl)
+        out = [r.getMessage() for r in logs.records]
+        self.assertEqual(sum("capped at the stale floor" in m for m in out), 1, out)
+        self.assertEqual(sum("live again" in m for m in out), 1, out)
+
+
+class TestColourStallWithFreshDepth(_ControllerRig):
+    """The 2026-09-25 shape: CAM_A (NN input) stalls, the mono cameras and
+    depth go on. The rig uses a 0.3 s limit to keep the test short; the
+    production limit is vision_stale_s (1.5 s, test_same_limit_as_follow_me)."""
+
+    present_at_boot = True
+    vision_stale_s = 0.3
+
+    def test_floor_after_the_limit_not_before_then_slew_back(self):
+        self.session.detections = True
+        self.assertTrue(_wait_until(
+            lambda: self.reader.get_detection_freshness()["session_seen"]))
+        self.assertTrue(self._depth_fresh())
+        self._arm()
+        cmd, telem = self._full_stick(n=40, dt_s=0.01)
         self.assertEqual(telem["obstacle_throttle_scale"], 1.0)
+        self.assertGreater(cmd.left_byte, 200)
+
+        # Colour stall: detections stop, depth goes on.
+        self.session.detections = False
+        _cmd, telem = self._full_stick(n=1)
+        self.assertFalse(telem["vision_stale"], "this tick read the stream as fresh")
+        self.assertEqual(telem["obstacle_throttle_scale"], 1.0, "not before the limit")
+        self.assertTrue(_wait_until(lambda: self.reader.get_detection_freshness()["stale"]))
+        self.assertTrue(self._depth_fresh())
+        cmd, telem = self._full_stick(n=50, dt_s=0.01)
+        self._assert_floor(cmd, telem)
+        self.assertEqual(telem["obstacle_detections_floor"], "stale")
+
+        # Fresh again: the floor lifts through the slew, no jump.
+        self.session.detections = True
+        self.assertTrue(_wait_until(
+            lambda: not self.reader.get_detection_freshness()["stale"]))
+        accel = float(default_config.slew_limiter.manual_accel_bps)
+        outs, stamps = [], []
+        for _ in range(60):
+            stamps.append(time.monotonic())
+            cmd, _ev, telem = self._tick(FWD_RC)
+            outs.append(cmd.left_byte)
+            self.assertFalse(telem["slew_bypassed"])
+            time.sleep(0.01)
+        self.assertEqual(telem["obstacle_throttle_scale"], 1.0)
+        self.assertIsNone(telem["obstacle_detections_floor"])
+        self.assertLess(outs[0], CENTER_OUTPUT_VALUE + FLOOR_FWD_MAX + 10, "no jump to full")
+        # Each step within the MANUAL accel rate for the real time between
+        # ticks (the limiter runs on the monotonic clock), plus rounding.
+        for i in range(1, len(outs)):
+            dt = stamps[i] - stamps[i - 1] + 0.005
+            self.assertGreaterEqual(outs[i], outs[i - 1])
+            self.assertLessEqual(outs[i] - outs[i - 1], accel * dt + 2, (i, outs))
+        self.assertGreater(outs[-1], 200)
+
+    def test_frozen_close_person_still_stops_during_the_stall(self):
+        # The stored list is not cleared: a frozen close person keeps the stop.
+        self.session.detections = True
+        self.session.all_dets = [CLOSE_PERSON]
+        self.assertTrue(_wait_until(
+            lambda: self.reader.get_detection_freshness()["session_seen"]))
+        self.session.detections = False   # the list freezes with the person
+        self.assertTrue(_wait_until(lambda: self.reader.get_detection_freshness()["stale"]))
+        self.assertTrue(_wait_until(lambda: self.reader.get_min_distance()[0] == 0.0
+                                    and self.reader.get_min_distance()[1] < STALE_S))
+        with self.reader._lock:
+            self.assertEqual(self.reader._all_dets_state.detections, [CLOSE_PERSON])
+        self._arm()
+        cmd, telem = self._full_stick()
+        self.assertEqual(telem["obstacle_throttle_scale"], 0.0)
+        self.assertEqual((cmd.left_byte, cmd.right_byte),
+                         (CENTER_OUTPUT_VALUE, CENTER_OUTPUT_VALUE))
 
 
 class TestDeferredGyroCalibration(unittest.TestCase):

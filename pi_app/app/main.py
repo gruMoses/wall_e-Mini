@@ -503,11 +503,17 @@ def run() -> int:
         if callable(_fresh_fn):
             controller.set_vision_freshness_getter(_fresh_fn)
         else:
+            # Fail closed (Kevin, 2026-11-25): a reader that cannot say how
+            # fresh its detections are counts as stale. FOLLOW_ME and
+            # WAYPOINT_NAV are refused and MANUAL stays at the stale floor.
+            controller.set_vision_freshness_getter(
+                lambda: {"age_s": float("inf"), "stale": True, "seq": None,
+                         "seq_stuck_packets": 0}
+            )
             print(
                 "WARNING: OAK-D reader has no get_detection_freshness(); "
-                "follow-me will NOT stop on a stalled detection stream "
-                "(2026-09-25 vision-stale incident). A frozen person list "
-                "can drive the robot."
+                "detections count as stale: FOLLOW_ME / WAYPOINT_NAV refused, "
+                "MANUAL at the stale floor"
             )
     bt_server = None  # Set to None to indicate external SPP service is used
 

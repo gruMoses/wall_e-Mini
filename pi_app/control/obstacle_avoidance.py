@@ -39,15 +39,17 @@ class ObstacleAvoidanceController:
     ) -> float:
         """Return a throttle multiplier between 0.0 (full stop) and 1.0 (no limit).
 
-        ``detections_unseen`` (first-packet gate, 2026-11-25): the current
-        OAK device session has fresh depth but has not delivered its first
-        detection packet, so the person/animal stop tier only knows the
-        previous session's list (or none). The scale is capped at the stale
-        floor of the mode (MANUAL ``manual_stale_throttle_scale``, the
+        ``detections_unseen`` (2026-11-25): the person/animal stop tier has no
+        live detections while depth is fresh. The controller sets it for the
+        first-packet gate (the OAK session has not delivered its first
+        detection packet; all modes) and, in MANUAL, for a stale detection
+        stream (Kevin: no MANUAL above the stale floor on depth alone; see
+        Controller._detections_floor_reason). The scale is capped at the
+        stale floor of the mode (MANUAL ``manual_stale_throttle_scale``, the
         autonomous modes 0.0) as for stale depth. A cap, not a replacement:
-        a distance of 0.0 (a stop-tier detection) still gives 0.0. Applied
-        after the netting mute too. Nothing else about stale detections is
-        gated here.
+        a distance of 0.0 (a stop-tier detection) still gives 0.0, and the
+        depth corridor still lowers it. Applied after the netting mute, so
+        the mute never lifts it.
 
         When depth data is stale (age > stale_timeout_s), behaviour depends on
         ``stale_policy``: "stop" returns 0.0, "clear" returns 1.0.
