@@ -38,9 +38,10 @@ Health (Kevin, 2026-11-16: do not charge an unhealthy pack):
   middle, under 10 mV at the top); a fixed small threshold would cry wolf.
 
 Armed (Kevin, 2026-11-25, audit N1): no charge starts while the robot is
-armed. A hold or full charge that is already running keeps going under all
-its normal stop rules, so the charger inhibit stays on while it runs (the
-manager reports it to the main loop). "Running" means the BMS showed charge
+armed. A charge that is already running keeps going under the normal stop
+rules of its mode, so the charger inhibit stays on while it runs (the
+manager reports it to the main loop). In manual ``on`` those are only the
+faults: it goes on until PLUG OFF. "Running" means the BMS showed charge
 current on ``armed_keep_charge_polls`` polls of the session while the robot
 was disarmed. It is kept while armed only while the manager's plug term
 holds the charger inhibit (``ChargeInputs.plug_inhibit``): never a charger
@@ -119,7 +120,7 @@ class ChargeDecision:
     alerts: Tuple[Dict[str, str], ...] = ()
     full_completed: bool = False
     info: Dict[str, Any] = field(default_factory=dict)
-    # A hold or full charge is running (see the module docstring, "Armed"):
+    # A charge is running, in any mode (see the module docstring, "Armed"):
     # it goes on when the robot arms, and the charger inhibit follows it.
     charge_running: bool = False
 

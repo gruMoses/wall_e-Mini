@@ -144,10 +144,12 @@ The plug source covers the end of a charge. There the current falls under
 
 The rules:
 - No charge starts while the robot is armed.
-- A charge that runs when the robot arms goes on. All its normal stop rules
-  still apply: the amp-hour target, full and tapered, the faults, the
-  temperatures, the cell limits, no current for 5 min, BMS dark for 2 min,
-  the countdown in the plug.
+- A charge that runs when the robot arms goes on. In `hold` and `full` all
+  its normal stop rules still apply: the amp-hour target, full and tapered,
+  the faults, the temperatures, the cell limits, no current for 5 min, BMS
+  dark for 2 min, the countdown in the plug. PLUG ON has none of these
+  except a latched fault and, while armed, the countdown in the plug: it
+  goes on until you tap PLUG OFF.
 - "Runs" means: the BMS showed 1.0 A or more of charge current on 2 polls
   while the robot was disarmed.
 - The charge is kept only while the plug source holds the robot. A charger
@@ -235,7 +237,8 @@ lead off before you arm.
   alone. A hard power loss of the Pi mid-charge leaves the plug on in
   mode `on` only; the charger then ends the charge itself at 54.6 V. In
   `hold` and `full`, the dead-man timer in the plug ends the charge in 5
-  minutes or less (see "Dead-man timer in the plug").
+  minutes or less (see "Dead-man timer in the plug"). So does `on` while
+  the robot is armed during a charge kept in `on` (see "Armed").
 
 ## Operating it
 - Phone: main page on port 8080, panel "Charger Plug": HOLD 50 % / CHARGE

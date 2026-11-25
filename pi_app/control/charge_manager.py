@@ -15,7 +15,7 @@ Dead-man: while the plug is on in ``hold`` or ``full`` the manager keeps a
 countdown rule in the plug itself ("off in ``plug_deadman_s``") and re-arms
 it every ``plug_deadman_refresh_s``. If the Pi halts, hangs or loses the
 Wi-Fi link, the plug ends the charge without the robot. Manual ``on`` has no
-countdown.
+countdown, except while the robot is armed during a charge kept in ``on``.
 
 Stop: on ``stop()`` the plug is switched off when the system itself is
 shutting down (e-stop halt, main switch off, ``poweroff``) and the mode is an
@@ -244,9 +244,10 @@ class ChargeManager:
         self._armed = bool(armed)
 
     def holds_plug_on(self, now: Optional[float] = None) -> bool:
-        """True while the plug is on in a running hold or full charge: the
-        charger is powered and its lead is on the robot. The main loop adds
-        this to the charger inhibit. Called every control tick: no lock, no I/O.
+        """True while the plug is on in a running charge, in any mode (a
+        charge that showed current on 2 disarmed polls): the charger is
+        powered and its lead is on the robot. The main loop adds this to the
+        charger inhibit. Called every control tick: no lock, no I/O.
         """
         until = self._plug_hold_until
         if until is None or not self._drive_inhibit_enabled:

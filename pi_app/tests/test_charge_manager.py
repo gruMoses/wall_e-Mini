@@ -724,6 +724,35 @@ class ArmedChargeInhibit(unittest.TestCase):
             self.assertTrue(plug.on)                                   # disarmed: manual is manual
             self.assertIsNone(plug.timer)                              # and has no countdown
 
+    def test_plug_on_then_disarm_after_an_armed_off_keeps_it_off_until_the_plug_reads_off(self):
+        """Grok re-review of 8599655 (should-fix 2): the disarm half. A charge
+        finished while armed, the plug still reads on, PLUG ON, then the
+        robot disarms: want_on stays False and the countdown in the plug is
+        left alone until the plug reads off; then PLUG ON is manual again."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, bms, plug, t = running_charge(self, tmp, "hold")      # countdown armed at REST
+            mgr.note_armed(True)
+            plug.fail_set = True
+            bms.cell = 3.84                                            # OFF decided while armed, it fails
+            self.assertIs(mgr.tick(now=t + 10.0)["want_on"], False)
+            mgr.set_mode("on")
+            self.assertIs(mgr.tick(now=t + 20.0)["want_on"], False)
+            arms0, timer0 = plug.arms, plug.timer
+            mgr.note_armed(False)
+            for k in range(3, 45):                                     # disarmed, well past 360 s
+                now = t + 10.0 * k
+                st = mgr.tick(now=now)
+                self.assertIs(st["want_on"], False, now)
+                self.assertTrue(plug.on, now)
+                self.assertEqual((plug.arms, plug.timer), (arms0, timer0), now)
+            self.assertIn("waiting for the plug to go off", st["reason"])
+            self.assertEqual(st["phase"], "stopping")
+            plug.on = False                                            # the plug's countdown ended it
+            plug.fail_set = False
+            mgr.tick(now=t + 460.0)                                    # seen off: PLUG ON is manual again
+            self.assertTrue(plug.on)
+            self.assertIsNone(plug.timer)                              # and has no countdown
+
     def test_a_plug_on_charge_running_at_the_arm_keeps_going_with_a_countdown(self):
         """PLUG ON follows the same armed rule as hold and full: a charge that
         runs at the arm goes on and holds the robot; while armed it has the

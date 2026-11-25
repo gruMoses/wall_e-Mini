@@ -1507,13 +1507,14 @@ class ChargerPlugConfig:
 
     # Dead-man: while a charge runs in hold/full the manager keeps a countdown
     # in the plug itself ("off in plug_deadman_s"). A dead Pi or a lost Wi-Fi
-    # link then ends the charge without the robot. Not armed in manual "on".
+    # link then ends the charge without the robot. Not armed in manual "on",
+    # except while the robot is armed during a charge kept in "on".
     plug_deadman_s: float = 300.0
     plug_deadman_refresh_s: float = 60.0
 
     # Armed (Kevin, 2026-11-25, audit N1): a charge already running keeps going
     # when the robot is armed, so the charger inhibit stays on while it runs;
-    # no charge starts while armed. "Running" = a hold or full charge with
+    # no charge starts while armed, in any mode. "Running" = a charge with
     # charge current (rest_load_current_a or more) on this many polls while
     # disarmed. A plug that is on with the lead off the robot is not a charge
     # and must not hold an armed robot for the 5 min of no_current_after_s.
