@@ -644,6 +644,20 @@ class Controller:
             return False
         return bool(fresh.get("stale", True))
 
+    def _vision_session_unseen(self) -> bool:
+        """First-packet gate (2026-11-25): True while the current OAK device
+        session has not delivered its first detection packet.
+
+        Only an explicit ``session_seen`` False from the reader counts. No
+        getter, a getter without the key, or a failed getter (fail-closed
+        dict) leaves it False: this gate adds no general "stale detections
+        floor MANUAL" rule.
+        """
+        fresh = self._vision_freshness_now()
+        if not isinstance(fresh, dict):
+            return False
+        return fresh.get("session_seen", True) is False
+
     def _merge_vision_telemetry(self, telemetry: dict) -> None:
         """Stamp vision age/stale when the gate is active. No-op otherwise."""
         if not callable(self._vision_freshness_getter):
@@ -2946,6 +2960,7 @@ class Controller:
                 self._obstacle_age_s if self._obstacle_age_s is not None else 999.0,
                 is_manual=(self._mode == "MANUAL"),
                 corridor_muted=netting.active,
+                detections_unseen=self._vision_session_unseen(),
             )
             if is_forward_motion:
                 # Scale only the common-mode (forward) component; preserve the

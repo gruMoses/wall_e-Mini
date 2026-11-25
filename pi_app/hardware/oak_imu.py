@@ -187,6 +187,20 @@ class OakImuReader:
         self._stale_last_log_s: float = 0.0
         self._last_zupt_active: bool = False
         self._last_stationary: bool = False
+        # Deferred gyro calibration (2026-11-25). calibrate_gyro saw no fresh
+        # sample (camera absent at boot, or an IMU stream late at boot), so
+        # the bias is only the prior (0 at boot). Until a still window as
+        # long as the boot calibration is measured from live samples, read()
+        # reports integrate_status "uncalibrated" and the steering
+        # compensator treats the heading as stale (no hold, WAYPOINT_NAV
+        # refused). Still = the producer's stationary detector (quiet raw
+        # window AND a fresh wheels-stopped witness). Moving resets the
+        # window. yaw_axis_sign is not touched here.
+        self._bias_uncalibrated: bool = False
+        self._defer_duration_s: float = 3.0
+        self._defer_samples: list[tuple[float, float, float]] = []
+        self._defer_t0_dev: Optional[float] = None
+        self._defer_last_dev: Optional[float] = None
 
         # Push bias + NMNI into producer. NMNI may be on before the first
         # calibrate_gyro; calibrate temporarily clears it so bias estimation
@@ -629,7 +643,70 @@ class OakImuReader:
                     float(duration_s), prior_bias[0], prior_bias[1], prior_bias[2],
                 )
             self._resolve_yaw_axis_sign_from_gravity(accel_mean_g)
+            # No sample: measure the bias later from a still window of live
+            # samples (read() / _deferred_bias_step); heading stale until then.
+            self._bias_uncalibrated = measured is None
+            self._defer_duration_s = max(1.0, float(duration_s))
+            self._defer_samples = []
+            self._defer_t0_dev = None
+            self._defer_last_dev = None
+            if measured is None:
+                logger.warning(
+                    "OAK IMU gyro bias deferred: heading reported stale until "
+                    "%.1f s of live samples with the robot still",
+                    self._defer_duration_s,
+                )
         return self.gyro_bias_dps
+
+    def _deferred_bias_step(
+        self,
+        age_s: float,
+        dev_ts: float,
+        stationary: bool,
+        raw_dps: tuple[float, float, float],
+    ) -> bool:
+        """Feed one read() into the deferred calibration. True when it ends.
+
+        One sample per new device timestamp (a duplicate read adds nothing).
+        A sample that is not stationary clears the window, as does a device
+        clock that goes back (new session). When the window spans
+        ``_defer_duration_s`` the raw mean becomes the bias, exactly as the
+        boot calibration would have set it, and is pushed to the producer.
+        """
+        if not (age_s < 0.5) or not (dev_ts > 0.0) or not math.isfinite(dev_ts):
+            return False
+        last = self._defer_last_dev
+        if last is not None and dev_ts == last:
+            return False
+        self._defer_last_dev = dev_ts
+        if (last is not None and dev_ts < last) or not stationary:
+            self._defer_samples = []
+            self._defer_t0_dev = None
+            if not stationary:
+                return False
+        if self._defer_t0_dev is None:
+            self._defer_t0_dev = dev_ts
+        self._defer_samples.append(tuple(raw_dps))
+        span = dev_ts - self._defer_t0_dev
+        if span < self._defer_duration_s or len(self._defer_samples) < 10:
+            return False
+        n = len(self._defer_samples)
+        bias = (
+            sum(x for x, _, _ in self._defer_samples) / n,
+            sum(y for _, y, _ in self._defer_samples) / n,
+            sum(z for _, _, z in self._defer_samples) / n,
+        )
+        self.gyro_bias_dps = bias
+        self._bias_uncalibrated = False
+        self._defer_samples = []
+        self._defer_t0_dev = None
+        self._sync_producer_config()
+        logger.warning(
+            "OAK IMU gyro bias measured after start (none at boot) over %.2f s "
+            "still, %d samples: x=%.4f y=%.4f z=%.4f dps; heading valid",
+            span, n, bias[0], bias[1], bias[2],
+        )
+        return True
 
     def calibrate_mag_hard_iron(self, duration_s: float = 5.0) -> tuple:
         """No-op: OAK-D Lite has no magnetometer."""
@@ -739,6 +816,7 @@ class OakImuReader:
             "yaw_axis_sign": float(self.yaw_axis_sign),
             "accel_mean_g": tuple(self._last_accel_mean_g),
             "integrate_status": self._integrate_status,
+            "gyro_bias_uncalibrated": self._bias_uncalibrated,
             "integration_path": "producer" if self._has_producer_cum else "legacy_snapshot",
             "sample_age_s": self._last_sample_age_s,
             "device_timestamp_s": self._last_dev_ts_seen,
@@ -1001,6 +1079,14 @@ class OakImuReader:
         # CW-positive compass heading (see the convention block above).
         heading_deg = math.degrees(self.yaw_rad) % 360.0
         selected = self._selected_source()
+        # Deferred gyro calibration (see __init__). A stale sample keeps its
+        # own, stronger status.
+        status_out = self._integrate_status
+        if self._bias_uncalibrated and not self._deferred_bias_step(
+            age_s, dev_ts, stationary, (gx_raw_dps, gy_raw_dps, gz_raw_dps)
+        ):
+            if status_out != "stale":
+                status_out = "uncalibrated"
 
         return {
             "roll_deg": math.degrees(self.roll_rad),
@@ -1030,7 +1116,7 @@ class OakImuReader:
             "yaw_rate_scale": self._yaw_rate_scale,
             "sample_age_s": age_s,
             "device_timestamp_s": dev_ts,
-            "integrate_status": self._integrate_status,
+            "integrate_status": status_out,
             "integrate_dt_s": self._last_dt_s,
             "integration_path": "producer" if self._has_producer_cum else "legacy_snapshot",
             "count_duplicate": float(self._count_duplicate),

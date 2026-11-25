@@ -111,12 +111,15 @@ def _reading_is_stale(data) -> bool:
     OakImuReader reports ``integrate_status`` "stale" when its newest sample
     is older than its stale age (0.5 s): it then freezes the heading and
     reports a yaw rate of 0. An infinite ``sample_age_s`` means no sample
-    has ever arrived. A reader without these fields (the external I2C
-    ImuReader) is never treated as stale here.
+    has ever arrived. ``integrate_status`` "uncalibrated" (2026-11-25): the
+    boot gyro calibration saw no sample and the bias is not measured yet
+    (OakImuReader deferred calibration), so the heading drifts at the raw
+    bias rate. A reader without these fields (the external I2C ImuReader)
+    is never treated as stale here.
     """
     if not isinstance(data, dict):
         return False
-    if data.get("integrate_status") == "stale":
+    if data.get("integrate_status") in ("stale", "uncalibrated"):
         return True
     age = data.get("sample_age_s")
     if isinstance(age, bool) or not isinstance(age, (int, float)):
@@ -466,6 +469,10 @@ class ImuSteeringCompensator:
             self._last_sample_age_s = None
         else:
             self._last_sample_age_s = float(age)
+        if isinstance(data, dict) and data.get("integrate_status") == "uncalibrated":
+            # Fresh samples, unmeasured bias: heading_age_s() reads inf, so
+            # the WAYPOINT_NAV heading guard refuses it (2026-11-25).
+            self._last_sample_age_s = float("inf")
         stale = _reading_is_stale(data)
         was_stale = self.state.heading_stale
         if stale or was_stale:

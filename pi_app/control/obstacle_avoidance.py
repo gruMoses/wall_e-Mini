@@ -35,8 +35,19 @@ class ObstacleAvoidanceController:
         age_s: float,
         is_manual: bool = False,
         corridor_muted: bool = False,
+        detections_unseen: bool = False,
     ) -> float:
         """Return a throttle multiplier between 0.0 (full stop) and 1.0 (no limit).
+
+        ``detections_unseen`` (first-packet gate, 2026-11-25): the current
+        OAK device session has fresh depth but has not delivered its first
+        detection packet, so the person/animal stop tier only knows the
+        previous session's list (or none). The scale is capped at the stale
+        floor of the mode (MANUAL ``manual_stale_throttle_scale``, the
+        autonomous modes 0.0) as for stale depth. A cap, not a replacement:
+        a distance of 0.0 (a stop-tier detection) still gives 0.0. Applied
+        after the netting mute too. Nothing else about stale detections is
+        gated here.
 
         When depth data is stale (age > stale_timeout_s), behaviour depends on
         ``stale_policy``: "stop" returns 0.0, "clear" returns 1.0.
@@ -50,19 +61,27 @@ class ObstacleAvoidanceController:
         reading. It never applies to a stale depth (blind is blind), to the
         autonomous modes, or to the YOLO stop channel (distance 0.0 exactly).
         """
+        if self._cfg.stale_policy == "stop":
+            stale_floor = self._cfg.manual_stale_throttle_scale if is_manual else 0.0
+        else:
+            stale_floor = 1.0
         if age_s > self._cfg.stale_timeout_s:
-            if self._cfg.stale_policy == "stop":
-                stale_floor = self._cfg.manual_stale_throttle_scale if is_manual else 0.0
-            else:
-                stale_floor = 1.0
             self._last_scale = stale_floor
             return self._last_scale
 
         self._last_distance_m = distance_m
+        scale = self._fresh_depth_scale(distance_m, is_manual, corridor_muted)
+        if detections_unseen:
+            scale = min(scale, stale_floor)
+        self._last_scale = scale
+        return self._last_scale
 
+    def _fresh_depth_scale(
+        self, distance_m: float, is_manual: bool, corridor_muted: bool
+    ) -> float:
+        """The scale for a fresh depth reading (body of compute_throttle_scale)."""
         if corridor_muted and is_manual and distance_m > 0.0:
-            self._last_scale = 1.0
-            return self._last_scale
+            return 1.0
 
         manual_curve = self._manual_curve_points() if is_manual and distance_m > 0.0 else None
         if manual_curve is not None:
@@ -87,8 +106,7 @@ class ObstacleAvoidanceController:
             floor = float(getattr(self._cfg, "manual_obstacle_min_scale", 0.0))
             if floor > 0.0:
                 scale = max(scale, min(1.0, floor))
-        self._last_scale = scale
-        return self._last_scale
+        return scale
 
     def _manual_curve_points(self) -> tuple[float, float, float, float] | None:
         """(slow, half, floor distance, floor scale) for MANUAL, or None.

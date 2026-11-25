@@ -1413,6 +1413,13 @@ class OakDepthReader:
         self._det_fresh_ts: float | None = None
         self._det_last_seq: int | None = None
         self._det_seq_stuck_packets: int = 0
+        # First-packet gate (2026-11-25, Grok review of the absent-at-boot
+        # change): False from each device session start until that session
+        # refreshes the detection stream once. Until then the person/animal
+        # stop tier only sees the previous session's list (or none), so the
+        # controller keeps MANUAL at the stale-depth floor even on fresh
+        # depth (ObstacleAvoidanceController, detections_unseen).
+        self._det_session_seen: bool = False
         # Colour-stall watchdog (2026-09-25 CAM_A). Times are monotonic
         # stamps of watchdog restarts, pruned to color_stall_window_s.
         # The count is the total since this reader was created. The fault
@@ -1448,6 +1455,7 @@ class OakDepthReader:
         # worker polls USB for a camera that has never been seen.
         self._wait_for_device_at_start = False
         self._awaiting_device = False
+        self._usb_probe = None  # (thread, result) of a detect() in flight
         self._last_rgb_poll_ts = 0.0
         self._last_pipeline_error_msg = ""
         self._last_depth_error_msg = ""
@@ -1506,9 +1514,14 @@ class OakDepthReader:
         return self._stop_event.is_set()
 
     def get_min_distance(self) -> tuple[float, float]:
-        """Return (min_distance_m, age_s). Thread-safe."""
+        """Return (min_distance_m, age_s). Thread-safe.
+
+        ``age_s`` is ``inf`` before the first depth frame (timestamp 0),
+        the same "never received" age as get_imu_data().
+        """
         with self._lock:
-            age = time.monotonic() - self._depth_state.timestamp
+            ts = self._depth_state.timestamp
+            age = (time.monotonic() - ts) if ts else float("inf")
             return self._depth_state.min_distance_m, age
 
     def get_person_stop_hold(self) -> dict:
@@ -1556,7 +1569,10 @@ class OakDepthReader:
         ``stale`` (``age_s > vision_stale_s``), ``seq`` (last sequence that
         refreshed the clock; None if that packet had none), and
         ``seq_stuck_packets`` (packets since then whose sequence did not
-        advance). Does not change ``get_person_detections()``. Thread-safe.
+        advance), and ``session_seen`` (the current device session has
+        refreshed the stream at least once; False before the first session
+        and from each session start, including a reconnect, until its first
+        packet). Does not change ``get_person_detections()``. Thread-safe.
         """
         now = time.monotonic()
         with self._lock:
@@ -1564,6 +1580,7 @@ class OakDepthReader:
             seq = self._det_last_seq
             stuck = self._det_seq_stuck_packets
             limit = self._vision_stale_s
+            session_seen = self._det_session_seen
         if fresh_ts is None:
             age = float("inf")
         else:
@@ -1573,6 +1590,7 @@ class OakDepthReader:
             "stale": age > limit,
             "seq": seq,
             "seq_stuck_packets": stuck,
+            "session_seen": session_seen,
         }
 
     def get_depth_stats(self) -> DepthStats:
@@ -1906,6 +1924,7 @@ class OakDepthReader:
             det_fresh_ts = self._det_fresh_ts
             det_seq = self._det_last_seq
             det_seq_stuck_packets = self._det_seq_stuck_packets
+            det_session_seen = self._det_session_seen
             vision_stale_s = self._vision_stale_s
             color_stall_restarts = self._color_stall_restart_count
             color_stall_fault = bool(self._color_stall_fault)
@@ -2027,6 +2046,7 @@ class OakDepthReader:
             ),
             "det_seq": det_seq,
             "det_seq_stuck_packets": det_seq_stuck_packets,
+            "det_session_seen": det_session_seen,
             "vision_stale": vision_stale,
             "color_stall_restarts": color_stall_restarts,
             "color_stall_fault": color_stall_fault,
@@ -2148,10 +2168,48 @@ class OakDepthReader:
     _RECONNECT_BACKOFF_S = (2.0, 5.0, 10.0)
 
     # Camera absent at startup (_await_first_device): USB poll schedule in
-    # seconds, the final value repeats; and the interval of the reminder
-    # line while the camera is still missing.
+    # seconds, the final value repeats; the interval of the reminder line
+    # while the camera is still missing; and how long one USB enumeration
+    # (detect()) may take before the wait counts as blocked.
     _BOOT_WAIT_BACKOFF_S = (1.0, 2.0, 5.0)
     _BOOT_WAIT_REMIND_S = 600.0
+    _BOOT_WAIT_DETECT_TIMEOUT_S = 5.0
+
+    def _probe_usb(self, timeout_s: float) -> Optional[bool]:
+        """``detect()`` bounded by ``timeout_s``. Returns True / False, or
+        None when the enumeration has not returned (blocked) or stop() came.
+
+        ``detect()`` calls depthai's ``getAllAvailableDevices()``, which has
+        no timeout. It runs in a daemon thread; at most one is in flight, so
+        a blocked call is waited on again by the next poll instead of
+        starting another. A thread stuck inside depthai cannot be killed;
+        the process exit of the hang monitor ends it.
+        """
+        probe = self._usb_probe
+        if probe is None:
+            box: dict = {}
+
+            def run() -> None:
+                try:
+                    box["found"] = bool(self.detect())
+                except Exception:
+                    box["found"] = False
+
+            thread = threading.Thread(target=run, name="OakUsbProbe", daemon=True)
+            thread.start()
+            probe = (thread, box)
+            self._usb_probe = probe
+        thread, box = probe
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while thread.is_alive():
+            if self._stop_event.is_set():
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return None
+            thread.join(timeout=min(0.05, remaining))
+        self._usb_probe = None
+        return bool(box.get("found", False))
 
     def _await_first_device(self) -> bool:
         """Wait for a camera that was not on USB when the service started.
@@ -2164,32 +2222,48 @@ class OakDepthReader:
         stale). The device session opens here once the camera enumerates,
         with no service restart.
 
-        Polls ``detect()`` (USB enumeration) only. No ``dai.Device`` is
-        opened against an absent camera, so a failed open and its depthai
-        teardown are never run in a loop. The supervisor heartbeat is
-        stamped on every poll, so the hang monitor sees a live wait and
-        not a hung worker (vision_hang_s). Journal: one line at the first
-        miss, one every ``_BOOT_WAIT_REMIND_S`` while it lasts, one when the
-        camera is found.
+        Polls ``detect()`` (USB enumeration) only, bounded by
+        ``_BOOT_WAIT_DETECT_TIMEOUT_S`` (``_probe_usb``). No ``dai.Device``
+        is opened against an absent camera, so a failed open and its
+        depthai teardown are never run in a loop. The supervisor heartbeat
+        is stamped after each enumeration that RETURNED, so the hang
+        monitor sees a live wait; an enumeration blocked inside depthai
+        stops the heartbeat and, after ``vision_hang_s``, reads as a hung
+        worker (journal, and a service restart while disarmed), not as a
+        live wait. Journal: one line at the first miss, one every
+        ``_BOOT_WAIT_REMIND_S`` while it lasts, one when the enumeration
+        blocks, one when the camera is found.
 
         Returns True when the camera is seen, False when ``stop()`` ends the
-        wait.
+        wait (also when stop() comes while the enumeration returns True).
         """
         t0 = time.monotonic()
         polls = 0
         missed_logged = False
+        blocked_logged = False
         next_remind = t0 + float(self._BOOT_WAIT_REMIND_S)
         steady_s = float(self._BOOT_WAIT_BACKOFF_S[-1])
         with self._lock:
             self._awaiting_device = True
+            self._last_supervisor_ts = time.monotonic()
         try:
             while not self._stop_event.is_set():
+                found = self._probe_usb(self._BOOT_WAIT_DETECT_TIMEOUT_S)
+                if self._stop_event.is_set():
+                    return False
+                if found is None:
+                    # Blocked: no heartbeat, so the hang monitor can act.
+                    if not blocked_logged:
+                        blocked_logged = True
+                        logger.warning(
+                            "OAK-D USB enumeration has not returned after %g s; "
+                            "waiting on it (heartbeat stopped, the vision hang "
+                            "monitor takes over if it stays blocked)",
+                            float(self._BOOT_WAIT_DETECT_TIMEOUT_S),
+                        )
+                    continue
                 with self._lock:
                     self._last_supervisor_ts = time.monotonic()
-                try:
-                    found = bool(self.detect())
-                except Exception:
-                    found = False
                 polls += 1
                 now = time.monotonic()
                 if found:
@@ -2224,7 +2298,6 @@ class OakDepthReader:
         finally:
             with self._lock:
                 self._awaiting_device = False
-                self._last_supervisor_ts = time.monotonic()
 
     def _run_pipeline(self) -> None:
         """Supervisor loop: owns one device session at a time and re-establishes
@@ -3965,9 +4038,12 @@ class OakDepthReader:
         the clock. ``_det_fresh_ts`` is kept, so the age keeps growing from
         the old session's last packet: an outage longer than
         ``vision_stale_s`` reads stale until the new session's first packet.
+        ``_det_session_seen`` goes False: until that first packet the stop
+        tier sees only the old session's list (first-packet gate).
         """
         self._det_last_seq = None
         self._det_seq_stuck_packets = 0
+        self._det_session_seen = False
 
     def _note_det_packet_freshness(self, msg, publish_ts: float) -> None:
         """Update detection-stream freshness. Caller holds ``self._lock``.
@@ -3988,6 +4064,12 @@ class OakDepthReader:
             capture = _nn_msg_capture_ts(msg)
             self._det_fresh_ts = publish_ts if capture is None else capture
             self._det_last_seq = seq
+            if not self._det_session_seen:
+                self._det_session_seen = True
+                logger.warning(
+                    "OAK: first detection packet of this device session; the "
+                    "person/animal stop sees live detections again"
+                )
             if seq is not None and (prev is None or seq > prev):
                 self._det_seq_stuck_packets = 0
         else:

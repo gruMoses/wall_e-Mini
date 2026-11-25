@@ -352,11 +352,12 @@ def run() -> int:
                 if imu_compensator.get_status().is_available and (
                     imu_source_used == "oak_d" and not oak_present_at_boot
                 ):
-                    # The 3 s gyro calibration above saw no samples: bias
-                    # starts at 0 and the stationary tracker learns it.
+                    # The 3 s gyro calibration above saw no samples: the
+                    # reader measures the bias from live samples once the
+                    # robot is still, and reports the heading stale until then.
                     print(
                         "  IMU steering: OAK-D IMU waiting for the camera, heading "
-                        "stale until it connects (no boot gyro calibration)"
+                        "stale until it connects and a still-robot gyro calibration ends"
                     )
                 elif imu_compensator.get_status().is_available:
                     print(f"  IMU steering compensation enabled (source: {imu_source_used})")
