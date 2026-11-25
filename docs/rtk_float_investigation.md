@@ -95,6 +95,23 @@ Monitor options (2026-11-08). The base has no data port outside the case (inside
 3. Decode the link with the same listener: find the frequency by RSSI, then try spreading factor, bandwidth and sync word until packets decode, and look for RTCM3 frames (preamble 0xD3). If that works, the RTCM stream shows base restarts (a changed 1005 coordinate), the byte rate, and (with MSM4 or MSM7) the base's signal strength. The decoded stream can also feed a home-built rover (any dual-band RTK module). Risk: an unknown framing or frequency hopping. CAD and RSSI see only the frequency, spreading factor and bandwidth that are programmed, so the search is a sweep (902–928 MHz, SF5–SF11, BW 125/250/500 kHz, both sync words, both IQ settings). An implicit header, a custom sync word or hopping can stop the decode while CAD still fires. If the sweep finds nothing, the next tool is a USB SDR waterfall, not another LoRa board.
 4. A second KIT0198-US is the plug-and-play rover. The wiki suggests that one base serves any number of rovers, and DFRobot confirmed on 2026-11-18 that a rover from another kit hears this base (section 2.5). Never re-pair the robot's rover to another base.
 
+### 2.3a PV load test (2026-11-25): PV noise does not break a held fix
+
+Plan: `docs/rtk_test_plan_2026-11-25.md`. The robot stood disarmed at the 2026-11-24 afternoon spot (3.3 m from it) from about 09:10, at about 6 h before sunset (17:25). The battery was full from 10:06, so PV followed the load. Loads switched from the dashboard: Container Dehumidifier (Hubitat 404, 5 min start delay) and North and South Barn Lights (422, 423); the lights alone took PV from 39 W to 810 W in 15 s, the three together to 1.25-1.34 kW. Data: robot journal and run logs, dashboard PV history.
+
+| Time (CST) | PV | Rover |
+|---|---|---|
+| 09:26-10:06 | 1.2-2.1 kW (battery charging) | float |
+| 10:06-11:11 | 40-110 W (quiet) | float for 65 min, then **fixed at 11:11:05** (27 satellites) |
+| 11:16:28-11:31:36, Noisy 1 | 0.81-1.33 kW | fixed for 12 min (one 4 s float at 11:26:33), float at 11:28:25 |
+| 11:31:36 | loads off | fixed 8 s later (11:31:44) |
+| 11:33:21-11:35:38 | 70 W (quiet) | float, then fixed (two short flips) |
+| 11:41:31-11:56:31, Noisy 2 | 0.91-1.34 kW | **fixed on 100 % of 180 samples** |
+
+Result, by the rule in the plan: PV noise rejected as the cause of losing a fix (the rover stayed fixed through Noisy 2 and through 12 of 15 min of Noisy 1, and it lost the fix once in quiet). Not tested: PV noise against getting a fix (acquisition). The only acquisition samples are the morning (40 min float at 1.2-2 kW) and the quiet hour that followed (65 min to the first fix): one sample each. The PV-off control was not run.
+
+Interpretation: this is the first fix at midday in the record (section 2.2 has none earlier than 3 h before sunset). Every fix needs a long stationary wait (17-65 min on 2026-11-24 and today), and the robot is mostly parked in the evening. That makes slow ambiguity resolution plus sampling bias (cause 2 in the test plan; causes 1 and 2 in section 3: thin correction epochs, L1-only) the leading explanation, and PV noise a weak one. Next: log per-satellite C/N0 and signal ids (GSV) from the rover, and keep a park-and-wait table (time from standstill to fix, at any hour).
+
 ### 2.4 Listener results (2026-11-12)
 
 The receive-only listener of option 2 is built: Heltec WiFi LoRa 32 V3,
