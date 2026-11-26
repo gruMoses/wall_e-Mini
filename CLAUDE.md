@@ -63,6 +63,7 @@ WALL-E is a real robot that can injure a person. The safety rules below are the 
 - 2026-11-05: HotRC CH3/CH4 hybrid-mode fault; arm channel fail-safe added.
 - 2026-11-06 to 11-08: IMU stream stopped silently; heading frozen 38.8 h.
 - 2026-11-08: one bad close frame released the 0.8 m stop for 0.66 s (led to the stop hold).
+- 2026-11-22 and 11-25: a depthai XLINK error killed the depth stream alone; MANUAL on the stale floor for 25.6 h and 11.8 h (led to the depth stall watchdog, `docs/status_audit_2026-11-25.md` 0a).
 
 ## Architecture
 Python control stack on a Raspberry Pi 5. Entry point `pi_app/app/main.py`: a fast control loop (about 30 Hz) plus an SSE web server on port 8080. Subsystems run in threads and share state through small dataclasses; the main loop reads the latest snapshots and publishes motor commands. Vision runs at 15 fps. All settings are in one frozen `Config` dataclass in `config.py` (repo root).

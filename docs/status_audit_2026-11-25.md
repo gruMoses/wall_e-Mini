@@ -14,6 +14,13 @@ WARNING: The safety rules in `CLAUDE.md` hold whatever this document says. Ask K
 4. Arming with the transmitter on: closed by Kevin (`abd3732`).
 5. Phone app over Tailscale HTTPS (`docs/phone_app_tailscale.md`), app nav and battery percent `777d754`, `c68c370`. Live 10:40.
 
+## 0a. Found overnight 2026-11-25/26 (robot in the garage, disarmed)
+
+1. NEW GAP, depth stream dead with the session alive. depthai logged `no request for this response: XLINK_READ_REL_RESP` at 20:51:38 and the depth stream stopped; detections, RGB and the IMU kept running (`depth_age_s` 42,324 s at 08:36, `depth_fps` 0, `vision_hung` False). No watchdog covered it: the colour watchdog watches NN packets, the IMU watchdog IMU messages. MANUAL sat on the 10 % stale floor for 11.8 h and FOLLOW_ME / WAYPOINT_NAV were refused, until a disarmed `wall-e` restart at 08:39 (Kevin's OK) brought depth back at 15 fps. The same error killed depth on 2026-11-22 08:43 for 25.6 h (until the 11-23 10:18 restart). Since 11-15 it fired 5 times: 3 times on the IMU stream (the IMU watchdog rebuilt the session in about 8 s) and 2 times on depth. Fix: a depth stall watchdog (`depth_stall_*` in `OakDetectionConfig`, `OakDepthReader._depth_stall_after_poll`, `pi_app/tests/test_oak_depth_stall.py`). It ends the session after 5 s without a depth frame while detections are fresh, shares the 3-per-15-min budget, waits (does not latch) when other watchdogs filled the budget, and gives up after 3 rebuilds in a row that did not bring 60 s of continuous depth. Five Grok passes. Status: see the commit; not yet seen on a real stall.
+2. Auto-disarm worked: armed and idle 600 s, disarmed at 17:54:11.
+3. Charge hold worked all night: 5 cycles from 3.700 V per cell rested to 3.83 V under charge, about 16 min each, every 3 h. At 08:07:03 the BMS reported -304.7 A for one poll (a bad BLE frame). That broke the charging streak, so `is_charging()` read False; the plug inhibit held the robot until PLUG OFF at 08:07:16, and the current read -0.3 A at 08:07:21. The plug inhibit (`0ae2af1`) covered exactly this case. Open, low: reject an implausible BMS current instead of letting it reset the streak.
+4. RTK: no corrections in the garage all night (14.8 h at quality 2, correction age 0). The TinySA in the garage saw the base's bursts at about -89 dBm in the same evening (`docs/rtk_float_investigation.md` section 2.3c).
+
 ## 1. Summary
 
 1. **Highest open gap: the Arduino still runs the old firmware.** By its code, a channel that loses its pulse keeps its last value. If the receiver loses power or a lead comes off, the Pi sees the last stick, arm and e-stop values with no end. The corrected sketch is in the repo and is not flashed (section 2, item 1).
