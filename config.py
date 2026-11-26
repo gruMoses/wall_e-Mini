@@ -1722,6 +1722,42 @@ class OakDetectionConfig:
     # restarts. Past that the watchdog that wanted the restart latches its
     # own fault (color_stall_fault / imu_stall_fault) until its stream
     # delivers again.
+    # Depth stall watchdog (2026-11-26). depthai's "no request for this
+    # response: XLINK_READ_REL_RESP" error kills one stream of a live
+    # session. It fired five times 2026-11-15..11-25: three times it took
+    # the IMU stream (the IMU watchdog rebuilt the session in ~8 s) and
+    # twice the depth stream, with detections, RGB and the IMU still live.
+    # Nothing ended those sessions. Depth stayed dead for 25.6 h (11-22
+    # 08:43 until a service restart on 11-23 10:18) and 11.8 h (11-25 20:51
+    # until a restart on 11-26 08:39): MANUAL on the stale floor, FOLLOW_ME
+    # and WAYPOINT_NAV refused. End the session when no depth frame has
+    # arrived in THIS session for depth_stall_restart_s while detections are
+    # fresh and the session is past depth_stall_warmup_s, and let the
+    # supervisor rebuild it. Received frames count, quality rejects too: a
+    # dark garage or netting over the lens is not a stall. Why 5 s: the
+    # colour watchdog's value; from 11-12 to 11-26 every OAK health STALE
+    # transition (depth older than 1 s) came from one of these errors or a
+    # watchdog rebuild. Same shared budget as the colour and IMU watchdogs.
+    # A full budget only delays the next try (depth_stall_fault set): colour
+    # or IMU restarts can fill it before depth's first try, and a dead depth
+    # stream never delivers the frame that would clear a latch (Grok review
+    # 2026-11-26). The watchdog gives up (depth_stall_given_up, until a depth
+    # frame arrives or the service restarts) after color_stall_max_restarts
+    # rebuilds in a row that did not bring depth back: past that a rebuild
+    # does not help and each one costs ~8 s without fresh detections
+    # (second Grok review). 0 disables the watchdog.
+    depth_stall_restart_s: float = 5.0
+    depth_stall_warmup_s: float = 10.0
+    # A rebuild brought depth back only when depth then ran this long with
+    # no gap longer than depth_stall_restart_s. One stray frame is not a
+    # recovery, nor a frame before a gap plus one after it (third and
+    # fourth Grok reviews 2026-11-26); without this a stream that sends one
+    # frame per rebuild would cycle 3 rebuilds per window forever.
+    depth_stall_worked_s: float = 60.0
+    # The depth watchdog acts only while the NN stream is newer than this.
+    # When detections are stale too, the whole device is stalled: that is
+    # the colour watchdog's and the reconnect path's job.
+    depth_stall_det_fresh_s: float = 1.5
     # Vision worker hang (2026-10-04 13:41 -> 2026-10-08 17:36). After a USB
     # hub glitch the colour-stall watchdog's third restart called
     # pipeline.stop() and depthai's teardown never returned. The worker

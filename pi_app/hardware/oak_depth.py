@@ -482,6 +482,27 @@ def _imu_stall_check(
     return _stream_stall_check(now, session_start_ts, msg_ts, restart_s, warmup_s)
 
 
+def _depth_stall_check(
+    now: float,
+    session_start_ts: float,
+    recv_ts: float | None,
+    cfg,
+) -> tuple[bool, float]:
+    """Decide whether a depth-stream stall should end the OAK session.
+
+    Same rule as ``_color_stall_check``, with ``depth_stall_restart_s`` and
+    ``depth_stall_warmup_s``. ``recv_ts`` is the last depth frame received
+    in THIS session (quality rejects included). Detection freshness and the
+    budget are decided by the reader (``OakDepthReader._depth_stall_after_poll``).
+    """
+    restart_s = 5.0
+    warmup_s = 10.0
+    if cfg is not None:
+        restart_s = float(getattr(cfg, "depth_stall_restart_s", 5.0))
+        warmup_s = float(getattr(cfg, "depth_stall_warmup_s", 10.0))
+    return _stream_stall_check(now, session_start_ts, recv_ts, restart_s, warmup_s)
+
+
 def vision_loop_sleep_s(period: float, elapsed: float, deadline_flag: bool) -> float:
     """Seconds to sleep at the end of a vision-loop iteration.
 
@@ -1500,6 +1521,30 @@ class OakDepthReader:
         self._imu_stall_fault: bool = False
         self._imu_stall_fault_ts: float = 0.0
         self._imu_never_seen_logged: bool = False
+        # Depth stall watchdog (2026-11-22 and 11-25: an XLINK error killed
+        # the depth stream alone, with detections live, for 25.6 h and
+        # 11.8 h). _depth_session_recv_ts is the last depth frame received
+        # in the current session (None until the session's first one);
+        # _last_depth_recv_ts spans sessions and stays for health. Restarts
+        # share the colour watchdog's budget. The fault is set while the
+        # budget is full (it clears on the next depth frame or the next
+        # restart once the window has room) and after the watchdog gave up
+        # (it clears on the next depth frame only).
+        self._depth_session_recv_ts: float | None = None
+        self._depth_stall_restart_times: list[float] = []
+        self._depth_stall_restart_count: int = 0
+        self._depth_stall_fault: bool = False
+        self._depth_stall_fault_ts: float = 0.0
+        # Depth rebuilds in a row that did not bring depth back for
+        # depth_stall_worked_s of continuous frames; at
+        # color_stall_max_restarts the watchdog gives up (latched).
+        # _depth_run_start_ts is the first frame of the current run of this
+        # session's frames: a gap longer than depth_stall_restart_s starts
+        # a new run, so a frame before a gap and a stray one after it never
+        # add up to a recovery (fourth Grok review 2026-11-26).
+        self._depth_run_start_ts: float | None = None
+        self._depth_stall_failed_rebuilds: int = 0
+        self._depth_stall_given_up: bool = False
         # Supervisor heartbeat (2026-10-08): stamped by _run_pipeline around
         # each session attempt and backoff, so get_health() can tell a
         # device-absent wait (supervisor ticking) from a worker thread that
@@ -1993,6 +2038,9 @@ class OakDepthReader:
             color_stall_fault = bool(self._color_stall_fault)
             imu_stall_restarts = self._imu_stall_restart_count
             imu_stall_fault = bool(self._imu_stall_fault)
+            depth_stall_restarts = self._depth_stall_restart_count
+            depth_stall_fault = bool(self._depth_stall_fault)
+            depth_stall_given_up = bool(self._depth_stall_given_up)
             imu_watchdog = bool(self._imu_watchdog_enabled)
             imu_sample_ts = self._imu_state.timestamp
             supervisor_ts = self._last_supervisor_ts
@@ -2115,6 +2163,9 @@ class OakDepthReader:
             "color_stall_fault": color_stall_fault,
             "imu_stall_restarts": imu_stall_restarts,
             "imu_stall_fault": imu_stall_fault,
+            "depth_stall_restarts": depth_stall_restarts,
+            "depth_stall_fault": depth_stall_fault,
+            "depth_stall_given_up": depth_stall_given_up,
             # Age of the newest IMU sample, the same age get_imu_data()
             # hands OakImuReader; stale past its 0.5 s stale age (then the
             # heading is frozen). None / True before the first sample. Not
@@ -2610,7 +2661,148 @@ class OakDepthReader:
         self._imu_stall_restart_times = [
             t for t in self._imu_stall_restart_times if t >= cutoff
         ]
-        return len(self._color_stall_restart_times) + len(self._imu_stall_restart_times)
+        self._depth_stall_restart_times = [
+            t for t in self._depth_stall_restart_times if t >= cutoff
+        ]
+        return (
+            len(self._color_stall_restart_times)
+            + len(self._imu_stall_restart_times)
+            + len(self._depth_stall_restart_times)
+        )
+
+    def _depth_stall_after_poll(
+        self,
+        now: float,
+        session_start_ts: float,
+        det_q_present: bool,
+    ) -> bool:
+        """Apply the depth stall watchdog after one vision poll.
+
+        Returns True when the session loop should exit so the supervisor
+        rebuilds the device (the colour watchdog's exit path). Never True
+        when:
+
+        * the watchdog is off (``depth_stall_restart_s <= 0``), there is
+          no detection queue, or ``stop()`` was requested;
+        * detections are not fresh (``depth_stall_det_fresh_s``): then the
+          whole device is stalled, which is not a depth-only stall;
+        * the watchdog gave up: color_stall_max_restarts depth rebuilds in a
+          row did not bring depth back. A rebuild worked only when depth
+          then ran for depth_stall_worked_s without a gap: one stray frame
+          is not a recovery (third and fourth Grok reviews 2026-11-26). Past that a rebuild does not help and each one costs
+          ~8 s without fresh detections, so it latches
+          (``depth_stall_given_up``). A depth frame clears the latch but not
+          the count, so a blip gives up again at the next stall; a run of
+          frames lasting depth_stall_worked_s, with no gap longer than
+          depth_stall_restart_s, resets the count;
+        * the shared budget is full. Then it WAITS (``depth_stall_fault``)
+          and tries again once the window has room. Colour or IMU restarts
+          can fill the budget before depth's first try, and a latch there
+          would bring back the multi-hour outage (Grok review 2026-11-26).
+
+        Safety: the stall itself already holds MANUAL on the stale floor and
+        stops FOLLOW_ME / WAYPOINT_NAV. The rebuild adds ~8 s without fresh
+        detections, and MANUAL stays on the floor until the new session's
+        first NN packet (first-packet gate), so ending the session never
+        lifts a limit.
+        """
+        if not det_q_present or self._stop_event.is_set():
+            return False
+        cfg = self._det_cfg
+        # One snapshot. _poll_depth runs on this same thread just before
+        # this call, so no frame can land between the snapshot and the
+        # decision.
+        with self._lock:
+            session_recv_ts = self._depth_session_recv_ts
+            run_start_ts = self._depth_run_start_ts
+            any_recv_ts = self._last_depth_recv_ts
+            fault = self._depth_stall_fault
+            fault_ts = self._depth_stall_fault_ts
+            given_up = self._depth_stall_given_up
+            det_fresh_ts = self._det_fresh_ts
+        # A frame after the fault clears it (and the give-up). The restart
+        # history and the failed-rebuild count stay, so a blip resets
+        # neither the cap nor the give-up count.
+        if fault and any_recv_ts > fault_ts:
+            with self._lock:
+                self._depth_stall_fault = False
+                self._depth_stall_given_up = False
+            logger.warning("OAK depth stream recovered after a stall fault")
+            return False
+        restart_now, stalled_for_s = _depth_stall_check(
+            now, session_start_ts, session_recv_ts, cfg,
+        )
+        if not restart_now or given_up:
+            return False
+        det_age_s = (now - det_fresh_ts) if det_fresh_ts is not None else float("inf")
+        det_fresh_s = 1.5
+        worked_s = 60.0
+        window_s = 900.0
+        max_restarts = 3
+        if cfg is not None:
+            det_fresh_s = float(getattr(cfg, "depth_stall_det_fresh_s", 1.5))
+            worked_s = float(getattr(cfg, "depth_stall_worked_s", 60.0))
+            window_s = float(getattr(cfg, "color_stall_window_s", 900.0))
+            max_restarts = int(getattr(cfg, "color_stall_max_restarts", 3))
+        if det_age_s > det_fresh_s:
+            return False
+
+        outcome = "restart"
+        with self._lock:
+            # Depth ran for worked_s without a gap in this session: the
+            # rebuild that started it (or the boot) worked, so the count
+            # starts over.
+            if (
+                run_start_ts is not None
+                and session_recv_ts is not None
+                and session_recv_ts - run_start_ts >= worked_s
+            ):
+                self._depth_stall_failed_rebuilds = 0
+            failed = self._depth_stall_failed_rebuilds
+            in_window = self._watchdog_restarts_in_window_locked(now, window_s)
+            if failed >= max_restarts:
+                self._depth_stall_given_up = True
+                self._depth_stall_fault = True
+                self._depth_stall_fault_ts = now
+                outcome = "give_up"
+            elif in_window >= max_restarts:
+                newly_full = not self._depth_stall_fault
+                if newly_full:
+                    self._depth_stall_fault = True
+                    self._depth_stall_fault_ts = now
+                outcome = "wait_new" if newly_full else "wait"
+            else:
+                self._depth_stall_fault = False
+                self._depth_stall_restart_times.append(now)
+                self._depth_stall_restart_count += 1
+                self._depth_stall_failed_rebuilds += 1
+                in_window += 1
+                self._last_pipeline_error_msg = "depth_stall"
+        if outcome == "give_up":
+            logger.error(
+                "OAK depth stream still dead after %d session rebuilds that "
+                "did not bring it back; depth auto-restart disabled (MANUAL "
+                "stays on the stale floor; restart the service to retry)",
+                failed,
+            )
+            return False
+        if outcome == "wait_new":
+            logger.error(
+                "OAK depth stream still stalled with the watchdog budget "
+                "full (%d session restarts in %.0f min); next depth "
+                "restart when the window has room (MANUAL stays on the "
+                "stale floor meanwhile)",
+                in_window, window_s / 60.0,
+            )
+        if outcome != "restart":
+            return False
+        logger.warning(
+            "OAK depth stream stalled: no depth frame for %.1f s "
+            "(detections age %.1f s); restarting the OAK session "
+            "(%d in the last %.0f min)",
+            stalled_for_s, det_age_s, in_window, window_s / 60.0,
+        )
+        return True
 
     def _imu_stall_after_poll(self, now: float, session_start_ts: float) -> bool:
         """Apply the IMU stall watchdog after the IMU poll of one loop pass.
@@ -3075,6 +3267,9 @@ class OakDepthReader:
                 self._imu_prev_consumed_ts = 0.0
                 # The IMU watchdog counts this session's messages only.
                 self._imu_session_msg_ts = None
+                # So does the depth watchdog with depth frames.
+                self._depth_session_recv_ts = None
+                self._depth_run_start_ts = None
                 self._corridor_persistence.reset()
                 self._vio_tracker.new_session()
                 self._vio_active = vio_q is not None
@@ -3110,6 +3305,11 @@ class OakDepthReader:
                 self._poll_vision_queues(depth_q, spatial_depth_q, det_q, np)
                 # No detection queue means there are never NN packets.
                 if self._color_stall_after_poll(
+                    time.monotonic(), session_start_ts, det_q is not None,
+                ):
+                    break
+                # 2026-11-22 / 11-25: the depth stream can stop alone.
+                if self._depth_stall_after_poll(
                     time.monotonic(), session_start_ts, det_q is not None,
                 ):
                     break
@@ -3480,8 +3680,15 @@ class OakDepthReader:
                 in_depth = newer_depth
             frame = in_depth.getFrame()  # uint16, millimetres
             recv_now = time.monotonic()
+            run_gap_s = float(getattr(self._det_cfg, "depth_stall_restart_s", 5.0) or 0.0)
+            if run_gap_s <= 0.0:
+                run_gap_s = 5.0
             with self._lock:
                 self._last_depth_recv_ts = recv_now
+                prev_recv_ts = self._depth_session_recv_ts
+                if prev_recv_ts is None or recv_now - prev_recv_ts > run_gap_s:
+                    self._depth_run_start_ts = recv_now
+                self._depth_session_recv_ts = recv_now
                 self._depth_recv_count += 1
                 self._depth_state.raw_frame = frame
                 _record_event_ts(self._depth_event_ts, recv_now)
