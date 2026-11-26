@@ -156,6 +156,28 @@ Kevin drove the robot out of the garage at 11:05 to the open charging spot. The 
 
 So the rover's LoRa reception is the suspect, not the robot's noise and not the charger. A whip in the garage hears the base 31 dB above the floor while the rover hears nothing, and about 7 dB more signal outside is enough for it. That points at a large loss in the rover's chain (antenna, cable, connector, the radio) or at the antenna's place on the robot. It also fits the thin margin at the parking spot (about 10 % late corrections, 2.3a). Kevin's call (2026-11-26): the garage test is dropped. The garage is far from the base and indoors, and RTK only matters outside. If corrections drop outside, far from the barn, check the rover's LoRa antenna connector and cable first, then the second kit's radio. Optional: a clip-on ferrite on the charger lead, since the charger noise takes 13-18 dB of the link margin whenever it charges.
 
+### 2.3e GNSS-band noise: charger, motors and OAK USB 3 (2026-11-26 midday and afternoon)
+
+Same spot outside, robot disarmed except for the drive. The TinySA whip lay right over the rover's GNSS antenna. Logger `gnss_watch.py`: one row about every 4.5 s, with the median floor per band from three 1555-1610 MHz sweeps (B1I 1555-1565, L1/E1 1565-1586, G1 1595-1610), two 1164-1190 MHz sweeps (L5/E5a) and one 914.5-915.5 MHz sweep (the LoRa channel at this spot). Data: `/home/tiny/sweeps/gnss_20261126_*.csv` and `wide_usb2.csv` / `wide_usb3.csv`. The TinySA stopped answering at 12:45:28 (USB write timeouts) and came back only after Kevin power-cycled it at about 15:29, so there are no rows between those times.
+
+| Window (CST) | State | L1 floor (max) | B1I / G1 floor | L5 floor (max) | 915 MHz floor | Rover |
+|---|---|---|---|---|---|---|
+| 12:20-12:32:58 | USB 2, charger off | -118.3 (-110.3) | -118.1 / -118.5 | -115.4 (-107.8) | -124.8 | 29 sats median (27-30), fixed on 138 of 155 lines; fixed to float at 12:31:33 |
+| 12:32:58-12:38:23 | charger ON (plug ON, hold charge) | -118.1 (-109.8) | -117.9 / -118.3 | -114.2 (-102.0) | -119.8 | 29 sats median (26-29), float to fixed at 12:35:09 while it charged, fixed on 39 of 65 |
+| 12:38:23-12:43:51 | charger off again | -118.3 (-110.5) | -118.3 / -118.5 | -115.4 (-104.9) | -125.0 | 28 sats median (27-29), fixed on 40 of 66 |
+| 12:43:51-12:44:17 | Kevin drove in MANUAL | -118.3 (-111.8) | -118.2 / -118.3 (G1 max -110.4) | -115.2 (-108.3) | -122.3 | 28 sats, float, corrections 1 s old |
+| 15:15-15:24:16 | USB 2 (TinySA dead) | - | - | - | - | 33 sats median (29-36), float on 111 of 111 lines |
+| 15:24:36-15:33:34 | **OAK on USB 3** (15:24:17 on) | -118.2 (-111.1) | -118.1 / -118.7 | -115.0 (-107.6) | **-106.6** (-107.2 to -105.1) | **16 sats median (13-19), q2 on 107 of 107 lines, no corrections** |
+| 15:33:42-15:41 | USB 2 again (restart) | -118.5 (-110.6) | -118.2 / -118.7 | -114.9 (-107.6) | -121.2 | 36 sats median (34-38), float, corrections 1 s old on 75 of 76 lines |
+
+1. The charger does not hurt the GNSS bands. While it charges, L1, B1I and G1 move 0.2-0.3 dB, and the L5 floor 1.2 dB with peaks up to 6 dB. The rover kept 29 satellites and went from float back to fixed during the charge. At the GNSS antenna the charger raised the 915 MHz floor only about 5 dB (13-18 dB at the LoRa antenna, 2.3d).
+2. The motors show nothing at this sensitivity. A short MANUAL drive (26 s, 6 rows) left every band at its floor and every max below the charger-off maxima, and the rover kept 28 satellites with corrections. The TinySA's floor is about -118 dBm per bin, well above the GNSS signals (about -130 dBm, under the thermal noise), so a small rise could hide under it. The rover's per-satellite C/N0 (GSV, branch `1f8706b`, not pushed) would measure it properly.
+3. USB 3 jams the rover again, the same as 2026-11-06. The OAK negotiated USB 3 at 15:24:17 (it needed the USB-C plug flipped: on this cable the plug orientation picks the speed). The rover went from 36 satellites to 30, 21, 20, then 16 within 20 s, and from float with 1 s corrections to q2 with none. It stayed there for 9 min. Back on USB 2, it had 35 satellites, float and 1 s corrections 9 s after the OAK came up.
+4. In the GNSS bands the TinySA sees no change with USB 3 (L1 -118.2 against -118.3/-118.5). What costs the rover half its satellites is below the TinySA's floor, the same limit as in finding 2.
+5. USB 3 does make a broad hump at 900-975 MHz: +12 to +13 dB in the 25 MHz bins of the wide sweep, and at the GNSS antenna the 915 MHz channel floor rose 15-18 dB (-106.6 against -124.8 before and -121.2 after). Smaller rises at 650-700 MHz and 775-800 MHz (+3 to +8 dB); nothing above 1000 MHz down to the wide sweep's floor (about -108 to -112 dBm). So USB 3 hits the satellites and sits on the correction channel too. This test does not separate the two: the corrections may stop at the radio, or the receiver may drop corrections it cannot use with 16 satellites.
+
+So `max_usb_speed = "HIGH"` stays. USB 3 (wanted for VIO, which costs a third of the depth frame rate on USB 2) would need a fix and then this same A/B before the cap moves: rover satellites, fix quality and correction age on USB 2, then USB 3, then USB 2 again. Candidates: a shielded USB 3 cable with ferrites at both ends, a shield over the OAK's hub and connector, and the GNSS and LoRa antennas farther from the hub (under 30 cm now).
+
 ### 2.4 Listener results (2026-11-12)
 
 The receive-only listener of option 2 is built: Heltec WiFi LoRa 32 V3,
@@ -269,7 +291,7 @@ The test is faster and more certain with per-satellite carrier-to-noise density 
 4. MEDIUM. Rover carrier-phase quality: GNSS antenna without a ground plane, multipath from the robot, broadband noise from the Pi, the VESCs and the BMS radio in the same enclosure. Satellite count and HDOP cannot show this. Confirm with the short-baseline test with the compute powered down.
 5. MEDIUM. Base antenna sky view and multipath (metal roof, eaves). Confirm with the base's own NMEA on its UART and a sky photo.
 6. LOW. Message set gaps (no 1230 with GLONASS MSM; infrequent 1005), MSM7 versus MSM4, receiver mode, or firmware. Confirm by decoding the RTCM stream.
-7. RULED OUT. Driver decode (the raw GGA agrees with register 19). Packet loss at the parking spot (119/120 epochs on time). USB 3 interference (the OAK runs at USB 2). CORRECTION 2026-11-06: at USB 3 the OAK does jam the RTK GPS (10 to 11 satellites and no RTK, against 32 to 34 with float at USB 2). The OAK is capped at USB 2 since then.
+7. RULED OUT. Driver decode (the raw GGA agrees with register 19). Packet loss at the parking spot (119/120 epochs on time). USB 3 interference (the OAK runs at USB 2). CORRECTION 2026-11-06: at USB 3 the OAK does jam the RTK GPS (10 to 11 satellites and no RTK, against 32 to 34 with float at USB 2). The OAK is capped at USB 2 since then. Re-tested 2026-11-26 with a TinySA (2.3e): the same loss within 20 s, and a +12 dB hump over 900-975 MHz on the correction channel.
 
 The gates stay as they are: `WaypointNavConfig.min_rtk_quality = 4` and the aligner's `== 4` check are correct. Float is decimetre-to-metre accuracy and must not establish heading lock. Consequence: the GPS heading aligner has never locked, so the robot has run on gyro-only heading with no north reference since at least July. CORRECTION: the aligner has locked since then, first in the evening of 2026-09-19, when a waypoint run also succeeded. The heading is gyro-only whenever RTK is not fixed.
 
