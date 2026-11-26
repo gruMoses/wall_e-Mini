@@ -137,6 +137,25 @@ So in the garage the path from the barn is not the limit: the rover's own recept
 
 Next, cheapest first: (1) TinySA antenna next to the rover's LoRa antenna in the garage, robot on, then off: if the bursts stay at about -90 dBm and the rover still hears nothing, the receiver side is at fault; (2) check the rover's LoRa antenna connector and cable; (3) swap in the second kit's rover radio (DFRobot, 11-18) at the same spot.
 
+### 2.3d Outside, TinySA on the robot (2026-11-26 late morning): the charger raises the 915 MHz floor; the robot does not
+
+Kevin drove the robot out of the garage at 11:05 to the open charging spot. The TinySA rode on the robot, its whip on the robot but not right at the LoRa antenna. The TinySA Pi ran on its own battery bank (`throttled=0x0`, no USB drop). One row about every 16 s (15 s of max-hold sweeps of 914.5-915.5 MHz, then one 900-930 MHz sweep), 11:08:23 to 11:38. Data: `/home/tiny/sweeps/rover_ant_run2.log`. The 11:04 CSV was lost when the Pi lost power at 11:07; the script now syncs each row to disk.
+
+| Time (CST) | State | LoRa bursts, max: median (range) | Floor at 915.0 MHz | Comb 904 / 916 / 928, median | 900-930 floor | Rover |
+|---|---|---|---|---|---|---|
+| 11:08-11:16 | robot on, charger off | -81.5 dBm (-87 to -70) | -121.5 to -122.4 | -91 / -90 / -90 | -110.3 to -111.0 | float, **fixed at 11:11:54** |
+| 11:16:11-11:20:15 | charger plug ON (hold charge) | -81.4 (-84 to -63) | -104.4, settling to -108.8 | -90 / -90 / -89 | -104.9 to -107.7 | fixed, corrections 1 s old |
+| 11:20:19-11:22:18 | robot main switch off, charger on | -81.7 (-83 to -71) | -108.2 to -108.7 | -102 / -101 / -103 | -108.8 to -110.2 | off |
+| 11:22:18-11:31:30 | robot on, charger on | -82.1 (-85 to -79) | -108.3 to -109.8 | -90 / -90 / -89 | -106.7 to -107.8 | float, corrections 1 s old on 102 of 103 lines |
+| 11:31:40 on | charger unplugged from the robot (Kevin) | -82.2 (-84 to -81) | -122.4 to -122.7 | -90 / -91 / -89 | -110.7 to -111.6 | float, 1 s |
+
+1. The charger is a 915 MHz noise source. While it charges, the floor in the LoRa channel rises 13-18 dB (from -122 to -104...-110 dBm) and the 900-930 MHz floor 4-6 dB. It started 3 s after "Charger plug ON" (11:16:11), ended within 15 s of the unplug, and did not change with the robot switched off. Outside it cost the rover nothing: the floor stayed about 25 dB under the bursts, the fix held, corrections kept arriving 1 s old. It cannot explain the garage night either: there the charger ran about 16 min every 3 h, and the floor read -121.5 dBm with it off.
+2. The comb at 904.0, 916.0 and 928.1 MHz is the robot: it fell 10-18 dB with the main switch off and came back with it on. It sits 1 MHz or more from the 500 kHz LoRa channel (914.76-915.26 MHz), and the floor at 915.0 MHz was the same with the robot on or off (-108.2 to -109.8 dBm, charger on both times). At this antenna spacing the robot's own noise does not reach the correction channel. The +4 dB in 2.3b was the 900-930 MHz floor, not the channel.
+3. Outside, the bursts read a median of -82 dBm (single sweeps up to -63), against -88.7 to -90.7 dBm in the garage (another spot, the evening before): about 7 dB more. The burst level did not change with the charger or the robot on or off. The rover went from no corrections at all in the garage to corrections on every line outside.
+4. First corrections at 11:06:13, within 45 s of leaving the garage; fixed at 11:11:54, 5.7 min later. That is the fastest fix in the record (17-65 min in 2.3a). The receiver had tracked 16-21 satellites in the garage for hours, so only the corrections were missing.
+
+So the rover's LoRa reception is the suspect, not the robot's noise and not the charger. A whip in the garage hears the base 31 dB above the floor while the rover hears nothing, and about 7 dB more signal outside is enough for it. That points at a large loss in the rover's chain (antenna, cable, connector, the radio) or at the antenna's place on the robot. It also fits the thin margin at the parking spot (about 10 % late corrections, 2.3a). Next is still test (1) of 2.3c, the TinySA right at the rover's LoRa antenna in the garage, then the cable and connector, then the second kit's radio. Optional: a clip-on ferrite on the charger lead, since the charger noise takes 13-18 dB of the link margin whenever it charges.
+
 ### 2.4 Listener results (2026-11-12)
 
 The receive-only listener of option 2 is built: Heltec WiFi LoRa 32 V3,
